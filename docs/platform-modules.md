@@ -1033,11 +1033,29 @@ on macOS and Windows they operate on the session's own byte queues.
 
 PEM inputs must also behave identically. A multi-block PEM — the ordinary
 `fullchain.pem` shape (leaf plus its issuers), or a CA bundle — is accepted by every
-backend, and all of them use the leaf and ignore the rest. On macOS that means the
-import helper picks the first item of the wanted kind out of `SecItemImport`'s result by
-`CFTypeID`: the reported `SecExternalItemType` for a multi-block PEM is
-`kSecItemTypeAggregate`, so gating on it would reject every real-world certificate
-bundle that Linux accepts.
+backend, and every backend installs the whole bundle: the first certificate is the
+leaf, and the issuers after it go on the wire in the same TLS `Certificate` message, so
+a client holding only the root can build a path. Serving the leaf alone is the classic
+"works in my browser, fails from curl" misconfiguration, and a runtime that silently
+imposed it on an operator whose certificate was perfectly correct would be the one at
+fault — so dropping the issuers is not an option any backend takes. OpenSSL adds each
+one with `SSL_CTX_add_extra_chain_cert`, which takes ownership of the `X509`. Secure
+Transport keeps them beside the identity and passes `SSLSetCertificate` the
+`[identity, issuer...]` array it has always accepted. SChannel puts leaf and issuers in
+one in-memory `HCERTSTORE` and lets the store answer the issuer lookups chain building
+performs.
+
+A bundle that cannot be installed whole is refused, never truncated. Whatever a backend
+needs in order to hold the issuers — an extra chain slot, a growable array, a certificate
+store — failing to materialize fails `pal_tls_ctx_use_cert` outright, because a
+credential that reports success and then serves a prefix of its chain is the same defect
+wearing a success code, and the operator has no way to see it locally.
+
+Reading a bundle at all constrains the macOS import: for a multi-block PEM
+`SecItemImport` reports its `SecExternalItemType` as `kSecItemTypeAggregate`, so a
+backend gating on that type would reject every real-world certificate bundle Linux
+accepts. The import walks the returned `CFArray` by `CFTypeID` instead, taking the
+first certificate as the leaf and the remainder as issuers.
 
 ### macOS: why Secure Transport, and the TLS 1.3 gap
 

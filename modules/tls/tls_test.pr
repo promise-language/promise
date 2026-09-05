@@ -399,16 +399,48 @@ _test_cert_chain() u8[] {
   return (one + one).bytes();
 }
 
+// Three-level certificate hierarchy for fullchain testing (T1612).
+//
+//   Root CA → Intermediate CA → Leaf (CN=localhost, SAN=localhost+127.0.0.1+::1)
+//
+// All pre-dated to 2019-01-01 to dodge Apple's 398-day validity cap (same as
+// the self-signed fixture). Generated via Go crypto/x509.CreateCertificate.
+// The client trusts only the root CA; the server serves fullchain (leaf +
+// intermediate). If intermediates are dropped, the handshake fails because the
+// client cannot build a path from the leaf to the root.
+
+_test_chain_root_cert() u8[] {
+  return "-----BEGIN CERTIFICATE-----\nMIIC7jCCAdagAwIBAgIBATANBgkqhkiG9w0BAQsFADAXMRUwEwYDVQQDEwxUZXN0\nIFJvb3QgQ0EwHhcNMTkwMTAxMDAwMDAwWhcNMzkwMTAxMDAwMDAwWjAXMRUwEwYD\nVQQDEwxUZXN0IFJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIB\nAQDvMzhk7Jtx1mXPfkGtuNDqfnmu6Gb8+7DTjqGmvaraThlrB5RJDen8N/W7U1lZ\nObnRXo5/GSsxb/LvuJQCe5N6efGyJh9e+X8hH/DRbVzhqFy5sSy+0jnaOKDWsyEL\nS4l5vs2FYnuR+2KW3riUnNwmjQGGxMH4tm3UMoRHygqLcOhY4CC51fYjmErhHo1E\nCMD1jIj/GAOq0qEYEgl4aGz68iZpvh6R3FRMaEIyXwhWWOpBCIxlNy9FxjkNB+R7\nK1ff9JKKTdspQizmL6MA20DBv2DV7yDngLxHniHvK8kzXOnANJ42HaNr+sDRRy9A\n+hBQ8rEFsQCBIeW5ZZOph64tAgMBAAGjRTBDMA4GA1UdDwEB/wQEAwIChDASBgNV\nHRMBAf8ECDAGAQH/AgEBMB0GA1UdDgQWBBSjOmgODczRrG8w75T1qBIRA8SK4jAN\nBgkqhkiG9w0BAQsFAAOCAQEAFo8tyQhZdbmB9bE2LdkQohKkpd8K6pxUNi5WXqtl\niGwnlo6PEQPDaD3aoLoXRohBhCqrFQalsGKS7XX5+7yipi0C9FNGzVfXBn4DBsqJ\nvT97ig3NcwytBrAaAYlh0oZ5Nq4tk7oGPCP1Vm2fkWJieV92Yh9a6NbcOR3qTiXc\nK9mdv2SuN6z98iMxgoAAVNoFA+w4ff61+gqbQnl5sPasKAcl3+KlIj9XT+IPwo7z\nlUrBrbXxDRDpdPcydKbtEcz99V/8R/Dot3keyK4ABc1wSMGEDqBbUxUxp5UsrjpT\ncTixdOVFeamSb0Bqg+gg24U9Uq3QnzOKZuEicSwEW+NoIw==\n-----END CERTIFICATE-----\n".bytes();
+}
+
+_test_chain_intermediate_cert() u8[] {
+  return "-----BEGIN CERTIFICATE-----\nMIIDFzCCAf+gAwIBAgIBAjANBgkqhkiG9w0BAQsFADAXMRUwEwYDVQQDEwxUZXN0\nIFJvb3QgQ0EwHhcNMTkwMTAxMDAwMDAwWhcNMzkwMTAxMDAwMDAwWjAfMR0wGwYD\nVQQDExRUZXN0IEludGVybWVkaWF0ZSBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEP\nADCCAQoCggEBAM9RbXy+Ux/TbjgGMCom4eh9OOXlB+vei8utenym3jXjUdg0rQ4C\ny+YuNd97OLJtOMRONlfifL0Vf7t5cuZU2KckMgyMWZuThtDA2i6YTcf81/59saMc\nQ67h1OywIUpNk1EDHxx8FRGTxJgZOzB20Moq4GMrQTRSUDygA80nEUMayt8XbhSe\nbBxBPfSr7g2NlwGjZ6btNobifD6gGK3OV89vfLSfloa03wIg+eiFUhEMm8m5Br31\nx9NxWJz+Kib7jK0HBG5Sfb3YO6knyb3rY4xlyrdHBA3vOM6Zt12CDi9I0DgpwK9i\n5fAT749wU0KlLJuosp4vDNtXfeWg+9bj+EUCAwEAAaNmMGQwDgYDVR0PAQH/BAQD\nAgKEMBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYDVR0OBBYEFBd4mXIi/fF3TJBVAuMd\nCOxZ3SfzMB8GA1UdIwQYMBaAFKM6aA4NzNGsbzDvlPWoEhEDxIriMA0GCSqGSIb3\nDQEBCwUAA4IBAQCs3KpQ7cK1I8TAp7F3e/e12dsMVfZTcquwO9DDhjcJn1vCg1cp\nrQOsGF/xnMbBfvMhcfIblBZV1Vm+TY/B+q+QarKizjqePlmhmDrtjMO5OJnp43Ah\ncFbCoWpLBBC/cW/UR2F0/qqzUGf7EmJ6x8jLnszxqUIfF42quNl6U6HOlrfMEIrT\nk8OLcC/9IAn7HTsM3R8Yy+QTqbxRl6JsHptYGsKkLnebCk2FwMsjnMLAsn34jsAq\nDTRNzdmLObR2AldaRIT6zUCxL57jqBf9h3x74bwOj5TVY6WwB0vhZoODh0EY0Y03\ng9SkToxs+jWBl9LOnZV1ivkTidbv3Kydo0Vt\n-----END CERTIFICATE-----\n".bytes();
+}
+
+_test_chain_leaf_cert() u8[] {
+  return "-----BEGIN CERTIFICATE-----\nMIIDNDCCAhygAwIBAgIBAzANBgkqhkiG9w0BAQsFADAfMR0wGwYDVQQDExRUZXN0\nIEludGVybWVkaWF0ZSBDQTAeFw0xOTAxMDEwMDAwMDBaFw0zOTAxMDEwMDAwMDBa\nMBQxEjAQBgNVBAMTCWxvY2FsaG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCC\nAQoCggEBANXbP6JQ2K0wYdB4ofRmveGffrmlutzo94ROwNCkLZM5BZ4wnMECuqb8\nd8PLlsS598g5jvp70AVC4CAWZjxeooPJgFWVumnbweVVnvbf963FzdB9VqABF13B\n1MzGDtMJDe1zxNOWpoa8FymnF0tPpEOsTfciZ1E5Xx+B2rZ1OWgIuY1PUap9QhAg\nJ1K1ns+3fSWKQRUvJCmC7zlP2WI1qRtUhbvG26pjz4+JeqEGac749rNNlG8REBsn\nnNyGFr5ZQOqLAN+6JyzgIvP9KMgVKA4guUabYleC5oEUmwzk/JOBSa0EKK+w910O\nhhvwxx/86wZ0prOP1Y12lV6efaUxkHcCAwEAAaOBhTCBgjAOBgNVHQ8BAf8EBAMC\nBaAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwDAYDVR0TAQH/BAIwADAfBgNVHSMEGDAW\ngBQXeJlyIv3xd0yQVQLjHQjsWd0n8zAsBgNVHREEJTAjgglsb2NhbGhvc3SHBH8A\nAAGHEAAAAAAAAAAAAAAAAAAAAAEwDQYJKoZIhvcNAQELBQADggEBAFa36WAviWbN\nzPdiO3O40PVUhKHAt9W215tSRfvyg2qaIu42tqjqrr1DzWrjXZpJ77HmNBZRjN36\n/3JoAkuOvbluCudnZv/sbjg+R32cKO/50HiEkZPxhU27UwIh47Ziq3QDq6ocH5XL\nBqCPaY2wsce2XO69RYRuWVx5EZ7NDwtde25cryeOsgS1QQeSSpunZm5Zio7/qMcA\nxpLsZnxc+KnHeUinDa6c18+Ahu4B1EC5eP/Dq25IIpsbUV5qcuABiduqq4Is1v9w\nlK+5e9cvzI59M2fNc0oCu6cEghmuEv8MbNX76JTKVSVpsntNnilmopb3JA9wM3cO\n7OXRz7YgmHE=\n-----END CERTIFICATE-----\n".bytes();
+}
+
+_test_chain_leaf_key() u8[] {
+  return "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDV2z+iUNitMGHQ\neKH0Zr3hn365pbrc6PeETsDQpC2TOQWeMJzBArqm/HfDy5bEuffIOY76e9AFQuAg\nFmY8XqKDyYBVlbpp28HlVZ723/etxc3QfVagARddwdTMxg7TCQ3tc8TTlqaGvBcp\npxdLT6RDrE33ImdROV8fgdq2dTloCLmNT1GqfUIQICdStZ7Pt30likEVLyQpgu85\nT9liNakbVIW7xtuqY8+PiXqhBmnO+PazTZRvERAbJ5zchha+WUDqiwDfuics4CLz\n/SjIFSgOILlGm2JXguaBFJsM5PyTgUmtBCivsPddDoYb8Mcf/OsGdKazj9WNdpVe\nnn2lMZB3AgMBAAECggEAH56Jo5Gpimh8uzVC2N8h/wyKe59wkqi9WVTINxu3LgKA\nfU75tk3q1ArAbcoZvMo0Q73tkRp3piIo/4WK+y0Q1pnB6FA5iNz4UlSyVWpwSpip\noW8OvPHnBwfu0zy2GhIc0Dl4O21AVOvVeY/ze+vxa8dmRakoC9SG5yKCIyJk6P0a\nnRLPxRSTSyN5UtXptlOhG4Wd4VSXmS/5/+HQHatZPtAnrDH/cUFfYEtMGBrpGey1\nu8Aqu9/AH8IDGfWZNn3atlexO+13WS0wIQA3+phqEG814O8JWBzwhlKRlsw1hZ+H\nvp/OPxtKSpPeNwZnSyjqNw3StK7HbE9ga/JGlK55rQKBgQD36ywFooFtLofi76bK\nVMLNkPzmkimb7SPTtezIj+HGFcDvPmoQL4wpDsy7hQcVaYyI+TbozYkRj5OmsoOn\nNBbzQGM6EUEVBgtLe5KiFGGWgvDxyjxx6ZXTjRuYFUoH1iX69JshUobvSpalqsLX\nocbAbY9JkLhEfpGRCy12xz0qLQKBgQDc09W3Tkf4qSSApnufvsLWqNGaGtQV7dr4\nWAiBGs0yxf3wj9siJYRR68jHdMH90dK3U/9mU8m8GIAF5KqZhuknheNujtqhcCu7\nR74Iv24aawOCdPHgdHP2swW+Ysf2PuBpgo6ry+Q5qjjEIvGlkLniQvqaQwD0TOtm\nXmee67w/swKBgQCCpjtvyMDeMdxImrTSAbMbM+Ii/DnTQzhTNJdQ5oo7onEnY0Pv\nva7mYDdCRwuBnDsEYBkwvEgUqg5MldzNe6Twkij4i+k5VBMVt0yB/62h7OVe9o2+\nFjPv5Xf6QJXf5Vnkk41BFUWoyyzypzfA/S9JbzNIuGxzJCRARJyz8LFqDQKBgA+8\nUJhVTa+cbet08Y46i6u8L+NpUf+WCWp063Y3sLOThDrmJVlTjxA/WvlLip9JmlhR\n9fsWsWNj44uH9dgm0upsEf7I0y95zMP1oscAzRm40nEzYCD8a18C9r/QTitv45Hh\nKcV4K/Un+g+P5eREYdqLp0vixmiiKowK4hti9PEdAoGAej+1TQhjz2ONR8ZQSCJG\n+it65eUII0XWKl9dHwYf4LMkG4MM3d2aYjFi+Jg+15sW1ADQrWWNmiCaVUotiBE+\nDipWie8N4R7eUyNsJPLH101ABMzgOlDn0s46BVraRK29MUkkheE2KyKOf6JgMYwa\nXAWxrfD2uPTzO3UIFJwq81o=\n-----END PRIVATE KEY-----\n".bytes();
+}
+
+// Fullchain: leaf + intermediate concatenated. The server sends this bundle;
+// the intermediate is what lets a client that trusts only the root build a path.
+_test_chain_fullchain() u8[] {
+  string leaf = string.from_bytes(_test_chain_leaf_cert());
+  string inter = string.from_bytes(_test_chain_intermediate_cert());
+  return (leaf + inter).bytes();
+}
+
 // A multi-block PEM works on both ends: as the server's certificate chain and as a
 // client trust bundle. This is the regression guard for the macOS import path:
 // SecItemImport reports a multi-block PEM as kSecItemTypeAggregate, so a backend
 // that gated on the reported item type would reject every real-world certificate
 // bundle with "invalid PEM?" while Linux accepted it (T1599).
 //
-// It pins acceptance only. Both backends currently install just the leaf and drop
-// the remaining blocks, so an intermediate CA in a real fullchain.pem never reaches
-// the wire — tracked as T1612, which needs a two-level CA/leaf fixture this
-// single-certificate one cannot express.
+// With T1612 fixed, intermediates in the bundle are now sent on the wire. This
+// test still exercises acceptance of multi-block PEM in the self-signed case.
 test_tls_certificate_chain_bundle() `test(exclude: wasm, timeout: "20s") {
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert_chain(), _test_key())?!;
   int port = listener.local_port;
@@ -1205,4 +1237,80 @@ test_tls_listener_bind_releases_credentials_when_the_socket_bind_fails() `test(e
     }
   }!;
   assert(caught_io, "a failed socket bind is reported as TlsErrorKind.io");
+}
+
+// T1612: verify that a fullchain.pem (leaf + intermediate) is sent on the wire.
+// The client trusts only the root CA; the intermediate is NOT in the client's
+// trust store. If the server drops the intermediate (the T1612 bug), the client
+// cannot build a chain from the leaf to the root and the handshake fails.
+test_tls_fullchain_sends_intermediates() `test(exclude: wasm, timeout: "20s") {
+  TlsServerConfig server_cfg = TlsServerConfig.create(_test_chain_fullchain(), _test_chain_leaf_key())?!;
+  net.TcpListener tcp_listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = tcp_listener.local_port;
+
+  channel[bool] done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+    TlsConfig cfg = TlsConfig.create();
+    cfg.add_root_certificate(_test_chain_root_cert())?!;
+    TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
+    client.write_string("fullchain\n")?!;
+    if reply := client.read_line()?! {
+      assert(reply == "echo:fullchain", "client received the echo over a chain-verified connection");
+    } else {
+      assert(false, "client expected an echo line");
+    }
+    client.close()?!;
+    done.send(true);
+  };
+
+  net.TcpStream raw = tcp_listener.accept()?!;
+  TlsStream server = TlsStream.accept(move raw, server_cfg)?!;
+  if line := server.read_line()?! {
+    assert(line == "fullchain", "server received client line over chain-verified TLS");
+    server.write_string("echo:" + line + "\n")?!;
+  } else {
+    assert(false, "server expected a request line");
+  }
+  server.close()?!;
+
+  (<-done)!;
+  tcp_listener.close()?!;
+}
+
+// T1612 negative case: serving with the leaf certificate only (no intermediate)
+// must fail when the client trusts only the root CA. This proves that the
+// positive test above passes because the intermediate IS on the wire, not
+// because the client happened to have it cached.
+test_tls_leaf_only_fails_without_intermediate() `test(exclude: wasm, timeout: "15s") {
+  // Serve with the leaf-only cert (no intermediate). The client trusts only the
+  // root CA, so it cannot build a path and the handshake must fail.
+  TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_chain_leaf_cert(), _test_chain_leaf_key())?!;
+  int port = listener.local_port;
+
+  channel[bool] server_done = channel[bool](capacity: 1);
+
+  go {
+    // Bind inside the block so the listener is moved, not borrowed, across the
+    // spawn boundary (T1397). The goroutine owns it from here on, and `l` drops
+    // at the end of the block, closing the socket.
+    TlsListener l = listener;
+    // The server-side accept may also fail once the client rejects the cert.
+    l.accept()? _ is TlsError {
+    }!;
+    server_done.send(true);
+  };
+
+  net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
+  TlsConfig cfg = TlsConfig.create();
+  cfg.add_root_certificate(_test_chain_root_cert())?!;
+
+  bool caught_error = false;
+  TlsStream.connect(move tcp, "localhost", cfg)? _ is TlsError {
+    caught_error = true;
+  }!;
+  assert(caught_error, "leaf-only server is rejected when client trusts only the root");
+
+  (<-server_done)!;
 }

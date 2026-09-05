@@ -92,6 +92,7 @@ func (p *PosixPAL) EmitTLS(module *ir.Module) map[string]*ir.Func {
 		ir.NewParam("ctx", irtypes.I8Ptr))
 	sslCtxUseCert := getOrDeclareFunc(module, "SSL_CTX_use_certificate", irtypes.I32,
 		ir.NewParam("ctx", irtypes.I8Ptr), ir.NewParam("x", irtypes.I8Ptr))
+	errClearError := getOrDeclareFunc(module, "ERR_clear_error", irtypes.Void)
 	sslCtxUseKey := getOrDeclareFunc(module, "SSL_CTX_use_PrivateKey", irtypes.I32,
 		ir.NewParam("ctx", irtypes.I8Ptr), ir.NewParam("pkey", irtypes.I8Ptr))
 	sslCtxLoadVerifyFile := getOrDeclareFunc(module, "SSL_CTX_load_verify_file", irtypes.I32,
@@ -260,7 +261,14 @@ func (p *PosixPAL) EmitTLS(module *ir.Module) map[string]*ir.Func {
 	}
 
 	// --- pal_tls_ctx_use_cert(i64 ctx, i8* pem, i64 len) → i32 ----------
+	// Installs the first certificate as the leaf via SSL_CTX_use_certificate,
+	// then loops through any remaining PEM blocks and adds them as chain
+	// certificates via SSL_CTX_ctrl(ctx, SSL_CTRL_EXTRA_CHAIN_CERT=14, 0, x).
+	// Ownership of extras transfers to the ctx on success — do NOT X509_free.
+	// On failure, X509_free the extra before breaking (T1612).
 	{
+		const sslCtrlExtraChainCert = 14 // SSL_CTRL_EXTRA_CHAIN_CERT
+
 		fn := module.NewFunc("pal_tls_ctx_use_cert", irtypes.I32,
 			ir.NewParam("ctx", irtypes.I64), ir.NewParam("pem", irtypes.I8Ptr),
 			ir.NewParam("len", irtypes.I64))
@@ -278,10 +286,46 @@ func (p *PosixPAL) EmitTLS(module *ir.Module) map[string]*ir.Func {
 		failBlk.NewCall(bioFree, bio)
 		failBlk.NewRet(i32(0))
 
+		// Install the leaf certificate.
 		rc := okBlk.NewCall(sslCtxUseCert, ctx, x)
 		okBlk.NewCall(x509Free, x)
-		okBlk.NewCall(bioFree, bio)
-		okBlk.NewRet(rc)
+		leafOK := okBlk.NewICmp(enum.IPredEQ, rc, i32(1))
+		chainLoop := fn.NewBlock(".chain_loop")
+		okBlk.NewCondBr(leafOK, chainLoop, failBlk)
+
+		// Loop: read additional PEM blocks as intermediates.
+		extra := chainLoop.NewCall(pemReadBioX509, bio, null, null, null)
+		extraNull := chainLoop.NewICmp(enum.IPredEQ, extra, null)
+		addExtra := fn.NewBlock(".add_extra")
+		doneBlk := fn.NewBlock(".done")
+		chainLoop.NewCondBr(extraNull, doneBlk, addExtra)
+
+		// SSL_CTX_ctrl(ctx, SSL_CTRL_EXTRA_CHAIN_CERT, 0, extra) — ownership
+		// transfers on success. On failure, we must X509_free(extra).
+		ctrlRC := addExtra.NewCall(sslCtxCtrl, ctx,
+			i32(sslCtrlExtraChainCert), constant.NewInt(irtypes.I64, 0), extra)
+		ctrlOK := addExtra.NewICmp(enum.IPredNE, ctrlRC, constant.NewInt(irtypes.I64, 0))
+		freeExtra := fn.NewBlock(".free_extra")
+		addExtra.NewCondBr(ctrlOK, chainLoop, freeExtra)
+
+		// The ctrl failed, so ownership did not transfer and the issuer is ours to
+		// free. The whole call then fails: a context holding part of its chain
+		// sends exactly the incomplete Certificate message this function exists to
+		// prevent, and reporting success for it is how that reaches a wire.
+		freeExtra.NewCall(x509Free, extra)
+		freeExtra.NewCall(errClearError)
+		freeExtra.NewCall(bioFree, bio)
+		freeExtra.NewRet(i32(0))
+
+		// The read that ends the loop fails with PEM_R_NO_START_LINE and leaves it
+		// on the thread's error queue. That is not an error here — running out of
+		// blocks is how the loop is meant to end — but OpenSSL's queue is global to
+		// the thread, so a stale entry would be reported by whatever unrelated call
+		// inspects it next. SSL_CTX_use_certificate_chain_file clears it at exactly
+		// this point for the same reason.
+		doneBlk.NewCall(errClearError)
+		doneBlk.NewCall(bioFree, bio)
+		doneBlk.NewRet(i32(1))
 		emit(fn)
 	}
 

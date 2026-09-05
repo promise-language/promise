@@ -267,7 +267,8 @@ const (
 	winCtxFKey       = 7  // NCRYPT_KEY_HANDLE
 	winCtxFKeyProv   = 8  // NCRYPT_PROV_HANDLE
 	winCtxFKeyName   = 9  // UTF-16 CNG key name (pal_alloc'd)
-	winCtxFCredLock  = 10 // CRITICAL_SECTION serializing __pal_tls_ensure_cred
+	winCtxFChain     = 10 // HCERTSTORE holding leaf + intermediates (T1612)
+	winCtxFCredLock  = 11 // CRITICAL_SECTION serializing __pal_tls_ensure_cred
 )
 
 // Field indices into the session struct (tlsWinTypes.sess).
@@ -308,6 +309,7 @@ func newTLSWinTypes() *tlsWinTypes {
 		irtypes.I64, // key
 		irtypes.I64, // key provider
 		i8p,         // key name (UTF-16)
+		i8p,         // chain store: leaf + intermediates (T1612)
 		// CRITICAL_SECTION (40 bytes, 8-aligned on x64 — the size
 		// pal_mutex_init allocates). Appended last so every field index above
 		// stays put; tlsWinSizeOf derives the allocation size from this type.

@@ -181,24 +181,36 @@ func (e *tlsWinEmitter) sessBuf(b *ir.Block, s value.Value, idx int) value.Value
 
 // --- PEM / string helpers --------------------------------------------------
 
-// emitPemDER defines i8* @__pal_tls_pem_der(i8* pem, i64 len, i64* outLen):
-// decodes a PEM block (BEGIN/END armour + base64 body) into a pal_alloc'd DER
-// buffer. Returns null when the input is not a well-formed PEM block, which is
-// what lets tls.pr surface TlsErrorKind.certificate for malformed input.
+// emitPemDER defines i8* @__pal_tls_pem_der(i8* pem, i64 len, i64* outLen,
+// i64* outSkip): decodes a PEM block (BEGIN/END armour + base64 body) into a
+// pal_alloc'd DER buffer. Returns null when the input is not a well-formed PEM
+// block, which is what lets tls.pr surface TlsErrorKind.certificate for
+// malformed input.
+//
+// outSkip receives CryptStringToBinaryA's pdwSkip: the number of characters
+// before the block's base64 body, i.e. any preamble plus the -----BEGIN----- line.
+// Advancing a scan cursor by it lands strictly inside the block just decoded, so
+// the next forward search for -----BEGIN finds the *following* block. That is what
+// lets a caller walk a multi-block bundle (T1612) without guessing the block's
+// text extent from the size of the DER it decoded to. Callers that only ever read
+// the first block pass a throwaway slot.
 func (e *tlsWinEmitter) emitPemDER() {
 	i8p := irtypes.I8Ptr
 	nullI32P := constant.NewNull(irtypes.NewPointer(irtypes.I32))
 	fn := e.newFn("__pal_tls_pem_der", i8p,
 		ir.NewParam("pem", i8p), ir.NewParam("len", irtypes.I64),
-		ir.NewParam("outLen", irtypes.NewPointer(irtypes.I64)))
+		ir.NewParam("outLen", irtypes.NewPointer(irtypes.I64)),
+		ir.NewParam("outSkip", irtypes.NewPointer(irtypes.I64)))
 	b := fn.NewBlock(".entry")
 	cb := b.NewAlloca(irtypes.I32)
+	skip := b.NewAlloca(irtypes.I32)
 	b.NewStore(i32c(0), cb)
+	b.NewStore(i32c(0), skip)
 	// The Promise u8[] is not NUL-terminated, so the length is always explicit.
 	cch := b.NewTrunc(fn.Params[1], irtypes.I32)
 
 	ok1 := b.NewCall(e.strToBin, fn.Params[0], cch, i32c(winCryptStringBase64Header),
-		tlsWinNull, cb, nullI32P, nullI32P)
+		tlsWinNull, cb, skip, nullI32P)
 	failBlk := fn.NewBlock(".fail")
 	sizedBlk := fn.NewBlock(".sized")
 	b.NewCondBr(b.NewICmp(enum.IPredNE, ok1, i32c(0)), sizedBlk, failBlk)
@@ -211,7 +223,7 @@ func (e *tlsWinEmitter) emitPemDER() {
 
 	der := decodeBlk.NewCall(e.alloc, decodeBlk.NewZExt(n, irtypes.I64))
 	ok2 := decodeBlk.NewCall(e.strToBin, fn.Params[0], cch, i32c(winCryptStringBase64Header),
-		der, cb, nullI32P, nullI32P)
+		der, cb, skip, nullI32P)
 	undoBlk := fn.NewBlock(".decode_failed")
 	okBlk := fn.NewBlock(".ok")
 	decodeBlk.NewCondBr(decodeBlk.NewICmp(enum.IPredNE, ok2, i32c(0)), okBlk, undoBlk)
@@ -221,6 +233,7 @@ func (e *tlsWinEmitter) emitPemDER() {
 
 	final := okBlk.NewLoad(irtypes.I32, cb)
 	okBlk.NewStore(okBlk.NewZExt(final, irtypes.I64), fn.Params[2])
+	okBlk.NewStore(okBlk.NewZExt(okBlk.NewLoad(irtypes.I32, skip), irtypes.I64), fn.Params[3])
 	okBlk.NewRet(der)
 	e.pemDER = fn
 }

@@ -163,6 +163,9 @@ func (p *PosixPAL) EmitTLSSecureTransport(module *ir.Module) map[string]*ir.Func
 		irtypes.I8Ptr, // 6 anchors      (SecCertificateRef[], pal_alloc'd)
 		irtypes.I64,   // 7 anchor_count
 		irtypes.I64,   // 8 anchor_cap
+		irtypes.I8Ptr, // 9  intermediates  (SecCertificateRef[], pal_alloc'd) — T1612
+		irtypes.I64,   // 10 intermediate_count
+		irtypes.I64,   // 11 intermediate_cap
 	)
 	ctxPtrTy := irtypes.NewPointer(ctxTy)
 
@@ -623,6 +626,9 @@ func (p *PosixPAL) EmitTLSSecureTransport(module *ir.Module) map[string]*ir.Func
 		okBlk.NewStore(null, fld(okBlk, ctxTy, c, 6))
 		okBlk.NewStore(i64(0), fld(okBlk, ctxTy, c, 7))
 		okBlk.NewStore(i64(0), fld(okBlk, ctxTy, c, 8))
+		okBlk.NewStore(null, fld(okBlk, ctxTy, c, 9)) // intermediates — T1612
+		okBlk.NewStore(i64(0), fld(okBlk, ctxTy, c, 10))
+		okBlk.NewStore(i64(0), fld(okBlk, ctxTy, c, 11))
 		okBlk.NewRet(okBlk.NewPtrToInt(raw, irtypes.I64))
 		return emit(fn)
 	}
@@ -663,9 +669,9 @@ func (p *PosixPAL) EmitTLSSecureTransport(module *ir.Module) map[string]*ir.Func
 		anchors := cur.NewLoad(irtypes.I8Ptr, fld(cur, ctxTy, c, 6))
 		count := cur.NewLoad(irtypes.I64, fld(cur, ctxTy, c, 7))
 		anchorsNull := cur.NewICmp(enum.IPredEQ, anchors, null)
-		freeSelf := fn.NewBlock(".free_self")
+		afterAnchors := fn.NewBlock(".after_anchors")
 		loopHead := fn.NewBlock(".anchor_loop")
-		cur.NewCondBr(anchorsNull, freeSelf, loopHead)
+		cur.NewCondBr(anchorsNull, afterAnchors, loopHead)
 
 		idxSlot := body.NewAlloca(irtypes.I64)
 		cur.NewStore(i64(0), idxSlot)
@@ -689,7 +695,39 @@ func (p *PosixPAL) EmitTLSSecureTransport(module *ir.Module) map[string]*ir.Func
 		freeArr.NewStore(null, fld(freeArr, ctxTy, c, 6))
 		freeArr.NewStore(i64(0), fld(freeArr, ctxTy, c, 7))
 		freeArr.NewStore(i64(0), fld(freeArr, ctxTy, c, 8))
-		freeArr.NewBr(freeSelf)
+		freeArr.NewBr(afterAnchors)
+
+		// Release each intermediate, then the array itself (T1612).
+		interArr := afterAnchors.NewLoad(irtypes.I8Ptr, fld(afterAnchors, ctxTy, c, 9))
+		interCount := afterAnchors.NewLoad(irtypes.I64, fld(afterAnchors, ctxTy, c, 10))
+		interNull := afterAnchors.NewICmp(enum.IPredEQ, interArr, null)
+		freeSelf := fn.NewBlock(".free_self")
+		interHead := fn.NewBlock(".inter_loop")
+		afterAnchors.NewCondBr(interNull, freeSelf, interHead)
+
+		interIdxSlot := body.NewAlloca(irtypes.I64)
+		afterAnchors.NewStore(i64(0), interIdxSlot)
+		interArrPtr := interHead.NewBitCast(interArr, irtypes.NewPointer(irtypes.I8Ptr))
+		iIdx := interHead.NewLoad(irtypes.I64, interIdxSlot)
+		interMore := interHead.NewICmp(enum.IPredSLT, iIdx, interCount)
+		interBody := fn.NewBlock(".inter_body")
+		freeInterArr := fn.NewBlock(".free_inters")
+		interHead.NewCondBr(interMore, interBody, freeInterArr)
+		interElem := interBody.NewLoad(irtypes.I8Ptr, interBody.NewGetElementPtr(irtypes.I8Ptr, interArrPtr, iIdx))
+		interNN := interBody.NewICmp(enum.IPredNE, interElem, null)
+		relInter := fn.NewBlock(".rel_inter")
+		nextInter := fn.NewBlock(".next_inter")
+		interBody.NewCondBr(interNN, relInter, nextInter)
+		relInter.NewCall(cfRelease, interElem)
+		relInter.NewBr(nextInter)
+		nextInter.NewStore(nextInter.NewAdd(iIdx, i64(1)), interIdxSlot)
+		nextInter.NewBr(interHead)
+
+		freeInterArr.NewCall(palFree, interArr)
+		freeInterArr.NewStore(null, fld(freeInterArr, ctxTy, c, 9))
+		freeInterArr.NewStore(i64(0), fld(freeInterArr, ctxTy, c, 10))
+		freeInterArr.NewStore(i64(0), fld(freeInterArr, ctxTy, c, 11))
+		freeInterArr.NewBr(freeSelf)
 
 		freeSelf.NewCall(palFree, raw)
 		freeSelf.NewRet(nil)
@@ -800,10 +838,12 @@ func (p *PosixPAL) EmitTLSSecureTransport(module *ir.Module) map[string]*ir.Func
 	}
 
 	// --- pal_tls_ctx_use_cert(i64 ctx, i8* pem, i64 len) → i32 ------------
-	// Stages the certificate. The identity is only built once the matching key
-	// arrives (use_key), because Secure Transport wants a SecIdentityRef, not a
-	// bare certificate. Any previously staged cert/identity is released first, so
-	// calling this twice cannot leak.
+	// Stages the leaf certificate and collects any intermediates from the PEM
+	// bundle (T1612). Uses SecItemImport inline (rather than __promise_tls_import)
+	// so it can iterate ALL certificates in the CFArray: first cert → leaf (field 5),
+	// subsequent certs → intermediates array (fields 9–11). The identity is only
+	// built once the matching key arrives (use_key). Calling this twice is safe —
+	// previous cert, identity, and intermediates are released first.
 	{
 		fn := module.NewFunc("pal_tls_ctx_use_cert", irtypes.I32,
 			ir.NewParam("ctx", irtypes.I64), ir.NewParam("pem", irtypes.I8Ptr),
@@ -817,34 +857,186 @@ func (p *PosixPAL) EmitTLSSecureTransport(module *ir.Module) map[string]*ir.Func
 		failBlk.NewRet(i32(0))
 
 		c := body.NewBitCast(body.NewIntToPtr(fn.Params[0], irtypes.I8Ptr), ctxPtrTy)
-		cert := body.NewCall(tlsImport, fn.Params[1], fn.Params[2], i32(stItemTypeCertific))
-		certNull := body.NewICmp(enum.IPredEQ, cert, null)
-		haveCert := fn.NewBlock(".have_cert")
-		body.NewCondBr(certNull, failBlk, haveCert)
 
-		oldCertP := fld(haveCert, ctxTy, c, 5)
-		oldCert := haveCert.NewLoad(irtypes.I8Ptr, oldCertP)
-		oldCertNN := haveCert.NewICmp(enum.IPredNE, oldCert, null)
-		relCert := fn.NewBlock(".rel_old_cert")
-		afterCert := fn.NewBlock(".after_old_cert")
-		haveCert.NewCondBr(oldCertNN, relCert, afterCert)
-		relCert.NewCall(cfRelease, oldCert)
-		relCert.NewBr(afterCert)
+		// SecItemImport — same call as __promise_tls_import but we keep the full array.
+		fmtP := body.NewAlloca(irtypes.I32)
+		typP := body.NewAlloca(irtypes.I32)
+		outP := body.NewAlloca(irtypes.I8Ptr)
+		body.NewStore(i32(stFormatUnknown), fmtP)
+		body.NewStore(i32(stItemTypeCertific), typP)
+		body.NewStore(null, outP)
 
-		// A previously built identity is now stale — drop it so the next use_key
-		// rebuilds against this certificate.
-		oldIdP := fld(afterCert, ctxTy, c, 4)
-		oldId := afterCert.NewLoad(irtypes.I8Ptr, oldIdP)
-		oldIdNN := afterCert.NewICmp(enum.IPredNE, oldId, null)
-		relId := fn.NewBlock(".rel_old_identity")
-		afterId := fn.NewBlock(".after_old_identity")
-		afterCert.NewCondBr(oldIdNN, relId, afterId)
-		relId.NewCall(cfRelease, oldId)
-		relId.NewStore(null, oldIdP)
-		relId.NewBr(afterId)
+		data := body.NewCall(cfDataCreate, null, fn.Params[1], fn.Params[2])
+		dataNull := body.NewICmp(enum.IPredEQ, data, null)
+		haveData := fn.NewBlock(".have_data")
+		body.NewCondBr(dataNull, failBlk, haveData)
 
-		afterId.NewStore(cert, oldCertP)
-		afterId.NewRet(i32(1))
+		st := haveData.NewCall(secItemImport, data, null, fmtP, typP, i32(0), null, null, outP)
+		haveData.NewCall(cfRelease, data)
+		stOK := haveData.NewICmp(enum.IPredEQ, st, i32(stErrSuccess))
+		importOK := fn.NewBlock(".import_ok")
+		haveData.NewCondBr(stOK, importOK, failBlk)
+
+		arr := importOK.NewLoad(irtypes.I8Ptr, outP)
+		arrNull := importOK.NewICmp(enum.IPredEQ, arr, null)
+		haveArr := fn.NewBlock(".have_array")
+		importOK.NewCondBr(arrNull, failBlk, haveArr)
+
+		// Release previous staged cert, identity, and intermediates (idempotent).
+		oldCertP := fld(haveArr, ctxTy, c, 5)
+		oldCert := haveArr.NewLoad(irtypes.I8Ptr, oldCertP)
+		oldCertNN := haveArr.NewICmp(enum.IPredNE, oldCert, null)
+		relOldCert := fn.NewBlock(".rel_old_cert")
+		afterOldCert := fn.NewBlock(".after_old_cert")
+		haveArr.NewCondBr(oldCertNN, relOldCert, afterOldCert)
+		relOldCert.NewCall(cfRelease, oldCert)
+		relOldCert.NewBr(afterOldCert)
+
+		oldIdP := fld(afterOldCert, ctxTy, c, 4)
+		oldId := afterOldCert.NewLoad(irtypes.I8Ptr, oldIdP)
+		oldIdNN := afterOldCert.NewICmp(enum.IPredNE, oldId, null)
+		relOldId := fn.NewBlock(".rel_old_identity")
+		afterOldId := fn.NewBlock(".after_old_identity")
+		afterOldCert.NewCondBr(oldIdNN, relOldId, afterOldId)
+		relOldId.NewCall(cfRelease, oldId)
+		relOldId.NewStore(null, oldIdP)
+		relOldId.NewBr(afterOldId)
+
+		// Clear previous intermediates.
+		oldInterP := fld(afterOldId, ctxTy, c, 9)
+		oldInter := afterOldId.NewLoad(irtypes.I8Ptr, oldInterP)
+		oldInterNN := afterOldId.NewICmp(enum.IPredNE, oldInter, null)
+		clearInter := fn.NewBlock(".clear_old_inter")
+		afterClearInter := fn.NewBlock(".after_clear_inter")
+		afterOldId.NewCondBr(oldInterNN, clearInter, afterClearInter)
+
+		// Loop to release each old intermediate.
+		oldInterCount := clearInter.NewLoad(irtypes.I64, fld(clearInter, ctxTy, c, 10))
+		clearIdxSlot := entry.NewAlloca(irtypes.I64)
+		clearInter.NewStore(i64(0), clearIdxSlot)
+		clearHead := fn.NewBlock(".clear_inter_loop")
+		clearInter.NewBr(clearHead)
+		clearIdx := clearHead.NewLoad(irtypes.I64, clearIdxSlot)
+		clearMore := clearHead.NewICmp(enum.IPredSLT, clearIdx, oldInterCount)
+		clearBody := fn.NewBlock(".clear_inter_body")
+		clearDone := fn.NewBlock(".clear_inter_done")
+		clearHead.NewCondBr(clearMore, clearBody, clearDone)
+		clearElemPtr := clearBody.NewGetElementPtr(irtypes.I8Ptr,
+			clearBody.NewBitCast(oldInter, irtypes.NewPointer(irtypes.I8Ptr)), clearIdx)
+		clearElem := clearBody.NewLoad(irtypes.I8Ptr, clearElemPtr)
+		clearNN := clearBody.NewICmp(enum.IPredNE, clearElem, null)
+		relClear := fn.NewBlock(".rel_clear_inter")
+		nextClear := fn.NewBlock(".next_clear_inter")
+		clearBody.NewCondBr(clearNN, relClear, nextClear)
+		relClear.NewCall(cfRelease, clearElem)
+		relClear.NewBr(nextClear)
+		nextClear.NewStore(nextClear.NewAdd(clearIdx, i64(1)), clearIdxSlot)
+		nextClear.NewBr(clearHead)
+		clearDone.NewCall(palFree, oldInter)
+		clearDone.NewStore(null, oldInterP)
+		clearDone.NewStore(i64(0), fld(clearDone, ctxTy, c, 10))
+		clearDone.NewStore(i64(0), fld(clearDone, ctxTy, c, 11))
+		clearDone.NewBr(afterClearInter)
+
+		// Scan the imported array for certificates.
+		afterClearInter.NewStore(null, oldCertP) // clear leaf slot
+		certTypeID := afterClearInter.NewCall(secCertificateGetTypeID)
+		arrCount := afterClearInter.NewCall(cfArrayGetCount, arr)
+		scanIdxSlot := entry.NewAlloca(irtypes.I64)
+		foundLeafSlot := entry.NewAlloca(irtypes.I32)
+		afterClearInter.NewStore(i64(0), scanIdxSlot)
+		afterClearInter.NewStore(i32(0), foundLeafSlot)
+		scanHead := fn.NewBlock(".scan_head")
+		afterClearInter.NewBr(scanHead)
+
+		scanIdx := scanHead.NewLoad(irtypes.I64, scanIdxSlot)
+		scanMore := scanHead.NewICmp(enum.IPredSLT, scanIdx, arrCount)
+		scanBody := fn.NewBlock(".scan_body")
+		scanDone := fn.NewBlock(".scan_done")
+		scanHead.NewCondBr(scanMore, scanBody, scanDone)
+
+		item := scanBody.NewCall(cfArrayGetValueAtIndex, arr, scanIdx)
+		itemNull := scanBody.NewICmp(enum.IPredEQ, item, null)
+		nextScan := fn.NewBlock(".next_scan")
+		checkItem := fn.NewBlock(".check_item")
+		scanBody.NewCondBr(itemNull, nextScan, checkItem)
+
+		gotTypeID := checkItem.NewCall(cfGetTypeID, item)
+		isCert := checkItem.NewICmp(enum.IPredEQ, gotTypeID, certTypeID)
+		handleCert := fn.NewBlock(".handle_cert")
+		checkItem.NewCondBr(isCert, handleCert, nextScan)
+
+		foundLeaf := handleCert.NewLoad(irtypes.I32, foundLeafSlot)
+		isFirst := handleCert.NewICmp(enum.IPredEQ, foundLeaf, i32(0))
+		stageLeaf := fn.NewBlock(".stage_leaf")
+		appendInter := fn.NewBlock(".append_inter")
+		handleCert.NewCondBr(isFirst, stageLeaf, appendInter)
+
+		// First cert → leaf.
+		stageLeaf.NewCall(cfRetain, item)
+		stageLeaf.NewStore(item, oldCertP)
+		stageLeaf.NewStore(i32(1), foundLeafSlot)
+		stageLeaf.NewBr(nextScan)
+
+		// Subsequent certs → intermediates array (grow-and-append, same as anchors).
+		appendInter.NewCall(cfRetain, item)
+		interCountP := fld(appendInter, ctxTy, c, 10)
+		interCapP := fld(appendInter, ctxTy, c, 11)
+		interArrP := fld(appendInter, ctxTy, c, 9)
+		interCount := appendInter.NewLoad(irtypes.I64, interCountP)
+		interCap := appendInter.NewLoad(irtypes.I64, interCapP)
+		interFull := appendInter.NewICmp(enum.IPredSGE, interCount, interCap)
+		growInter := fn.NewBlock(".grow_inter")
+		doAppend := fn.NewBlock(".do_append_inter")
+		appendInter.NewCondBr(interFull, growInter, doAppend)
+
+		capZero := growInter.NewICmp(enum.IPredEQ, interCap, i64(0))
+		newInterCap := growInter.NewSelect(capZero, i64(4), growInter.NewMul(interCap, i64(2)))
+		newInterArr := growInter.NewCall(palAlloc, growInter.NewMul(newInterCap, i64(8)))
+		newInterNull := growInter.NewICmp(enum.IPredEQ, newInterArr, null)
+		interAllocFail := fn.NewBlock(".inter_alloc_fail")
+		interCopyOld := fn.NewBlock(".inter_copy_old")
+		growInter.NewCondBr(newInterNull, interAllocFail, interCopyOld)
+		// Growing the issuer array failed. Staging a leaf whose issuers were dropped
+		// would report success for exactly the incomplete chain this function exists
+		// to prevent, so the call fails instead; whatever is already staged on the
+		// ctx is released by pal_tls_ctx_free when the caller drops the config.
+		interAllocFail.NewCall(cfRelease, item)
+		interAllocFail.NewCall(cfRelease, arr)
+		interAllocFail.NewRet(i32(0))
+
+		oldInterArr := interCopyOld.NewLoad(irtypes.I8Ptr, interArrP)
+		oldInterArrNN := interCopyOld.NewICmp(enum.IPredNE, oldInterArr, null)
+		moveOldInter := fn.NewBlock(".move_old_inter")
+		storeNewInter := fn.NewBlock(".store_new_inter")
+		interCopyOld.NewCondBr(oldInterArrNN, moveOldInter, storeNewInter)
+		moveOldInter.NewCall(memcpyFn, newInterArr, oldInterArr,
+			moveOldInter.NewMul(interCount, i64(8)))
+		moveOldInter.NewCall(palFree, oldInterArr)
+		moveOldInter.NewBr(storeNewInter)
+		storeNewInter.NewStore(newInterArr, interArrP)
+		storeNewInter.NewStore(newInterCap, interCapP)
+		storeNewInter.NewBr(doAppend)
+
+		doAppendArr := doAppend.NewBitCast(doAppend.NewLoad(irtypes.I8Ptr, interArrP),
+			irtypes.NewPointer(irtypes.I8Ptr))
+		doAppendCount := doAppend.NewLoad(irtypes.I64, interCountP)
+		doAppend.NewStore(item, doAppend.NewGetElementPtr(irtypes.I8Ptr, doAppendArr, doAppendCount))
+		doAppend.NewStore(doAppend.NewAdd(doAppendCount, i64(1)), interCountP)
+		doAppend.NewBr(nextScan)
+
+		nextScan.NewStore(nextScan.NewAdd(nextScan.NewLoad(irtypes.I64, scanIdxSlot), i64(1)), scanIdxSlot)
+		nextScan.NewBr(scanHead)
+
+		// Done scanning — release the array and check if we found a leaf.
+		scanDone.NewCall(cfRelease, arr)
+		foundLeafFinal := scanDone.NewLoad(irtypes.I32, foundLeafSlot)
+		haveLeaf := scanDone.NewICmp(enum.IPredNE, foundLeafFinal, i32(0))
+		okBlk := fn.NewBlock(".ok")
+		noLeaf := fn.NewBlock(".no_leaf")
+		scanDone.NewCondBr(haveLeaf, okBlk, noLeaf)
+		okBlk.NewRet(i32(1))
+		noLeaf.NewRet(i32(0))
 		emit(fn)
 	}
 
@@ -914,7 +1106,6 @@ func (p *PosixPAL) EmitTLSSecureTransport(module *ir.Module) map[string]*ir.Func
 		fn := module.NewFunc("pal_tls_new", irtypes.I64, ir.NewParam("ctx", irtypes.I64))
 		fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 		entry := fn.NewBlock(".entry")
-		identSlot := entry.NewAlloca(irtypes.I8Ptr)
 		isZero := entry.NewICmp(enum.IPredEQ, fn.Params[0], i64(0))
 		failBlk := fn.NewBlock(".fail")
 		body := fn.NewBlock(".body")
@@ -958,20 +1149,46 @@ func (p *PosixPAL) EmitTLSSecureTransport(module *ir.Module) map[string]*ir.Func
 		minVer := haveSSL.NewLoad(irtypes.I32, fld(haveSSL, ctxTy, c, 2))
 		haveSSL.NewCall(sslSetProtocolVersionMin, ssl, minVer)
 
-		// Install the identity built from cert+key, if any. This is the server's
-		// certificate chain; on a client it is the mutual-TLS client certificate
-		// (set_client_certificate) — Secure Transport uses the same setter for both.
+		// Install the identity built from cert+key, if any, together with any
+		// intermediates (T1612). SSLSetCertificate takes [identity, cert1, cert2, ...],
+		// so we build a temporary i8*[] holding identity at [0] and each intermediate
+		// from the ctx at [1..N], then wrap it in a CFArray.
 		ident := haveSSL.NewLoad(irtypes.I8Ptr, fld(haveSSL, ctxTy, c, 4))
 		identNN := haveSSL.NewICmp(enum.IPredNE, ident, null)
 		setCert := fn.NewBlock(".set_cert")
 		afterCert := fn.NewBlock(".after_cert")
 		haveSSL.NewCondBr(identNN, setCert, afterCert)
-		setCert.NewStore(ident, identSlot)
-		chain := setCert.NewCall(cfArrayCreate, null,
-			setCert.NewBitCast(identSlot, irtypes.I8Ptr), i64(1), cfTypeArrayCallBacks)
-		chainNull := setCert.NewICmp(enum.IPredEQ, chain, null)
+
+		interCount := setCert.NewLoad(irtypes.I64, fld(setCert, ctxTy, c, 10))
+		chainLen := setCert.NewAdd(i64(1), interCount) // 1 (identity) + N intermediates
+		tmpArr := setCert.NewCall(palAlloc, setCert.NewMul(chainLen, i64(8)))
+		tmpArrNull := setCert.NewICmp(enum.IPredEQ, tmpArr, null)
+		buildChain := fn.NewBlock(".build_chain")
+		setCert.NewCondBr(tmpArrNull, afterCert, buildChain)
+
+		// Store identity at index 0.
+		tmpArrTyped := buildChain.NewBitCast(tmpArr, irtypes.NewPointer(irtypes.I8Ptr))
+		buildChain.NewStore(ident, buildChain.NewGetElementPtr(irtypes.I8Ptr, tmpArrTyped, i64(0)))
+
+		// Copy intermediates from the ctx into indices 1..N.
+		hasInters := buildChain.NewICmp(enum.IPredUGT, interCount, i64(0))
+		copyInterBlk := fn.NewBlock(".copy_inters")
+		createArr := fn.NewBlock(".create_chain_arr")
+		buildChain.NewCondBr(hasInters, copyInterBlk, createArr)
+
+		interSrc := copyInterBlk.NewLoad(irtypes.I8Ptr, fld(copyInterBlk, ctxTy, c, 9))
+		dstOff := copyInterBlk.NewGetElementPtr(irtypes.I8Ptr, tmpArrTyped, i64(1))
+		copyInterBlk.NewCall(memcpyFn,
+			copyInterBlk.NewBitCast(dstOff, irtypes.I8Ptr),
+			interSrc,
+			copyInterBlk.NewMul(interCount, i64(8)))
+		copyInterBlk.NewBr(createArr)
+
+		chain := createArr.NewCall(cfArrayCreate, null, tmpArr, chainLen, cfTypeArrayCallBacks)
+		createArr.NewCall(palFree, tmpArr)
+		chainNull := createArr.NewICmp(enum.IPredEQ, chain, null)
 		applyCert := fn.NewBlock(".apply_cert")
-		setCert.NewCondBr(chainNull, afterCert, applyCert)
+		createArr.NewCondBr(chainNull, afterCert, applyCert)
 		applyCert.NewCall(sslSetCertificate, ssl, chain)
 		applyCert.NewCall(cfRelease, chain)
 		applyCert.NewBr(afterCert)

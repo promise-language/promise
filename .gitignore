@@ -53,3 +53,4 @@ CLAUDE.local.md
 
 # written by `workspace setup` — per-host/per-clone, never committed
 /.workspace/
+/.mcp.json

@@ -1066,6 +1066,90 @@ func (p *PosixPAL) EmitFileTruncate(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitFileSameAsPath defines @pal_file_same_as_path using fstat(2) + stat(2),
+// comparing (st_dev, st_ino) — the pair that identifies a file independently of
+// any name it currently answers to (T1967).
+//
+// st_ino sits at offset 8 on every platform this targets. st_dev is at offset 0
+// on all three but is 32-bit on Darwin (dev_t is int32 there) and 64-bit on
+// Linux, so it is loaded at its own width and widened — the same per-platform
+// offset table EmitFileStat already documents.
+//
+// A path that does not exist is not an error here: it answers "not the same
+// file", which is exactly what the caller needs to know when the name it
+// believed it owned has been renamed away. Every other stat failure propagates.
+func (p *PosixPAL) EmitFileSameAsPath(module *ir.Module) *ir.Func {
+	fstatFn := getOrDeclareFunc(module, "fstat", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr))
+	statFn := getOrDeclareFunc(module, "stat", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("buf", irtypes.I8Ptr))
+
+	fn := module.NewFunc("pal_file_same_as_path", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Two 256-byte struct stat buffers, sized and aligned as EmitFileStat does.
+	bufArray := irtypes.NewArray(256, irtypes.I8)
+	fdBuf := entry.NewAlloca(bufArray)
+	fdBuf.Align = 16
+	pathBuf := entry.NewAlloca(bufArray)
+	pathBuf.Align = 16
+	fdPtr := entry.NewBitCast(fdBuf, irtypes.I8Ptr)
+	pathPtr := entry.NewBitCast(pathBuf, irtypes.I8Ptr)
+
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	errnoLoc := p.getOrDeclareErrnoLocFn(module)
+
+	fdRC := entry.NewCall(fstatFn, fn.Params[0], fdPtr)
+	statBlk := fn.NewBlock(".stat_path")
+	fstatErrBlk := fn.NewBlock(".fstat_err")
+	entry.NewCondBr(entry.NewICmp(enum.IPredSLT, fdRC, zero32), fstatErrBlk, statBlk)
+	p.emitNegErrnoReturnI32(fstatErrBlk, errnoLoc)
+
+	pathRC := statBlk.NewCall(statFn, fn.Params[1], pathPtr)
+	compareBlk := fn.NewBlock(".compare")
+	statErrBlk := fn.NewBlock(".stat_err")
+	statBlk.NewCondBr(statBlk.NewICmp(enum.IPredSLT, pathRC, zero32), statErrBlk, compareBlk)
+
+	// ENOENT (2) means the name is gone — a definite "not the same file", not a
+	// failure to compare. Everything else is a real error.
+	errnoPtr := statErrBlk.NewCall(errnoLoc)
+	errnoVal := statErrBlk.NewLoad(irtypes.I32, errnoPtr)
+	notSameBlk := fn.NewBlock(".not_same")
+	otherErrBlk := fn.NewBlock(".stat_other_err")
+	statErrBlk.NewCondBr(
+		statErrBlk.NewICmp(enum.IPredEQ, errnoVal, constant.NewInt(irtypes.I32, 2)),
+		notSameBlk, otherErrBlk)
+	otherErrBlk.NewRet(otherErrBlk.NewSub(zero32, errnoVal))
+	notSameBlk.NewRet(zero32)
+
+	// st_dev is 32-bit on Darwin, 64-bit on Linux; st_ino is 64-bit on both.
+	devIs32 := p.isMacOS()
+	loadDev := func(base value.Value) value.Value {
+		ptr := compareBlk.NewGetElementPtr(irtypes.I8, base, constant.NewInt(irtypes.I64, 0))
+		if devIs32 {
+			return compareBlk.NewZExt(
+				compareBlk.NewLoad(irtypes.I32, compareBlk.NewBitCast(ptr, irtypes.NewPointer(irtypes.I32))),
+				irtypes.I64)
+		}
+		return compareBlk.NewLoad(irtypes.I64, compareBlk.NewBitCast(ptr, irtypes.NewPointer(irtypes.I64)))
+	}
+	loadIno := func(base value.Value) value.Value {
+		ptr := compareBlk.NewGetElementPtr(irtypes.I8, base, constant.NewInt(irtypes.I64, 8))
+		return compareBlk.NewLoad(irtypes.I64, compareBlk.NewBitCast(ptr, irtypes.NewPointer(irtypes.I64)))
+	}
+
+	sameDev := compareBlk.NewICmp(enum.IPredEQ, loadDev(fdPtr), loadDev(pathPtr))
+	sameIno := compareBlk.NewICmp(enum.IPredEQ, loadIno(fdPtr), loadIno(pathPtr))
+	same := compareBlk.NewAnd(sameDev, sameIno)
+	compareBlk.NewRet(compareBlk.NewZExt(same, irtypes.I32))
+	return fn
+}
+
 // EmitFileExists declares libc @access and defines @pal_file_exists.
 // Uses access(path, F_OK=0) to check existence.
 func (p *PosixPAL) EmitFileExists(module *ir.Module) *ir.Func {

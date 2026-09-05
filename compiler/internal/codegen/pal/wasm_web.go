@@ -133,6 +133,9 @@ func (p *WasmWebPAL) EmitFileUnlock(module *ir.Module) *ir.Func { return emitStu
 func (p *WasmWebPAL) EmitFileTruncate(module *ir.Module) *ir.Func {
 	return emitStubFileTruncate(module)
 }
+func (p *WasmWebPAL) EmitFileSameAsPath(module *ir.Module) *ir.Func {
+	return emitStubFileSameAsPath(module)
+}
 func (p *WasmWebPAL) EmitDirOpen(module *ir.Module) *ir.Func     { return emitStubDirOpen(module) }
 func (p *WasmWebPAL) EmitDirNextName(module *ir.Module) *ir.Func { return emitStubDirNextName(module) }
 func (p *WasmWebPAL) EmitDirClose(module *ir.Module) *ir.Func    { return emitStubDirClose(module) }

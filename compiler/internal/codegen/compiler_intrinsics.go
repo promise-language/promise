@@ -237,6 +237,7 @@ func (c *Compiler) declareIntrinsics() {
 	c.palFileLock = p.EmitFileLock(c.module)
 	c.palFileUnlock = p.EmitFileUnlock(c.module)
 	c.palFileTruncate = p.EmitFileTruncate(c.module)
+	c.palFileSameAsPath = p.EmitFileSameAsPath(c.module)
 	c.palFileExists = p.EmitFileExists(c.module)
 	c.palFileMkdir = p.EmitFileMkdir(c.module)
 	c.palDirRemove = p.EmitDirRemove(c.module)

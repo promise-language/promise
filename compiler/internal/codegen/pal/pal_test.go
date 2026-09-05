@@ -2698,31 +2698,30 @@ func TestFileUnlockPosixUsesLockUn(t *testing.T) {
 	assertContains(t, out, "@flock(i32 %fd, i32 8)", "LOCK_UN = 8")
 }
 
-// LockFileEx locks a byte *range*, so a whole-file lock is 0xFFFFFFFF:0xFFFFFFFF
-// bytes from a zeroed OVERLAPPED. Both halves matter and both fail silently if
-// wrong: short extents or a garbage Offset would lock a range that does not
-// conflict with anyone, so the lock would appear to succeed and exclude nothing.
-func TestFileLockWindowsLocksWholeFile(t *testing.T) {
+// LockFileEx locks a byte *range*: the sentinel byte at 2^64-2, never the data
+// (T1968 — see TestFileLockWindowsSentinelRange for the range itself). What
+// this test pins is the machinery around it: a garbage OVERLAPPED or a missing
+// handle recovery would lock a range that conflicts with nobody, so the lock
+// would appear to succeed and exclude nothing.
+func TestFileLockWindowsMechanism(t *testing.T) {
 	module := ir.NewModule()
 	(&WindowsPAL{}).EmitFileLock(module)
 	out := module.String()
 	assertContains(t, out, "@_get_osfhandle(", "recovers the HANDLE behind the CRT fd")
 	assertContains(t, out, "alloca [32 x i8]", "32-byte OVERLAPPED")
 	assertContains(t, out, "@memset(", "zeroes the OVERLAPPED")
-	assertContains(t, out, "i32 u0xFFFFFFFF, i32 u0xFFFFFFFF, i8*", "0xFFFFFFFF:0xFFFFFFFF whole-file extents")
 	// LOCKFILE_EXCLUSIVE_LOCK = 0x2, LOCKFILE_FAIL_IMMEDIATELY = 0x1
 	assertContains(t, out, "i32 2, i32 0", "LOCKFILE_EXCLUSIVE_LOCK = 2")
 	assertContains(t, out, "i32 1, i32 0", "LOCKFILE_FAIL_IMMEDIATELY = 1")
 }
 
-func TestFileUnlockWindowsUnlocksWholeFile(t *testing.T) {
+func TestFileUnlockWindowsMechanism(t *testing.T) {
 	module := ir.NewModule()
 	(&WindowsPAL{}).EmitFileUnlock(module)
 	out := module.String()
 	assertContains(t, out, "@UnlockFileEx(", "UnlockFileEx declaration")
 	assertContains(t, out, "alloca [32 x i8]", "32-byte OVERLAPPED")
 	assertContains(t, out, "@memset(", "zeroes the OVERLAPPED")
-	assertContains(t, out, "i32 u0xFFFFFFFF, i32 u0xFFFFFFFF, i8*", "matches the range EmitFileLock takes")
 }
 
 // ERROR_LOCK_VIOLATION (33) must reach the Promise layer as EWOULDBLOCK, not as
@@ -5907,4 +5906,97 @@ func TestFileStatSizeWindowsFailWidensPalError(t *testing.T) {
 	if callee, ok := openCall.Callee.(*ir.Func); !ok || callee.Name() != "pal_file_open" {
 		t.Errorf(".fail widens the result of %v, want pal_file_open", openCall.Callee)
 	}
+}
+
+// --- T1967: file identity (pal_file_same_as_path) ---
+
+// The primitive that makes slot ownership sound: a lock on a descriptor says
+// nothing about what its name refers to now, so _acquire_slot compares file
+// identity after locking. Identity is (st_dev, st_ino) on POSIX and volume
+// serial + file index on Windows; a missing path answers 0 ("not the same
+// file"), which is the very condition being probed, not an error.
+func TestFileSameAsPathAllPlatforms(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		pal   PAL
+		wants []string
+	}{
+		// Linux: st_dev is a 64-bit load at offset 0 — no zext.
+		{"Linux", &PosixPAL{target: "x86_64-unknown-linux-gnu"}, []string{
+			"call i32 @fstat(", "call i32 @stat(",
+		}},
+		// Darwin: dev_t is int32, so the offset-0 load is widened.
+		{"macOS", &PosixPAL{target: "arm64-apple-darwin23.0.0"}, []string{
+			"call i32 @fstat(", "call i32 @stat(", "zext i32",
+		}},
+		// Windows: both sides through GetFileInformationByHandle; the path side
+		// opens with FILE_READ_ATTRIBUTES (128) and share-all so the probe can
+		// never itself block a rename or delete.
+		{"Windows", &WindowsPAL{}, []string{
+			"call i32 @GetFileInformationByHandle(",
+			"@CreateFileA(i8* %path, i32 128, i32 7,",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitFileSameAsPath(module)
+			out := module.String()
+			if fn.Name() != "pal_file_same_as_path" {
+				t.Errorf("expected pal_file_same_as_path, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i32 @pal_file_same_as_path(i32 %fd, i8* %path)", "definition")
+			for _, w := range tc.wants {
+				assertContains(t, out, w, "platform mechanism")
+			}
+		})
+	}
+	// WASM: unsupported must raise (ENOSYS), never answer 0 or 1 — a target
+	// with no identity primitive must not silently claim files match.
+	module := ir.NewModule()
+	(&WasmPAL{}).EmitFileSameAsPath(module)
+	assertContains(t, module.String(), "ret i32 -38", "WASM stub returns -ENOSYS")
+}
+
+// The struct stat identity fields live at fixed offsets (dev at 0, ino at 8 on
+// every target); both buffers must be read at both offsets or the comparison
+// silently degrades to dev-only or ino-only.
+func TestFileSameAsPathPosixReadsBothFields(t *testing.T) {
+	module := ir.NewModule()
+	(&PosixPAL{target: "x86_64-unknown-linux-gnu"}).EmitFileSameAsPath(module)
+	out := module.String()
+	for _, off := range []string{"i64 0", "i64 8"} {
+		if n := strings.Count(out, "getelementptr i8, i8* %2, "+off) +
+			strings.Count(out, "getelementptr i8, i8* %3, "+off); n < 2 {
+			t.Errorf("offset %s read %d times; both stat buffers must be read at dev and ino", off, n)
+		}
+	}
+}
+
+// --- T1968: the lock range is a sentinel byte, not the data ---
+
+// LockFileEx is mandatory, so a lock over [0, ~0) makes the locked file's
+// *data* unreadable through other handles — which turned replace_content's
+// renamed-in destination unreadable while the slot lock outlived the rename.
+// The lock is therefore one byte at offset 2^64-2: same contention, no data
+// coverage. The unlock must name the identical range or UnlockFileEx fails.
+func TestFileLockWindowsSentinelRange(t *testing.T) {
+	module := ir.NewModule()
+	(&WindowsPAL{}).EmitFileLock(module)
+	(&WindowsPAL{}).EmitFileUnlock(module)
+	out := module.String()
+
+	// Length 1:0 on both calls — not the 0xFFFFFFFF:0xFFFFFFFF whole-file idiom.
+	if !callArgsContain(out, "@LockFileEx(", "i32 0, i32 1, i32 0,") {
+		t.Errorf("LockFileEx is not locking a 1-byte range:\n%s", out)
+	}
+	if !callArgsContain(out, "@UnlockFileEx(", "i32 0, i32 1, i32 0,") {
+		t.Errorf("UnlockFileEx does not release the 1-byte range:\n%s", out)
+	}
+	// The OVERLAPPED offset is the sentinel, stored in both functions.
+	for _, want := range []string{"store i32 u0xFFFFFFFE,", "store i32 u0xFFFFFFFF,"} {
+		if n := strings.Count(out, want); n != 2 {
+			t.Errorf("%s appears %d times; lock and unlock must both address the sentinel byte", want, n)
+		}
+	}
+	assertNotContains(t, out, "i32 u0xFFFFFFFF, i32 u0xFFFFFFFF, i8*", "whole-file range is gone")
 }

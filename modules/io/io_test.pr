@@ -1343,6 +1343,23 @@ file_rename_missing_parent_raises() `test(exclude: wasm) {
 // flock ownership is per open file description, not per process, so two fds on
 // one path contend inside a single process. Every lock test below is therefore
 // single-process and deterministic — no sleeps, no cross-process coordination.
+// Locking is advisory on every platform (docs/io.md §5.3): a held lock excludes
+// other lockers, never plain readers. On Windows that holds because the lock
+// covers a sentinel byte rather than the data (T1968) — with the old whole-file
+// LockFileEx range this read failed with "permission denied", which is exactly
+// how replace_content's renamed-in destination became briefly unreadable.
+lock_does_not_block_readers() `test(exclude: wasm) {
+  string p = os.temp_dir + "/pr_iot_lkadv";
+  File.write_content(p[0:p.len], "guarded")?!;
+  File locker = File.open(p[0:p.len])?!;
+  locker.lock()?!;
+  assert(File.read_content(p[0:p.len])?! == "guarded",
+  "a held exclusive lock does not block a plain read of the data");
+  locker.unlock()?!;
+  locker.close()?!;
+  File.remove(p)?!;
+}
+
 try_lock_contends_between_two_handles() `test(exclude: wasm) {
   string p = os.temp_dir + "/pr_iot_lk1";
   File.write_content(p[0:p.len], "x")?!;
@@ -1524,10 +1541,11 @@ replace_content_skips_live_slot() `test(exclude: wasm) {
   assert(File.read_content(p[0:p.len])?! == "new", "the write used a later slot");
   assert(!File.exists(p + ".promise-sync1"), "slot 1 was consumed by the rename");
 
-  // Slot 0's contents are checked only after the lock is released: docs/io.md §5.3
-  // says Windows locking is mandatory, so reading a locked range through another
-  // handle actually fails there. Releasing first keeps the assertion about what
-  // replace_content did, rather than about which platform is running it.
+  // Slot 0's contents are checked after the lock is released. Locking is
+  // advisory on every platform (docs/io.md §5.3 — Windows locks a sentinel
+  // byte, not the data), so the read would succeed either way; releasing first
+  // simply keeps the assertion about what replace_content did to a slot whose
+  // writer is finished.
   holder.unlock()?!;
   holder.close()?!;
   assert(File.read_content(slot0[0:slot0.len])?! == "live writer data",

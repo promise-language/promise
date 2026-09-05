@@ -100,6 +100,16 @@ type PAL interface {
 	EmitFileUnlock(module *ir.Module) *ir.Func
 	// EmitFileTruncate defines @pal_file_truncate(i32 fd, i64 length) → i32 (0=ok, -errno)
 	EmitFileTruncate(module *ir.Module) *ir.Func
+	// EmitFileSameAsPath defines @pal_file_same_as_path(i32 fd, i8* path) → i32
+	// (1=fd and path are the same file, 0=they are not, -errno on failure).
+	//
+	// T1967: holding a lock on a descriptor says nothing about what its *name*
+	// refers to now — another writer can rename the file out from under it. This
+	// is the observation that closes that gap, and it is a comparison of file
+	// identity (POSIX st_dev+st_ino, Windows volume serial + file index), not of
+	// paths: two names for one file compare equal, and a name reused for a
+	// different file compares unequal.
+	EmitFileSameAsPath(module *ir.Module) *ir.Func
 	// EmitFileStatSize defines @pal_file_stat_size(i8* path) → i64 (-1=error)
 	EmitFileStatSize(module *ir.Module) *ir.Func
 	// EmitFileRemove defines @pal_file_remove(i8* path) → i32 (0=ok, -1=error)
@@ -1468,6 +1478,19 @@ func emitStubFileTruncate(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_file_truncate", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("length", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, stubENOSYS))
+	return fn
+}
+
+// emitStubFileSameAsPath reports the comparison as unsupported (T1967). It must
+// not answer 0 or 1: a target with no answer must make its caller raise, never
+// silently claim the file is or is not the one it holds.
+func emitStubFileSameAsPath(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_same_as_path", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("path", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, stubENOSYS))

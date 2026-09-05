@@ -416,6 +416,7 @@ type Compiler struct {
 	palFileLock                *ir.Func // @pal_file_lock(i32 fd, i32 exclusive, i32 nonblocking) → i32 (T1520)
 	palFileUnlock              *ir.Func // @pal_file_unlock(i32 fd) → i32 (T1520)
 	palFileTruncate            *ir.Func // @pal_file_truncate(i32 fd, i64 length) → i32 (T1520)
+	palFileSameAsPath          *ir.Func // @pal_file_same_as_path(i32 fd, i8* path) → i32 (T1967)
 	palFileExists              *ir.Func // @pal_file_exists(i8* path) → i32
 	palFileMkdir               *ir.Func // @pal_file_mkdir(i8* path) → i32
 	palDirRemove               *ir.Func // @pal_dir_remove(i8* path) → i32

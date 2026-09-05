@@ -26,6 +26,7 @@ GetCurrentProcessId
 GetEnvironmentVariableA
 GetExitCodeProcess
 GetFileAttributesA
+GetFileInformationByHandle
 GetFullPathNameA
 GetLastError
 GetProcessTimes

@@ -106,17 +106,29 @@ The temporary name is therefore **deterministic**, not random — `<name>.promis
 destination — and liveness is decided by the lock:
 
 1. Open `<name>.promise-sync0` with `O_RDWR|O_CREAT` — **not** `O_EXCL` — and `try_lock` it.
-   **The lock alone decides ownership.** Acquired means the slot is ours and whatever it holds is
-   stale, because the kernel releases locks on process death (§5.4), so truncate it to zero.
-2. If `try_lock` fails, a live writer owns it. Try `<name>.promise-sync1`, `2`, … to a bound of 8,
+2. Locked: confirm the name still refers to the locked file — same file identity (POSIX
+   `st_dev`+`st_ino`; Windows volume serial + file index), not same path string. **The lock, on a
+   file its name still refers to, decides ownership.** Confirmed means the slot is ours and whatever
+   it holds is stale, because the kernel releases locks on process death (§5.4), so truncate it to
+   zero. On mismatch, drop the descriptor and retry the same slot: the name was consumed while we
+   waited, and every such retry means another writer completed an entire replace, so the system
+   always makes progress.
+3. If `try_lock` fails, a live writer owns it. Try `<name>.promise-sync1`, `2`, … to a bound of 8,
    then raise.
-3. Hold the lock for the whole write. The rename removes the name; closing releases the lock.
+4. Hold the lock for the whole write. The rename removes the name; closing releases the lock.
 
 Creation is deliberately *not* the ownership test. `open(O_CREAT|O_EXCL)` and the lock are two
 syscalls, and between them the temporary exists and is unlocked — indistinguishable from a crash
 orphan. A second writer arriving in that window would classify a live writer's slot as stale,
-truncate it, and rename it into place mid-write, violating §3.1 and §3.5. Deciding on the lock alone
-collapses the two states into one observation that no window can separate.
+truncate it, and rename it into place mid-write, violating §3.1 and §3.5.
+
+The lock *alone* is not the ownership test either, and for the mirror-image reason: the open and the
+lock are also two syscalls, and between them the slot's owner can finish — rename the temporary onto
+the destination and close, releasing the lock. The late arrival's `try_lock` then succeeds on a
+descriptor whose name is gone, and the file it holds **is the destination**: truncating it would
+empty a completed write, violating §3.1 and §3.5 from the other side. The identity check in step 2
+is what closes that window, and it is safe against re-opening it: once the name is confirmed, only
+the lock holder can rename it away, so ownership cannot be lost after the check.
 
 This needs no random source, no process identifier, no clock, and no liveness probe. Process
 identifier reuse cannot fool it, concurrent writers to one destination never collide, and every
@@ -167,7 +179,7 @@ which method is called rather than by a flag, so the call site says which one it
 | Platform | Implementation |
 |---|---|
 | Linux, macOS | `flock(2)` — `LOCK_EX`, `LOCK_SH`, `LOCK_NB`, `LOCK_UN` |
-| Windows | `LockFileEx` / `UnlockFileEx` over the whole file |
+| Windows | `LockFileEx` / `UnlockFileEx` over a sentinel byte at offset 2⁶⁴−2 (§5.3) |
 | WASM | unsupported — raises |
 
 ### 5.2 Why `flock`, and what it costs
@@ -189,14 +201,26 @@ provides per `HANDLE` — giving **one** model to document rather than two.
 
 The cost is NFS, and it is accepted rather than worked around (§5.5).
 
-### 5.3 Advisory on POSIX, mandatory on Windows
+### 5.3 Advisory everywhere — Windows locks a sentinel byte
 
 `flock` is advisory: a process that never takes the lock can read and write the file freely. Windows
-`LockFileEx` is mandatory: conflicting reads and writes from other handles actually fail.
+`LockFileEx` is mandatory — conflicting reads and writes from other handles actually fail — so
+locking a file's data range would give the two platforms observably different semantics, and worse:
+§3.4 requires the temporary slot's lock to outlive the rename, so a data-range lock would make the
+freshly renamed-in *destination* unreadable to concurrent readers until the writer closes, breaking
+§3.1's reader guarantee on Windows (T1968).
 
-This difference is irreducible and is **not** smoothed over. A correct program takes the lock and
-does not depend on either behavior — it must not assume other writers are blocked (they are not, on
-POSIX), and it must not assume unlocked access will succeed (it will not, on Windows).
+The Windows implementation therefore locks a **single sentinel byte at offset 2⁶⁴−2** — beyond any
+reachable file size, which Win32 explicitly permits. Every Promise lock operation uses the same
+range, so contention between lock holders is exactly what it is under `flock`, while the mandatory
+enforcement never covers a byte anyone reads or writes. The observable contract is uniform: locking
+is advisory on every platform, and a correct program takes the lock rather than assuming other
+writers are blocked (they are not, anywhere).
+
+The corollary is also uniform: Promise locks coordinate processes that use Promise locks. A
+non-Promise program that locks a file's data range with `LockFileEx` does not conflict with a
+Promise lock on the same file — exactly as a program using `fcntl` ranges does not conflict with
+`flock` on POSIX.
 
 ### 5.4 Release on death is guaranteed
 
@@ -246,7 +270,8 @@ waiting is legitimate but must stay bounded, `lock!` only when the holder is kno
 
 Everything above is uniform across platforms except these, which are stated rather than hidden:
 
-1. **Advisory vs mandatory locking** (§5.3).
+1. **Lock interop with non-Promise programs** (§5.3): locking is advisory on every platform, but a
+   foreign program locking a file's data range coordinates with Promise locks on no platform.
 2. **Delete-pending on Windows.** An open file can be renamed over there, but not by
    `MoveFileEx`: `FILE_SHARE_DELETE` on every handle is necessary and not sufficient, because
    `MoveFileEx`'s replace step fails with `ERROR_ACCESS_DENIED` while any handle to the destination

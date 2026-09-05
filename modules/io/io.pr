@@ -34,6 +34,9 @@ _io_dir_sync(string path) int `extern("promise_io_dir_sync");
 _io_file_lock(int fd, int exclusive, int nonblocking) int `extern("promise_io_file_lock");
 _io_file_unlock(int fd) int `extern("promise_io_file_unlock");
 _io_file_truncate(int fd, int length) int `extern("promise_io_file_truncate");
+// file identity: 1 = fd and path are the same file, 0 = not (or the name is
+// gone), -errno on failure. What makes slot ownership sound (T1967).
+_io_file_same_as_path(int fd, string path) int `extern("promise_io_file_same_as_path");
 
 // EOF sentinel value used by the read_line bridge to signal end-of-file.
 // Set in errno by the codegen bridge. Value 0x7FFF0001 — above all real POSIX errno values.
@@ -154,12 +157,15 @@ type _Slot {
 
 // Acquires the first free temporary slot beside path, starting at index.
 //
-// The lock alone decides ownership (docs/io.md §3.4): the slot is opened without
-// O_TRUNC and without O_EXCL, and only a successful try_lock proves it stale —
-// the kernel releases locks on process death, so a lock nobody holds means
-// whatever wrote it is gone. Creation is deliberately not the test, because
-// creating and locking are two syscalls and a second writer arriving between
-// them would mistake a live writer's slot for an orphan.
+// The lock, on a file its name still refers to, decides ownership (docs/io.md
+// §3.4): the slot is opened without O_TRUNC and without O_EXCL, a successful
+// try_lock proves nothing live holds it — the kernel releases locks on process
+// death, so a lock nobody holds means whatever wrote it is gone — and the
+// identity check proves the lock landed on the file the name still names,
+// not on one renamed away while we waited (T1967). Creation is deliberately
+// not the test, because creating and locking are two syscalls and a second
+// writer arriving between them would mistake a live writer's slot for an
+// orphan.
 _acquire_slot!(string path, int index) _Slot {
   // Bounded at 8 so a pathological directory cannot make one write scan forever;
   // eight concurrent live writers to a single path is already far past the
@@ -170,6 +176,21 @@ _acquire_slot!(string path, int index) _Slot {
   string name = path + ".promise-sync" + index.to_string();
   File f = File._open_or_create(name[0:name.len]);
   if f.try_lock() {
+    // The lock proves no live writer holds this open file — not that the name
+    // still refers to it. The slot's previous owner may have renamed it onto
+    // the destination and closed (releasing the lock) after our open; the file
+    // this descriptor points at is then the *destination*, and truncating it
+    // would empty a completed write mid-flight (T1967, docs/io.md §3.4).
+    // Identity closes that window: once the name is confirmed, only the lock
+    // holder — us — can rename it away, so ownership is stable from here on.
+    if !f._same_as_path(name[0:name.len]) {
+      // The name was consumed (or replaced) while we waited. Discard the
+      // orphaned descriptor and retry the same slot. Each retry means another
+      // writer completed an entire replace inside our open-to-lock window, so
+      // this cannot spin without the system as a whole making progress.
+      f.close();
+      return _acquire_slot(path, index);
+    }
     f._truncate(0);
     return _Slot(file: move f, name: move name, committed: false);
   }
@@ -530,6 +551,21 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     if rc < 0 {
       raise _make_io_error(rc);
     }
+  }
+
+  // T1967: reports whether this open descriptor is still the file that path
+  // names — false also when the name no longer exists. The temporary-slot
+  // protocol must confirm this after locking, because a rename can consume the
+  // name between the open and the lock (docs/io.md §3.4).
+  _same_as_path!(~this, string path) bool {
+    if this._fd < 0 {
+      raise IoError(code: 9, message: "bad file descriptor");
+    }
+    int rc = _io_file_same_as_path(this._fd, path);
+    if rc < 0 {
+      raise _make_io_error(rc);
+    }
+    return rc == 1;
   }
 
   drop(~this) {

@@ -100,6 +100,9 @@ func (c *Compiler) defineFileIOBodies() {
 	if fn, ok := irFuncByName["promise_io_file_truncate"]; ok {
 		c.defineFileTruncateBody(fn)
 	}
+	if fn, ok := irFuncByName["promise_io_file_same_as_path"]; ok {
+		c.defineFileSameAsPathBody(fn)
+	}
 }
 
 // Syscall handoff helpers
@@ -488,6 +491,21 @@ func (c *Compiler) defineDirExistsBody(fn *ir.Func) {
 // thread inside flock/LockFileEx, and without handing the P off first it would
 // wedge the P for as long as the other holder runs — which for a declared
 // exclusion is measured in minutes.
+
+// defineFileSameAsPathBody: void @promise_io_file_same_as_path(i8* sret, i8* fd, i8* path)
+// Returns 1 (same file), 0 (different or gone), or -errno (T1967).
+func (c *Compiler) defineFileSameAsPathBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	fdI32 := entry.NewTrunc(c.extractRawInt(entry, fn.Params[1]), irtypes.I32)
+	pathStr := c.stringToCStr(entry, fn.Params[2])
+	c.emitEnterSyscall(entry)
+	rc := entry.NewCall(c.palFileSameAsPath, fdI32, pathStr)
+	c.emitExitSyscall(entry)
+	entry.NewCall(c.palFree, pathStr)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, fn.Params[0], rcI64)
+	entry.NewRet(nil)
+}
 
 // defineFileRenameBody: void @promise_io_file_rename(i8* sret, i8* from, i8* to)
 func (c *Compiler) defineFileRenameBody(fn *ir.Func) {

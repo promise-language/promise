@@ -730,6 +730,9 @@ func (p *WasmPAL) EmitDirSync(module *ir.Module) *ir.Func      { return emitStub
 func (p *WasmPAL) EmitFileLock(module *ir.Module) *ir.Func     { return emitStubFileLock(module) }
 func (p *WasmPAL) EmitFileUnlock(module *ir.Module) *ir.Func   { return emitStubFileUnlock(module) }
 func (p *WasmPAL) EmitFileTruncate(module *ir.Module) *ir.Func { return emitStubFileTruncate(module) }
+func (p *WasmPAL) EmitFileSameAsPath(module *ir.Module) *ir.Func {
+	return emitStubFileSameAsPath(module)
+}
 
 // WASM directory listing stubs — no filesystem access.
 func (p *WasmPAL) EmitDirOpen(module *ir.Module) *ir.Func     { return emitStubDirOpen(module) }

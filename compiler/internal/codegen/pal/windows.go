@@ -874,6 +874,35 @@ func winDeclareGetOsfHandle(module *ir.Module) *ir.Func {
 // lock a range somewhere else in the file and silently not conflict with anyone.
 const winOverlappedSize = 32
 
+// The byte range pal_file_lock/pal_file_unlock actually lock: one byte at
+// offset 2^64-2, far past any reachable file size. LockFileEx enforcement is
+// mandatory — a locked range makes conflicting reads and writes from other
+// handles *fail*, unlike advisory flock — so locking the data bytes would make
+// every file the lock protects unreadable to bystanders while it is held. That
+// broke replace_content: the slot's lock must outlive the rename (T1967), so
+// the renamed-in *destination* carried an exclusive lock for a moment and a
+// concurrent read_content failed with EACCES (T1968). Locking a sentinel byte
+// no data operation can touch keeps the contention semantics (the range is the
+// same for every locker) while making the lock genuinely advisory, matching
+// flock and io.md §5.3. Locking beyond EOF is explicitly legal Win32.
+const (
+	winLockSentinelOffLow  = 0xFFFFFFFE
+	winLockSentinelOffHigh = 0xFFFFFFFF
+	winLockSentinelLen     = 1
+)
+
+// winEmitLockSentinelOverlapped stores the sentinel offset into a zeroed
+// OVERLAPPED (Offset at byte 16, OffsetHigh at byte 20).
+func winEmitLockSentinelOverlapped(blk *ir.Block, ovPtr value.Value) {
+	storeAt := func(off, val int64) {
+		ptr := blk.NewGetElementPtr(irtypes.I8, ovPtr, constant.NewInt(irtypes.I64, off))
+		blk.NewStore(constant.NewInt(irtypes.I32, val),
+			blk.NewBitCast(ptr, irtypes.NewPointer(irtypes.I32)))
+	}
+	storeAt(16, winLockSentinelOffLow)
+	storeAt(20, winLockSentinelOffHigh)
+}
+
 // winEmitOsfHandleGuard emits the "recover the HANDLE, bail out on a bad fd"
 // prologue shared by pal_file_sync, pal_file_lock and pal_file_unlock. It returns
 // the HANDLE and the block execution continues in; the failure path returns
@@ -1118,6 +1147,116 @@ func (p *WindowsPAL) winEmitPosixRename(module *ir.Module, fn *ir.Func, blk *ir.
 	closeFailBlk.NewBr(failBlk)
 }
 
+// EmitFileSameAsPath defines @pal_file_same_as_path using
+// GetFileInformationByHandle on both sides, comparing dwVolumeSerialNumber and
+// the 64-bit file index — Windows' equivalent of (st_dev, st_ino) (T1967).
+//
+// BY_HANDLE_FILE_INFORMATION, the fields this reads:
+//
+//	 0  DWORD    dwFileAttributes
+//	 4  FILETIME ftCreationTime / 12 ftLastAccessTime / 20 ftLastWriteTime
+//	28  DWORD    dwVolumeSerialNumber
+//	32  DWORD    nFileSizeHigh / 36 nFileSizeLow
+//	40  DWORD    nNumberOfLinks
+//	44  DWORD    nFileIndexHigh
+//	48  DWORD    nFileIndexLow
+//
+// The path side is opened with FILE_READ_ATTRIBUTES only, and shares delete so
+// that querying it cannot itself block a rename someone else is attempting.
+// A path that does not exist answers "not the same file" rather than failing:
+// that is precisely the case the caller is checking for.
+func (p *WindowsPAL) EmitFileSameAsPath(module *ir.Module) *ir.Func {
+	createFileA := getOrDeclareFunc(module, "CreateFileA", irtypes.I8Ptr,
+		ir.NewParam("lpFileName", irtypes.I8Ptr),
+		ir.NewParam("dwDesiredAccess", irtypes.I32),
+		ir.NewParam("dwShareMode", irtypes.I32),
+		ir.NewParam("lpSecurityAttributes", irtypes.I8Ptr),
+		ir.NewParam("dwCreationDisposition", irtypes.I32),
+		ir.NewParam("dwFlagsAndAttributes", irtypes.I32),
+		ir.NewParam("hTemplateFile", irtypes.I8Ptr))
+	getFileInfo := getOrDeclareFunc(module, "GetFileInformationByHandle", irtypes.I32,
+		ir.NewParam("hFile", irtypes.I8Ptr),
+		ir.NewParam("lpFileInformation", irtypes.I8Ptr))
+	getLastError := getOrDeclareFunc(module, "GetLastError", irtypes.I32)
+	closeHandle := winDeclareCloseHandle(module)
+	errnoFn := p.getOrDeclareErrnoFn(module)
+
+	const (
+		readAttributes = 0x80 // FILE_READ_ATTRIBUTES
+		shareAll       = 0x1 | 0x2 | 0x4
+		openExisting   = 3
+		backupSemantic = 0x02000000 // so a directory can be compared too
+		volSerialOff   = 28
+		indexHighOff   = 44
+		indexLowOff    = 48
+	)
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	nullPtr := constant.NewNull(irtypes.I8Ptr)
+
+	fn := module.NewFunc("pal_file_same_as_path", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("path", irtypes.I8Ptr))
+	addFuncAttr(fn, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	infoArray := irtypes.NewArray(64, irtypes.I8)
+	fdInfo := entry.NewAlloca(infoArray)
+	fdInfo.Align = 8
+	pathInfo := entry.NewAlloca(infoArray)
+	pathInfo.Align = 8
+	fdInfoPtr := entry.NewBitCast(fdInfo, irtypes.I8Ptr)
+	pathInfoPtr := entry.NewBitCast(pathInfo, irtypes.I8Ptr)
+
+	handle, gotBlk := p.winEmitOsfHandleGuard(module, fn, entry, fn.Params[0])
+
+	fdOK := gotBlk.NewCall(getFileInfo, handle, fdInfoPtr)
+	fdErrBlk := fn.NewBlock(".fd_info_err")
+	openPathBlk := fn.NewBlock(".open_path")
+	gotBlk.NewCondBr(gotBlk.NewICmp(enum.IPredEQ, fdOK, zero32), fdErrBlk, openPathBlk)
+	p.emitWinErrReturnI32(fdErrBlk, gotBlk.NewCall(getLastError), errnoFn)
+
+	pathHandle := openPathBlk.NewCall(createFileA, fn.Params[1],
+		constant.NewInt(irtypes.I32, readAttributes), constant.NewInt(irtypes.I32, shareAll),
+		nullPtr, constant.NewInt(irtypes.I32, openExisting),
+		constant.NewInt(irtypes.I32, backupSemantic), nullPtr)
+	openErr := openPathBlk.NewCall(getLastError)
+	pathHandleInt := openPathBlk.NewPtrToInt(pathHandle, irtypes.I64)
+	badPath := openPathBlk.NewICmp(enum.IPredEQ, pathHandleInt, constant.NewInt(irtypes.I64, -1))
+	openFailBlk := fn.NewBlock(".open_fail")
+	pathInfoBlk := fn.NewBlock(".path_info")
+	openPathBlk.NewCondBr(badPath, openFailBlk, pathInfoBlk)
+
+	// ERROR_FILE_NOT_FOUND (2) / ERROR_PATH_NOT_FOUND (3): the name is gone, so
+	// it is definitely not this file. Anything else is a real failure.
+	notSameBlk := fn.NewBlock(".not_same")
+	openOtherErrBlk := fn.NewBlock(".open_other_err")
+	gone := openFailBlk.NewOr(
+		openFailBlk.NewICmp(enum.IPredEQ, openErr, constant.NewInt(irtypes.I32, 2)),
+		openFailBlk.NewICmp(enum.IPredEQ, openErr, constant.NewInt(irtypes.I32, 3)))
+	openFailBlk.NewCondBr(gone, notSameBlk, openOtherErrBlk)
+	p.emitWinErrReturnI32(openOtherErrBlk, openErr, errnoFn)
+	notSameBlk.NewRet(zero32)
+
+	pathOK := pathInfoBlk.NewCall(getFileInfo, pathHandle, pathInfoPtr)
+	pathErr := pathInfoBlk.NewCall(getLastError)
+	pathInfoBlk.NewCall(closeHandle, pathHandle)
+	pathErrBlk := fn.NewBlock(".path_info_err")
+	compareBlk := fn.NewBlock(".compare")
+	pathInfoBlk.NewCondBr(pathInfoBlk.NewICmp(enum.IPredEQ, pathOK, zero32), pathErrBlk, compareBlk)
+	p.emitWinErrReturnI32(pathErrBlk, pathErr, errnoFn)
+
+	loadField := func(base value.Value, off int64) value.Value {
+		ptr := compareBlk.NewGetElementPtr(irtypes.I8, base, constant.NewInt(irtypes.I64, off))
+		return compareBlk.NewLoad(irtypes.I32, compareBlk.NewBitCast(ptr, irtypes.NewPointer(irtypes.I32)))
+	}
+	sameVol := compareBlk.NewICmp(enum.IPredEQ, loadField(fdInfoPtr, volSerialOff), loadField(pathInfoPtr, volSerialOff))
+	sameHigh := compareBlk.NewICmp(enum.IPredEQ, loadField(fdInfoPtr, indexHighOff), loadField(pathInfoPtr, indexHighOff))
+	sameLow := compareBlk.NewICmp(enum.IPredEQ, loadField(fdInfoPtr, indexLowOff), loadField(pathInfoPtr, indexLowOff))
+	same := compareBlk.NewAnd(compareBlk.NewAnd(sameVol, sameHigh), sameLow)
+	compareBlk.NewRet(compareBlk.NewZExt(same, irtypes.I32))
+	return fn
+}
+
 // EmitFileSync declares Win32 @FlushFileBuffers and defines @pal_file_sync.
 func (p *WindowsPAL) EmitFileSync(module *ir.Module) *ir.Func {
 	flushFileBuffers := getOrDeclareFunc(module, "FlushFileBuffers", irtypes.I32,
@@ -1161,11 +1300,11 @@ func (p *WindowsPAL) EmitDirSync(module *ir.Module) *ir.Func {
 
 // EmitFileLock declares Win32 @LockFileEx and defines @pal_file_lock.
 //
-// LockFileEx locks a byte range, so the whole file is 0xFFFFFFFF:0xFFFFFFFF bytes
-// from offset 0 — the documented idiom for a whole-file lock. Ownership is per
-// HANDLE, which is what makes it match flock's per-open-file-description model
-// (docs/io.md §5.2). Unlike flock it is mandatory rather than advisory; §5.3
-// states that difference instead of smoothing it over.
+// LockFileEx locks a byte range; the range taken is the sentinel byte at
+// 2^64-2, not the file's data — see winLockSentinelOffLow for why (T1968).
+// Ownership is per HANDLE, which is what makes it match flock's
+// per-open-file-description model (docs/io.md §5.2), and with the sentinel
+// range it is advisory in effect too, as §5.3 records.
 //
 // LOCKFILE_FAIL_IMMEDIATELY = 0x1, LOCKFILE_EXCLUSIVE_LOCK = 0x2.
 func (p *WindowsPAL) EmitFileLock(module *ir.Module) *ir.Func {
@@ -1194,6 +1333,7 @@ func (p *WindowsPAL) EmitFileLock(module *ir.Module) *ir.Func {
 
 	winEmitMemset(module, blk, ov, winOverlappedSize)
 	ovPtr := blk.NewBitCast(ov, irtypes.I8Ptr)
+	winEmitLockSentinelOverlapped(blk, ovPtr)
 
 	isExcl := blk.NewICmp(enum.IPredNE, fn.Params[1], constant.NewInt(irtypes.I32, 0))
 	exclBit := blk.NewSelect(isExcl, constant.NewInt(irtypes.I32, 0x2), constant.NewInt(irtypes.I32, 0))
@@ -1202,7 +1342,7 @@ func (p *WindowsPAL) EmitFileLock(module *ir.Module) *ir.Func {
 	flags := blk.NewOr(exclBit, nbBit)
 
 	ok := blk.NewCall(lockFileEx, handle, flags, constant.NewInt(irtypes.I32, 0),
-		constant.NewInt(irtypes.I32, 0xFFFFFFFF), constant.NewInt(irtypes.I32, 0xFFFFFFFF), ovPtr)
+		constant.NewInt(irtypes.I32, winLockSentinelLen), constant.NewInt(irtypes.I32, 0), ovPtr)
 	winErr := blk.NewCall(getLastError)
 
 	failed := blk.NewICmp(enum.IPredEQ, ok, constant.NewInt(irtypes.I32, 0))
@@ -1234,7 +1374,8 @@ func (p *WindowsPAL) EmitFileLock(module *ir.Module) *ir.Func {
 }
 
 // EmitFileUnlock declares Win32 @UnlockFileEx and defines @pal_file_unlock.
-// Releases the same whole-file range EmitFileLock takes.
+// Releases the same sentinel range EmitFileLock takes — UnlockFileEx requires
+// the range to match the lock exactly.
 func (p *WindowsPAL) EmitFileUnlock(module *ir.Module) *ir.Func {
 	unlockFileEx := getOrDeclareFunc(module, "UnlockFileEx", irtypes.I32,
 		ir.NewParam("hFile", irtypes.I8Ptr),
@@ -1256,9 +1397,10 @@ func (p *WindowsPAL) EmitFileUnlock(module *ir.Module) *ir.Func {
 
 	winEmitMemset(module, blk, ov, winOverlappedSize)
 	ovPtr := blk.NewBitCast(ov, irtypes.I8Ptr)
+	winEmitLockSentinelOverlapped(blk, ovPtr)
 
 	ok := blk.NewCall(unlockFileEx, handle, constant.NewInt(irtypes.I32, 0),
-		constant.NewInt(irtypes.I32, 0xFFFFFFFF), constant.NewInt(irtypes.I32, 0xFFFFFFFF), ovPtr)
+		constant.NewInt(irtypes.I32, winLockSentinelLen), constant.NewInt(irtypes.I32, 0), ovPtr)
 	winErr := blk.NewCall(getLastError)
 
 	failed := blk.NewICmp(enum.IPredEQ, ok, constant.NewInt(irtypes.I32, 0))

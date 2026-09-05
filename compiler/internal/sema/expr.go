@@ -317,7 +317,7 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 					}
 				} else {
 					c.checkExpr(interp.Expr)
-					c.checkSubExprFailable(interp.Expr)
+					c.checkFailableEscape(interp.Expr)
 					c.validateInterpolationType(c.info.Types[interp.Expr], interp.Expr)
 				}
 			}
@@ -888,8 +888,8 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {
 		left = c.checkExpr(e.Left)
 	}
 
-	c.checkSubExprFailable(e.Left)
-	c.checkSubExprFailable(e.Right)
+	c.checkFailableEscape(e.Left)
+	c.checkFailableEscape(e.Right)
 
 	switch e.Op {
 	case ast.BinAnd, ast.BinOr:
@@ -1110,7 +1110,7 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 	if operand == nil {
 		return nil
 	}
-	c.checkSubExprFailable(e.Operand)
+	c.checkFailableEscape(e.Operand)
 
 	switch e.Op {
 	case ast.UnaryNot:
@@ -1849,7 +1849,7 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 	// B0323: Register auto-propagation for failable call targets in member access.
 	// Without this, codegen receives the raw failable tuple {i1, value, error}
 	// instead of the unwrapped value, causing invalid IR.
-	c.checkVarDeclFailable(e.Target)
+	c.checkFailableEscape(e.Target)
 	// Unwrap references — member access transparently delegates to inner type
 	if ref, ok := target.(*types.MutRef); ok {
 		target = ref.Elem()
@@ -2435,7 +2435,7 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 		return nil
 	}
 	// B0323: Register auto-propagation for failable call targets in index access.
-	c.checkVarDeclFailable(e.Target)
+	c.checkFailableEscape(e.Target)
 
 	// Generic instantiation: Type[Arg] or func[Arg] in expression context.
 	// Only treat [index] as type argument when the target is a type name
@@ -2630,7 +2630,7 @@ func (c *Checker) checkSliceExpr(e *ast.SliceExpr) types.Type {
 		return nil
 	}
 	// B0323: Register auto-propagation for failable call targets in slice access.
-	c.checkVarDeclFailable(e.Target)
+	c.checkFailableEscape(e.Target)
 
 	// Unwrap MutRef/SharedRef for slicing (auto-deref through borrows)
 	if ref, ok := target.(*types.MutRef); ok {
@@ -3540,7 +3540,7 @@ func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
 	errsBefore := len(c.errors)
 	cond := c.checkExpr(e.Cond)
-	c.checkSubExprFailable(e.Cond) // T1873
+	c.checkFailableEscape(e.Cond) // T1873
 	if cond != nil && !types.Identical(cond, types.TypBool) {
 		c.errorf(e.Cond.Pos(), "if condition must be bool, got %s", cond)
 	}
@@ -3864,7 +3864,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type, report bool)
 			// arms already route through checkBlock's statement path. No-op for
 			// ?^/?! arms (those are ErrorPropagate/ErrorPanic nodes, not bare
 			// failable calls).
-			c.checkSubExprFailable(arm.Body)
+			c.checkFailableEscape(arm.Body)
 		} else if arm.Block != nil {
 			c.checkBlock(arm.Block)
 			// T1332/T1335: a block arm that always exits (return/raise) contributes

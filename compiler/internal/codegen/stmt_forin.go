@@ -19,7 +19,7 @@ import (
 
 // forInIterableType returns the substituted iterable type of a for-in loop with
 // one borrow layer stripped. A borrowed container (T0971) has the same runtime
-// layout as the owned form, and genExpr(s.Iterable) already yields the same
+// layout as the owned form, and evaluating s.Iterable already yields the same
 // slice/map/string/range value (resolveType unwraps refs), so the type dispatch
 // must run on the unwrapped type. Centralizes the strip for every site that
 // re-derives the iterable type (genForInStmt, genForInRange, genForInMap).
@@ -37,13 +37,28 @@ func (c *Compiler) forInIterableType(s *ast.ForInStmt) types.Type {
 	return t
 }
 
+// T1896: every value branch below evaluates the iterable with
+// genExprAutoPropagate, not genExpr. A for-in subject is an expression position
+// like any other (§7.2 of docs/language-design.md gives implicit propagation in
+// "all expression positions"), so a bare failable call there must be unwrapped
+// before the value reaches the iteration emitter — previously the raw
+// {i1, i8*, i8*} result struct was handed to genForInVector, which GEP'd it as
+// an instance pointer and panicked. genExprAutoPropagate is a no-op unless sema
+// recorded the iterable in AutoPropagateExprs, so non-failable iterables are
+// untouched; when it does fire it also registers the unwrapped heap value as a
+// statement temp (T1883). The vector, string and channel branches then promote
+// that temp to a scope binding so it is dropped on every exit path, including
+// an early return; the map (T1941) and duck-typed ForInNext (T1442) branches
+// still lack that promotion and leak on an early return, independently of how
+// the iterable was spelled. The raw generator branch is the sole exception to
+// the unwrap — it keeps its own (T0284); see sema's isRawGeneratorForIn.
 func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 	iterableType := c.forInIterableType(s)
 
 	if arr, ok := iterableType.(*types.Array); ok {
 		c.genForInArray(s, arr)
 	} else if elem, ok := types.AsVector(iterableType); ok {
-		slicePtr := c.genExpr(s.Iterable)
+		slicePtr := c.genExprAutoPropagate(s.Iterable)
 		// T0109: Register a scope binding for temporary vectors returned by call
 		// expressions (e.g., for elem in set.to_vector()). Variable-backed vectors
 		// are dropped by their own scope bindings; only call results are orphaned.
@@ -80,10 +95,10 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		}
 		c.genForInVector(s, slicePtr, elem)
 	} else if key, val, ok := types.AsMap(iterableType); ok {
-		mapPtr := c.genExpr(s.Iterable)
+		mapPtr := c.genExprAutoPropagate(s.Iterable)
 		c.genForInMap(s, mapPtr, key, val)
 	} else if elem, ok := types.AsChannel(iterableType); ok {
-		chPtr := c.genExpr(s.Iterable)
+		chPtr := c.genExprAutoPropagate(s.Iterable)
 		// T0502: Same lifetime-extension fix as the vector/string for-in
 		// branches. When the iterable is a tracked stmt temp (getter result,
 		// call result), promote it to a scope binding so the body's
@@ -121,7 +136,7 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		// T1735: When sema recorded ForInIter, the value is a structural Stream[T]
 		// view (not a generator). Use the duck-typed iterable path (iter() + next()).
 		if kind, ok := c.info.ForInKinds[s]; ok && kind == sema.ForInIter {
-			iterVal := c.genExpr(s.Iterable)
+			iterVal := c.genExprAutoPropagate(s.Iterable)
 			c.genForInCustomStream(s, iterVal, iterableType)
 		} else {
 			genVal := c.genExpr(s.Iterable)
@@ -144,7 +159,7 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		// String iteration
 		named := extractNamed(iterableType)
 		if named == types.TypString {
-			strPtr := c.genExpr(s.Iterable)
+			strPtr := c.genExprAutoPropagate(s.Iterable)
 			// T0494: Same lifetime-extension fix as the vector path. When the
 			// iterable is a tracked stmt temp (call result, getter result,
 			// string concat result, etc.), promote it to a scope binding so
@@ -175,7 +190,7 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		}
 		// Duck-typed for-in: check sema ForInKinds
 		if kind, ok := c.info.ForInKinds[s]; ok {
-			iterVal := c.genExpr(s.Iterable)
+			iterVal := c.genExprAutoPropagate(s.Iterable)
 			switch kind {
 			case sema.ForInNext:
 				c.genForInCustomIter(s, iterVal, iterableType)
@@ -447,7 +462,8 @@ func (c *Compiler) emitIterNext(receiverVal value.Value, receiverType types.Type
 // genForInRange handles for-in over a Range[T] value type (e.g., 0..10, 'a'..'z').
 // Extracts start/end/inclusive from the value type struct and uses a direct counter loop.
 func (c *Compiler) genForInRange(s *ast.ForInStmt, elemType types.Type) {
-	rangeVal := c.genExpr(s.Iterable)
+	// Auto-propagating evaluation, for the reason given on genForInStmt (T1896).
+	rangeVal := c.genExprAutoPropagate(s.Iterable)
 
 	// Get the layout to find field indices. T0971: unwrap a borrowed Range so
 	// its value-type layout resolves.

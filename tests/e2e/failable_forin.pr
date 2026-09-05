@@ -1,0 +1,673 @@
+// T1896: a bare failable call as the subject of a `for-in` is an expression
+// position like any other — §7.2 of docs/language-design.md gives implicit
+// propagation in "all expression positions", and §11 makes an explicit `?^`
+// equivalent to the bare form. Before the fix the bare form panicked codegen
+// (the raw `{i1, i8*, i8*}` result struct reached genForInVector) for the
+// vector/string/map/range branches, and silently iterated zero times for the
+// duck-typed branch (T1417).
+//
+// The vector and string cases are each paired with their `?^` control, since
+// "the two spellings agree" is the whole contract; the remaining branches have
+// no separate control because the bare form is the only one that was broken.
+// `?!` gets one too, at the end — it is the spelling that must stay legal in a
+// *non*-failable function, where the bare form is now a diagnostic.
+//
+// The iterable is not always a call: a failable getter is a MemberExpr, `<-t`
+// on a `failable_task[T]` is a UnaryExpr, and failability propagates outward
+// through parentheses. Those three are covered below too, because sema settles
+// the iterable by consulting `FailableExprs` rather than by inspecting the node
+// kind, and `isRawGeneratorForIn` asks specifically whether it is a call.
+//
+// NOT covered here — three shapes that leak for reasons unrelated to this fix,
+// each already filed:
+//
+//   - a failable factory returning `channel[T]`. It iterates correctly but leaks
+//     ~5 allocations, because trackUnwrappedFailableTemp has no native-handle
+//     dispatch — so the plain `?^` spelling leaks identically, with no `for-in`
+//     involved at all (T1940). The branch is still pinned, at the IR level, by
+//     TestForInBareFailableChannelAutoPropagates.
+//   - an early `return`/`raise` out of a `map[K, V]` iterable. genForInMap never
+//     got the scope-binding promotion the vector/string/channel branches have,
+//     so the map is only freed on the fall-through path. Reproduces with a plain
+//     non-failable factory and no error operator anywhere (T1941).
+//   - an early `return`/`raise` out of a duck-typed (`next(~this) T?`) iterable —
+//     the same missing promotion on the ForInNext branch, and likewise not
+//     specific to the failable spelling (T1442).
+//
+// Add each case here when its item lands.
+// --- Factories ---
+_mkv!(int n) u8[] {
+  u8[] bytes = Vector[u8](capacity: 4);
+  for i in 0..n {
+    bytes.push(97u8);
+  }
+  return bytes;
+}
+
+_mks!() string {
+  return "hello";
+}
+
+_mkmap!() map[string, int] {
+  map[string, int] m = {:};
+  m["a"] = 1;
+  m["b"] = 2;
+  return m;
+}
+
+_mkrange!(int n) Range[int] {
+  return 0..n;
+}
+
+_mkarr!() int[3] {
+  int[3] a = [1, 2, 3];
+  return a;
+}
+
+_fail!() u8[] {
+  raise error("boom");
+}
+
+// T1417's repro shape: a failable factory returning a duck-typed iterator
+// (a plain type with `next(~this) T?`, no `is Iterator[T]`).
+type _Counter {
+  int n;
+  int limit;
+
+  next(~this) int? {
+    if this.n >= this.limit {
+      return none;
+    }
+    int v = this.n;
+    this.n = this.n + 1;
+    return v;
+  }
+}
+
+_mkcounter!(int limit) _Counter {
+  return _Counter(n: 0, limit: limit);
+}
+
+// --- Vector iterable ---
+
+_forin_vec!() int {
+  int n = 0;
+  for b in _mkv(3) {
+    n += 1;
+  }
+  return n;
+}
+
+_forin_vec_caret!() int {
+  int n = 0;
+  for b in _mkv(3)?^ {
+    n += 1;
+  }
+  return n;
+}
+
+forin_vector_bare_matches_caret() `test {
+  assert(_forin_vec()?! == 3, "bare failable vector iterable");
+  assert(_forin_vec_caret()?! == 3, "?^ vector iterable");
+}
+
+// --- String iterable ---
+
+_forin_str!() int {
+  int n = 0;
+  for ch in _mks() {
+    n += 1;
+  }
+  return n;
+}
+
+_forin_str_caret!() int {
+  int n = 0;
+  for ch in _mks()?^ {
+    n += 1;
+  }
+  return n;
+}
+
+forin_string_bare_matches_caret() `test {
+  assert(_forin_str()?! == 5, "bare failable string iterable");
+  assert(_forin_str_caret()?! == 5, "?^ string iterable");
+}
+
+// --- Map iterable ---
+
+_forin_map!() int {
+  int total = 0;
+  for k, v in _mkmap() {
+    total += v;
+  }
+  return total;
+}
+
+forin_map_bare() `test {
+  assert(_forin_map()?! == 3, "bare failable map iterable");
+}
+
+// --- Range iterable ---
+
+_forin_range!() int {
+  int n = 0;
+  for i in _mkrange(4) {
+    n += 1;
+  }
+  return n;
+}
+
+forin_range_bare() `test {
+  assert(_forin_range()?! == 4, "bare failable range iterable");
+}
+
+// --- Fixed-size array iterable ---
+//
+// genForInArray reaches the iterable through genArrayBasePtr, which already
+// auto-propagates (B0323) — so this branch needed no codegen change, but it was
+// still broken until sema started recording the iterable in AutoPropagateExprs.
+
+_forin_arr!() int {
+  int total = 0;
+  for x in _mkarr() {
+    total += x;
+  }
+  return total;
+}
+
+forin_array_bare() `test {
+  assert(_forin_arr()?! == 6, "bare failable array iterable");
+}
+
+// --- Duck-typed iterator (T1417) ---
+
+_forin_counter!() int {
+  int sum = 0;
+  for x in _mkcounter(3) {
+    sum += x;
+  }
+  return sum;
+}
+
+forin_duck_typed_bare() `test {
+  // T1417: this silently produced 0 (zero iterations) before the fix.
+  assert(_forin_counter()?! == 3, "bare failable duck-typed iterable");
+}
+
+// --- Early exits: the propagated container must still drop on every path ---
+
+_forin_break!() int {
+  int n = 0;
+  for b in _mkv(5) {
+    if n == 2 {
+      break;
+    }
+    n += 1;
+  }
+  return n;
+}
+
+forin_break_bare() `test {
+  assert(_forin_break()?! == 2, "break out of a bare failable iterable");
+}
+
+_forin_return!() int {
+  int n = 0;
+  for b in _mkv(5) {
+    n += 1;
+    if n == 3 {
+      return n;
+    }
+  }
+  return 0;
+}
+
+forin_return_bare() `test {
+  assert(_forin_return()?! == 3, "return out of a bare failable iterable");
+}
+
+_forin_continue!() int {
+  int n = 0;
+  for b in _mkv(5) {
+    if n == 2 {
+      continue;
+    }
+    n += 1;
+  }
+  return n;
+}
+
+forin_continue_bare() `test {
+  assert(_forin_continue()?! == 2, "continue inside a bare failable iterable");
+}
+
+// A fresh container is propagated on each outer pass — 3 x 4 iterations, and
+// three vectors dropped.
+_forin_nested!() int {
+  int n = 0;
+  for i in 0..3 {
+    for b in _mkv(4) {
+      n += 1;
+    }
+  }
+  return n;
+}
+
+forin_nested_bare() `test {
+  assert(_forin_nested()?! == 12, "bare failable iterable inside an outer loop");
+}
+
+// --- Error paths: all three sinks genAutoPropagateValue can route to ---
+//
+// A propagated error leaves by one of three exits: a plain failable return, a
+// failable generator's error slot, or a failable `go` block's result aggregate.
+// The for-in iterable must reach each of them.
+
+// Sink 1 — plain failable return.
+
+_forin_err!() int {
+  int n = 0;
+  for b in _fail() {
+    n += 1;
+  }
+  return n;
+}
+
+forin_error_propagates() `test {
+  bool caught = false;
+  int result = _forin_err()? e {
+    caught = true;
+    assert(e.message == "boom", "propagated error message");
+    42
+  };
+  assert(caught, "factory error should propagate out of the for-in");
+  assert(result == 42, "handler recovery value");
+}
+
+// Sink 2 — a failable generator's error slot.
+
+_gen!(int n) stream[int] {
+  for b in _mkv(n) {
+    yield 1;
+  }
+}
+
+forin_inside_generator_yields() `test {
+  int total = 0;
+  for x in _gen(3)?! {
+    total += x;
+  }
+  assert(total == 3, "bare failable iterable inside a generator body");
+}
+
+_gen_err!() stream[int] {
+  for b in _fail() {
+    yield 1;
+  }
+}
+
+_drive_gen_err!() int {
+  int n = 0;
+  for x in _gen_err() {
+    n += 1;
+  }
+  return n;
+}
+
+forin_inside_generator_propagates() `test {
+  bool caught = false;
+  _drive_gen_err()? e {
+    caught = true;
+    0
+  };
+  assert(caught, "error should reach the generator's error slot");
+}
+
+// Sink 3 — a failable `go` block's result aggregate.
+
+forin_inside_go_block_yields() `test {
+  t := go! {
+    int n = 0;
+    for b in _mkv(4) {
+      n += 1;
+    }
+    n
+  };
+  assert((<-t)?! == 4, "bare failable iterable inside a go! block");
+}
+
+forin_inside_go_block_propagates() `test {
+  t := go! {
+    int n = 0;
+    for b in _fail() {
+      n += 1;
+    }
+    n
+  };
+  bool caught = false;
+  (<-t)? e {
+    caught = true;
+    0
+  };
+  assert(caught, "error should reach the go block's result aggregate");
+}
+
+// --- Iterables that are not call expressions -------------------------------
+//
+// `FailableExprs` is set on more node kinds than calls, and sema now settles
+// the iterable by consulting that map rather than by looking at the node kind.
+// A failable *getter* is a MemberExpr, `<-t` on a `failable_task[T]` is a
+// UnaryExpr (§17.2.1), and failability propagates outward through parentheses
+// (T1379) — so each of these is a bare failable iterable with no call node in
+// the position `isRawGeneratorForIn` inspects.
+
+type _Holder {
+  int seed;
+
+  get items! int[] {
+    int[] v = [];
+    v.push(1);
+    v.push(2);
+    v.push(this.seed);
+    return v;
+  }
+
+  get label! string {
+    return "abcd";
+  }
+}
+
+_forin_getter_vec!() int {
+  _Holder h = _Holder(seed: 3);
+  int total = 0;
+  for x in h.items {
+    total += x;
+  }
+  return total;
+}
+
+_forin_getter_str!() int {
+  _Holder h = _Holder(seed: 0);
+  int n = 0;
+  for ch in h.label {
+    n += 1;
+  }
+  return n;
+}
+
+forin_failable_getter() `test {
+  assert(_forin_getter_vec()?! == 6, "failable getter returning a vector");
+  assert(_forin_getter_str()?! == 4, "failable getter returning a string");
+}
+
+_forin_paren!() int {
+  int n = 0;
+  for b in (_mkv(3)) {
+    n += 1;
+  }
+  return n;
+}
+
+forin_parenthesized_bare() `test {
+  assert(_forin_paren()?! == 3, "parenthesized bare failable iterable");
+}
+
+_mkints!(int n) int[] {
+  int[] v = [];
+  for i in 0..n {
+    v.push(2);
+  }
+  return v;
+}
+
+_forin_awaited_task!() int {
+  t := go! {
+    _mkints(3)?^
+  };
+  int total = 0;
+  for x in <-t {
+    total += x;
+  }
+  return total;
+}
+
+forin_awaited_failable_task() `test {
+  assert(_forin_awaited_task()?! == 6, "awaited failable task as iterable");
+}
+
+// --- The iter()-method branch ----------------------------------------------
+//
+// A type iterable through `iter()` rather than `next()` reaches a different
+// arm of codegen's duck-typed switch than `_Counter` above does, and it is the
+// only way a failable iterable can get there: a `Stream[T]`-typed one is always
+// classified as a raw generator.
+
+type _NumsIter {
+  int cur;
+  int limit;
+
+  next(~this) int? {
+    if this.cur >= this.limit {
+      return none;
+    }
+    int v = this.cur;
+    this.cur = this.cur + 1;
+    return v;
+  }
+}
+
+type _Nums {
+  int limit;
+
+  iter(~this) _NumsIter {
+    return _NumsIter(cur: 0, limit: this.limit);
+  }
+}
+
+_mknums!(int limit) _Nums {
+  return _Nums(limit: limit);
+}
+
+_forin_iter_method!() int {
+  int sum = 0;
+  for x in _mknums(4) {
+    sum += x;
+  }
+  return sum;
+}
+
+forin_iter_method_bare() `test {
+  assert(_forin_iter_method()?! == 6, "bare failable iter()-typed iterable");
+}
+
+// --- Ownership of what was propagated --------------------------------------
+//
+// The unwrapped container is a temp nobody named, so the elements it owns are
+// dropped only if the loop's own cleanup runs. These exercise that with values
+// the leak checker can see: a type with a `drop`, and heap strings — the latter
+// abandoned mid-iteration by an early `return`.
+
+type _Res {
+  int id;
+  drop(~this) {
+  }
+}
+
+_mkres!(int n) _Res[] {
+  _Res[] v = [];
+  for i in 0..n {
+    v.push(_Res(id: i));
+  }
+  return v;
+}
+
+_forin_droppable!() int {
+  int total = 0;
+  for r in _mkres(3) {
+    total += r.id;
+  }
+  return total;
+}
+
+forin_droppable_elements() `test {
+  assert(_forin_droppable()?! == 3, "droppable elements of a propagated vector");
+}
+
+_mkstrs!() string[] {
+  string[] v = [];
+  v.push("alpha");
+  v.push("beta");
+  return v;
+}
+
+_forin_heap_early_return!() string {
+  for s in _mkstrs() {
+    return s;
+  }
+  return "none";
+}
+
+forin_heap_elements_early_return() `test {
+  assert(_forin_heap_early_return()?! == "alpha", "early return over heap elements");
+}
+
+// `raise` is the fourth exit path out of the loop, alongside the fall-through,
+// `break` and `return` cases above — and the one that leaves through the same
+// sink the propagated error itself would use.
+_forin_raise_out!() int {
+  for b in _mkv(5) {
+    raise error("early");
+  }
+  return 0;
+}
+
+forin_raise_out_of_loop() `test {
+  bool caught = false;
+  _forin_raise_out()? e {
+    caught = true;
+    assert(e.message == "early", "raised message");
+    0
+  };
+  assert(caught, "raise out of a bare failable iterable");
+}
+
+// --- Remaining branches' error paths and contexts --------------------------
+
+_failmap!() map[string, int] {
+  raise error("mapboom");
+}
+
+_forin_map_err!() int {
+  int total = 0;
+  for k, v in _failmap() {
+    total += v;
+  }
+  return total;
+}
+
+forin_map_error_propagates() `test {
+  bool caught = false;
+  int result = _forin_map_err()? e {
+    caught = true;
+    assert(e.message == "mapboom", "propagated map factory error");
+    7
+  };
+  assert(caught, "map factory error should propagate out of the for-in");
+  assert(result == 7, "handler recovery value");
+}
+
+// A failable *method* body is a fourth propagation context, alongside the free
+// function, generator and `go!` block cases above.
+type _Summer {
+  int seed;
+
+  total!() int {
+    int n = this.seed;
+    for x in _mkv(3) {
+      n += 1;
+    }
+    return n;
+  }
+}
+
+forin_inside_method() `test {
+  _Summer s = _Summer(seed: 10);
+  assert(s.total()?! == 13, "bare failable iterable inside a method");
+}
+
+// §11 makes `?^` equivalent to the bare form; `?!` is the spelling that stays
+// legal in a *non*-failable function, so the new diagnostic must not have
+// swallowed it.
+_forin_bang() int {
+  int n = 0;
+  for b in _mkv(3)?! {
+    n += 1;
+  }
+  return n;
+}
+
+forin_panic_operator_in_non_failable() `test {
+  assert(_forin_bang() == 3, "?! iterable in a non-failable function");
+}
+
+// The string branch has its own scope-binding promotion, so it needs its own
+// early-exit cases — a propagated string abandoned mid-iteration is freed by
+// the same binding that frees it on the fall-through path.
+
+_forin_str_early_return!() int {
+  for ch in _mks() {
+    return 1;
+  }
+  return 0;
+}
+
+forin_string_early_return() `test {
+  assert(_forin_str_early_return()?! == 1, "early return out of a failable string iterable");
+}
+
+_forin_str_raise!() int {
+  for ch in _mks() {
+    raise error("mid");
+  }
+  return 0;
+}
+
+forin_string_raise_out_of_loop() `test {
+  bool caught = false;
+  _forin_str_raise()? e {
+    caught = true;
+    0
+  };
+  assert(caught, "raise out of a failable string iterable");
+}
+
+// --- A generic failable factory --------------------------------------------
+//
+// Monomorphization reuses one AST node per instantiation, and
+// AutoPropagateExprs is keyed by that node — so the unwrap is emitted once per
+// instance, each time under a different substitution. The `string` instance
+// also puts heap elements through the propagated container.
+
+_mkgen![T](T seed, int n) T[] {
+  T[] v = [];
+  for i in 0..n {
+    v.push(seed);
+  }
+  return v;
+}
+
+_forin_generic!() int {
+  int n = 0;
+  for x in _mkgen[int](7, 3) {
+    n += x;
+  }
+  for s in _mkgen[string]("ab", 2) {
+    n += s.len;
+  }
+  return n;
+}
+
+forin_generic_factory() `test {
+  assert(_forin_generic()?! == 25, "generic failable factory as iterable");
+}

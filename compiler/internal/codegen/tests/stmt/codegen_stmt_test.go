@@ -639,3 +639,387 @@ func TestWeakUpgradeCASLoop(t *testing.T) {
 	// Should use cmpxchg for atomic upgrade
 	codegentest.AssertContains(t, ir, "cmpxchg")
 }
+
+// T1896: a bare failable call as a for-in iterable must be routed through the
+// auto-propagate path. genForInStmt used to call genExpr directly, so the raw
+// {i1, i8*, i8*} result struct reached genForInVector, which GEP'd it as a
+// vector instance pointer and panicked codegen.
+//
+// Every assertion below is scoped to the user function under test with
+// FuncBody: GenerateIR returns a module with std embedded, and std has plenty of
+// auto-propagating calls and for-in-over-a-temp loops of its own, so a
+// module-wide AssertContains for "auto.propagate" or "__forin_vec_tmp" would
+// pass whether or not the change under test did anything.
+func TestForInBareFailableVectorAutoPropagates(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		mkv!() u8[] {
+			u8[] v = u8[]();
+			v.push(1u8);
+			return v;
+		}
+		run!() int {
+			int n = 0;
+			for b in mkv() { n += 1; }
+			return n;
+		}
+		main() { }
+	`)
+	body := codegentest.FuncBody(t, ir, "run")
+	// The result struct is branched on and the success value extracted...
+	codegentest.AssertContains(t, body, "auto.propagate")
+	codegentest.AssertContains(t, body, "auto.ok")
+	// ...and the unwrapped vector is promoted to a scope binding, so it drops on
+	// every exit path (T1883: the implicit path must register the same temp the
+	// explicit `?^` path does, or the propagated vector leaks).
+	codegentest.AssertContains(t, body, "__forin_vec_tmp")
+	codegentest.AssertContains(t, body, "call void @Vector.drop")
+}
+
+// T1896: the bare form must emit what the explicit `?^` emits — §7.2 makes them
+// the same expression. Comparing the two bodies for the same markers is the
+// contract; asserting one spelling alone would not notice the two drifting.
+func TestForInFailableVectorSpellingsAgree(t *testing.T) {
+	for _, spelling := range []string{"mkv()", "mkv()?^"} {
+		t.Run(spelling, func(t *testing.T) {
+			ir := codegentest.GenerateIR(t, `
+				mkv!() u8[] {
+					u8[] v = u8[]();
+					v.push(1u8);
+					return v;
+				}
+				run!() int {
+					int n = 0;
+					for b in `+spelling+` { n += 1; }
+					return n;
+				}
+				main() { }
+			`)
+			body := codegentest.FuncBody(t, ir, "run")
+			codegentest.AssertContains(t, body, "__forin_vec_tmp")
+			codegentest.AssertContains(t, body, "call void @Vector.drop")
+		})
+	}
+}
+
+// T1896: same contract for the string branch — unwrap, then promote the
+// propagated string so the iteration outlives the enclosing statement.
+func TestForInBareFailableStringAutoPropagates(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		mks!() string { return "a" + "bc"; }
+		run!() int {
+			int n = 0;
+			for ch in mks() { n += 1; }
+			return n;
+		}
+		main() { }
+	`)
+	body := codegentest.FuncBody(t, ir, "run")
+	codegentest.AssertContains(t, body, "auto.propagate")
+	codegentest.AssertContains(t, body, "auto.ok")
+	codegentest.AssertContains(t, body, "__forin_str_tmp")
+	codegentest.AssertContains(t, body, "call void @promise_string_drop")
+}
+
+// T1896 / T1417: the duck-typed branch (a plain type with next(~this) T?) took
+// the same unpropagated genExpr path. It did not panic — it silently handed
+// genForInCustomIter the result struct and iterated zero times.
+func TestForInBareFailableDuckTypedAutoPropagates(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type Counter {
+			int n;
+			next(~this) int? {
+				if this.n >= 3 { return none; }
+				int v = this.n;
+				this.n = this.n + 1;
+				return v;
+			}
+		}
+		mkc!() Counter { return Counter(n: 0); }
+		run!() int {
+			int sum = 0;
+			for x in mkc() { sum += x; }
+			return sum;
+		}
+		main() { }
+	`)
+	body := codegentest.FuncBody(t, ir, "run")
+	codegentest.AssertContains(t, body, "auto.propagate")
+	codegentest.AssertContains(t, body, "auto.ok")
+	// genForInCustomIter's loop blocks: the next()-driven path ran on the
+	// unwrapped Counter, not on the raw result struct.
+	codegentest.AssertContains(t, body, "iter.header")
+}
+
+// T1896: the raw generator branch keeps its own unwrap (T0284's
+// unwrapFailableGeneratorResult, which emits gen.factory.ok/err). Sema's
+// isRawGeneratorForIn withholds AutoPropagateExprs there so the two mechanisms
+// cannot both fire on the same iterable. run() is deliberately non-failable:
+// losing that guard turns the iterable into a "failable call must be handled"
+// sema error, which fails this test at GenerateIR. Whether it *should* be that
+// error is T1942 — until that is settled, this pins today's behavior.
+func TestForInBareFailableGeneratorKeepsGeneratorUnwrap(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		gen!(int n) stream[int] {
+			int i = 0;
+			while i < n { yield i; i = i + 1; }
+		}
+		run() int {
+			int sum = 0;
+			for x in gen(3) { sum += x; }
+			return sum;
+		}
+		main() { }
+	`)
+	body := codegentest.FuncBody(t, ir, "run")
+	codegentest.AssertContains(t, body, "gen.factory.ok")
+	codegentest.AssertContains(t, body, "gen.factory.err")
+	codegentest.AssertNotContains(t, body, "auto.propagate")
+}
+
+// T1896: genForInStmt dispatches on the iterable's type and each branch reads
+// the value independently, so "the vector branch unwraps" says nothing about
+// the rest. One test per remaining branch, each pinned to the same two markers:
+// the auto-propagate preamble ran, and the branch's own loop was built on top of
+// the unwrapped value rather than on the raw {i1, i8*, i8*} result struct.
+func TestForInBareFailableMapAutoPropagates(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		mkm!() map[string, int] {
+			map[string, int] m = {:};
+			m["a"] = 1;
+			return m;
+		}
+		run!() int {
+			int n = 0;
+			for k, v in mkm() { n += v; }
+			return n;
+		}
+		main() { }
+	`)
+	body := codegentest.FuncBody(t, ir, "run")
+	codegentest.AssertContains(t, body, "auto.propagate")
+	codegentest.AssertContains(t, body, "auto.ok")
+	// genForInMap's bucket walk — reached with a map instance pointer.
+	codegentest.AssertContains(t, body, "forin.header")
+	// T1941: the map branch has no scope-binding promotion, so there is
+	// deliberately no __forin_*_tmp to assert here. Adding one is that item.
+}
+
+func TestForInBareFailableRangeAutoPropagates(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		mkr!(int n) Range[int] { return 0..n; }
+		run!() int {
+			int n = 0;
+			for i in mkr(3) { n += 1; }
+			return n;
+		}
+		main() { }
+	`)
+	body := codegentest.FuncBody(t, ir, "run")
+	codegentest.AssertContains(t, body, "auto.propagate")
+	codegentest.AssertContains(t, body, "auto.ok")
+	codegentest.AssertContains(t, body, "forin.header")
+}
+
+// The channel branch is asserted here and not in tests/e2e/failable_forin.pr
+// because running it leaks 5 allocations — T1940, a gap in
+// trackUnwrappedFailableTemp's handling of native handles that the explicit
+// `?^` spelling hits identically. The IR still shows what this item is about:
+// the receive loop is built on the unwrapped channel.
+func TestForInBareFailableChannelAutoPropagates(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		mkch!() channel[int] {
+			ch := channel[int](capacity: 1);
+			ch.close();
+			return ch;
+		}
+		run!() int {
+			int n = 0;
+			for x in mkch() { n += 1; }
+			return n;
+		}
+		main() { }
+	`)
+	body := codegentest.FuncBody(t, ir, "run")
+	codegentest.AssertContains(t, body, "auto.propagate")
+	codegentest.AssertContains(t, body, "auto.ok")
+	codegentest.AssertContains(t, body, "forin_ch.header")
+}
+
+// The `iter()`-method shape lands on the ForInIter case of the duck-typed
+// switch — a different call site from the ForInNext case the Counter test
+// above covers, and the one place a failable iterable can reach
+// genForInCustomStream (a Stream[T]-typed one is always a raw generator).
+func TestForInBareFailableIterMethodAutoPropagates(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type NumsIter {
+			int cur;
+			int limit;
+			next(~this) int? {
+				if this.cur >= this.limit { return none; }
+				int v = this.cur;
+				this.cur = this.cur + 1;
+				return v;
+			}
+		}
+		type Nums {
+			int limit;
+			iter(~this) NumsIter { return NumsIter(cur: 0, limit: this.limit); }
+		}
+		mkn!(int limit) Nums { return Nums(limit: limit); }
+		run!() int {
+			int sum = 0;
+			for x in mkn(4) { sum += x; }
+			return sum;
+		}
+		main() { }
+	`)
+	body := codegentest.FuncBody(t, ir, "run")
+	codegentest.AssertContains(t, body, "auto.propagate")
+	codegentest.AssertContains(t, body, "auto.ok")
+	codegentest.AssertContains(t, body, "iter.header")
+}
+
+// The iterable does not have to be a call. FailableExprs is also set on a
+// failable getter (a MemberExpr) and on `<-t` for a failable_task[T] (a
+// UnaryExpr, §17.2.1) — genForInStmt keys off AutoPropagateExprs, not off the
+// node kind, and isRawGeneratorForIn's "is this a CallExpr" test must not send
+// these anywhere unusual.
+func TestForInBareFailableNonCallIterablesAutoPropagate(t *testing.T) {
+	cases := map[string]string{
+		"getter": `
+			type Holder {
+				get items! int[] {
+					int[] v = [];
+					v.push(1);
+					return v;
+				}
+			}
+			run!() int {
+				Holder h = Holder();
+				int n = 0;
+				for x in h.items { n += x; }
+				return n;
+			}
+			main() { }
+		`,
+		"awaited_task": `
+			mkv!() int[] {
+				int[] v = [];
+				v.push(1);
+				return v;
+			}
+			run!() int {
+				t := go! { mkv()?^ };
+				int n = 0;
+				for x in <-t { n += x; }
+				return n;
+			}
+			main() { }
+		`,
+		"parenthesized": `
+			mkv!() int[] {
+				int[] v = [];
+				v.push(1);
+				return v;
+			}
+			run!() int {
+				int n = 0;
+				for x in (mkv()) { n += x; }
+				return n;
+			}
+			main() { }
+		`,
+	}
+	for name, src := range cases {
+		t.Run(name, func(t *testing.T) {
+			body := codegentest.FuncBody(t, codegentest.GenerateIR(t, src), "run")
+			codegentest.AssertContains(t, body, "auto.propagate")
+			codegentest.AssertContains(t, body, "__forin_vec_tmp")
+			codegentest.AssertContains(t, body, "call void @Vector.drop")
+		})
+	}
+}
+
+// The negative control for every assertion above: genExprAutoPropagate must
+// stay a no-op when sema recorded nothing. Without this, an implementation that
+// wrapped *every* iterable would satisfy the whole rest of this file.
+func TestForInNonFailableIterableEmitsNoAutoPropagate(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		mkv() int[] {
+			int[] v = [];
+			v.push(1);
+			return v;
+		}
+		run() int {
+			int n = 0;
+			for x in mkv() { n += x; }
+			for c in "ab" { n += 1; }
+			for i in 0..3 { n += 1; }
+			return n;
+		}
+		main() { }
+	`)
+	body := codegentest.FuncBody(t, ir, "run")
+	codegentest.AssertContains(t, body, "forin.header")
+	codegentest.AssertNotContains(t, body, "auto.propagate")
+}
+
+// The array branch reaches the iterable through genArrayBasePtr, which already
+// consulted AutoPropagateExprs (B0323) — so it needed no codegen change and was
+// nevertheless broken, because sema was never recording the iterable. It is the
+// one branch where the whole fix is the sema half.
+func TestForInBareFailableArrayAutoPropagates(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		mka!() int[3] {
+			int[3] a = [1, 2, 3];
+			return a;
+		}
+		run!() int {
+			int total = 0;
+			for x in mka() { total += x; }
+			return total;
+		}
+		main() { }
+	`)
+	body := codegentest.FuncBody(t, ir, "run")
+	codegentest.AssertContains(t, body, "auto.propagate")
+	codegentest.AssertContains(t, body, "auto.ok")
+	codegentest.AssertContains(t, body, "forin.header")
+}
+
+// T1735's shape, kept here because T1896 reordered the branch that chooses
+// between it and the raw-generator path: a Stream[T] *variable* holds a
+// structural view, so it must take iter()+next() and not the coroutine path.
+// Nothing about it is failable, which is the point — the reorder must not have
+// made the choice depend on the new failable route. The getter spelling of the
+// same subject is T1943 (misread as a view, segfaults) and predates this item.
+func TestForInStreamVariableStillUsesIterPath(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type NumsIter {
+			int cur;
+			int limit;
+			next(~this) int? {
+				if this.cur >= this.limit { return none; }
+				int v = this.cur;
+				this.cur = this.cur + 1;
+				return v;
+			}
+		}
+		type Nums {
+			int limit;
+			iter(~this) NumsIter { return NumsIter(cur: 0, limit: this.limit); }
+		}
+		run() int {
+			Stream[int] s = Nums(limit: 3);
+			int sum = 0;
+			for x in s { sum += x; }
+			return sum;
+		}
+		main() { }
+	`)
+	body := codegentest.FuncBody(t, ir, "run")
+	codegentest.AssertContains(t, body, "iter.header")
+	// Not the coroutine path, and nothing to unwrap.
+	codegentest.AssertNotContains(t, body, "gen.factory.ok")
+	codegentest.AssertNotContains(t, body, "auto.propagate")
+}

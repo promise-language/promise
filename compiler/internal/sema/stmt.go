@@ -244,7 +244,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		}
 
 		// Auto-propagate failable calls in assignments within failable functions.
-		c.checkVarDeclFailable(s.Value)
+		c.checkFailableEscape(s.Value)
 
 		// Error handler in value context must produce recovery value or diverge.
 		c.checkErrorHandlerRecovery(s.Value, declType)
@@ -338,7 +338,7 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	}
 
 	// Auto-propagate failable calls in assignments within failable functions.
-	c.checkVarDeclFailable(s.Value)
+	c.checkFailableEscape(s.Value)
 
 	// T1381: binding a must-use value (one that transitively owns a
 	// `failable_task[T]`) to `_` discards it, silently swallowing its error —
@@ -362,25 +362,17 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	}
 }
 
-// checkVarDeclFailable handles naked failable calls in variable declarations.
-// In failable functions, the error is auto-propagated to the caller.
-// In non-failable functions, it is a compile error.
-func (c *Checker) checkVarDeclFailable(expr ast.Expr) {
-	if !c.info.FailableExprs[expr] {
-		return
-	}
-	if c.recordFailableEscape() {
-		c.info.AutoPropagateExprs[expr] = true
-	} else {
-		c.errorf(expr.Pos(), "failable call must be handled: use ?^ to propagate, ?! to panic on error, or ? { } for an inline handler")
-	}
-}
-
-// checkSubExprFailable handles a failable call expression used as a
-// sub-expression (binary/unary operand, etc.) in a context that expects
-// its plain value type. In failable functions, the error is auto-propagated
-// to the caller. In non-failable functions, it is a compile error.
-func (c *Checker) checkSubExprFailable(expr ast.Expr) {
+// checkFailableEscape settles a bare (unhandled) failable call standing in an
+// expression position that expects its plain value type — a variable
+// declaration or assignment, a call argument, an operand, a condition, a
+// `for`-in iterable, an interpolation. In a failable context the error
+// auto-propagates to the caller and the expression is recorded for codegen to
+// unwrap; in a non-failable one there is nowhere to propagate to, so it is a
+// compile error. §7.2 of docs/language-design.md gives auto-propagation in
+// "all expression positions", which is why this is one predicate and not a
+// per-position family: every caller wants exactly this, and a position that
+// forgets to call it is the bug (T1873 for conditions, T1896 for `for`-in).
+func (c *Checker) checkFailableEscape(expr ast.Expr) {
 	if !c.info.FailableExprs[expr] {
 		return
 	}
@@ -516,7 +508,7 @@ func (c *Checker) checkUseVarDecl(s *ast.UseVarDecl) {
 	// to store the failable-result aggregate into the unwrapped slot (panic), and
 	// in a non-failable function the "failable call must be handled" diagnostic
 	// would be silently skipped.
-	c.checkVarDeclFailable(s.Value)
+	c.checkFailableEscape(s.Value)
 
 	// Verify the type has a close() method (structural Closer satisfaction)
 	var named *types.Named
@@ -614,7 +606,7 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	c.checkWriteThroughSharedBorrow(s.Target, s.Pos())
 
 	// Check for failable calls in the assigned value.
-	c.checkVarDeclFailable(s.Value)
+	c.checkFailableEscape(s.Value)
 
 	// Validate setter exists when assigning to a getter property
 	if me, ok := s.Target.(*ast.MemberExpr); ok {
@@ -1226,7 +1218,7 @@ func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {
 	if !types.AssignableTo(valType, expected) {
 		c.errorf(s.Pos(), "cannot return %s from function returning %s", valType, expected)
 	}
-	c.checkSubExprFailable(s.Value) // T0976: reject bare failable in non-failable fn
+	c.checkFailableEscape(s.Value) // T0976: reject bare failable in non-failable fn
 }
 
 // checkGoBlockReturn type-checks a `return` inside a `go {}` / `go! {}` block
@@ -1248,7 +1240,7 @@ func (c *Checker) checkGoBlockReturn(s *ast.ReturnStmt) {
 	valType := c.checkExprWithHint(s.Value, ctx.resultType)
 	// T0976 in a plain `go {}` (the body is a non-failable scope); §17.2.1
 	// auto-propagation into the task in a `go! {}`.
-	c.checkSubExprFailable(s.Value)
+	c.checkFailableEscape(s.Value)
 	ctx.hasValueRet = true
 	if valType == nil {
 		return
@@ -1326,7 +1318,7 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 		// T0770: a failable scrutinee (e.g. `if e := load()` where `load!() T?`)
 		// auto-propagates its error in a failable function, leaving the `T?` to
 		// unwrap; in a non-failable function it must be handled explicitly.
-		c.checkVarDeclFailable(s.Init)
+		c.checkFailableEscape(s.Init)
 		if initType != nil {
 			c.checkNoShadow(s.Binding, s.Pos())
 			// T0850: a borrowed optional (`T?&` / `T?~`, e.g. `Ref[T?].borrow` or a
@@ -1370,7 +1362,7 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 			if isNarrow == nil {
 				// Normal: type-check condition, then detect simple narrowing
 				cond = c.checkExpr(s.Cond)
-				c.checkSubExprFailable(s.Cond) // T1873
+				c.checkFailableEscape(s.Cond) // T1873
 				narrow = c.detectOptionalNarrowing(s.Cond, cond)
 			}
 		}
@@ -1859,7 +1851,7 @@ func (c *Checker) detectNarrowableExpr(expr ast.Expr) []NarrowedVar {
 
 func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 	cond := c.checkExpr(s.Cond)
-	c.checkSubExprFailable(s.Cond) // T1873
+	c.checkFailableEscape(s.Cond) // T1873
 	if cond != nil && !types.Identical(cond, types.TypBool) {
 		c.errorf(s.Cond.Pos(), "while condition must be bool, got %s", cond)
 	}
@@ -1875,7 +1867,7 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	valType := c.checkExpr(s.Value)
 	// T0770: a failable scrutinee auto-propagates its error (failable function)
 	// or must be handled explicitly (non-failable), same as the if-unwrap form.
-	c.checkVarDeclFailable(s.Value)
+	c.checkFailableEscape(s.Value)
 
 	c.inLoop++
 	c.openScope(s.Body, "while-unwrap")
@@ -1896,15 +1888,6 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	c.inLoop--
 }
 
-// recordFailableGeneratorForIn records a failable escape for a for-in over a
-// failable generator: the generator's mid-stream error auto-propagates into the
-// enclosing failable context, exactly like a bare failable call (T1386). In a
-// non-propagating context it panics instead, so nothing is recorded.
-//
-// The error operator (`?!`/`?^`/`? {}`) on the iterable only handles the
-// *factory* call's error — genForInGenerator still routes mid-stream errors to
-// the enclosing sink — so peel it before asking whether the generator itself is
-// failable.
 // isStructuralStreamView reports whether iterating over a Stream[T] value
 // should use the structural iter()+next() path. T1735: now that Stream[T]
 // is tagged `structural(protocol: true)`, variables of type Stream[T] may
@@ -1913,7 +1896,7 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 // functions), so it must use the coroutine path. Any other expression of
 // type Stream[T] (variable, field access) holds a structural view, since
 // rejectStoredGenerator prevents storing raw coroutine handles.
-func (c *Checker) isStructuralStreamView(expr ast.Expr, _ types.Type) bool {
+func (c *Checker) isStructuralStreamView(expr ast.Expr) bool {
 	if types.TypStream == nil || !types.TypStream.IsStructural() {
 		return false
 	}
@@ -1927,14 +1910,58 @@ func (c *Checker) isStructuralStreamView(expr ast.Expr, _ types.Type) bool {
 	return true
 }
 
+// recordFailableGeneratorForIn records a failable escape for a for-in over a
+// failable generator: the generator's mid-stream error auto-propagates into the
+// enclosing failable context, exactly like a bare failable call (T1386). In a
+// non-propagating context it panics instead, so nothing is recorded.
+//
+// The error operator (`?!`/`?^`/`? {}`) on the iterable only handles the
+// *factory* call's error — genForInGenerator still routes mid-stream errors to
+// the enclosing sink — so peel it before asking whether the generator itself is
+// failable.
 func (c *Checker) recordFailableGeneratorForIn(s *ast.ForInStmt) {
 	if c.info.FailableExprs[unwrapErrorOperator(s.Iterable)] {
 		c.recordFailableEscape()
 	}
 }
 
+// isRawGeneratorForIn reports whether a for-in iterable is consumed as a raw
+// generator/coroutine handle rather than as an ordinary value. That path owns
+// its error routing end to end (recordFailableGeneratorForIn above, plus
+// genForInGenerator's mid-stream sink), and unlike every other expression
+// position it *panics* rather than erroring when a bare failable factory
+// appears in a non-propagating context (T0284) — so T1896's blanket
+// checkFailableEscape must skip it. Single predicate, used both to gate that
+// call and to pick the branch in checkForInStmt.
+//
+// That panic is a divergence from §7.2 of docs/language-design.md, which makes a
+// bare failable call in a non-failable function a compile error in *every*
+// expression position. Settling it either way is T1942; until it is settled this
+// guard preserves the behavior tests/e2e/failable_generator_forin_test.pr
+// asserts. Deleting the guard is exactly T1942's option 1.
+func (c *Checker) isRawGeneratorForIn(iterType types.Type, iterable ast.Expr) bool {
+	if iterType == nil {
+		return false
+	}
+	dispatchType := stripRef(iterType)
+	inst, ok := dispatchType.(*types.Instance)
+	if !ok || inst.Origin() != types.TypStream {
+		return false
+	}
+	return !c.isStructuralStreamView(iterable)
+}
+
 func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	iterType := c.checkExpr(s.Iterable)
+
+	// T1896: the iterable is an expression position like any other, so a bare
+	// failable call there auto-propagates in a failable function and is a
+	// diagnostic in a non-failable one (§7.2: "all expression positions"). The
+	// raw generator path is the one exception — see isRawGeneratorForIn.
+	rawGenerator := c.isRawGeneratorForIn(iterType, s.Iterable)
+	if !rawGenerator {
+		c.checkFailableEscape(s.Iterable)
+	}
 
 	c.inLoop++
 	c.openScope(s.Body, "for-in")
@@ -1982,15 +2009,15 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 				} else {
 					elemType = dispatchType
 				}
-				// T1735: If the iterable is a structural Stream[T] view (not an
-				// actual generator), record ForInIter so codegen uses the
-				// iter()+next() path. Detect by checking if the concrete type
-				// differs from Stream[T] (a true generator IS Stream[T]).
-				if c.isStructuralStreamView(s.Iterable, dispatchType) {
-					c.info.ForInKinds[s] = ForInIter
-				} else {
-					// Raw generator/coroutine path
+				// T1735: a structural Stream[T] view (not an actual generator)
+				// records ForInIter so codegen uses the iter()+next() path.
+				// isRawGeneratorForIn draws that line, and drew it above to
+				// decide whether the iterable takes the ordinary failable-value
+				// route — so reuse its answer rather than asking twice.
+				if rawGenerator {
 					c.recordFailableGeneratorForIn(s)
+				} else {
+					c.info.ForInKinds[s] = ForInIter
 				}
 			} else if origin == types.TypChannel {
 				// Channel[T] yields T via channel receive
@@ -2151,7 +2178,7 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	// Condition
 	if s.Cond != nil {
 		cond := c.checkExpr(s.Cond)
-		c.checkSubExprFailable(s.Cond) // T1873
+		c.checkFailableEscape(s.Cond) // T1873
 		if cond != nil && !types.Identical(cond, types.TypBool) {
 			c.errorf(s.Cond.Pos(), "for condition must be bool, got %s", cond)
 		}

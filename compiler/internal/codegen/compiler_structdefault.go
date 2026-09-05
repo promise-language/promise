@@ -270,15 +270,28 @@ func (c *Compiler) resolveMonoParentName(named *types.Named, targetType types.Ty
 //     <child>.<method> function is ever emitted for a plain inherited method
 //     (T1551).
 //
-// Shared by method calls, binary/unary/compound operators, and string
-// interpolation's format() dispatch so every direct-dispatch site agrees on the
-// callee.
+// Shared by method calls, getters/setters, binary/unary/compound operators,
+// string interpolation's format() dispatch and the synthetic for-in next()/iter()
+// call (T1459), so every direct-dispatch site agrees on the callee.
 func (c *Compiler) resolveDirectDispatchOwner(named *types.Named, targetType types.Type, methodName string) string {
+	return c.resolveDirectDispatchOwnerBy(named, targetType, methodName, (*types.Named).LookupMethod)
+}
+
+// resolveDirectDispatchOwnerBy is the kind-parameterized form of
+// resolveDirectDispatchOwner. getters/setters are skipped by LookupMethod
+// (T0637/T1559), so getter and setter dispatch must pass LookupGetter /
+// LookupSetter to locate the structural parent that owns an inherited default
+// — mirroring findStructuralOwner / findStructuralOwnerBy. Only that lookup
+// differs between the three kinds; the three-case resolution itself is one
+// implementation.
+func (c *Compiler) resolveDirectDispatchOwnerBy(named *types.Named, targetType types.Type, methodName string,
+	lookup func(*types.Named, string) *types.Method) string {
+
 	ownerName := c.resolveMethodOwner(named, methodName)
 	if ownerName == named.Obj().Name() {
 		return c.resolveTypeName(targetType)
 	}
-	if structParent := c.findStructuralOwner(named, methodName); structParent != nil {
+	if structParent := c.findStructuralOwnerBy(named, methodName, lookup); structParent != nil {
 		c.ensureDefaultMethodsSynthesized(named, structParent)
 		return c.resolveTypeName(targetType)
 	}

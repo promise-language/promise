@@ -1714,25 +1714,12 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 		return
 	}
 
-	var mangledName string
-	ownerName := c.resolveMethodOwner(named, target.Field)
-	if ownerName != named.Obj().Name() {
-		// A default setter from a structural interface is synthesized per-concrete
-		// (T1559), mirroring genGetterCall / genMethodCall: use the concrete type's
-		// name, not the (possibly generic) interface's.
-		if structParent := c.findStructuralOwnerBy(named, target.Field, (*types.Named).LookupSetter); structParent != nil {
-			concreteName := c.resolveTypeName(targetType)
-			c.ensureDefaultMethodsSynthesized(named, structParent)
-			mangledName = mangleMethodName(concreteName, target.Field, true)
-		} else {
-			// T0637: Non-structural parent. Resolve to mono name if parent is
-			// generic (mirrors genGetterCall / genMethodCall).
-			monoOwner := c.resolveMonoParentName(named, targetType, ownerName)
-			mangledName = mangleMethodName(monoOwner, target.Field, true)
-		}
-	} else {
-		mangledName = mangleMethodName(c.resolveTypeName(targetType), target.Field, true)
-	}
+	// The same three-case owner choice as genGetterCall / genMethodCall — own
+	// declaration, a structural interface's per-concrete default (T1559), or a
+	// non-structural parent's mono name (T0637) — through the one shared
+	// implementation, with LookupSetter because LookupMethod skips setters.
+	mangledName := mangleMethodName(
+		c.resolveDirectDispatchOwnerBy(named, targetType, target.Field, (*types.Named).LookupSetter), target.Field, true)
 
 	fn, ok := c.funcs[mangledName]
 	if !ok {

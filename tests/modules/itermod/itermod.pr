@@ -1,0 +1,37 @@
+// itermod: iterator/stream bases meant to be INHERITED from user code, so the
+// for-in dispatch has to name a module-owned function (T1459).
+type ModIter `public `doc("Iterator base: yields cur..lim. Meant to be inherited.") {
+  int cur `public `doc("Next value to yield.");
+  int lim `public `doc("One past the last value.");
+
+  next(~this) int? `public `doc("Yields the next value, or none when exhausted.") {
+    if this.cur >= this.lim {
+      return none;
+    }
+    int v = this.cur;
+    this.cur = this.cur + 1;
+    return v;
+  }
+}
+
+type ModStream `public `doc("Stream base: builds a ModIter. Meant to be inherited.") {
+  int seed `public `doc("First value the built iterator yields.");
+
+  iter(~this) ModIter `public `doc("Builds an iterator over seed..seed+3.") {
+    return ModIter(cur: this.seed, lim: this.seed + 3);
+  }
+}
+
+type ModHeapIter `public `doc("Iterator base yielding heap strings. Meant to be inherited.") {
+  string[] items `public `doc("Values to yield, in order.");
+  int idx `public `doc("Index of the next value.");
+
+  next(~this) string? `public `doc("Yields the next string, or none when exhausted.") {
+    if this.idx >= this.items.len {
+      return none;
+    }
+    string v = this.items[this.idx];
+    this.idx = this.idx + 1;
+    return v;
+  }
+}

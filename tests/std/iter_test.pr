@@ -78,6 +78,281 @@ test_custom_iter_continue() `test {
   assert(sum == 25, "odd sum: 1+3+5+7+9=25");
 }
 
+// --- T1459: for-in over a subtype that INHERITS next() from its parent ---
+//
+// No <Child>.next function is emitted for a plainly inherited method (T1551),
+// and a leaf, non-abstract child does not get a vtable — so emitIterNext must
+// dispatch to the type that declares next(). This used to panic in codegen with
+// "undeclared method T1459Child.next".
+//
+// The base is declared here rather than reusing CountUp on purpose: giving
+// CountUp a child would make needsVtable(CountUp) true and silently reroute
+// every test above onto the VIRTUAL branch, deleting the direct-dispatch
+// coverage they provide. For the same reason the two types actually iterated
+// below (T1459Child, T1459Grandchild) are leaves — a child of their own would
+// put them back on the virtual branch and stop exercising the fix.
+//
+// T1944 covers the still-open case where the parent is GENERIC
+// (`type IntBoxIter is GBox[int]`): the element type stays the parent's unbound
+// T and it fails in sema first. That shape does not belong here yet.
+
+type T1459Base {
+  int current;
+  int limit;
+
+  next(~this) int? {
+    if this.current >= this.limit {
+      return none;
+    }
+    int val = this.current;
+    this.current = this.current + 1;
+    return val;
+  }
+}
+
+// Leaf child of the declaring type: one hop, DIRECT dispatch.
+type T1459Child is T1459Base {
+  new(~this) {
+    this.current = 0;
+    this.limit = 4;
+  }
+}
+
+test_inherited_next_for_in() `test {
+  f := T1459Child();
+  int sum = 0;
+  for x in f {
+    sum = sum + x;
+  }
+  assert(sum == 6, "inherited next(): 0+1+2+3=6");
+}
+
+test_inherited_next_empty() `test {
+  // The `none` exit path through an inherited next(), with nothing to yield.
+  c := T1459Child();
+  c.current = 4;
+  int count = 0;
+  for _ in c {
+    count = count + 1;
+  }
+  assert(count == 0, "inherited next() yields nothing when exhausted");
+}
+
+// Two levels up: the declaring type of T1459Grandchild's next() is its
+// GRANDparent, which exercises the recursive parent walk in resolveMethodOwner
+// rather than a single hop. T1459Middle sits on a second branch of the same
+// tree so that T1459Child above stays a leaf.
+type T1459Middle is T1459Base {
+  new(~this) {
+    this.current = 2;
+    this.limit = 5;
+  }
+}
+
+type T1459Grandchild is T1459Middle {
+  new(~this) {
+    this.current = 1;
+    this.limit = 4;
+  }
+}
+
+test_inherited_next_grandparent() `test {
+  g := T1459Grandchild();
+  int sum = 0;
+  for x in g {
+    sum = sum + x;
+  }
+  assert(sum == 6, "grandparent next(): 1+2+3=6");
+}
+
+// T1459Middle HAS a child, so needsVtable() is true for it and this one goes
+// down the virtual branch with an inherited next() — the counterpart of the
+// direct cases above.
+test_inherited_next_virtual() `test {
+  m := T1459Middle();
+  int sum = 0;
+  for x in m {
+    sum = sum + x;
+  }
+  assert(sum == 9, "inherited next() through the vtable: 2+3+4=9");
+}
+
+// A GENERIC leaf child of the non-generic declaring type: the receiver reaching
+// the owner resolution is a monomorphized instance (T1459GenericChild[int])
+// while the callee is the plain parent's single T1459Base.next — the parent
+// branch of that resolution with a mono receiver, which the direct cases above
+// do not reach.
+type T1459GenericChild[T] is T1459Base {
+  T tag;
+}
+
+test_inherited_next_generic_receiver() `test {
+  g := T1459GenericChild[int](current: 0, limit: 4, tag: 7);
+  int sum = 0;
+  for x in g {
+    sum = sum + x;
+  }
+  assert(sum == 6, "generic child, inherited next(): 0+1+2+3=6");
+}
+
+// A TEMPORARY receiver: the child value is constructed directly in the for-in
+// subject, so the loop both dispatches the inherited next() and owns the
+// receiver it has to drop at loop exit.
+test_inherited_next_temporary_receiver() `test {
+  int sum = 0;
+  for x in T1459Child() {
+    sum = sum + x;
+  }
+  assert(sum == 6, "temporary receiver, inherited next(): 0+1+2+3=6");
+}
+
+// The receiver arrives as a moved PARAMETER rather than a local, so the loop
+// runs inside a callee whose receiver type is only known from the signature.
+sum_inherited(T1459Child move it) int {
+  int sum = 0;
+  for x in it {
+    sum = sum + x;
+  }
+  return sum;
+}
+
+test_inherited_next_moved_param() `test {
+  assert(sum_inherited(T1459Child()) == 6, "moved-param receiver: 0+1+2+3=6");
+}
+
+// An inherited next() that yields HEAP values from a heap field. The elements
+// and the vector are owned by the receiver, so this is the drop-accounting case
+// the int-only iterators above cannot reach: the loop must free each yielded
+// string and the receiver's vector, or the test reports LEAK.
+type T1459HeapBase {
+  string[] items;
+  int idx;
+
+  next(~this) string? {
+    if this.idx >= this.items.len {
+      return none;
+    }
+    string v = this.items[this.idx];
+    this.idx = this.idx + 1;
+    return v;
+  }
+}
+
+type T1459HeapChild is T1459HeapBase {
+  new(~this) {
+    this.items = ["a", "bb", "ccc"];
+    this.idx = 0;
+  }
+}
+
+test_inherited_next_heap_elements_no_leak() `test {
+  h := T1459HeapChild();
+  int total = 0;
+  for s in h {
+    total = total + s.len;
+  }
+  assert(total == 6, "inherited next() over heap elements: 1+2+3=6");
+}
+
+test_inherited_next_heap_early_break_no_leak() `test {
+  // Leaving the loop early still has to drop the remaining receiver state.
+  h := T1459HeapChild();
+  int total = 0;
+  for s in h {
+    total = total + s.len;
+    break;
+  }
+  assert(total == 1, "break out of an inherited heap iterator");
+}
+
+// The shape a user actually writes: the parent declares `is Iterator[int]`, so
+// next() is `abstract on the STRUCTURAL ancestor and concrete on the
+// non-structural parent. Nothing may be synthesized under the leaf's own name;
+// the parent's implementation owns the dispatch. The leaf also inherits the 20
+// Iterator[T] combinators through the same chain.
+type T1459IterBase is Iterator[int] {
+  int cur;
+  int lim;
+
+  next(~this) int? {
+    if this.cur >= this.lim {
+      return none;
+    }
+    int v = this.cur;
+    this.cur = this.cur + 1;
+    return v;
+  }
+}
+
+type T1459IterChild is T1459IterBase {
+  new(~this) {
+    this.cur = 0;
+    this.lim = 4;
+  }
+}
+
+test_inherited_next_iterator_parent_for_in() `test {
+  c := T1459IterChild();
+  int sum = 0;
+  for x in c {
+    sum = sum + x;
+  }
+  assert(sum == 6, "child of an Iterator[int] parent: 0+1+2+3=6");
+}
+
+test_inherited_next_iterator_parent_view() `test {
+  // Boxed into the structural view first: dispatch is virtual, and the view
+  // vtable's next() slot has to name the parent's function — no per-concrete
+  // default may be synthesized under the leaf for a member the structural
+  // ancestor only declares `abstract.
+  Iterator[int] it = T1459IterChild();
+  int sum = 0;
+  for x in it {
+    sum = sum + x;
+  }
+  assert(sum == 6, "Iterator[int] view of an inherited next(): 0+1+2+3=6");
+}
+
+test_inherited_next_iterator_parent_combinator() `test {
+  // count() is a structural default reached through the same inheritance, so it
+  // drives the inherited next() from inside a synthesized body instead of a loop.
+  c := T1459IterChild();
+  assert(c.count() == 4, "count() over an inherited next()");
+}
+
+// The guard in the other direction: a child that OVERRIDES next() must keep
+// calling its own, not be re-routed to the declaring parent.
+type T1459OverrideBase {
+  int c;
+
+  next(~this) int? {
+    if this.c >= 3 {
+      return none;
+    }
+    this.c = this.c + 1;
+    return 100;
+  }
+}
+
+type T1459OverrideChild is T1459OverrideBase {
+  next(~this) int? {
+    if this.c >= 3 {
+      return none;
+    }
+    this.c = this.c + 1;
+    return 1;
+  }
+}
+
+test_overridden_next_not_rerouted_to_parent() `test {
+  o := T1459OverrideChild(c: 0);
+  int sum = 0;
+  for x in o {
+    sum = sum + x;
+  }
+  assert(sum == 3, "the child's own next() wins: 1+1+1=3");
+}
+
 // --- Iterator[T] conformance: type with `is` inherits combinators ---
 
 type Counter is Iterator[int] {
@@ -560,6 +835,139 @@ test_concrete_stream_explicit_drop_early_return_no_leak() `test {
   // its owned `scratch` must still drop on the return path — the exact leak the fix
   // guards against for explicit-drop concrete iterators.
   assert(concrete_explicit_find_seven(ExplicitDropStream(start: 5, count: 50)) == 7, "found 7");
+}
+
+// --- T1459: for-in over a subtype that INHERITS iter() from its parent ---
+//
+// The stream path funnels through the same emitIterNext, so it panicked the
+// same way ("undeclared method T1459StreamChild.iter") before the fix. The base
+// is declared here rather than reusing NumberStream for the reason given on
+// T1459Base: a child would flip NumberStream onto the virtual branch and drop
+// the direct-dispatch coverage of the stream tests above.
+
+type T1459StreamBase {
+  int start;
+  int count;
+
+  iter() NumberIter {
+    return NumberIter(i: this.start, n: this.count);
+  }
+}
+
+type T1459StreamChild is T1459StreamBase {
+  new(~this) {
+    this.start = 10;
+    this.count = 3;
+  }
+}
+
+test_inherited_iter_for_in() `test {
+  s := T1459StreamChild();
+  int sum = 0;
+  for x in s {
+    sum = sum + x;
+  }
+  assert(sum == 33, "inherited iter(): 10+11+12=33");
+}
+
+test_inherited_iter_empty() `test {
+  s := T1459StreamChild();
+  s.count = 0;
+  int count = 0;
+  for _ in s {
+    count = count + 1;
+  }
+  assert(count == 0, "inherited iter() over an empty stream yields nothing");
+}
+
+// An inherited iter() whose iterator yields HEAP values. genForInCustomStream
+// builds a fresh iterator per loop and registers it for drop; with heap
+// elements both that iterator and every yielded string have to be freed, so
+// this is the stream path's leak-accounting case.
+type T1459StringIter {
+  string[] items;
+  int idx;
+
+  next(~this) string? {
+    if this.idx >= this.items.len {
+      return none;
+    }
+    string v = this.items[this.idx];
+    this.idx = this.idx + 1;
+    return v;
+  }
+}
+
+type T1459StringStreamBase {
+  int width;
+
+  iter() T1459StringIter {
+    return T1459StringIter(items: ["a", "bb", "ccc"], idx: 0);
+  }
+}
+
+type T1459StringStreamChild is T1459StringStreamBase {
+  new(~this) {
+    this.width = 3;
+  }
+}
+
+test_inherited_iter_heap_elements_no_leak() `test {
+  s := T1459StringStreamChild();
+  int total = 0;
+  for v in s {
+    total = total + v.len;
+  }
+  assert(total == 6, "inherited iter() over heap elements: 1+2+3=6");
+}
+
+test_inherited_iter_heap_early_break_no_leak() `test {
+  // Breaking out mid-loop still has to drop the fresh iterator the inherited
+  // iter() built, plus its remaining items.
+  s := T1459StringStreamChild();
+  int total = 0;
+  for v in s {
+    total = total + v.len;
+    break;
+  }
+  assert(total == 1, "break out of an inherited heap stream");
+}
+
+// Two levels up on the stream side: the declaring type of the grandchild's
+// iter() is its GRANDparent. T1459StreamMiddle is a second branch of the tree
+// so T1459StreamChild above stays a leaf on the direct branch.
+type T1459StreamMiddle is T1459StreamBase {
+  new(~this) {
+    this.start = 20;
+    this.count = 2;
+  }
+}
+
+type T1459StreamGrandchild is T1459StreamMiddle {
+  new(~this) {
+    this.start = 1;
+    this.count = 3;
+  }
+}
+
+test_inherited_iter_grandparent() `test {
+  s := T1459StreamGrandchild();
+  int sum = 0;
+  for x in s {
+    sum = sum + x;
+  }
+  assert(sum == 6, "grandparent iter(): 1+2+3=6");
+}
+
+// T1459StreamMiddle HAS a child, so it takes the virtual branch with an
+// inherited iter() — the counterpart of the direct stream cases above.
+test_inherited_iter_virtual() `test {
+  m := T1459StreamMiddle();
+  int sum = 0;
+  for x in m {
+    sum = sum + x;
+  }
+  assert(sum == 41, "inherited iter() through the vtable: 20+21=41");
 }
 
 // --- Edge cases for existing combinators ---

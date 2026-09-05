@@ -446,8 +446,20 @@ func (c *Compiler) emitIterNext(receiverVal value.Value, receiverType types.Type
 		return c.block.NewCall(fnTyped, append([]value.Value{instance}, defaultArgs...)...)
 	}
 
-	// Direct dispatch: call the concrete method function
-	ownerName := c.resolveTypeName(receiverType)
+	// Direct dispatch: call the concrete method function.
+	//
+	// T1459: mangle against the type that DECLARES the method, not the receiver's
+	// own type. No <Child>.<method> function is emitted for a plainly inherited
+	// method (T1551), so a subtype that inherits next()/iter() and does not
+	// override it used to miss c.funcs and panic — while the vtable branch above
+	// was skipped because a leaf, non-abstract child has needsVtable() == false.
+	// resolveDirectDispatchOwner is the helper every other direct-dispatch site
+	// already shares (method calls, getters/setters, operators, interpolation's
+	// format()), so this synthetic call site now agrees with them on the callee:
+	// own declaration → the receiver's (mono) name; structural default → the
+	// concrete name, with synthesis ensured; non-structural parent → the parent's
+	// mono name.
+	ownerName := c.resolveDirectDispatchOwner(named, receiverType, method.Name())
 	mangledName := mangleMethodName(ownerName, method.Name(), false)
 	fn, ok := c.funcs[mangledName]
 	if !ok {

@@ -448,24 +448,14 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 		return c.genVirtualGetterCall(e, named, getter, targetType)
 	}
 
-	var mangledName string
-	ownerName := c.resolveMethodOwner(named, e.Field)
-	if ownerName != named.Obj().Name() {
-		// Getter inherited from parent. A default getter from a structural
-		// interface is synthesized per-concrete (T1559), mirroring genMethodCall:
-		// use the concrete type's name, not the (possibly generic) interface's.
-		if structParent := c.findStructuralOwnerBy(named, e.Field, (*types.Named).LookupGetter); structParent != nil {
-			concreteName := c.resolveTypeName(targetType)
-			c.ensureDefaultMethodsSynthesized(named, structParent)
-			mangledName = mangleMethodName(concreteName, e.Field, false)
-		} else {
-			// Non-structural parent: resolve to mono name if parent is generic.
-			monoOwner := c.resolveMonoParentName(named, targetType, ownerName)
-			mangledName = mangleMethodName(monoOwner, e.Field, false)
-		}
-	} else {
-		mangledName = mangleMethodName(c.resolveTypeName(targetType), e.Field, false)
-	}
+	// Own declaration → the receiver's (mono) name; a structural interface's
+	// default getter → still the concrete name, because defaults are synthesized
+	// per-concrete (T1559); a non-structural parent → the parent's mono name
+	// (T0637). resolveDirectDispatchOwnerBy is the one implementation of that
+	// three-case choice, shared with genMethodCall / genSetterCall — passing
+	// LookupGetter because LookupMethod skips getters by design.
+	mangledName := mangleMethodName(
+		c.resolveDirectDispatchOwnerBy(named, targetType, e.Field, (*types.Named).LookupGetter), e.Field, false)
 
 	fn, ok := c.funcs[mangledName]
 	if !ok {

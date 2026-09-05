@@ -467,16 +467,12 @@ func hasOwnMethod(named *types.Named, name string) bool {
 	return false
 }
 
-// findStructuralOwner returns the structural parent type that owns a method
-// inherited by `named`, or nil if the method comes from a non-structural parent.
-func (c *Compiler) findStructuralOwner(named *types.Named, methodName string) *types.Named {
-	return c.findStructuralOwnerBy(named, methodName, (*types.Named).LookupMethod)
-}
-
-// findStructuralOwnerBy is the kind-parameterized form of findStructuralOwner.
-// getters/setters are skipped by LookupMethod (T0637), so getter/setter dispatch
-// must pass LookupGetter/LookupSetter to locate the structural parent that owns
-// an inherited default getter/setter (T1559).
+// findStructuralOwnerBy returns the structural parent type that owns a member
+// inherited by `named`, or nil if the member comes from a non-structural parent.
+// getters/setters are skipped by LookupMethod (T0637), so each caller passes the
+// lookup for the member kind it dispatches: LookupMethod for a plain method,
+// LookupGetter/LookupSetter to locate the structural parent that owns an
+// inherited default getter/setter (T1559).
 func (c *Compiler) findStructuralOwnerBy(named *types.Named, methodName string, lookup func(*types.Named, string) *types.Method) *types.Named {
 	owner, _ := c.resolveStructuralOwnerBy(named, methodName, lookup)
 	return owner

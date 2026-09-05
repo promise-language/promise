@@ -200,11 +200,6 @@ type FastCounter is CountIter `public `doc("Subtype of CountIter — its existen
   }
 }
 
-// NOTE: `for v in FastCounter()` — iterating the SUBTYPE, whose next() is
-// inherited — panics in codegen ("undeclared method FastCounter.next").
-// Pre-existing and unrelated to defaults; tracked as T1459. Only the parent
-// receiver (which is what exercises the vtable path here) is iterated below.
-
 test_for_in_virtual_iterator_default() `test(timeout: "10s") {
   CountIter c = CountIter(n: 0);
   int sum = 0;
@@ -215,11 +210,24 @@ test_for_in_virtual_iterator_default() `test(timeout: "10s") {
 }
 
 test_subtype_inherited_next_direct_default() `test {
-  // The subtype cannot be iterated (T1459), but calling its inherited next()
-  // directly still has to fill the parent's trailing default.
+  // Calling the subtype's inherited next() directly still has to fill the
+  // parent's trailing default.
   FastCounter f = FastCounter();
   int? first = f.next();
   assert((first ?: 0) == 2, "inherited next() called directly fills the default");
+}
+
+test_for_in_subtype_inherited_next_default() `test(timeout: "10s") {
+  // FastCounter is a leaf, so this takes emitIterNext's DIRECT branch while
+  // next() is declared by the parent — the combination T1459 fixed. The default
+  // still has to be filled from the parent's signature, or `step` arrives as 0
+  // and the loop never terminates.
+  FastCounter f = FastCounter();
+  int sum = 0;
+  for v in f {
+    sum = sum + v;
+  }
+  assert(sum == 12, "direct for-in on an inherited next() fills its default (2 + 4 + 6)");
 }
 
 // --- 10. for-in over a GENERIC iterator ---

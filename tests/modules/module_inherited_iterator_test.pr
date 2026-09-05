@@ -1,0 +1,74 @@
+// T1459: a user-code type that INHERITS next() / iter() from a MODULE-declared
+// parent and is iterated with for-in.
+//
+// emitIterNext mangles the callee from the type that DECLARES the method, so
+// here it names a function the module owns rather than one this unit emits. That
+// is deliberately NOT backed by forwardDeclareModuleMethod (T1740, the fallback
+// the plain method-call path has), so these pin that the direct lookup finds the
+// module's function for the synthetic for-in call site too.
+//
+// Each child is a leaf and not abstract, so needsVtable() is false and dispatch
+// takes emitIterNext's DIRECT branch — the branch that panicked with
+// "codegen: undeclared method UserChild.next".
+use itermod "./itermod";
+
+type UserChild is itermod.ModIter {
+  new(~this) {
+    this.cur = 0;
+    this.lim = 4;
+  }
+}
+
+test_module_parent_inherited_next() `test {
+  c := UserChild();
+  int sum = 0;
+  for v in c {
+    sum = sum + v;
+  }
+  assert(sum == 6, "module-declared next(): 0+1+2+3=6");
+}
+
+test_module_parent_inherited_next_empty() `test {
+  c := UserChild();
+  c.cur = 4;
+  int count = 0;
+  for _ in c {
+    count = count + 1;
+  }
+  assert(count == 0, "module-declared next() yields nothing when exhausted");
+}
+
+type UserStreamChild is itermod.ModStream {
+  new(~this) {
+    this.seed = 5;
+  }
+}
+
+test_module_parent_inherited_iter() `test {
+  // The stream path funnels through the same emitIterNext, and the iterator it
+  // builds is a module type this unit never declares a method for.
+  s := UserStreamChild();
+  int sum = 0;
+  for v in s {
+    sum = sum + v;
+  }
+  assert(sum == 18, "module-declared iter(): 5+6+7=18");
+}
+
+type UserHeapChild is itermod.ModHeapIter {
+  new(~this) {
+    this.items = ["a", "bb", "ccc"];
+    this.idx = 0;
+  }
+}
+
+test_module_parent_inherited_next_heap_no_leak() `test {
+  // Yielded strings and the receiver's vector are owned across the module
+  // boundary; the loop must drop them or this reports LEAK.
+  h := UserHeapChild();
+  int total = 0;
+  for s in h {
+    total = total + s.len;
+  }
+  assert(total == 6, "module-declared heap next(): 1+2+3=6");
+}

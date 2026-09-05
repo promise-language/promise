@@ -1,0 +1,12 @@
+{
+  "home": "promise-language/org",
+  "tag": "docs-2026.2",
+  "commit": "fe22dcfa7d8b0caf131d8b04c4ccbb5048a33390",
+  "files": {
+    "cli-guide.md": "52833cef3f8df38fd32d4f3dd8e5ad9837947300f74e1b8da84380dbfe8e36bc",
+    "engineering-guide-go.md": "46d898dc4c28e2bb22ee4e0c2e04098c54ff9f5cd64cd222fd73ad8bb012d667",
+    "engineering-guide-promise.md": "ec22416a05cb8dcb6504c8f3c7da7aed341cf80bc3d1274f0c4406c8b57513b3",
+    "engineering-guide.md": "f32f29cecbed386c7c9b1a5ec65ea265704586c284890799d6288d8843ce0573",
+    "normative.md": "7603027ad682939d8cd7cefa122ff864869d34243610a58398c48bba5d0d808f"
+  }
+}

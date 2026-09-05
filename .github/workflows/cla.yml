@@ -14,6 +14,19 @@ permissions:
 
 jobs:
   cla:
+    # Public repositories only, because on GitHub Free an organization secret is
+    # not reachable from a private repository at all — so CLA_SIGNATURES_TOKEN
+    # arrives empty and the action fails before it does anything, including
+    # before it reads the allowlist below. The failure is the plan, not the
+    # contributor.
+    #
+    # Nothing is lost by not running it here. The CLA covers contributions to
+    # the public projects; a private repository in this org is worked by people
+    # who are already covered, and the maintainer is allowlisted regardless.
+    # Copying the signatures PAT into every private repository to keep a check
+    # that can only ever say "exempt" would widen that token's reach for no
+    # decision.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     env:
       # contributor-assistant/github-action still ships a Node 20 runtime; no
@@ -33,6 +46,7 @@ jobs:
         with:
           path-to-document: 'https://promise-lang.org/cla/individual'
           # Stored in the PRIVATE promise-language/cla-signatures repo (PII).
+          # Shared org-wide file so one signature covers every Promise Lang repo.
           path-to-signatures: 'signatures/v1/cla.json'
           branch: 'main'
           allowlist: djabi,*[bot]

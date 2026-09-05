@@ -1420,6 +1420,7 @@ const t1883Prelude = `
 // covers all of them (`grep -n genAutoPropagateTracked internal/codegen/`):
 //
 //	match_arm       expr_enum_match.go  genMatchArmValue
+//	match_subject   expr_enum_match.go  genMatchExpr
 //	interp          expr_literal.go     genInterpolatedString
 //	call_arg        stmt.go             genCallArgExpr
 //	receiver        stmt.go             genExprAutoPropagate (member target)
@@ -1451,6 +1452,7 @@ var t1883Shapes = []struct {
 	body   string
 }{
 	{"match_arm", "int n", "string", `return match n { 1 => hs(3)%s, _ => "z", };`},
+	{"match_subject", "", "int", `return match hs(3)%s { "aaa" => 1, _ => 0, };`},
 	{"interp", "", "string", `return "[{hs(3)%s}]";`},
 	{"call_arg", "", "int", `return take(hs(3)%s);`},
 	{"receiver", "", "int", `return hs(3)%s.len;`},
@@ -1482,7 +1484,7 @@ var t1883Shapes = []struct {
 // emitting the drop in the wrong place.
 //
 // This is the item's discriminator turned into a table. At df412b12 (before the
-// fix) 16 of these 21 shapes produced *shorter* bare bodies — the missing
+// fix) 16 of the original 21 shapes produced *shorter* bare bodies — the missing
 // alloca/store/drop-flag/drop of the unwrapped heap temp. The five that already
 // matched are the ones fixed earlier (match_arm: T1267, interp: T0966) or that
 // unwrap an optional/aggregate with no heap temp to track (iflet, whilelet,
@@ -1508,6 +1510,51 @@ func TestT1883AutoPropagateMatchesExplicitAtEverySite(t *testing.T) {
 				t.Errorf("bare failable call and `?^` generate different bodies\n--- bare (%d lines) ---\n%s\n--- ?^ (%d lines) ---\n%s",
 					strings.Count(bare, "\n")+1, bare, strings.Count(caret, "\n")+1, caret)
 			}
+		})
+	}
+}
+
+// T1900 Part C: an explicit `?^`/`?!` spelling on a match subject is a
+// transparent wrapper over the owned call result, so subjectIsOwnedRvalueEnum
+// must peel it and reach the same T1119 enum spill / T1187 optional spill the
+// bare form reaches. Before the fix, `match mkp(1)?^ { … }` with a droppable
+// enum subject (and `match mko(3)?^ { … }` with a heap-payload optional) leaked
+// the subject's payload — the classifier stopped at the ErrorPropagateExpr/
+// ErrorPanicExpr node and nothing owned the payload. Pin that the bare and
+// explicit spellings generate identical bodies AND that those bodies contain
+// the subject drop (identical-but-both-leaking would otherwise still pass).
+func TestT1900MatchSubjectSpillPeelsExplicitPropagation(t *testing.T) {
+	const prelude = `
+		enum Payload { empty, full(string data), }
+		hs!(int n) string { string s = ""; for i in 0..n { s += "a"; } return s; }
+		mkp!(int n) Payload { return Payload.full(data: hs(n)); }
+		mko!(int n) string? { string s = hs(n); return s; }
+	`
+	cases := []struct {
+		name   string
+		body   string
+		dropFn string
+	}{
+		{"enum_subject", `return match mkp(n)%s { Payload.full(data) => data.len, Payload.empty => 0, };`,
+			"call void @Payload.drop"},
+		{"optional_subject", `return match mko(n)%s { none => -1, _ => 1, };`,
+			"call void @promise_string_drop"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gen := func(spelling string) string {
+				src := prelude + "\nwork!(int n) int {\n" +
+					strings.ReplaceAll(tc.body, "%s", spelling) + "\n}\nmain() { }\n"
+				body := codegentest.FuncBody(t, codegentest.GenerateIR(t, src), "work")
+				return strings.ReplaceAll(body, "auto.", "error.")
+			}
+			bare, caret, bang := gen(""), gen("?^"), gen("?!")
+			if bare != caret {
+				t.Errorf("bare failable subject and `?^` generate different bodies\n--- bare ---\n%s\n--- ?^ ---\n%s", bare, caret)
+			}
+			codegentest.AssertContains(t, bare, tc.dropFn)
+			codegentest.AssertContains(t, caret, tc.dropFn)
+			codegentest.AssertContains(t, bang, tc.dropFn)
 		})
 	}
 }

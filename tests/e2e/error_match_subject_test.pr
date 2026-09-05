@@ -1,0 +1,522 @@
+// T1900: a bare failable call as a `match` scrutinee must auto-propagate
+// (§7.2: auto-propagation works in all expression positions; §11: `?^` is
+// equivalent to a bare failable call). Before the fix the raw failable
+// aggregate reached the match codegen: a codegen panic for int/enum subjects,
+// a runtime segfault for string subjects, and a wrong answer for optional
+// subjects (the none arm read the error flag as the present flag).
+//
+// Part C of the same fix: the explicit `?^`/`?!` spellings must reach the
+// T1119 enum spill / T1187 optional spill the bare form reaches, so a
+// droppable-enum or heap-payload-optional subject is dropped on match exit.
+// Leak enforcement is the assertion for the heap rows — every test here must
+// report 0 outstanding allocations.
+//
+// Deliberately excluded: the whole-value name-binding-escape arm
+// (`other => other`) on an owned heap-string subject — that dangles with a
+// plain local subject and no failable call anywhere, so it is T1919, not this
+// item.
+// Heap string: repeated concatenation always allocates (a `.rodata` literal
+// carries the T0060 bit-63 flag and could not expose a missing drop).
+heap_string!(int n) string {
+  string s = "";
+  for i in 0..n {
+    s += "a";
+  }
+  return s;
+}
+
+heap_bytes!(int n) u8[] {
+  u8[] b = Vector[u8](capacity: 4);
+  for i in 0..n {
+    b.push(97u8);
+  }
+  return b;
+}
+
+mki!(int n) int {
+  return n;
+}
+
+enum Color {
+  red,
+  green,
+  blue,
+}
+
+mk_color!(int n) Color {
+  if n == 0 {
+    return Color.red;
+  }
+  return Color.blue;
+}
+
+enum Payload {
+  empty,
+  full(string data),
+}
+
+mk_payload!(int n) Payload {
+  if n == 0 {
+    return Payload.empty;
+  }
+  return Payload.full(data: heap_string(n));
+}
+
+heap_opt!(int n) string? {
+  if n < 0 {
+    return none;
+  }
+  string s = heap_string(n);
+  return s;
+}
+
+type Shape {
+}
+
+type Circle is Shape {
+  int r;
+}
+
+type Square is Shape {
+  int s;
+}
+
+mk_shape!(int n) Shape {
+  if n == 0 {
+    return Circle(r: 7);
+  }
+  return Square(s: n);
+}
+
+// --- int subject (was: codegen panic on the bare form) ---
+
+int_bare!() int {
+  return match mki(3) {
+    3 => 1,
+    _ => 0,
+  };
+}
+
+int_caret!() int {
+  return match mki(3)?^ {
+    3 => 1,
+    _ => 0,
+  };
+}
+
+int_bang!() int {
+  return match mki(3)?! {
+    3 => 1,
+    _ => 0,
+  };
+}
+
+int_local!() int {
+  local := mki(3)?^;
+  return match local {
+    3 => 1,
+    _ => 0,
+  };
+}
+
+match_subject_int() `test {
+  assert(int_bare()?! == 1, "bare int subject");
+  assert(int_caret()?! == 1, "?^ int subject");
+  assert(int_bang()?! == 1, "?! int subject");
+  assert(int_local()?! == 1, "local int control");
+}
+
+// --- string subject (was: compiled, then segfaulted on the bare form) ---
+
+string_bare!() int {
+  return match heap_string(3) {
+    "aaa" => 1,
+    _ => 0,
+  };
+}
+
+string_caret!() int {
+  return match heap_string(3)?^ {
+    "aaa" => 1,
+    _ => 0,
+  };
+}
+
+string_bang!() int {
+  return match heap_string(3)?! {
+    "aaa" => 1,
+    _ => 0,
+  };
+}
+
+string_local!() int {
+  local := heap_string(3)?^;
+  return match local {
+    "aaa" => 1,
+    _ => 0,
+  };
+}
+
+match_subject_string() `test {
+  assert(string_bare()?! == 1, "bare string subject");
+  assert(string_caret()?! == 1, "?^ string subject");
+  assert(string_bang()?! == 1, "?! string subject");
+  assert(string_local()?! == 1, "local string control");
+}
+
+// --- fieldless enum subject (was: invalid IR on the bare form) ---
+
+color_bare!(int n) int {
+  return match mk_color(n) {
+    Color.red => 1,
+    Color.green => 2,
+    Color.blue => 3,
+  };
+}
+
+color_caret!(int n) int {
+  return match mk_color(n)?^ {
+    Color.red => 1,
+    Color.green => 2,
+    Color.blue => 3,
+  };
+}
+
+color_bang!(int n) int {
+  return match mk_color(n)?! {
+    Color.red => 1,
+    Color.green => 2,
+    Color.blue => 3,
+  };
+}
+
+color_local!(int n) int {
+  local := mk_color(n)?^;
+  return match local {
+    Color.red => 1,
+    Color.green => 2,
+    Color.blue => 3,
+  };
+}
+
+match_subject_fieldless_enum() `test {
+  assert(color_bare(0)?! == 1, "bare fieldless enum subject");
+  assert(color_caret(0)?! == 1, "?^ fieldless enum subject");
+  assert(color_bang(9)?! == 3, "?! fieldless enum subject");
+  assert(color_local(9)?! == 3, "local fieldless enum control");
+}
+
+// --- heap-payload enum subject (was: codegen panic bare; LEAK with ?^/?!) ---
+
+payload_bare!(int n) int {
+  return match mk_payload(n) {
+    Payload.full(data) => data.len,
+    Payload.empty => 0,
+  };
+}
+
+payload_caret!(int n) int {
+  return match mk_payload(n)?^ {
+    Payload.full(data) => data.len,
+    Payload.empty => 0,
+  };
+}
+
+payload_bang!(int n) int {
+  return match mk_payload(n)?! {
+    Payload.full(data) => data.len,
+    Payload.empty => 0,
+  };
+}
+
+payload_local!(int n) int {
+  local := mk_payload(n)?^;
+  return match local {
+    Payload.full(data) => data.len,
+    Payload.empty => 0,
+  };
+}
+
+match_subject_payload_enum() `test {
+  assert(payload_bare(4)?! == 4, "bare payload enum subject");
+  assert(payload_caret(4)?! == 4, "?^ payload enum subject");
+  assert(payload_bang(4)?! == 4, "?! payload enum subject");
+  assert(payload_local(4)?! == 4, "local payload enum control");
+  assert(payload_bare(0)?! == 0, "bare empty variant");
+}
+
+// --- heap-payload optional subject (was: wrong answer bare; LEAK with ?^) ---
+
+opt_bare!(int n) int {
+  return match heap_opt(n) {
+    none => -1,
+    _ => 1,
+  };
+}
+
+opt_caret!(int n) int {
+  return match heap_opt(n)?^ {
+    none => -1,
+    _ => 1,
+  };
+}
+
+opt_bang!(int n) int {
+  return match heap_opt(n)?! {
+    none => -1,
+    _ => 1,
+  };
+}
+
+opt_local!(int n) int {
+  local := heap_opt(n)?^;
+  return match local {
+    none => -1,
+    _ => 1,
+  };
+}
+
+match_subject_optional() `test {
+  // Wrong-answer regression: the bare form read the aggregate's error flag as
+  // the present flag, so a present value took the `none` arm.
+  assert(opt_bare(3)?! == 1, "bare optional subject takes non-none arm");
+  assert(opt_bare(-1)?! == -1, "bare optional subject takes none arm");
+  assert(opt_caret(3)?! == 1, "?^ optional subject");
+  assert(opt_bang(3)?! == 1, "?! optional subject");
+  assert(opt_local(3)?! == 1, "local optional control");
+}
+
+// --- user-type subject with type-pattern arms (RTTI dispatch) ---
+
+shape_bare!(int n) int {
+  return match mk_shape(n) {
+    Circle c => c.r,
+    Square s => s.s,
+    _ => -1,
+  };
+}
+
+shape_caret!(int n) int {
+  return match mk_shape(n)?^ {
+    Circle c => c.r,
+    Square s => s.s,
+    _ => -1,
+  };
+}
+
+shape_bang!(int n) int {
+  return match mk_shape(n)?! {
+    Circle c => c.r,
+    Square s => s.s,
+    _ => -1,
+  };
+}
+
+shape_local!(int n) int {
+  local := mk_shape(n)?^;
+  return match local {
+    Circle c => c.r,
+    Square s => s.s,
+    _ => -1,
+  };
+}
+
+match_subject_type_pattern() `test {
+  assert(shape_bare(0)?! == 7, "bare shape subject, circle arm");
+  assert(shape_bare(5)?! == 5, "bare shape subject, square arm");
+  assert(shape_caret(0)?! == 7, "?^ shape subject");
+  assert(shape_bang(5)?! == 5, "?! shape subject");
+  assert(shape_local(0)?! == 7, "local shape control");
+}
+
+// --- u8[] subject with a guarded binding arm ---
+
+bytes_bare!(int n) int {
+  return match heap_bytes(n) {
+    b if b.len == 3 => 1,
+    _ => 0,
+  };
+}
+
+bytes_caret!(int n) int {
+  return match heap_bytes(n)?^ {
+    b if b.len == 3 => 1,
+    _ => 0,
+  };
+}
+
+bytes_bang!(int n) int {
+  return match heap_bytes(n)?! {
+    b if b.len == 3 => 1,
+    _ => 0,
+  };
+}
+
+bytes_local!(int n) int {
+  local := heap_bytes(n)?^;
+  return match local {
+    b if b.len == 3 => 1,
+    _ => 0,
+  };
+}
+
+match_subject_bytes() `test {
+  assert(bytes_bare(3)?! == 1, "bare u8[] subject");
+  assert(bytes_caret(3)?! == 1, "?^ u8[] subject");
+  assert(bytes_bang(2)?! == 0, "?! u8[] subject, wildcard arm");
+  assert(bytes_local(3)?! == 1, "local u8[] control");
+}
+
+// --- statement position: match with block arms, value discarded ---
+
+statement_bare!(int n) int {
+  int hit = 0;
+  match mki(n) {
+    3 => {
+      hit = 1;
+    },
+    _ => {
+      hit = 2;
+    },
+  }
+  return hit;
+}
+
+statement_string_bare!(int n) int {
+  int hit = 0;
+  match heap_string(n) {
+    "aaa" => {
+      hit = 1;
+    },
+    _ => {
+      hit = 2;
+    },
+  }
+  return hit;
+}
+
+match_subject_statement() `test {
+  assert(statement_bare(3)?! == 1, "bare statement-position int subject");
+  assert(statement_bare(4)?! == 2, "bare statement-position wildcard arm");
+  assert(statement_string_bare(3)?! == 1, "bare statement-position string subject");
+}
+
+// --- raising path: the subject call raises, so no arm ever runs ---
+// Everything above only exercises the success half of the auto-propagation.
+// These helpers actually raise, pinning that the error exits the enclosing
+// function before the match body, the message survives, and neither the error
+// object nor a droppable subject-in-flight leaks on the propagation path.
+
+fail_string!(int n) string {
+  if n < 0 {
+    raise error(message: "subject failed: " + n.to_string());
+  }
+  return heap_string(n);
+}
+
+fail_payload!(int n) Payload {
+  if n < 0 {
+    raise error(message: "payload subject failed");
+  }
+  return Payload.full(data: heap_string(n));
+}
+
+raising_string_bare!(int n) int {
+  return match fail_string(n) {
+    "aaa" => 1,
+    _ => 0,
+  };
+}
+
+raising_payload_bare!(int n) int {
+  return match fail_payload(n) {
+    Payload.full(data) => data.len,
+    Payload.empty => 0,
+  };
+}
+
+raising_statement_bare!(int n) int {
+  int hit = 0;
+  match fail_string(n) {
+    _ => {
+      hit = 1;
+    },
+  }
+  return hit;
+}
+
+match_subject_raises() `test {
+  string msg = "";
+  raising_string_bare(-1)? e {
+    msg = e.message;
+  };
+  assert(msg == "subject failed: -1", "raising string subject propagates the error");
+  assert(raising_string_bare(3)?! == 1, "same helper still matches when the subject succeeds");
+
+  msg = "";
+  raising_payload_bare(-2)? e {
+    msg = e.message;
+  };
+  assert(msg == "payload subject failed", "raising droppable-enum subject propagates");
+  assert(raising_payload_bare(4)?! == 4, "same payload helper still matches on success");
+
+  msg = "";
+  raising_statement_bare(-1)? e {
+    msg = e.message;
+  };
+  assert(msg == "subject failed: -1", "statement-position subject raise skips all arms");
+  assert(raising_statement_bare(3)?! == 1, "statement-position helper still runs its arm on success");
+}
+
+// --- generic context: the subject auto-propagates inside a mono-defined body ---
+// genMatchExpr applies c.typeSubst when defining a monomorphized body, so the
+// AutoPropagateExprs lookup for the scrutinee happens under substitution — a
+// different codegen entry than the plain-function tests above. Instantiated at
+// int (register-sized) and string (heap: subject spill + drop under subst).
+
+generic_source![T](T move v, bool should_fail) T {
+  if should_fail {
+    raise error(message: "generic subject failed");
+  }
+  return v;
+}
+
+generic_match![T: Equal](T move v, T want, bool should_fail) int {
+  return match generic_source(move v, should_fail) {
+    x if x == want => 1,
+    _ => 0,
+  };
+}
+
+match_subject_generic() `test {
+  assert(generic_match(3, 3, false)?! == 1, "generic int subject, guard hit");
+  assert(generic_match(3, 4, false)?! == 0, "generic int subject, guard miss");
+  assert(generic_match(heap_string(3)?!, "aaa", false)?! == 1, "generic heap-string subject");
+  string msg = "";
+  generic_match(heap_string(1)?!, "a", true)? e {
+    msg = e.message;
+  };
+  assert(msg == "generic subject failed", "generic subject raise propagates, moved-in value dropped");
+}
+
+// --- failable method call as the scrutinee (MemberExpr callee, not Ident) ---
+
+type Maker {
+  int n;
+
+  make!(this) string {
+    return heap_string(this.n);
+  }
+}
+
+method_bare!() int {
+  m := Maker(n: 3);
+  return match m.make() {
+    "aaa" => 1,
+    _ => 0,
+  };
+}
+
+match_subject_method_call() `test {
+  assert(method_bare()?! == 1, "bare failable method-call subject");
+}

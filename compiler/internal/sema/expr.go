@@ -3816,6 +3816,10 @@ func collectAncestors(n *types.Named) []types.Type {
 func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type, report bool) types.Type {
 	errsBefore := len(c.errors)
 	subjectType := c.checkExpr(e.Subject)
+	// T1900: a bare failable call as the match scrutinee is an expression
+	// position (§7.2), so it must auto-propagate in a failable function and be
+	// rejected in a non-failable one — same check T1267 added for arm bodies.
+	c.checkFailableEscape(e.Subject)
 
 	var resultType types.Type
 	hasReachableVoidArm := false

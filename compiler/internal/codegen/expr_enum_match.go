@@ -223,7 +223,7 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 // genMatchExpr generates a match expression. Dispatches to enum match (tag-based switch)
 // or value match (literal comparison chain) based on subject type.
 func (c *Compiler) genMatchExpr(e *ast.MatchExpr) value.Value {
-	subject := c.genExpr(e.Subject)
+	subject := c.genExprAutoPropagate(e.Subject) // T1900
 	subjectType := c.info.Types[e.Subject]
 	// Apply typeSubst for mono context
 	if c.typeSubst != nil {
@@ -316,9 +316,10 @@ func (c *Compiler) genMatchExpr(e *ast.MatchExpr) value.Value {
 // MemberExpr field, ThisExpr, native Vector/Array index) is owned by something
 // else that drops it, so dropping it here would double-free.
 //
-// Transparent borrow-preserving wrappers — parentheses and optional force-unwrap
-// (`!`) — are peeled first: `make_opt()!` is owned (root is a call) while `o!`
-// for a local `o` is a place (root is an ident).
+// Transparent borrow-preserving wrappers — parentheses, optional force-unwrap
+// (`!`), and explicit error propagation/panic (`?^`/`?!`, T1900) — are peeled
+// first: `make_opt()!` is owned (root is a call) while `o!` for a local `o` is
+// a place (root is an ident).
 //
 // A call always yields an owned value. A non-native `[]`-method read (Map/Set)
 // yields an owned value exactly when the `[]` method's internal match-destructure
@@ -336,6 +337,10 @@ func (c *Compiler) subjectIsOwnedRvalueEnum(expr ast.Expr, subjectType types.Typ
 		case *ast.ParenExpr:
 			expr = e.Expr
 		case *ast.OptionalUnwrapExpr:
+			expr = e.Expr
+		case *ast.ErrorPropagateExpr: // T1900
+			expr = e.Expr
+		case *ast.ErrorPanicExpr: // T1900
 			expr = e.Expr
 		default:
 			switch e := expr.(type) {

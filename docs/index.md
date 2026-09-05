@@ -58,6 +58,17 @@ A file's directory determines whether it binds: everything in the `docs/` root i
 - [ai-platform.md](ai-platform.md) — Promise as an AI-centric platform: MCP servers, agent orchestration, sandboxed execution.
 - [cloud-persistence.md](cloud-persistence.md) — Durable, schema-driven, multi-process shared state.
 
+## Organization-wide corpus — binding
+
+Vendored from [promise-language/org](https://github.com/promise-language/org) at the release named in [org/stamp.json](org/stamp.json). Never edited here: an issue about one of these documents is filed against `org` (org/normative.md §7); what this project files locally under their tags is its own compliance gaps.
+
+- [org/normative.md](org/normative.md) — What makes a document binding, and the one docs structure every project holds. This project's own [normative.md](normative.md) predates it; reconciling the two is tracked work.
+- [org/engineering-guide.md](org/engineering-guide.md) — How code in this organization is written, in any language.
+- [org/engineering-guide-promise.md](org/engineering-guide-promise.md) — The engineering guide applied to Promise source.
+- [org/engineering-guide-go.md](org/engineering-guide-go.md) — The engineering guide applied to Go source.
+- [org/cli-guide.md](org/cli-guide.md) — How every command-line tool behaves at its invocation surface.
+- [org/stamp.json](org/stamp.json) — The version stamp: the org release these copies came from, with per-file hashes.
+
 ---
 
 ## Proposals — not binding

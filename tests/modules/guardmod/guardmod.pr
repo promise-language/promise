@@ -1,0 +1,16 @@
+// guardmod — module whose method body is the only place MutexGuard[int] is
+// instantiated (T1929).
+type Counter `public `doc("A counter guarded by a Mutex owned by the method that uses it") {
+  int start `public `doc("Value the guarded counter starts from");
+
+  bump(this, int by) int `public `doc("Locks a local Mutex[int] and returns the incremented value") {
+    // The MutexGuard[int] local lives only inside this module's body. Before
+    // T1929 that made compileModule declare a MutexGuard[int].drop stub nothing
+    // ever defines, and bake a pointer to it into promise_typeinfo_MutexGuard[int]
+    // — an undefined symbol lld-link (Windows) refused to link.
+    Mutex[int] mx = Mutex[int](this.start);
+    MutexGuard[int] g = mx.lock();
+    g.borrow = g.borrow + by;
+    return g.borrow;
+  }
+}

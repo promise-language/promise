@@ -1734,8 +1734,15 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 				// functions. Vector/Generator are dropped via dedicated paths
 				// (origin Vector.drop, bindingGenerator); don't declare a dead
 				// stub that would only ever corrupt memory if called.
+				// T1929: MutexGuard belongs to that second group, not to the Arc
+				// family — its drop is the single shared MutexGuard.drop symbol
+				// (T0561), which every guard drop site looks up under that literal
+				// name, so a per-instance MutexGuard[T].drop has no definer
+				// anywhere in codegen. Declaring one only poisons the c.funcs
+				// lookup in emitMonoTypeInfoGlobals, which then bakes a pointer to
+				// a body-less function into the instance's typeinfo.
 				if !isFnIterNativeDrop(named) && named != types.TypArc &&
-					named != types.TypWeak && named != types.TypMutex && named != types.TypMutexGuard {
+					named != types.TypWeak && named != types.TypMutex {
 					continue
 				}
 			}
@@ -1848,10 +1855,12 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			// lazily by getOrCreateArcDrop when the drop function is first needed.
 			if isNativeDrop {
 				// T0469: only _FnIter's layout maps to __promise_iter_cleanup.
-				// Arc/Weak/Mutex/MutexGuard bodies are filled lazily by
-				// getOrCreate*Drop. All other native-drop generics are dropped
-				// via dedicated paths and have no per-instance stub (the declare
-				// phase skips them), so this loop never reaches them here.
+				// Arc/Weak/Mutex bodies are filled lazily by getOrCreate*Drop.
+				// All other native-drop generics are dropped via dedicated paths
+				// and have no per-instance stub (the declare phase skips them),
+				// so this loop never reaches them here — MutexGuard goes through
+				// the shared origin symbol MutexGuard.drop (T0561, T1929) exactly
+				// as Vector goes through Vector.drop.
 				if isFnIterNativeDrop(named) {
 					c.defineFnIterDrop(fn, inst)
 				}

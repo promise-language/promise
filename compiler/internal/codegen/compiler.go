@@ -202,6 +202,7 @@ type Compiler struct {
 	valueTypeRTTI             map[*types.Named]*ir.Global     // value type → global RTTI instance (field 1 of value struct)
 	interpBuilderWriterVtable *ir.Global                      // lazy: Builder→Writer vtable for string interpolation
 	nullVtableSlots           []nullVtableSlot                // T1880: slots emitted as null, checked by verifyNoNullVtableSlots
+	typeInfoDropRefs          []typeInfoDropRef               // T1929: typeinfo drop pointers, checked by verifyNoBodylessTypeInfoDrops
 
 	// Scope cleanup state: stack of active bindings for automatic close()/drop() at scope exit
 	scopeBindings  []scopeBinding
@@ -1140,6 +1141,10 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	// T1880: a null vtable slot for a non-abstract method is always a codegen
 	// bug — it turns a virtual call into a jump to address 0.
 	c.verifyNoNullVtableSlots()
+
+	// T1929: a typeinfo drop pointer aimed at a declared-but-never-defined
+	// function is an undefined symbol that only some linkers diagnose.
+	c.verifyNoBodylessTypeInfoDrops()
 
 	return &CompileResult{
 		Module:          c.module,

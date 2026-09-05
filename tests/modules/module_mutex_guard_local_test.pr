@@ -1,0 +1,10 @@
+use guardmod "./guardmod";
+
+// T1929: a generic `native` std type (MutexGuard[int]) instantiated only inside a
+// module body must still link — its drop goes through the shared MutexGuard.drop
+// symbol, not a per-instance MutexGuard[int].drop that nothing ever defines.
+module_mutex_guard_local() `test {
+  guardmod.Counter c = guardmod.Counter(start: 40);
+  assert(c.bump(2) == 42, "the module-side MutexGuard[int] local guards the increment");
+  assert(c.bump(0) == 40, "each call locks a fresh Mutex, so the start value is unchanged");
+}

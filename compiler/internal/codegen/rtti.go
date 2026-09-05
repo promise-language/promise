@@ -109,6 +109,7 @@ func (c *Compiler) emitTypeInfo(named *types.Named) *ir.Global {
 	typeID := c.assignTypeID(named)
 	parentIDs := c.collectAllParentIDs(named)
 	numParents := len(parentIDs)
+	globalName := "promise_typeinfo_" + c.typeGlobalName(named)
 
 	var structType *irtypes.StructType
 	var fields []constant.Constant
@@ -121,7 +122,7 @@ func (c *Compiler) emitTypeInfo(named *types.Named) *ir.Global {
 	}
 
 	// Field 1: drop function pointer (B0226)
-	fields = append(fields, c.resolveTypeInfoDropFn(named.Obj().Name(), named))
+	fields = append(fields, c.resolveTypeInfoDropFn(globalName, "", named.Obj().Name(), named))
 
 	// Field 2: clone function pointer (T0387)
 	fields = append(fields, c.resolveTypeInfoCloneFn(named))
@@ -144,7 +145,6 @@ func (c *Compiler) emitTypeInfo(named *types.Named) *ir.Global {
 	}
 
 	init := constant.NewStruct(structType, fields...)
-	globalName := "promise_typeinfo_" + c.typeGlobalName(named)
 	global := c.module.NewGlobalDef(globalName, init)
 	global.Immutable = true
 	return global
@@ -155,7 +155,10 @@ func (c *Compiler) emitTypeInfo(named *types.Named) *ir.Global {
 // B0226: Used to populate the typeinfo drop_fn_ptr field for runtime dispatch.
 // B0247: For explicit user drops (not synthesized), returns a wrapper that calls
 // drop + pal_free, since user drop functions don't free the instance themselves.
-func (c *Compiler) resolveTypeInfoDropFn(ownerName string, named *types.Named) constant.Constant {
+// globalName/instName identify the typeinfo the pointer is baked into, so the
+// choice can be re-checked by verifyNoBodylessTypeInfoDrops once every body
+// exists (T1929); instName is "" for a non-generic type.
+func (c *Compiler) resolveTypeInfoDropFn(globalName, instName, ownerName string, named *types.Named) constant.Constant {
 	if named.HasDrop() || named.NeedsSynthDrop() {
 		resolvedOwner := ownerName
 		explicitDrop := named.HasDrop() && !named.NeedsSynthDrop()
@@ -164,6 +167,7 @@ func (c *Compiler) resolveTypeInfoDropFn(ownerName string, named *types.Named) c
 		}
 		mangledName := mangleMethodName(resolvedOwner, "drop", false)
 		if fn, ok := c.funcs[mangledName]; ok {
+			c.recordTypeInfoDropRef(globalName, instName, named.Obj().Name(), fn)
 			if explicitDrop && !dropIsNative(named) {
 				// B0247: Wrap explicit user drop with pal_free. T1344: native drops
 				// self-free, so wrapping them double-frees under RTTI dispatch.
@@ -689,8 +693,10 @@ func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
 		// Field 1: drop function pointer (B0226)
 		// B0247: Explicit user drops get wrapped with pal_free.
 		dropFnConst := constant.Constant(constant.NewNull(irtypes.I8Ptr))
+		tiGlobalName := "promise_typeinfo_" + name
 		monoDropName := mangleMethodName(name, "drop", false)
 		if fn, ok := c.funcs[monoDropName]; ok {
+			c.recordTypeInfoDropRef(tiGlobalName, name, name, fn)
 			if named.HasDrop() && !named.NeedsSynthDrop() && !dropIsNative(named) {
 				// T1344: native drops (e.g. _FnIter → iter_cleanup) self-free —
 				// wrapping them double-frees under RTTI drop dispatch.
@@ -698,8 +704,10 @@ func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
 			}
 			dropFnConst = constant.NewBitCast(fn, irtypes.I8Ptr)
 		} else {
-			// Fall back to origin type's drop
-			dropFnConst = c.resolveTypeInfoDropFn(named.Obj().Name(), named)
+			// Fall back to origin type's drop. The resolved function belongs to the
+			// origin, not to this instance, so it is not exempted by an instance
+			// cache hit — hence the empty instName.
+			dropFnConst = c.resolveTypeInfoDropFn(tiGlobalName, "", named.Obj().Name(), named)
 		}
 		fields = append(fields, dropFnConst)
 
@@ -727,7 +735,7 @@ func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
 		}
 
 		init := constant.NewStruct(structType, fields...)
-		tiGlobal := c.module.NewGlobalDef("promise_typeinfo_"+name, init)
+		tiGlobal := c.module.NewGlobalDef(tiGlobalName, init)
 		tiGlobal.Immutable = true
 		c.monoTypeInfoGlobals[name] = tiGlobal
 
@@ -984,6 +992,51 @@ func (c *Compiler) verifyNoNullVtableSlots() {
 			"a default inherited from a structural interface — virtual dispatch "+
 			"would jump to address 0 (T1880)",
 			s.slot, s.global.Name(), s.typeName, s.method.Name()))
+	}
+}
+
+// typeInfoDropRef records a drop function pointer that was baked into a typeinfo
+// global, so verifyNoBodylessTypeInfoDrops can re-check it once every body exists
+// (T1929). The check cannot run at emission time: a lazily-defined drop such as
+// Ref[int].drop is legitimately declared-only when its typeinfo is built and only
+// gets a body when the first drop site is compiled.
+type typeInfoDropRef struct {
+	global   string // typeinfo global the pointer was baked into
+	typeName string
+	instName string // mono instance name; "" for a non-generic type
+	fn       *ir.Func
+}
+
+// recordTypeInfoDropRef notes that global's drop_fn_ptr field points at fn.
+// The pre-wrap function is what must be recorded: getOrCreateDropWrap emits a
+// wrapper that *calls* its target, so wrapping never makes a body-less target safe.
+func (c *Compiler) recordTypeInfoDropRef(global, instName, typeName string, fn *ir.Func) {
+	c.typeInfoDropRefs = append(c.typeInfoDropRefs, typeInfoDropRef{
+		global: global, instName: instName, typeName: typeName, fn: fn})
+}
+
+// verifyNoBodylessTypeInfoDrops asserts that no typeinfo's drop_fn_ptr points at a
+// function that was declared but never defined, once every body has been emitted.
+// Such a pointer is an undefined symbol that only some linkers diagnose: ld.lld
+// discards the (otherwise unreferenced) typeinfo section under --gc-sections before
+// it can complain, while lld-link resolves symbols before /OPT:REF and fails the
+// build — which is how T1929 surfaced as a Windows-only link error for a defect
+// that was in the IR on every platform.
+//
+// A cached mono instance is exempt: its body legitimately lives in a pre-built .bc
+// rather than in this module (see the cachedInstances skip in defineMonoMethods).
+func (c *Compiler) verifyNoBodylessTypeInfoDrops() {
+	for _, r := range c.typeInfoDropRefs {
+		if r.instName != "" && c.cachedInstances[r.instName] {
+			continue
+		}
+		if len(r.fn.Blocks) > 0 {
+			continue
+		}
+		panic(fmt.Sprintf("codegen: @%s names %s as the drop function for %s, "+
+			"but that function is declared and never defined — the typeinfo holds "+
+			"a reference to an undefined symbol (T1929)",
+			r.global, r.fn.Name(), r.typeName))
 	}
 }
 

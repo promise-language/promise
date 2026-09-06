@@ -11,10 +11,13 @@ import (
 )
 
 // compileModules inlines all imported module declarations into the current IR module.
-// For each module, it temporarily swaps c.info and c.file to the module's context,
-// runs the same layout/declare/define pipeline, then restores.
-// Modules are compiled in topological order (dependencies before dependents)
-// so that a module's types and functions are available when its dependents are compiled.
+// It runs in two sweeps over the modules, each temporarily swapping c.info and
+// c.file to the module's context and restoring afterwards: declareModulePhase for
+// every module first (layouts, stubs, vtables, typeinfo), then defineModulePhase
+// for every module (bodies). Splitting the sweeps is what lets a std generic
+// monomorphized for a later module's type reach that type's stubs (T1458).
+// Both sweeps follow topological order (dependencies before dependents) so that a
+// module's types and functions are available when its dependents are compiled.
 func (c *Compiler) compileModules() {
 	if c.info.ModuleInfos == nil {
 		return
@@ -42,7 +45,7 @@ func (c *Compiler) compileModules() {
 	// (user) sema info. These include instances of module-defined types/methods
 	// (e.g. Map[string,int], Iterator[int].map[int]) and calls to module generic
 	// functions (e.g. sort[int]) that were created by user code. We pass them to
-	// compileModule so they are processed under the correct module context.
+	// declareModulePhase so they are processed under the correct module context.
 	mainMonoInstances := collectMonoInstances(c.info, c.spiralInstances)
 	mainMonoFuncInstances := collectMonoFuncInstances(c.info, mainMonoInstances)
 	mainMonoMethodInstances := collectMonoMethodInstances(c.info, mainMonoInstances)
@@ -114,42 +117,54 @@ func (c *Compiler) compileModules() {
 	crossResolveAccumulatedInstances(&mainMonoFuncInstances, &mainMonoMethodInstances)
 
 	// Use topological order if available, otherwise fall back to map iteration.
+	var ordered []*sema.ModuleInfo
 	if len(c.info.ModuleOrder) > 0 {
 		for _, key := range c.info.ModuleOrder {
 			if modInfo, ok := c.info.ModuleInfos[key]; ok {
-				c.compileModule(modInfo, mainMonoInstances, mainMonoFuncInstances, mainMonoMethodInstances)
+				ordered = append(ordered, modInfo)
 			}
 		}
 	} else {
 		for _, modInfo := range c.info.ModuleInfos {
-			c.compileModule(modInfo, mainMonoInstances, mainMonoFuncInstances, mainMonoMethodInstances)
+			ordered = append(ordered, modInfo)
 		}
+	}
+
+	// T1458: declare every module before defining any of them, mirroring what
+	// compile() already does for the main file. A std generic monomorphized for a
+	// type declared in a later module (`sort(Score[])`, `Set[Key]`, `"{item}"`,
+	// a synthesized drop) dispatches to that type's method stub, which a strictly
+	// per-module declare-then-define order has not created yet.
+	prepared := make([]*preparedModule, 0, len(ordered))
+	for _, modInfo := range ordered {
+		prepared = append(prepared, c.declareModulePhase(modInfo, mainMonoInstances, mainMonoFuncInstances, mainMonoMethodInstances))
+	}
+	for _, p := range prepared {
+		c.defineModulePhase(p)
 	}
 }
 
-// compileModule compiles a single module's declarations into the current IR module.
-// extraInstances contains mono instances from the caller's sema info (e.g., the
-// main file) that may include instances of this module's types; they are merged
-// in so that user-created instantiations of module-defined generics are processed
-// under the correct module context (module's c.info and c.file).
-func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*types.Instance, extraFuncInstances []*sema.FuncInstance, extraMethodInstances []*sema.MethodInstance) {
-	// Save main context
-	savedInfo := c.info
-	savedFile := c.file
-	savedModule := c.compilingModule
+// preparedModule carries the per-module state that declareModulePhase computes
+// and defineModulePhase needs, so the two halves of a module's compilation can be
+// separated in time (T1458).
+type preparedModule struct {
+	modInfo             *sema.ModuleInfo
+	monoInstances       []*types.Instance
+	monoFuncInstances   []*sema.FuncInstance
+	monoMethodInstances []*sema.MethodInstance
+}
 
-	// Switch to module context.
-	// Use IRPrefix (derived from GlobalIdentity) for IR symbols — this is stable
-	// and globally unique, enabling cross-project .o reuse.
+// declareModulePhase computes layouts and declares every symbol a single module
+// contributes, without generating any bodies. extraInstances contains mono
+// instances from the caller's sema info (e.g., the main file) that may include
+// instances of this module's types; they are merged in so that user-created
+// instantiations of module-defined generics are processed under the correct
+// module context (module's c.info and c.file). The returned preparedModule is
+// passed to defineModulePhase once every module has been declared (T1458).
+func (c *Compiler) declareModulePhase(modInfo *sema.ModuleInfo, extraInstances []*types.Instance, extraFuncInstances []*sema.FuncInstance, extraMethodInstances []*sema.MethodInstance) *preparedModule {
+	defer c.enterModuleContext(modInfo)()
+
 	irName := modInfo.EffectiveIRPrefix()
-	c.info = modInfo.SemaInfo
-	c.file = modInfo.File
-	c.compilingModule = irName
-	// Reset per-module counters so module constant names are stable
-	// (independent of how many constants main code has emitted so far).
-	c.moduleStrCounter = 0
-	c.moduleArrCounter = 0
-
 	modFile := modInfo.File
 
 	// 1. Compute enum layouts for module types
@@ -200,12 +215,41 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.emitTypeInfoGlobals(modFile)
 	c.emitMonoTypeInfoGlobals(monoInstances)
 
-	// 7. Declare and define module functions
+	// 7. Declare module functions
 	c.declareModuleFuncs(modFile, irName)
 	c.declareMonoFuncs(modFile, monoFuncInstances)
 	c.declareMonoMethodInstances(modFile, monoMethodInstances)
 
-	// 8. Define module method bodies
+	return &preparedModule{
+		modInfo:             modInfo,
+		monoInstances:       monoInstances,
+		monoFuncInstances:   monoFuncInstances,
+		monoMethodInstances: monoMethodInstances,
+	}
+}
+
+// defineModulePhase generates the bodies for a module that declareModulePhase
+// has already declared. It re-enters the module context so that lazy synthesis
+// during body generation (ensureDefaultMethodsSynthesized, getOrEmitViewVtable)
+// still resolves against the module's sema info (T1458).
+func (c *Compiler) defineModulePhase(p *preparedModule) {
+	modInfo := p.modInfo
+	defer c.enterModuleContext(modInfo)()
+
+	irName := modInfo.EffectiveIRPrefix()
+	modFile := modInfo.File
+	monoInstances := p.monoInstances
+	monoFuncInstances := p.monoFuncInstances
+	monoMethodInstances := p.monoMethodInstances
+
+	// Reset per-module counters so module constant names are stable
+	// (independent of how many constants main code has emitted so far).
+	// Body generation is what emits these constants, so resetting here keeps
+	// @.str.__mod_<name>.N numbering identical to the pre-split ordering.
+	c.moduleStrCounter = 0
+	c.moduleArrCounter = 0
+
+	// 1. Define module method bodies
 	c.defineModuleTypeMethods(modFile, irName)
 	c.defineModuleEnumMethods(modFile, irName)
 	c.defineMonoMethods(modFile, monoInstances)
@@ -221,15 +265,29 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.defineMonoInheritedDrops(monoInstances)                 // T0468
 	c.defineInheritedModuleDrops(modFile, irName)             // T0507
 
-	// 9. Define module function bodies
+	// 2. Define module function bodies
 	c.defineModuleFuncs(modFile, irName)
 	c.defineMonoFuncs(modFile, monoFuncInstances)
 	c.defineMonoMethodInstances(modFile, monoMethodInstances)
+}
 
-	// Restore main context
-	c.info = savedInfo
-	c.file = savedFile
-	c.compilingModule = savedModule
+// enterModuleContext switches the compiler to modInfo's sema info, file and IR
+// prefix, and returns the function that restores the caller's context. Both
+// halves of a module's compilation enter through it, so the two sweeps can never
+// disagree about what "the module context" is. The IR prefix comes from
+// EffectiveIRPrefix (derived from GlobalIdentity) rather than the import name —
+// it is stable and globally unique, which is what makes cross-project .o reuse
+// possible.
+func (c *Compiler) enterModuleContext(modInfo *sema.ModuleInfo) func() {
+	savedInfo, savedFile, savedModule := c.info, c.file, c.compilingModule
+	c.info = modInfo.SemaInfo
+	c.file = modInfo.File
+	c.compilingModule = modInfo.EffectiveIRPrefix()
+	return func() {
+		c.info = savedInfo
+		c.file = savedFile
+		c.compilingModule = savedModule
+	}
 }
 
 // declareModuleExterns declares extern functions from a module, deduplicating

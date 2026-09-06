@@ -3,9 +3,10 @@
 // the interface's slots are laid into the type's own vtable as a prefix and
 // boxing reuses that vtable instead of building a `_as_<Interface>` view — which
 // means the inherited defaults must be synthesized per concrete type and written
-// into those slots while the MODULE is compiled (compileModule's own
-// declare/define pass), not only for main-file types. Before the fix the slots
-// were null and calling any inherited default jumped to address 0.
+// into those slots while the MODULE is compiled (declareModulePhase /
+// defineModulePhase, the module's own declare/define pass), not only for
+// main-file types. Before the fix the slots were null and calling any inherited
+// default jumped to address 0.
 //
 // This is the shape T1734 needs, since every non-generic heap I/O type that will
 // declare `is Reader` / `is Writer` (io.File, net.TcpStream, gzip.GunzipReader,

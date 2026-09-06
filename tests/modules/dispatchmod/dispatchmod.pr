@@ -1,0 +1,67 @@
+// dispatchmod: module-declared types carrying each dispatch kind an
+// earlier-compiled module's generic reaches through a structural bound —
+// regression fixture for T1458, where that module's monomorphized bodies were
+// generated before a later module's method stubs existed. std is the earlier
+// module for Item/Key/Score/Heapy; Tag is reached from dispatchgen instead,
+// which is what shows the failure was never specific to std.
+type Item `public `doc("A type with a format method, dispatched by string interpolation inside Vector[Item].to_string().") {
+  int id `public `final `doc("The identifier written by format().");
+
+  format!(this, Writer ~w) `public `doc("Writes 'item-<id>'.") {
+    w.write("item-".bytes())?^;
+    w.write(this.id.to_string().bytes())?^;
+  }
+}
+
+type Key is Hashable `public `doc("A hashable key, dispatched by Set[Key] and map[Key, V].") {
+  string name `public `final `doc("The key text hashed and compared.");
+
+  get hash int `public `doc("FNV-1a hash of the key name.") {
+    return this.name.hash;
+  }
+
+  == (this, Key other) bool `public `doc("Compares two keys by name.") {
+    return this.name == other.name;
+  }
+}
+
+type Score is Ordered `public `doc("An ordered value, dispatched by sort(Score[]).") {
+  int points `public `final `doc("The score being ordered.");
+
+  < (this, Score other) bool `public `doc("Orders scores by point count.") {
+    return this.points < other.points;
+  }
+
+  == (this, Score other) bool `public `doc("Compares scores by point count.") {
+    return this.points == other.points;
+  }
+}
+
+type Heapy `public `doc("A type owning a heap field, so its drop is synthesized and reached from Vector[Heapy].drop.") {
+  string label `public `final `doc("Heap-owned name, dropped with the instance.");
+  int[] values `public `doc("Heap-owned payload, dropped with the instance.");
+}
+
+type Tag `public `doc("A labelled value, dispatched by dispatchgen's Labeled-bounded generics.") {
+  string text `public `final `doc("The heap-owned label text.");
+
+  get label string `public `doc("The text this tag is known by.") {
+    return this.text;
+  }
+}
+
+enum Payload `public `doc("An enum owning a heap payload, so its drop is synthesized and reached from Vector[Payload].") {
+  Empty,
+  Text(string body),
+
+  describe(this) string `public `doc("Returns the payload text, or 'empty'.") {
+    match this {
+      Payload.Empty => {
+        return "empty";
+      },
+      Payload.Text(b) => {
+        return b;
+      },
+    }
+  }
+}

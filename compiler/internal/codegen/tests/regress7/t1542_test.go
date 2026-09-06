@@ -266,8 +266,8 @@ func TestT1542ModuleGenericValueTypeAsField(t *testing.T) {
 }
 
 // A module-owned type with a field of a value type imported from *another*
-// module (std's Duration): here the field walk runs during compileModule's own
-// layout pass, not the main file's. std is compiled first, so this already
+// module (std's Duration): here the field walk runs during declareModulePhase's
+// own layout pass, not the main file's. std is declared first, so this already
 // worked — the test pins that module compilation order keeps holding.
 func TestT1542ModuleTypeWithStdValueField(t *testing.T) {
 	ir := codegentest.GenerateIRWithModule(t, "vmod",

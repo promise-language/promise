@@ -1,0 +1,34 @@
+// dispatchgen: generics bounded by a structural interface this module declares
+// itself, so it never names the module holding the concrete types — regression
+// fixture for T1458. std is the losing module in the tests next to this one only
+// because every program imports it; nothing about the old ordering was specific
+// to std, and this module is what shows it: a module compiled *before* another
+// could not reach the later module's method stubs either.
+type Labeled `structural `public `doc("Anything that can name itself.") {
+  get label string `abstract `doc("The text this value is known by.");
+}
+
+describe[T: Labeled](T item) string `public `doc("Wraps an item's label in angle brackets.") {
+  return "<{item.label}>";
+}
+
+join_labels[T: Labeled](T[] items) string `public `doc("Joins every item's label with a comma.") {
+  string out = "";
+  int i = 0;
+  while i < items.len {
+    if i > 0 {
+      out = out + ", ";
+    }
+    out = out + items[i].label;
+    i++;
+  }
+  return out;
+}
+
+type Boxed[T: Labeled] `public `doc("A one-item container that reads its item's label.") {
+  T item `public `final `doc("The contained item.");
+
+  get shown string `public `doc("The contained item's label.") {
+    return this.item.label;
+  }
+}

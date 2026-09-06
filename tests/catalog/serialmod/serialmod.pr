@@ -1,0 +1,7 @@
+// serialmod: a serializable type declared in a module rather than in the user
+// file, so json's `encode_string[T: Encodable]` is monomorphized for a type
+// whose module is compiled after json's — the catalog-module form of T1458.
+type Reading `serializable `public `doc("A named measurement, encoded and decoded as JSON.") {
+  string sensor `public `doc("The sensor that produced the reading.");
+  int value `public `doc("The measured value.");
+}

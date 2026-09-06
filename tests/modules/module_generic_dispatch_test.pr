@@ -1,0 +1,119 @@
+// T1458: a generic monomorphized inside one module, for a type declared in a
+// module compiled after it, must be able to reach that type's method stubs.
+// Before the fix, compileModules declared *and* defined one module at a time, so
+// the earlier module's bodies were generated while the later one had no stubs
+// yet. std is the earlier module in every test up to the section break — it is
+// simply the module every program imports — and the section at the bottom shows
+// nothing about the failure was specific to std.
+//
+// Each test names the codegen panic its shape produced, or says why it already
+// worked. Verified against the pre-fix compiler: the two that say they already
+// worked do pass there, and every other test in this file panics.
+//
+// The shape T1458 was *filed* for — scan[T: Parse] reaching a module type's
+// `factory parse` — is not here: T1740 had already fixed it with the
+// forwardDeclareModuleMethod fallback at that one dispatch site, and
+// module_cross_module_parse_test.pr covers it. The sites below have no such
+// fallback, which is why the ordering had to be fixed structurally.
+use dispatchgen "./dispatchgen";
+use dispatchmod "./dispatchmod";
+
+// Panicked: "undeclared method Item.format for interpolation" (expr_literal.go).
+test_module_type_vector_format() `test {
+  dispatchmod.Item[] items = [dispatchmod.Item(id: 1), dispatchmod.Item(id: 2)];
+  assert(items.to_string() == "[item-1, item-2]", msg: "Vector[Item].to_string()");
+}
+
+// The same dispatch from *main* code rather than from inside a std generic.
+// This one always worked — main's bodies are generated after every module is
+// declared — so it is the control for the case above, not a second repro.
+test_module_type_interpolation() `test {
+  dispatchmod.Item it = dispatchmod.Item(id: 7);
+  assert("{it}" == "item-7", msg: "interpolating a module type");
+}
+
+// Panicked: "drop method not in vtable for Key" (stmt_drop_emit.go) — Key's
+// synthesized drop is reached from inside Set/Map's monomorphization before its
+// hash is, so that is the site that fails first. The assertions exercise hash,
+// == and drop, since the fix has to reach all three.
+test_module_type_set() `test {
+  Set[dispatchmod.Key] s = Set[dispatchmod.Key]();
+  s.add(dispatchmod.Key(name: "a"));
+  s.add(dispatchmod.Key(name: "b"));
+  s.add(dispatchmod.Key(name: "a"));
+  assert(s.len == 2, msg: "Set[Key] deduplicates by hash + ==");
+  assert(s.contains(dispatchmod.Key(name: "b")), msg: "Set[Key].contains");
+}
+
+// The same dispatches, through a map key rather than a set element.
+test_module_type_map_key() `test {
+  map[dispatchmod.Key, int] m = map[dispatchmod.Key, int]();
+  m[dispatchmod.Key(name: "x")] = 10;
+  m[dispatchmod.Key(name: "y")] = 20;
+  m[dispatchmod.Key(name: "x")] = 30;
+  assert(m.len == 2, msg: "map[Key, int] keyed by hash + ==");
+  if v := m[dispatchmod.Key(name: "x")] {
+    assert(v == 30, msg: "map[Key, int] lookup");
+  } else {
+    assert(false, msg: "missing key x");
+  }
+}
+
+// Panicked: "undeclared operator method Score.<" (expr_operator.go).
+test_module_type_sort() `test {
+  dispatchmod.Score[] v = [dispatchmod.Score(points: 30), dispatchmod.Score(points: 10), dispatchmod.Score(points: 20)];
+  dispatchmod.Score[] sorted = sort(move v);
+  assert(sorted.len == 3, msg: "sort keeps every element");
+  assert(sorted[0].points == 10, msg: "sort[0]");
+  assert(sorted[1].points == 20, msg: "sort[1]");
+  assert(sorted[2].points == 30, msg: "sort[2]");
+}
+
+// Panicked: "drop method not in vtable for Heapy" (stmt_drop_emit.go), reached
+// via the silent dropFunc == nil in stmt_drop_register.go. Leak enforcement
+// covers the drop path: the vector and both heap payloads must be freed.
+test_module_type_vector_drop() `test {
+  dispatchmod.Heapy[] v = [dispatchmod.Heapy(label: "first", values: [1, 2, 3]), dispatchmod.Heapy(label: "second", values: [4, 5])];
+  assert(v[0].label == "first", msg: "Heapy[0].label");
+  assert(v[1].values.len == 2, msg: "Heapy[1].values.len");
+}
+
+// --- The general form: one module's generic reaching a later module's type ---
+//
+// std is the losing module above only because every program imports it. Nothing
+// about the old ordering was specific to std: dispatchgen is `use`d before
+// dispatchmod, so it is compiled first, and its Labeled-bounded generics
+// monomorphized for dispatchmod.Tag hit the same missing stubs. All three
+// panicked with "codegen: undeclared getter Tag.label" before the fix.
+test_cross_module_generic_func() `test {
+  dispatchmod.Tag t = dispatchmod.Tag(text: "alpha");
+  assert(dispatchgen.describe[dispatchmod.Tag](t) == "<alpha>", msg: "describe[Tag]");
+}
+
+// The same reach with a std container in between: dispatchgen's generic indexes
+// a T[], so std's Vector[Tag] is monomorphized for a type from a module that is
+// compiled after both std and dispatchgen.
+test_cross_module_generic_func_over_vector() `test {
+  dispatchmod.Tag[] tags = [dispatchmod.Tag(text: "a"), dispatchmod.Tag(text: "b")];
+  assert(dispatchgen.join_labels[dispatchmod.Tag](tags) == "a, b", msg: "join_labels[Tag]");
+}
+
+// From a generic *type*'s method body rather than a free function — a different
+// monomorphization path (defineMonoMethods, not defineMonoFuncs).
+test_cross_module_generic_type() `test {
+  dispatchgen.Boxed[dispatchmod.Tag] b = dispatchgen.Boxed[dispatchmod.Tag](item: dispatchmod.Tag(text: "boxed"));
+  assert(b.shown == "boxed", msg: "Boxed[Tag].shown");
+}
+
+// A module-declared *enum* with a heap payload inside a std container: the
+// synthesized enum drop is reached from Vector[Payload]'s monomorphization, so
+// leak enforcement is the assertion that matters here. This shape already
+// compiled before the fix — it is here so the enum path is pinned alongside the
+// type path, since collectMonoInstancesWithExtra propagates only *types.Named
+// origins through the extra path.
+test_module_enum_payload_in_vector() `test {
+  dispatchmod.Payload[] v = [dispatchmod.Payload.Text("a heap payload"), dispatchmod.Payload.Empty];
+  assert(v.len == 2, msg: "Vector[Payload] keeps both elements");
+  assert(v[0].describe() == "a heap payload", msg: "Payload.Text describe");
+  assert(v[1].describe() == "empty", msg: "Payload.Empty describe");
+}

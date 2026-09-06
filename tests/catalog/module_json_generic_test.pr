@@ -1,0 +1,32 @@
+// Cross-module dispatch in its catalog form: `json.encode_string[T]` and
+// `json.decode_string[T]` monomorphized for a type declared in a module that is
+// compiled *after* json, whose encode/decode are the methods `serializable`
+// generates. json is `use`d first, so its bodies are generated first.
+//
+// Unlike the T1458 shapes in tests/modules/module_generic_dispatch_test.pr, this
+// one compiled before that fix too — a method call is the one dispatch site with
+// a fallback, forwardDeclareModuleMethod (T1740). Keeping it means the catalog
+// path stays covered whether that fallback survives or the declare-before-define
+// ordering carries it alone.
+use json;
+use serialmod "./serialmod";
+
+test_encode_module_type() `test {
+  string s = json.encode_string[serialmod.Reading](serialmod.Reading(sensor: "temp", value: 21))?!;
+  assert(s.contains("\"sensor\":\"temp\""), msg: "encoded sensor: {s}");
+  assert(s.contains("\"value\":21"), msg: "encoded value: {s}");
+}
+
+test_decode_module_type() `test {
+  string data = "\{\"sensor\":\"humidity\",\"value\":48}";
+  serialmod.Reading r = json.decode_string[serialmod.Reading](move data)?!;
+  assert(r.sensor == "humidity", msg: "decoded sensor");
+  assert(r.value == 48, msg: "decoded value");
+}
+
+test_round_trip_module_type() `test {
+  string s = json.encode_string[serialmod.Reading](serialmod.Reading(sensor: "pressure", value: 1013))?!;
+  serialmod.Reading back = json.decode_string[serialmod.Reading](move s)?!;
+  assert(back.sensor == "pressure", msg: "round-trip sensor");
+  assert(back.value == 1013, msg: "round-trip value");
+}

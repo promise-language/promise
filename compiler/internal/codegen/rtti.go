@@ -537,7 +537,7 @@ func (c *Compiler) computeMonoVtableInfo(instances []*types.Instance) {
 //
 // Called twice: once before module compilation (may produce null entries for
 // module-owned types whose methods aren't declared yet) and once inside
-// compileModule (methods now declared). The second call updates any null
+// declareModulePhase (methods now declared). The second call updates any null
 // entries filled in by the module's method declarations.
 func (c *Compiler) emitMonoVtableGlobals(instances []*types.Instance) {
 	for _, inst := range instances {

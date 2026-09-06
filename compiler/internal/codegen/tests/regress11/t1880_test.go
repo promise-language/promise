@@ -360,10 +360,10 @@ func TestT1880ValueTypeExplicitIsFillsOwnVtableSlots(t *testing.T) {
 	assertNoNullVtableSlot(t, vt, "promise_vtable_Cents")
 }
 
-// 11. The module form. compileModule builds its types' vtables before the main
-// file is compiled, so it needs its own per-concrete declare/define pass — the
-// main file's pass never sees a module's declarations. This is the arrangement
-// T1734 needs, since every non-generic heap I/O type that will declare
+// 11. The module form. declareModulePhase builds its types' vtables before the
+// main file is compiled, so it needs its own per-concrete declare/define pass —
+// the main file's pass never sees a module's declarations. This is the
+// arrangement T1734 needs, since every non-generic heap I/O type that will declare
 // `is Reader` / `is Writer` lives in a catalog module.
 func TestT1880ModuleTypeExplicitIsFillsOwnVtableSlots(t *testing.T) {
 	ir := codegentest.GenerateIRWithModule(t, "sinkmod", `

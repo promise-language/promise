@@ -174,9 +174,9 @@ func (c *Compiler) computeAllTypeLayouts(file *ast.File, monoInstances []*types.
 // Targets in `pending` are computed through the topological walk (compute), so
 // same-file ordering and cycle breaking are preserved. Targets outside it — a
 // value type imported from another module, whose own layout pass only runs later
-// in compileModule — are built on demand via ensureValueTypeLayout; without this
-// the container's layout would fall back to the generic `{i8*, i8*}` user-value
-// struct while the constructor emits the wide value struct. (T1542)
+// in declareModulePhase — are built on demand via ensureValueTypeLayout; without
+// this the container's layout would fall back to the generic `{i8*, i8*}`
+// user-value struct while the constructor emits the wide value struct. (T1542)
 func (c *Compiler) collectValueTypeFieldDeps(typ types.Type, pending map[string]layoutPendingItem, compute func(string)) {
 	switch t := typ.(type) {
 	case *types.Optional:

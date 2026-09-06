@@ -39,9 +39,11 @@ main() {
 `
 }
 
-// typeInfoFnPtr matches a `void (i8*)*` function pointer baked into a typeinfo
-// global's initializer — the drop_fn_ptr and clone_fn_ptr fields (B0226/T0387).
-var typeInfoFnPtr = regexp.MustCompile(`bitcast \(void \(i8\*\)\* @"?([^"()]+?)"? to i8\*\)`)
+// typeInfoFnPtr matches a function pointer baked into a typeinfo global's
+// initializer: drop_fn_ptr is a `void (i8*)*` cast (B0226), clone_fn_ptr an
+// `i8* (i8*)*` cast (T0387). The vtable field never matches — it is a cast of
+// a global array, not of a function.
+var typeInfoFnPtr = regexp.MustCompile(`bitcast \((?:void|i8\*) \(i8\*\)\* @"?([^"()]+?)"? to i8\*\)`)
 
 // definedFuncs collects every function the IR actually defines a body for.
 func definedFuncs(ir string) map[string]bool {
@@ -53,13 +55,10 @@ func definedFuncs(ir string) map[string]bool {
 	return defined
 }
 
-// The general invariant: no typeinfo may point at a function this module only
-// declares. A declared-but-never-defined target is an undefined symbol whose
-// diagnosis is left to the linker, and only some linkers give it.
-func TestTypeInfoFnPtrsAreAllDefined(t *testing.T) {
-	modSrc, userSrc := t1929Sources()
-	ir := codegentest.GenerateIRWithModule(t, "m", modSrc, userSrc)
-
+// assertTypeInfoFnPtrsDefined scans every typeinfo global in the IR and fails
+// on any function pointer whose target has no body in this module.
+func assertTypeInfoFnPtrsDefined(t *testing.T, ir string) {
+	t.Helper()
 	defined := definedFuncs(ir)
 	checked := 0
 	for _, line := range strings.Split(ir, "\n") {
@@ -76,6 +75,50 @@ func TestTypeInfoFnPtrsAreAllDefined(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no typeinfo function pointers found — the check would pass vacuously")
+	}
+}
+
+// The general invariant: no typeinfo may point at a function this module only
+// declares. A declared-but-never-defined target is an undefined symbol whose
+// diagnosis is left to the linker, and only some linkers give it.
+func TestTypeInfoFnPtrsAreAllDefined(t *testing.T) {
+	modSrc, userSrc := t1929Sources()
+	ir := codegentest.GenerateIRWithModule(t, "m", modSrc, userSrc)
+	assertTypeInfoFnPtrsDefined(t, ir)
+}
+
+// The other edge of verifyNoBodylessTypeInfoDrops: the Arc family (Ref/Weak/
+// Mutex) keeps its per-instance drop stubs, which are legitimately body-less
+// when the typeinfo is emitted and are filled in lazily by getOrCreate*Drop at
+// the first drop site. A module-only Ref[int]/Weak[int] instantiation must
+// neither trip the verifier (a false positive here is a compile abort) nor
+// leave the lazily-defined drops body-less in the final IR.
+func TestArcFamilyModuleOnlyInstanceDropsAreDefined(t *testing.T) {
+	modSrc := `
+type Holder ` + "`public" + ` {
+  int start ` + "`public" + `;
+  observe(this) int ` + "`public" + ` {
+    Ref[int] r = Ref[int](this.start);
+    Weak[int] _w = r.downgrade();
+    return r.borrow;
+  }
+}
+`
+	userSrc := `
+use m "./m";
+main() {
+  m.Holder h = m.Holder(start: 7);
+  int n = h.observe();
+}
+`
+	ir := codegentest.GenerateIRWithModule(t, "m", modSrc, userSrc)
+	assertTypeInfoFnPtrsDefined(t, ir)
+
+	defined := definedFuncs(ir)
+	for _, drop := range []string{"Ref[int].drop", "Weak[int].drop"} {
+		if !defined[drop] {
+			t.Errorf("expected the lazily-defined %s to have a body once compilation finishes", drop)
+		}
 	}
 }
 

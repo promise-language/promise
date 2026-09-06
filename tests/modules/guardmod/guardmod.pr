@@ -14,3 +14,18 @@ type Counter `public `doc("A counter guarded by a Mutex owned by the method that
     return g.borrow;
   }
 }
+
+// Holder — module whose method body is the only place Ref[int] and Weak[int]
+// are instantiated. The Arc family keeps per-instance drop stubs that are
+// body-less when the typeinfo is emitted and are filled in lazily at the first
+// drop site — the case T1929's verifier must not mistake for a dangling
+// reference (a false positive there aborts the compile).
+type Holder `public `doc("Holds a start value observed through a module-local Ref[int]") {
+  int start `public `doc("Value the module-local Ref[int] is created from");
+
+  observe(this) int `public `doc("Creates a local Ref[int] and Weak[int] and returns the referenced value") {
+    Ref[int] r = Ref[int](this.start);
+    Weak[int] _w = r.downgrade();
+    return r.borrow;
+  }
+}

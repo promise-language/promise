@@ -501,8 +501,7 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 		if c.typeSubst != nil {
 			elem = types.Substitute(elem, c.typeSubst)
 		}
-		innerNamed := extractNamed(elem)
-		if innerNamed != nil && innerNamed.IsStructural() && !innerNamed.IsValueType() {
+		if isNonValueStructuralType(elem) {
 			return envFieldDrop{envDropOptionalStructural, nil}
 		}
 	}
@@ -514,7 +513,7 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 	// move-capturing a borrowed parameter or borrowed value, and `this` captures
 	// already returned above. So dropping here can never double-free the
 	// caller's instance.
-	if named != nil && named.IsStructural() && !named.IsValueType() {
+	if isStructuralView(named) {
 		return envFieldDrop{envDropStructural, nil}
 	}
 

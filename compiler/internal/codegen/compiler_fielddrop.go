@@ -599,7 +599,7 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 		// T0573: Optional[MutexGuard] field scope-exit — MutexGuard.drop is a
 		// single T-independent symbol (T0156), so look it up by name.
 		dropFunc = c.funcs["MutexGuard.drop"]
-	case innerNamed != nil && innerNamed.IsStructural() && !innerNamed.IsValueType():
+	case isStructuralView(innerNamed):
 		// T0460: Optional[StructuralInterface] field — branch on has-value,
 		// then dispatch through __promise_structural_drop via RTTI. The
 		// concrete type is unknown at compile time; typeinfo.drop_fn_ptr
@@ -840,7 +840,7 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 		// T0573: Optional[MutexGuard] field reassignment — MutexGuard.drop is a
 		// single T-independent symbol (T0156).
 		dropFunc = c.funcs["MutexGuard.drop"]
-	case innerNamed != nil && innerNamed.IsStructural() && !innerNamed.IsValueType():
+	case isStructuralView(innerNamed):
 		// T1300: Optional[StructuralInterface] member field reassignment — the old
 		// slot holds a {vtable, instance} view box. Drop it through
 		// __promise_structural_drop (RTTI: typeinfo.drop_fn_ptr → concrete drop,

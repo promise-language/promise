@@ -836,3 +836,401 @@ structural_value_as_generic_constraint() `test {
   assert(first_doubled[Ledger](x: Ledger(raw: 5)) == 10, "a scalar-returning instantiation");
   assert(v[0].raw_doubled == 2, "the source vector is intact");
 }
+
+// ============================================================================
+// T1583 — the sites T1550 did not touch.
+//
+// T1550's root cause was one predicate spelled inconsistently: "is this target a
+// structural interface represented as a {vtable, instance} fat pointer?". T1583
+// folded the remaining ~18 inline `IsStructural() && !IsValueType()` spellings into
+// isStructuralView / isNonValueStructuralType. The refactor is behaviour-preserving
+// (the generated IR is byte-identical), so what these tests pin is not the refactor
+// but the BEHAVIOUR the folded sites are responsible for — which, until now, had no
+// runtime coverage on either side of the predicate at these particular crossings.
+//
+// Every case below is a pair over the same shape:
+//
+//   *_value — the payload is `T1583Metric`, a `structural type whose fields are all
+//             `value. It is a flat register-resident struct, `copy, with no heap box
+//             and no drop. The site must do NOTHING.
+//   *_view  — the payload is `T1583Doubler`, a real (abstract-method-bearing)
+//             interface satisfied by a heap type. Its runtime value is a fat pointer
+//             over a heap box, which the site must clone on read and drop via RTTI.
+//
+// The view halves are the ones with something to get wrong: each allocates, so a
+// site that stopped cloning double-frees and a site that stopped dropping leaks —
+// and the harness fails the test either way (zero-tolerance leak policy). The value
+// halves assert the mirror image: the same program over a flat value struct must
+// still produce the right answers, which is what breaks when a site loses the
+// `!IsValueType()` half and starts boxing (the T1550 panic).
+//
+// IR-shape coverage of the same sites is in
+// compiler/internal/codegen/tests/valuetype/t1583_structural_view_test.go. That file
+// pins most sites individually by mutation; the closure-env and match-binding sites
+// resist IR attribution (their drops are emitted inline in the enclosing function,
+// mixed with the enclosing scope's own), so for those THIS file is the instrument —
+// a wrong predicate there surfaces as a leak or a double-free, not as a missing
+// marker.
+// ============================================================================
+
+type T1583Metric `structural {
+  int raw `value;
+
+  get raw_doubled int => this.raw * 2;
+}
+
+type T1583Doubler `structural {
+  get raw_doubled int `abstract;
+}
+
+// Heap-allocating implementor: every T1583Doubler-typed slot below owns a box, so
+// the leak checker is what verifies the drop side of each site.
+type T1583Counter {
+  int n;
+  string label;
+
+  get raw_doubled int => this.n * 2;
+}
+
+t1583_counter(int n) T1583Doubler {
+  return T1583Counter(n: n, label: "c{n}");
+}
+
+t1583_next_metric(int n) T1583Metric? {
+  if n > 0 {
+    return T1583Metric(raw: n);
+  }
+  return none;
+}
+
+t1583_next_view(int n) T1583Doubler? {
+  if n > 0 {
+    return t1583_counter(n: n);
+  }
+  return none;
+}
+
+// --- while-unwrap binding (stmt_loop.go genWhileUnwrapStmt) -----------------
+// The `if`-unwrap form is covered above (case 23); the `while` form registers the
+// binding's cleanup on a different path, and re-binds it once per iteration. For a
+// boxed view that means a fresh box freed each time round — a missed free is a leak
+// that grows with the trip count, which is why the loop runs more than once.
+
+t1583_while_unwrap_value() `test {
+  int total = 0;
+  int n = 3;
+  while m := t1583_next_metric(n: n) {
+    total = total + m.raw_doubled;
+    n = n - 1;
+  }
+  assert(total == 12, "3 iterations of a flat value payload, got {total}");
+}
+
+t1583_while_unwrap_view() `test {
+  int total = 0;
+  int n = 3;
+  while d := t1583_next_view(n: n) {
+    total = total + d.raw_doubled;
+    n = n - 1;
+  }
+  assert(total == 12, "3 iterations of a boxed view payload, got {total}");
+}
+
+// --- closure env capture (expr_lambda.go analyzeEnvCaptureDrop) -------------
+// A move-captured structural is owned by the closure's env struct, so the env drop
+// has to discharge it. A value payload is `copy and lives inline in the env with
+// nothing to free; a view payload owns a box. Both the non-optional and the
+// Optional capture are separate arms of the same function.
+
+t1583_env_capture_value() `test {
+  captured := T1583Metric(raw: 6);
+  f := || -> captured.raw_doubled;
+  assert(f() == 12, "flat value read out of a closure env");
+  assert(captured.raw_doubled == 12, "the original is untouched — it was copied in");
+}
+
+t1583_env_capture_view() `test {
+  T1583Doubler captured = t1583_counter(n: 6);
+  f := move || -> captured.raw_doubled;
+  assert(f() == 12, "boxed view read out of a closure env");
+  assert(f() == 12, "and again — the env still owns a live box");
+}
+
+t1583_env_capture_optional_value() `test {
+  T1583Metric? held = T1583Metric(raw: 5);
+  f := || -> held!.raw_doubled;
+  assert(f() == 10, "flat value optional read out of a closure env");
+}
+
+t1583_env_capture_optional_view() `test {
+  T1583Doubler? held = t1583_counter(n: 5);
+  f := move || -> held!.raw_doubled;
+  assert(f() == 10, "boxed view optional read out of a closure env");
+}
+
+// A closure that is never CALLED still has to free what it captured — the env drop
+// runs at scope exit regardless, and this is the shape where a missing free is a
+// pure leak with no other symptom.
+t1583_env_capture_view_uncalled() `test {
+  T1583Doubler captured = t1583_counter(n: 7);
+  f := move || -> captured.raw_doubled;
+  assert(true, "the closure is dropped without ever being called");
+}
+
+// --- Optional vector element dup (compiler_native_handle.go) ----------------
+// Cloning a vector of OPTIONAL structural elements duplicates each present payload.
+// A shallow copy would alias the box between the source and the clone, so both free
+// it — the classic double-free this arm exists to prevent. `none` holes are there to
+// make sure the has-value guard is not skipped.
+
+t1583_optional_vector_clone_value() `test {
+  (T1583Metric?)[] v = [T1583Metric(raw: 1), none, T1583Metric(raw: 3)];
+  w := v.clone();
+  assert(w.len == 3, "cloned length");
+  assert(w[0]!.raw_doubled == 2, "cloned element 0");
+  assert(w[2]!.raw_doubled == 6, "cloned element 2");
+  assert(v[0]!.raw_doubled == 2, "source element 0 still readable");
+}
+
+t1583_optional_vector_clone_view() `test {
+  (T1583Doubler?)[] v = [];
+  v.push(t1583_counter(n: 1));
+  v.push(none);
+  v.push(t1583_counter(n: 3));
+  w := v.clone();
+  assert(w.len == 3, "cloned length");
+  assert(w[0]!.raw_doubled == 2, "cloned box 0 is independent");
+  assert(w[2]!.raw_doubled == 6, "cloned box 2 is independent");
+  assert(v[2]!.raw_doubled == 6, "source box 2 still readable — not aliased away");
+}
+
+// --- enum variant field dup + drop (compiler_native_handle.go / _synthdrop.go)
+// An enum whose variant carries a structural payload needs both halves: the dup
+// when the enum is copied (here, through a container clone) and the drop when
+// either copy dies. `missing` is present so the tag switch has to pick the right
+// arm rather than dropping unconditionally.
+
+enum T1583SampleValue {
+  ok(T1583Metric m),
+  missing,
+}
+
+enum T1583SampleView {
+  ok(T1583Doubler d),
+  missing,
+}
+
+t1583_enum_variant_clone_value() `test {
+  T1583SampleValue[] v = [];
+  v.push(T1583SampleValue.ok(m: T1583Metric(raw: 1)));
+  v.push(T1583SampleValue.missing);
+  w := v.clone();
+  assert(w.len == 2, "cloned length");
+  match w[0] {
+    ok(m) => assert(m.raw_doubled == 2, "cloned variant payload"),
+    missing => assert(false, "wrong variant in the clone"),
+  }
+  match w[1] {
+    ok(m) => assert(false, "wrong variant in the clone, got {m.raw}"),
+    missing => assert(true, "payload-free variant survived the clone"),
+  }
+}
+
+t1583_enum_variant_clone_view() `test {
+  T1583SampleView[] v = [];
+  v.push(T1583SampleView.ok(d: t1583_counter(n: 1)));
+  v.push(T1583SampleView.missing);
+  w := v.clone();
+  assert(w.len == 2, "cloned length");
+  // T1982: the two bindings are named differently ON PURPOSE. `dropBindings` is
+  // keyed by bare variable name function-wide, so a SECOND match binding the same
+  // name for a structural-view payload silently registers no drop and leaks the box
+  // it was just handed. Spelling both `d` here makes this test fail on a bug that
+  // has nothing to do with what it is checking. Collapse the names once T1982 lands.
+  match w[0] {
+    ok(cloned) => assert(cloned.raw_doubled == 2, "cloned variant box is independent"),
+    missing => assert(false, "wrong variant in the clone"),
+  }
+  match v[0] {
+    ok(source) => assert(source.raw_doubled == 2, "source variant box still readable"),
+    missing => assert(false, "wrong variant in the source"),
+  }
+}
+
+// --- match binding (expr_enum_match.go) -------------------------------------
+// Binding a structural payload out of a match arm copies it out of the enum. For a
+// view that copy must be a deep clone owned by the arm (the enum still owns its
+// own box), and the arm has to discharge it at exit. Reading the source again
+// afterwards is what catches an alias.
+
+t1583_match_binding_value() `test {
+  s := T1583SampleValue.ok(m: T1583Metric(raw: 6));
+  int seen = 0;
+  match s {
+    ok(m) => {
+      seen = m.raw_doubled;
+    },
+    missing => {
+      seen = -1;
+    },
+  }
+  assert(seen == 12, "bound a flat value payload, got {seen}");
+}
+
+t1583_match_binding_view() `test {
+  T1583SampleView[] v = [];
+  v.push(T1583SampleView.ok(d: t1583_counter(n: 6)));
+  int seen = 0;
+  match v[0] {
+    ok(bound) => {
+      seen = bound.raw_doubled;
+    },
+    missing => {
+      seen = -1;
+    },
+  }
+  assert(seen == 12, "bound a boxed view payload, got {seen}");
+  // T1982 again — a second binding of the SAME name would leak here. See the note
+  // in t1583_enum_variant_clone_view.
+  match v[0] {
+    ok(rebound) => assert(rebound.raw_doubled == 12, "the container's own box survived the first binding"),
+    missing => assert(false, "wrong variant"),
+  }
+}
+
+// --- Optional[structural] FIELD drop and reassignment (compiler_fielddrop.go)
+// A member field typed `T?` has its own drop path, separate from a local's, and a
+// second one for reassignment: writing over a PRESENT optional must discharge the
+// old payload first. Assigning twice and then to `none` walks all three transitions
+// (none→some, some→some, some→none); the some→some step is the one that leaks if
+// the old box is dropped on the floor.
+
+type T1583PanelValue {
+  T1583Metric? best;
+}
+
+type T1583PanelView {
+  T1583Doubler? best;
+}
+
+t1583_optional_field_reassign_value() `test {
+  p := T1583PanelValue(best: T1583Metric(raw: 1));
+  assert(p.best!.raw_doubled == 2, "field set at construction");
+  p.best = T1583Metric(raw: 5);
+  assert(p.best!.raw_doubled == 10, "reassigned over a present value");
+  p.best = none;
+  if _ := p.best {
+    assert(false, "field should be none after clearing");
+  }
+  p.best = T1583Metric(raw: 7);
+  assert(p.best!.raw_doubled == 14, "set again after clearing");
+}
+
+t1583_optional_field_reassign_view() `test {
+  p := T1583PanelView(best: t1583_counter(n: 1));
+  assert(p.best!.raw_doubled == 2, "field set at construction");
+  p.best = t1583_counter(n: 5);
+  assert(p.best!.raw_doubled == 10, "reassigned over a present box");
+  p.best = none;
+  if _ := p.best {
+    assert(false, "field should be none after clearing");
+  }
+  p.best = t1583_counter(n: 7);
+  assert(p.best!.raw_doubled == 14, "set again after clearing");
+}
+
+// The owner is dropped while the field is still PRESENT — the scope-exit half of
+// the same pair, which is a different function from the reassignment one.
+t1583_optional_field_dropped_with_owner_value() `test {
+  p := T1583PanelValue(best: T1583Metric(raw: 4));
+  assert(p.best!.raw_doubled == 8, "read before the owner goes out of scope");
+}
+
+t1583_optional_field_dropped_with_owner_view() `test {
+  p := T1583PanelView(best: t1583_counter(n: 4));
+  assert(p.best!.raw_doubled == 8, "read before the owner goes out of scope");
+}
+
+// --- push / slice element dup (expr_container.go maybeDupPushElement) -------
+// Slicing builds a new vector by pushing each element of the source into it, so a
+// view element has to be cloned on the way in — otherwise the slice and the source
+// share boxes and the second one to die double-frees. Both vectors are read after
+// the slice so an alias cannot hide.
+
+t1583_push_and_slice_value() `test {
+  T1583Metric[] v = [];
+  v.push(T1583Metric(raw: 1));
+  v.push(T1583Metric(raw: 2));
+  v.push(T1583Metric(raw: 3));
+  s := v[1:];
+  assert(s.len == 2, "slice length");
+  assert(s[0].raw_doubled == 4, "slice element 0");
+  assert(s[1].raw_doubled == 6, "slice element 1");
+  assert(v[1].raw_doubled == 4, "source element 1 still readable");
+}
+
+t1583_push_and_slice_view() `test {
+  T1583Doubler[] v = [];
+  v.push(t1583_counter(n: 1));
+  v.push(t1583_counter(n: 2));
+  v.push(t1583_counter(n: 3));
+  s := v[1:];
+  assert(s.len == 2, "slice length");
+  assert(s[0].raw_doubled == 4, "sliced box 0 is independent");
+  assert(s[1].raw_doubled == 6, "sliced box 1 is independent");
+  assert(v[1].raw_doubled == 4, "source box 1 still readable — not aliased into the slice");
+  assert(v.len == 3, "source length unchanged");
+}
+
+// --- AutoClone of a `clone generic (expr_enum_match.go isAutoCloneBitCopy) ----
+// A `clone type whose field is a bare type PARAMETER cannot be cloned by the
+// concrete-field synthesis — it goes through codegen's AutoClone path instead, which
+// classifies the substituted type as bit-copyable or not. A view is NOT: bit-copying
+// the fat pointer aliases the box, so the clone and the source both free it. A flat
+// value struct IS, and must not be routed through the box-cloning arm.
+
+type T1583Box[T] `clone {
+  T item;
+}
+
+t1583_auto_clone_value() `test {
+  b := T1583Box[T1583Metric](item: T1583Metric(raw: 3));
+  c := b.clone();
+  assert(c.item.raw_doubled == 6, "clone holds the flat value");
+  assert(b.item.raw_doubled == 6, "source still readable");
+}
+
+t1583_auto_clone_view() `test {
+  b := T1583Box[T1583Doubler](item: t1583_counter(n: 3));
+  c := b.clone();
+  assert(c.item.raw_doubled == 6, "clone holds an independent box");
+  assert(b.item.raw_doubled == 6, "source box still readable — not aliased into the clone");
+}
+
+// --- captured Optional[structural] REASSIGNED in the closure body -----------
+// (stmt_drop_register.go maybeRegisterCapturedOptionalStructuralDrop)
+// Writing to a captured `T?` from inside the lambda has to discharge whatever the
+// slot held before the write. That registration is deliberately reassignment-only —
+// the env drop owns the final cleanup — so it is a distinct path from both the
+// scope-exit drop of a local optional and the env-drop entry, and it is only
+// reachable when the closure body ASSIGNS to the capture rather than just reading it.
+
+t1583_env_capture_reassigned_value() `test {
+  T1583Metric? held = T1583Metric(raw: 1);
+  f := || -> int {
+    held = T1583Metric(raw: 5);
+    return held!.raw_doubled;
+  };
+  assert(f() == 10, "reassigned a captured flat-value optional");
+  assert(f() == 10, "and again — the second write overwrites the first");
+}
+
+t1583_env_capture_reassigned_view() `test {
+  T1583Doubler? held = t1583_counter(n: 1);
+  f := move || -> int {
+    held = t1583_counter(n: 5);
+    return held!.raw_doubled;
+  };
+  assert(f() == 10, "reassigned a captured boxed-view optional");
+  assert(f() == 10, "and again — the box written by the first call must be freed");
+}

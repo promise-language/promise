@@ -997,7 +997,7 @@ func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAl
 		return
 	}
 	named := extractNamed(typ)
-	if named == nil || !named.IsStructural() || named.IsValueType() {
+	if !isStructuralView(named) {
 		return
 	}
 	// T1061: a borrow-returning RHS (`T&`/`T~`, e.g. a structural operator/method
@@ -1076,7 +1076,7 @@ func (c *Compiler) maybeRegisterStructuralParamFree(varName string, alloca *ir.I
 		return
 	}
 	named := extractNamed(typ)
-	if named == nil || !named.IsStructural() || named.IsValueType() {
+	if !isStructuralView(named) {
 		return
 	}
 	// Value-struct alloca ({i8* vtable, i8* instance}) required to extract the instance ptr.
@@ -1390,7 +1390,7 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 		return false
 	}():
 		// dropFunc already set by the closure above
-	case innerNamed != nil && innerNamed.IsStructural() && !innerNamed.IsValueType():
+	case isStructuralView(innerNamed):
 		// B0229/B0243: Structural interface (e.g., Iterator[T]) — use RTTI-based drop
 		// dispatch. The concrete type is unknown at compile time (could be _FnIter,
 		// Counter, or any user type implementing the interface), so we dispatch through
@@ -1473,7 +1473,7 @@ func (c *Compiler) maybeRegisterCapturedOptionalStructuralDrop(varName string, a
 		elem = types.Substitute(elem, c.typeSubst)
 	}
 	innerNamed := extractNamed(elem)
-	if innerNamed == nil || !innerNamed.IsStructural() || innerNamed.IsValueType() {
+	if !isStructuralView(innerNamed) {
 		return
 	}
 

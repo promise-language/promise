@@ -949,7 +949,7 @@ func (c *Compiler) variantFieldNeedsDrop(typ types.Type) bool {
 		// __promise_structural_drop (RTTI dispatch). Mirrors the struct-field case
 		// (T0460) — Writer itself carries no HasDrop/NeedsSynthDrop, so gate on
 		// IsStructural directly.
-		if named.IsStructural() && !named.IsValueType() {
+		if isStructuralView(named) {
 			return true
 		}
 		if named.HasDrop() || named.NeedsSynthDrop() {
@@ -1235,7 +1235,7 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 		// dispatch through __promise_structural_drop (RTTI: typeinfo.drop_fn_ptr →
 		// concrete drop, else pal_free). Mirrors the struct-field walk (T0460). The
 		// null guard also covers a moved-out, zero-init'd variant slot (T0633).
-		if named.IsStructural() && !named.IsValueType() {
+		if isStructuralView(named) {
 			if c.structuralDrop != nil {
 				instancePtr := c.extractInstancePtr(fieldVal)
 				c.emitNullGuardedVariantDrop(instancePtr, func() {

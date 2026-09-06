@@ -2013,7 +2013,7 @@ func (c *Compiler) typeNeedsMatchDup(resolved types.Type) bool {
 	// (e.g. Slot[K, Showable] inside Map[K, Showable]) — otherwise the match binding
 	// aliases the container's box → double-free. Must precede the IsStructural bail-
 	// out below (which would leave the box shallow-aliased).
-	if named.IsStructural() && !named.IsValueType() {
+	if isStructuralView(named) {
 		return true
 	}
 	// Heap user types: only safe to shallow-dup (memcpy + field dup) if ALL droppable
@@ -2307,7 +2307,7 @@ func (c *Compiler) cloneResolvedValue(val value.Value, resolvedType types.Type) 
 			welem = resolvedType
 		}
 		dupVal = c.dupWeak(val, welem)
-	} else if named != nil && named.IsStructural() && !named.IsValueType() {
+	} else if isStructuralView(named) {
 		// T1292: A non-value structural interface value is a heap-boxed view
 		// ({vtable, instance}). Deep-clone the box via cloneStructuralView (T1284)
 		// so the bound copy owns an independent box — the enum/heap-user else below
@@ -2402,7 +2402,7 @@ func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtype
 	// free (honoring the concrete drop_fn). The drop flag is cleared at move sites
 	// (so `result[k] = v` in Map.clone/_rehash doesn't double-free) and the box is
 	// dropped at arm exit otherwise.
-	if named := extractNamed(resolvedType); named != nil && named.IsStructural() && !named.IsValueType() {
+	if isNonValueStructuralType(resolvedType) {
 		c.maybeRegisterStructuralParamFree(name, bindAlloca, resolvedType)
 		return
 	}
@@ -2513,7 +2513,7 @@ func (c *Compiler) isAutoCloneBitCopy(t types.Type) bool {
 	// AutoClone must deep-copy (cloneStructuralView) — NOT bit-copy (that would alias
 	// the box → double-free). Route to cloneResolvedValue's structural arm. Must
 	// precede the IsStructural() bit-copy classification below.
-	if named.IsStructural() && !named.IsValueType() {
+	if isStructuralView(named) {
 		return false
 	}
 	return named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural()

@@ -176,7 +176,7 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 		// The binding is above unwrapScopeLen, so the per-iteration
 		// emitScopeCleanup frees it each iteration.
 		if _, already := c.dropBindings[s.Binding]; !already {
-			if en := extractNamed(elemType); en != nil && en.IsStructural() && !en.IsValueType() {
+			if isNonValueStructuralType(elemType) {
 				if c.isFreshOwnedStructuralRHS(s.Value) {
 					c.maybeRegisterStructuralParamFree(s.Binding, alloca, elemType)
 				}

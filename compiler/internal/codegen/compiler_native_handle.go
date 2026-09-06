@@ -219,7 +219,7 @@ func (c *Compiler) dupOptionalVectorElem(optVal value.Value, opt *types.Optional
 	case types.IsWeak(innerElem):
 		weakElem, _ := types.AsWeak(innerElem)
 		dupedInner = c.dupWeak(innerVal, weakElem)
-	case named != nil && named.IsStructural() && !named.IsValueType():
+	case isStructuralView(named):
 		// T1291: structural-interface inner — the {vtable, instance} view boxes a
 		// heap instance; deep-clone it via RTTI (__promise_structural_clone) so the
 		// cloned optional owns an independent box. Without this the shallow alias is
@@ -1643,7 +1643,7 @@ func (c *Compiler) emitVariantFieldDup(fieldVal value.Value, fieldPtr value.Valu
 		// ({vtable, instance}). A shallow copy would alias the box between two now-
 		// droppable owners → double-free at drop. Deep-clone the box via
 		// cloneStructuralView (T1284), mirroring maybeDupPushElement's structural arm.
-		if named.IsStructural() && !named.IsValueType() {
+		if isStructuralView(named) {
 			dup := c.cloneStructuralView(fieldVal)
 			c.block.NewStore(dup, fieldPtr)
 			return

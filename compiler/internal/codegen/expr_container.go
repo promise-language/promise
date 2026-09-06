@@ -629,7 +629,7 @@ func (c *Compiler) maybeDupPushElement(argVal value.Value, resolvedElem types.Ty
 	// heap instance; deep-clone it via RTTI so each vector slot owns an
 	// independent box (else result.push(this[i]) in Vector.[:] aliases the source
 	// box and the structural-aware element drop double-frees).
-	if named.IsStructural() && !named.IsValueType() {
+	if isStructuralView(named) {
 		return c.cloneStructuralView(argVal)
 	}
 

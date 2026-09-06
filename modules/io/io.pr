@@ -220,7 +220,7 @@ read_stdin!() string `public `doc("Reads all of stdin into a string.") {
   return data;
 }
 
-type File `public `doc("A file handle. Use factory constructors to open files. Auto-closes on drop.") {
+type File is Closer `public `doc("A file handle. Use factory constructors to open files. Auto-closes on drop.") {
   int _fd;
 
   open_read!(string path) Self `factory `public `doc("Opens an existing file for reading only (O_RDONLY).") {
@@ -660,7 +660,7 @@ type Dir `public `doc("Directory operations. All methods are global.") {
   }
 }
 
-type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by reading in chunks. Satisfies Reader.") {
+type BufferedReader is Closer `public `doc("Buffered file reader. Reduces syscalls by reading in chunks. Satisfies Reader.") {
   File _file;
   u8[] _buf;
   int _pos;
@@ -748,7 +748,7 @@ type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by read
   }
 }
 
-type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batching writes. Satisfies Writer. Call flush() before drop.") {
+type BufferedWriter is Closer `public `doc("Buffered file writer. Reduces syscalls by batching writes. Satisfies Writer. Call flush() before drop.") {
   File _file;
   u8[] _buf;
   int _len;
@@ -808,7 +808,7 @@ type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batc
   }
 }
 
-type Metadata `public `doc("File system metadata for a path. Use File.metadata() to query.") {
+type Metadata is Format `public `doc("File system metadata for a path. Use File.metadata() to query.") {
   int size `value `public `doc("File size in bytes.");
   int mode `value `public `doc("Permission bits (lower 12 bits of st_mode).");
   int uid `value `public `doc("Owner user ID.");

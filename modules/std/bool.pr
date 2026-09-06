@@ -1,5 +1,5 @@
 // std/bool.pr — Boolean type with logical, equality, and unary operators
-type bool `native `public {
+type bool is Equal, Hashable, Format, Parse, Encodable, Decodable `native `public {
   && (bool other) bool `native;
   || (bool other) bool `native;
   == (bool other) bool `native;

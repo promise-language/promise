@@ -5,7 +5,7 @@ enum Slot[K, V] {
   Used(K key, V value),
 }
 
-type Map[K: Hashable + Equal, V] `public {
+type Map[K: Hashable + Equal, V] is Cloneable, Format `public {
   Slot[K, V][] _buckets;
   int _count;
 

@@ -1278,7 +1278,7 @@ encode_method_test() `test {
 
 format_method_test() `test {
   JsonValue v = JsonValue.Str("hello");
-  string s = v.format()?!;
+  string s = format_value(v)?!;
   assert(s == "\"hello\"", "format method");
 }
 
@@ -1287,7 +1287,7 @@ format_method_object_test() `test {
     "x": JsonValue.Number(1.0)
   };
   JsonValue obj = JsonValue.Object(move fields);
-  string s = obj.format()?!;
+  string s = format_value(obj)?!;
   assert(s.contains("\"x\":1"), "format object method");
 }
 
@@ -1318,7 +1318,7 @@ round_trip_method_test() `test {
     "ok": JsonValue.Bool(true),
   };
   JsonValue obj = JsonValue.Object(move fields);
-  string s = obj.format()?!;
+  string s = format_value(obj)?!;
   JsonValue parsed = parse_value(move s)?!;
   assert(parsed.is_object, "round trip is object");
   assert(parsed.get("ok") is present, "round trip has ok");
@@ -1458,13 +1458,13 @@ format_pretty_round_trip_test() `test {
 }
 
 format_method_all_variants_test() `test {
-  assert(JsonValue.Null.format()?! == "null", "format null");
-  assert(JsonValue.Bool(true).format()?! == "true", "format true");
-  assert(JsonValue.Bool(false).format()?! == "false", "format false");
-  assert(JsonValue.Number(42.0).format()?! == "42", "format number");
-  assert(JsonValue.Str("hi").format()?! == "\"hi\"", "format string");
-  assert(JsonValue.Array(JsonValue[]()).format()?! == "[]", "format empty array");
-  assert(JsonValue.Object(map[string, JsonValue]()).format()?! == "\{}", "format empty object");
+  assert(format_value(JsonValue.Null)?! == "null", "format null");
+  assert(format_value(JsonValue.Bool(true))?! == "true", "format true");
+  assert(format_value(JsonValue.Bool(false))?! == "false", "format false");
+  assert(format_value(JsonValue.Number(42.0))?! == "42", "format number");
+  assert(format_value(JsonValue.Str("hi"))?! == "\"hi\"", "format string");
+  assert(format_value(JsonValue.Array(JsonValue[]()))?! == "[]", "format empty array");
+  assert(format_value(JsonValue.Object(map[string, JsonValue]()))?! == "\{}", "format empty object");
 }
 
 parsed_value_methods_test() `test {
@@ -1612,4 +1612,31 @@ repeated_nested_parse_test() `test {
     }
     i = i + 1;
   }
+}
+
+// ---- T1734: JsonValue.format! conforms to std.Format (writes into a Writer) ----
+
+format_writes_into_a_writer_test() `test {
+  JsonValue v = JsonValue.Str("hello");
+  Builder b = Builder();
+  v.format(b)?!;
+  assert(b.to_string() == "\"hello\"", "format writes compact JSON into the Writer");
+}
+
+format_appends_to_a_non_empty_writer_test() `test {
+  // A Format writes into the writer it is given rather than replacing it.
+  Builder b = Builder();
+  b.write_string("value=");
+  JsonValue.Number(42.0).format(b)?!;
+  assert(b.to_string() == "value=42", "format appends at the writer's current position");
+}
+
+format_matches_format_value_test() `test {
+  map[string, JsonValue] fields = {
+    "x": JsonValue.Number(1.0)
+  };
+  JsonValue obj = JsonValue.Object(move fields);
+  Builder b = Builder();
+  obj.format(b)?!;
+  assert(b.to_string() == format_value(obj)?!, "format and format_value agree");
 }

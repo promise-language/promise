@@ -1,5 +1,5 @@
 // std/set.pr — Set[T] implemented as a wrapper around Map[T, bool]
-type Set[T: Hashable + Equal] `public {
+type Set[T: Hashable + Equal] is Cloneable, Format `public {
   Map[T, bool] _map;
 
   new(~this) {

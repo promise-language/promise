@@ -37,7 +37,7 @@ _sha256_k() u32[] => [0x428a2f98u32, 0x71374491u32, 0xb5c0fbcfu32, 0xe9b5dba5u32
 // is by 0 or 32 (no undefined-behavior edge case).
 _rotr(u32 x, u32 n) u32 => (x >> n) | (x << (32u32 - n));
 
-type Digest256 `public `doc("A SHA-256 digest: 32 bytes as a big-endian u256, H0 in the most significant 32 bits.") {
+type Digest256 is Equal, Hashable, Format `public `doc("A SHA-256 digest: 32 bytes as a big-endian u256, H0 in the most significant 32 bits.") {
   u256 value `value `public `doc("The raw digest. Exposed for callers that need to manipulate it directly (e.g. PBKDF2's XOR fold over successive blocks).");
 
   to_string(this) string `public `doc("Canonical lowercase 64-character hex, always zero-padded.") => this.value.to_string(base: 16, width: 64, fill: '0');

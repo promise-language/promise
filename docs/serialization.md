@@ -716,7 +716,7 @@ A tree-based approach (build a `JsonValue`, then serialize the tree) requires an
 ```promise
 // Tree-based (wasteful):
 json_tree := JsonValue.Object({"name": JsonValue.Str("Alice"), ...});
-output := json_tree.format();
+output := format_value(json_tree);
 
 // Streaming (direct):
 encoder.begin_object!(2);

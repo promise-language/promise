@@ -3,7 +3,7 @@
 _nanotime() int `extern("promise_nanotime");
 _sleep_nanos(int ns) `extern("promise_sleep_nanos");
 
-type Duration `public `doc("A span of time measured in nanoseconds. Pure value type with arithmetic, comparison, and human-readable formatting.") {
+type Duration is Ordered, Format `public `doc("A span of time measured in nanoseconds. Pure value type with arithmetic, comparison, and human-readable formatting.") {
   int nanos `value;
 
   // Factory constructors
@@ -70,7 +70,7 @@ type Duration `public `doc("A span of time measured in nanoseconds. Pure value t
   }
 }
 
-type Instant `public `doc("A point in monotonic time. Use `now()` to capture the current time, `elapsed()` to measure duration since capture.") {
+type Instant is Ordered `public `doc("A point in monotonic time. Use `now()` to capture the current time, `elapsed()` to measure duration since capture.") {
   int nanos `value;
 
   // Factory — captures current monotonic time

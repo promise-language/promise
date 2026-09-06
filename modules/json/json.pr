@@ -826,10 +826,10 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  format!(this) string `structural(protocol: false) `public `doc("Formats this JsonValue tree as a compact JSON string.") {
+  format!(this, Writer ~w) `public `doc("Writes this JsonValue tree to a Writer as compact JSON. Conforms to std.Format; for a string use json.format_value(v).") {
     JsonEncoder enc = JsonEncoder();
     this.encode(enc);
-    return enc.to_string();
+    w.write_string(enc.to_string());
   }
 
   format_pretty!(this, int indent = 2) string `public `doc("Formats this JsonValue tree as a pretty-printed JSON string.") {
@@ -850,9 +850,13 @@ parse_value!(string move input) JsonValue `public `doc("Parses a JSON string int
   return _parse_json_value(dec);
 }
 
-// Format a JsonValue tree as a JSON string. Delegates to JsonValue.format().
+// Format a JsonValue tree as a JSON string. Like JsonValue.format(), this
+// delegates the actual serialization to JsonValue.encode(); going straight to
+// the encoder avoids copying the output through an intermediate Builder.
 format_value!(JsonValue v) string `public `doc("Formats a JsonValue tree as a JSON string.") {
-  return v.format();
+  JsonEncoder enc = JsonEncoder();
+  v.encode(enc);
+  return enc.to_string();
 }
 
 // Format a JsonValue tree as a pretty-printed JSON string. Delegates to JsonValue.format_pretty().

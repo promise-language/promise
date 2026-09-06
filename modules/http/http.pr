@@ -113,7 +113,7 @@ type _Transport `doc("A byte transport for one HTTP connection: plaintext TCP, o
   graceful_close(~this) `abstract `doc("Close in a way that cannot race the peer's last read: half-close the write side, drain whatever the peer is still sending, then close.");
 }
 
-type _PlainTransport is _Transport `doc("An HTTP connection carried directly over TCP.") {
+type _PlainTransport is _Transport, Closer `doc("An HTTP connection carried directly over TCP.") {
   net.TcpStream _tcp;
 
   create(net.TcpStream move tcp) Self `factory `doc("Wrap an owned TCP connection as a transport.") {
@@ -157,7 +157,7 @@ type _PlainTransport is _Transport `doc("An HTTP connection carried directly ove
   }
 }
 
-type _TlsTransport is _Transport `doc("An HTTP connection carried over TLS.") {
+type _TlsTransport is _Transport, Closer `doc("An HTTP connection carried over TLS.") {
   tls.TlsStream _tls;
 
   create(tls.TlsStream move stream) Self `factory `doc("Wrap an owned TLS stream as a transport.") {
@@ -264,6 +264,9 @@ type Pool {
   }
 }
 
+// No `is Closer` (T1734): Client.close(~this) is non-failable where Closer
+// requires close!(~this), and the explicit-`is` vtable path miscompiles that
+// relaxed match (T1952). Client satisfies Closer structurally in the meantime.
 type Client `public `doc("A reusable HTTP/1.1 client with redirect following, keep-alive connection reuse, and automatic gzip response decoding. Speaks both http:// and https://; by default an https:// request verifies the server certificate against the system trust store, which set_tls_config can override. Create once and reuse for many requests to the same host. Not safe for concurrent use — the connection pool is mutated per request, so use one Client per goroutine.") {
   // The TLS configuration slot: empty until set_tls_config is called or the
   // first https:// request materialises the system-trust-store default into it.
@@ -503,7 +506,7 @@ type _TlsUpgrader is _ConnectionUpgrader `doc("Completes a TLS handshake on each
   }
 }
 
-type Server `public `doc("An HTTP/1.1 server that handles each connection on its own goroutine, with keep-alive and a bounded number of concurrent connections. bind serves plaintext HTTP; bind_tls serves HTTPS over the same code path, so the two differ only in how each accepted connection is upgraded.") {
+type Server is Closer `public `doc("An HTTP/1.1 server that handles each connection on its own goroutine, with keep-alive and a bounded number of concurrent connections. bind serves plaintext HTTP; bind_tls serves HTTPS over the same code path, so the two differ only in how each accepted connection is upgraded.") {
   net.TcpListener _listener;
   string _address;
   int _port;

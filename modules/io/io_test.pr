@@ -1243,6 +1243,52 @@ metadata_format() `test(exclude: wasm) {
   File.remove(os.temp_dir + "/pr_iot_mdfmt")?!;
 }
 
+// ---- T1734: the declared `is Closer` / `is Format` conformances are usable boxed ----
+
+file_boxed_as_closer() `test(exclude: wasm) {
+  // File declares `is Closer`; the conformance must hold through a boxed view,
+  // not just as a direct method call.
+  File.write_content(os.temp_dir + "/pr_iot_boxclose", "x")?!;
+  Closer c = File.open_read(os.temp_dir + "/pr_iot_boxclose")?!;
+  c.close()?!;
+  File.remove(os.temp_dir + "/pr_iot_boxclose")?!;
+}
+
+buffered_writer_boxed_as_closer_flushes() `test(exclude: wasm) {
+  // BufferedWriter declares `is Closer`; closing through the box must still run
+  // the concrete close!, which flushes buffered bytes before closing the file.
+  File f = File.create(os.temp_dir + "/pr_iot_boxbwc")?!;
+  BufferedWriter w = BufferedWriter(move f, buf_size: 64);
+  w.write_string("flushed-through-box")?!;
+  Closer c = w;
+  c.close()?!;
+  string content = File.read_content(os.temp_dir + "/pr_iot_boxbwc")?!;
+  assert(content == "flushed-through-box", "boxed close flushed the buffer");
+  File.remove(os.temp_dir + "/pr_iot_boxbwc")?!;
+}
+
+buffered_reader_boxed_as_closer() `test(exclude: wasm) {
+  File.write_content(os.temp_dir + "/pr_iot_boxbrc", "abc")?!;
+  File f = File.open_read(os.temp_dir + "/pr_iot_boxbrc")?!;
+  BufferedReader r = BufferedReader(move f, buf_size: 64);
+  Closer c = r;
+  c.close()?!;
+  File.remove(os.temp_dir + "/pr_iot_boxbrc")?!;
+}
+
+metadata_boxed_as_format() `test(exclude: wasm) {
+  // Metadata declares `is Format` — a pure value type whose concrete format!
+  // must dispatch through a boxed Format view.
+  File.write_content(os.temp_dir + "/pr_iot_boxmf", "f")?!;
+  Format m = File.metadata(os.temp_dir + "/pr_iot_boxmf")?!;
+  Builder b = Builder();
+  m.format(b)?!;
+  string s = b.to_string();
+  assert(s.contains("file"), "boxed format contains kind");
+  assert(s.contains("size:"), "boxed format contains size");
+  File.remove(os.temp_dir + "/pr_iot_boxmf")?!;
+}
+
 metadata_uid_gid() `test(exclude: wasm) {
   File.write_content(os.temp_dir + "/pr_iot_mdug", "u")?!;
   Metadata m = File.metadata(os.temp_dir + "/pr_iot_mdug")?!;

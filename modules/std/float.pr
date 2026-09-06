@@ -1,5 +1,5 @@
 // std/float.pr — Floating-point types with arithmetic, comparison, and unary operators
-type f32 `native `public {
+type f32 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public {
   +(f32 other) f32 `native;
   -(f32 other) f32 `native;
   * (f32 other) f32 `native;
@@ -61,7 +61,7 @@ type f32 `native `public {
   }
 }
 
-type f64 `native `public {
+type f64 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public {
   +(f64 other) f64 `native;
   -(f64 other) f64 `native;
   * (f64 other) f64 `native;

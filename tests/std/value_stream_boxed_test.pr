@@ -1,0 +1,96 @@
+// tests/std/value_stream_boxed_test.pr
+//
+// T1734 canary. std's standard-stream handles (`_InputStream` / `_OutputStream`
+// in modules/std/io.pr) are pure value types that now declare `is Reader` /
+// `is Writer` explicitly. Both interfaces carry *default* methods — Reader
+// contributes `read_byte`, Writer contributes `write_string` and `write_line` —
+// and calling an inherited default through a boxed receiver is precisely the
+// shape T1880 broke for non-generic *heap* types: the default's vtable slot was
+// left null and the call jumped to address 0.
+//
+// Value types were never affected by T1880 and its fix generalized the
+// synthesis, but nothing in the tree exercised the value-type half. These tests
+// pin it, so a future change to default-method synthesis that regresses value
+// types fails here instead of in whatever program next boxes a stream.
+// A pure value type standing in for _InputStream/_OutputStream, which are
+// private to std. Same shape: one `value field, one abstract method, every
+// other method inherited from the interface.
+type _CountingSink is Writer {
+  int _tag `value;
+
+  write!(~this, u8[] ~buf) int `doc("Accepts every byte and reports the count.") {
+    return buf.len;
+  }
+}
+
+type _ConstantSource is Reader {
+  u8 _byte `value;
+
+  read!(~this, u8[] ~buf) int `doc("Fills one byte per call, never reaching EOF.") {
+    if buf.len == 0 {
+      return 0;
+    }
+    buf[0] = this._byte;
+    return 1;
+  }
+}
+
+value_type_boxed_as_writer_runs_inherited_defaults() `test {
+  Writer w = _CountingSink(_tag: 1);
+  // write_string is Writer's default, not the concrete type's — this is the
+  // dispatch that T1880 broke for heap types.
+  assert(w.write_string("hello")?! == 5, "inherited write_string dispatches");
+}
+
+value_type_boxed_as_writer_runs_second_level_default() `test {
+  // write_line is a default that calls another default (write_string), which in
+  // turn calls the concrete override. Two synthesis hops, boxed.
+  Writer w = _CountingSink(_tag: 2);
+  w.write_line("hello")?!;
+}
+
+value_type_boxed_as_reader_runs_inherited_default() `test {
+  Reader r = _ConstantSource(_byte: 65u8);
+  // read_byte is Reader's default: it allocates a 1-byte buffer and calls the
+  // concrete read().
+  b := r.read_byte();
+  assert(b is present, "inherited read_byte returns a byte");
+  assert(b! == 65u8, "inherited read_byte returns the byte read() produced");
+}
+
+value_type_reader_default_reports_eof() `test {
+  // read() returning 0 must surface as absent through the inherited default.
+  Reader r = _ConstantSource(_byte: 0u8);
+  u8[] empty = Vector[u8].filled(0u8, 0);
+  assert(r.read(empty)?! == 0, "empty buffer reads nothing");
+}
+
+value_type_used_directly_matches_boxed() `test {
+  // The declared conformance must not change what the type does unboxed.
+  _CountingSink direct = _CountingSink(_tag: 3);
+  int via_direct = direct.write_string("abc")?!;
+
+  Writer boxed = _CountingSink(_tag: 3);
+  int via_view = boxed.write_string("abc")?!;
+
+  assert(via_direct == via_view, "direct and boxed dispatch agree");
+  assert(via_direct == 3, "both wrote three bytes");
+}
+
+std_stream_handles_box_and_dispatch() `test {
+  // The real thing: stdout/stderr are _OutputStream values handed back already
+  // boxed as Writer, and stdin is an _InputStream boxed as Reader. Writing an
+  // empty string exercises the inherited default's dispatch without emitting
+  // anything into the harness's streams.
+  Writer out = stdout;
+  assert(out.write_string("")?! == 0, "stdout boxed as Writer runs write_string");
+
+  Writer err = stderr;
+  assert(err.write_string("")?! == 0, "stderr boxed as Writer runs write_string");
+
+  // stdin is only boxed, never read — a blocking read would make this test
+  // depend on what the harness attaches to the child's descriptor 0.
+  Reader input = stdin;
+  u8[] empty = Vector[u8].filled(0u8, 0);
+  assert(input.read(empty)?! == 0, "stdin boxed as Reader accepts a zero-length read");
+}

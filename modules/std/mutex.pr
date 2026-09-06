@@ -12,6 +12,11 @@ type Mutex[T] `native `public `interior `single_owner {
 // held lock, so it takes a shared `this receiver (interior mutability). `close and
 // `drop consume the guard and stay `~this — moving a borrowed guard is caught by
 // ownership analysis, not the shared-borrow mutation check.
+// No `is Closer` (T1734): MutexGuard satisfies Closer structurally, but its
+// close(~this) is non-failable where Closer requires close!(~this). That relaxed
+// match is accepted by sema and then miscompiled by the explicit-`is` vtable path
+// — T1952 — so declaring the conformance would break `Closer c = guard;
+// c.close()?!`, which works today. Restore the clause when T1952 lands.
 type MutexGuard[T] `native `public `interior `single_owner {
   get borrow T & `native `doc("Get the guarded value.");
   set borrow(T value) `native `doc("Set the guarded value.");

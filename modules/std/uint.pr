@@ -1,5 +1,5 @@
 // std/uint.pr — Unsigned integer types with arithmetic, comparison, bitwise, and unary operators
-type uint `native `public {
+type uint is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public {
   +(uint other) uint `native;
   -(uint other) uint `native;
   * (uint other) uint `native;
@@ -67,7 +67,7 @@ type uint `native `public {
   }
 }
 
-type u8 `native `public {
+type u8 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public {
   +(u8 other) u8 `native;
   -(u8 other) u8 `native;
   * (u8 other) u8 `native;
@@ -120,7 +120,7 @@ type u8 `native `public {
   }
 }
 
-type u16 `native `public {
+type u16 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public {
   +(u16 other) u16 `native;
   -(u16 other) u16 `native;
   * (u16 other) u16 `native;
@@ -173,7 +173,7 @@ type u16 `native `public {
   }
 }
 
-type u32 `native `public {
+type u32 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public {
   +(u32 other) u32 `native;
   -(u32 other) u32 `native;
   * (u32 other) u32 `native;
@@ -226,7 +226,7 @@ type u32 `native `public {
   }
 }
 
-type u64 `native `public {
+type u64 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public {
   +(u64 other) u64 `native;
   -(u64 other) u64 `native;
   * (u64 other) u64 `native;

@@ -132,6 +132,17 @@ _offset_suffix(int offset_secs) string {
   return sign + _pad2(o / 3600) + ":" + _pad2((o % 3600) / 60);
 }
 
+// Reads a Reader to end-of-input. The three `parse!` entry points take a Reader
+// to satisfy std.Parse, but every format below is indexed positionally, so each
+// one drains its reader here and then works over the resulting string.
+_drain(Reader ~r) string {
+  u8[] bytes = u8[]();
+  while byte := r.read_byte() {
+    bytes.push(byte);
+  }
+  return string.from_bytes(bytes);
+}
+
 // Reads `count` decimal digits from `s` starting at `start`, returning the value.
 _read_digits!(string s, int start, int count) int {
   int v = 0;
@@ -157,7 +168,7 @@ _expect!(string s, int at, char expected) {
 
 // ---- DateTime ----
 
-type DateTime `public `doc("A calendar date and time anchored to the Unix epoch, with an optional fixed UTC offset. Pure value type.") {
+type DateTime is Ordered, Format, Parse `public `doc("A calendar date and time anchored to the Unix epoch, with an optional fixed UTC offset. Pure value type.") {
   int _epoch_nanos `value; // nanoseconds since 1970-01-01T00:00:00Z (the instant)
   int _offset_secs `value; // displayed UTC offset in seconds (0 = UTC)
 
@@ -176,7 +187,8 @@ type DateTime `public `doc("A calendar date and time anchored to the Unix epoch,
     return DateTime(_epoch_nanos: secs * 1000000000, _offset_secs: 0);
   }
 
-  parse!(string s) DateTime `structural(protocol: false) `factory `doc("Parses an ISO 8601 / RFC 3339 timestamp such as \"2026-04-11T14:30:00Z\", \"2026-04-11T14:30:00.5Z\", or \"2026-04-11T14:30:00.250+05:30\". Fractional seconds are optional and preserved to nanosecond precision (extra digits are truncated).") {
+  parse!(Reader ~r) DateTime `factory `doc("Parses an ISO 8601 / RFC 3339 timestamp such as \"2026-04-11T14:30:00Z\", \"2026-04-11T14:30:00.5Z\", or \"2026-04-11T14:30:00.250+05:30\". Fractional seconds are optional and preserved to nanosecond precision (extra digits are truncated). Consumes the reader to end-of-input; to parse from a string use scan[DateTime](s).") {
+    string s = _drain(r);
     int year = _read_digits(s, 0, 4);
     _expect(s, 4, '-');
     int month = _read_digits(s, 5, 2);
@@ -291,13 +303,14 @@ type DateTime `public `doc("A calendar date and time anchored to the Unix epoch,
 
 // ---- Date ----
 
-type Date `public `doc("A calendar date (year, month, day) without time-of-day. Pure value type.") {
+type Date is Ordered, Format, Parse `public `doc("A calendar date (year, month, day) without time-of-day. Pure value type.") {
   int _days `value; // days since 1970-01-01
 
   today() Date `factory `doc("The current UTC date.") => Date(_days: _floor_div(_wallclock(), 86400000000000));
   create(int year, int month, int day) Date `factory `doc("A Date from calendar components.") => Date(_days: _days_from_civil(year, month, day));
 
-  parse!(string s) Date `structural(protocol: false) `factory `doc("Parses a date such as \"2026-04-11\".") {
+  parse!(Reader ~r) Date `factory `doc("Parses a date such as \"2026-04-11\". Consumes the reader to end-of-input; to parse from a string use scan[Date](s).") {
+    string s = _drain(r);
     int year = _read_digits(s, 0, 4);
     _expect(s, 4, '-');
     int month = _read_digits(s, 5, 2);
@@ -351,14 +364,15 @@ type Date `public `doc("A calendar date (year, month, day) without time-of-day. 
 
 // ---- Time ----
 
-type Time `public `doc("A time of day (hour, minute, second, nanosecond) without a date. Pure value type.") {
+type Time is Ordered, Format, Parse `public `doc("A time of day (hour, minute, second, nanosecond) without a date. Pure value type.") {
   int _nanos `value; // nanoseconds since midnight, in [0, 86_400_000_000_000)
 
   create(int hour, int minute, int second) Time `factory `doc("A Time from hour, minute, and second.") => Time(_nanos: (hour * 3600 + minute * 60 + second) * 1000000000);
   midnight() Time `factory `doc("00:00:00.") => Time(_nanos: 0);
   noon() Time `factory `doc("12:00:00.") => Time(_nanos: 43200000000000);
 
-  parse!(string s) Time `structural(protocol: false) `factory `doc("Parses a time such as \"14:30:00\" or \"14:30:00.5\". Fractional seconds are optional and preserved to nanosecond precision (extra digits are truncated).") {
+  parse!(Reader ~r) Time `factory `doc("Parses a time such as \"14:30:00\" or \"14:30:00.5\". Fractional seconds are optional and preserved to nanosecond precision (extra digits are truncated). Consumes the reader to end-of-input; to parse from a string use scan[Time](s).") {
+    string s = _drain(r);
     int hour = _read_digits(s, 0, 2);
     _expect(s, 2, ':');
     int minute = _read_digits(s, 3, 2);

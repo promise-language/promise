@@ -1005,7 +1005,7 @@ main!() {
     JsonValue? scores = v.get("scores");          // Array
     f64? first = scores!.at(0)!.as_number();      // 10.0
   }
-  string out = v.format();                        // compact JSON string
+  string out = json.format_value(v);               // compact JSON string
 }
 
 // Run a subprocess: execute(program, args[], env?, working_dir?) — failable

@@ -12,7 +12,7 @@
 // the dominant wide-integer use cases (hashes, UUIDs, addresses, ECC scalars)
 // and the only base whose formatting is division-free. Decimal remains
 // available via an explicit `base: 10` argument. See docs/large-integers.md.
-type i128 `native `public `doc("Signed 128-bit integer.") {
+type i128 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public `doc("Signed 128-bit integer.") {
   +(i128 other) i128 `native;
   -(i128 other) i128 `native;
   * (i128 other) i128 `native;
@@ -100,7 +100,7 @@ type i128 `native `public `doc("Signed 128-bit integer.") {
   }
 }
 
-type u128 `native `public `doc("Unsigned 128-bit integer.") {
+type u128 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public `doc("Unsigned 128-bit integer.") {
   +(u128 other) u128 `native;
   -(u128 other) u128 `native;
   * (u128 other) u128 `native;
@@ -170,7 +170,7 @@ type u128 `native `public `doc("Unsigned 128-bit integer.") {
   }
 }
 
-type i256 `native `public `doc("Signed 256-bit integer.") {
+type i256 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public `doc("Signed 256-bit integer.") {
   +(i256 other) i256 `native;
   -(i256 other) i256 `native;
   * (i256 other) i256 `native;
@@ -258,7 +258,7 @@ type i256 `native `public `doc("Signed 256-bit integer.") {
   }
 }
 
-type u256 `native `public `doc("Unsigned 256-bit integer.") {
+type u256 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public `doc("Unsigned 256-bit integer.") {
   +(u256 other) u256 `native;
   -(u256 other) u256 `native;
   * (u256 other) u256 `native;
@@ -328,7 +328,7 @@ type u256 `native `public `doc("Unsigned 256-bit integer.") {
   }
 }
 
-type i512 `native `public `doc("Signed 512-bit integer.") {
+type i512 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public `doc("Signed 512-bit integer.") {
   +(i512 other) i512 `native;
   -(i512 other) i512 `native;
   * (i512 other) i512 `native;
@@ -416,7 +416,7 @@ type i512 `native `public `doc("Signed 512-bit integer.") {
   }
 }
 
-type u512 `native `public `doc("Unsigned 512-bit integer.") {
+type u512 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `public `doc("Unsigned 512-bit integer.") {
   +(u512 other) u512 `native;
   -(u512 other) u512 `native;
   * (u512 other) u512 `native;

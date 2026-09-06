@@ -44,7 +44,7 @@ _read_bytes(int fd, u8[] ~buf) int `extern("promise_read_bytes");
 // Value types are load-bearing here: no drop, no close, no allocation, copyable —
 // so each getter hands back a fresh handle and the process's fd 0/1/2 can never be
 // closed or double-closed by user code. Neither type satisfies Closer.
-type _InputStream `doc("A handle on a read-only file descriptor. Satisfies Reader.") {
+type _InputStream is Reader `doc("A handle on a read-only file descriptor. Satisfies Reader.") {
   int _fd `value;
 
   read!(~this, u8[] ~buf) int `doc("Reads up to buf.len bytes from the descriptor into buf. Returns the number of bytes read (0 = EOF).") {
@@ -56,7 +56,7 @@ type _InputStream `doc("A handle on a read-only file descriptor. Satisfies Reade
   }
 }
 
-type _OutputStream `doc("A handle on a write-only file descriptor. Satisfies Writer.") {
+type _OutputStream is Writer `doc("A handle on a write-only file descriptor. Satisfies Writer.") {
   int _fd `value;
 
   write!(~this, u8[] ~buf) int `doc("Writes bytes from buf to the descriptor. Returns the number of bytes written.") {

@@ -167,7 +167,7 @@ type TlsServerConfig `public `doc("Server-side TLS credentials: a certificate ch
   }
 }
 
-type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connection. Satisfies Reader and Writer. Auto-frees the TLS session and closes the socket on drop.") {
+type TlsStream is Closer `public `doc("A TLS-encrypted stream wrapping an owned TCP connection. Satisfies Reader and Writer. Auto-frees the TLS session and closes the socket on drop.") {
   int _ssl; // backend session handle as int (0 = never established)
   net.TcpStream _tcp;
   bool _checked_first_record = false; // see _fill_in
@@ -453,7 +453,7 @@ type TlsStream `public `doc("A TLS-encrypted stream wrapping an owned TCP connec
   }
 }
 
-type TlsListener `public `doc("A TLS server listener. Binds a TCP port with a certificate chain and private key, and accepts incoming TLS connections, handshaking each one inline. A server that must not let one slow peer stall its accept loop should instead bind a net.TcpListener and hand each accepted stream to TlsStream.accept on its own goroutine. Auto-frees its credentials on drop and closes the socket.") {
+type TlsListener is Closer `public `doc("A TLS server listener. Binds a TCP port with a certificate chain and private key, and accepts incoming TLS connections, handshaking each one inline. A server that must not let one slow peer stall its accept loop should instead bind a net.TcpListener and hand each accepted stream to TlsStream.accept on its own goroutine. Auto-frees its credentials on drop and closes the socket.") {
   net.TcpListener _listener;
   TlsServerConfig _config;
 

@@ -326,7 +326,7 @@ _make_cancel_handle(int pd) CancelHandle {
   return CancelHandle(_pd: pd);
 }
 
-type TcpListener `public `doc("A TCP listener socket. Binds to an address and accepts incoming connections. Auto-closes on drop.") {
+type TcpListener is Closer `public `doc("A TCP listener socket. Binds to an address and accepts incoming connections. Auto-closes on drop.") {
   int _fd;
   int _pd; // PollDesc pointer (as int) for reactor integration
   int _accept_deadline; // absolute monotonic nanos, 0 = no deadline
@@ -416,7 +416,7 @@ type TcpListener `public `doc("A TCP listener socket. Binds to an address and ac
   }
 }
 
-type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read/write with reactor-based goroutine parking, per-direction deadlines and cancellation. Auto-closes on drop.") {
+type TcpStream is Closer `public `doc("A TCP connection stream. Supports non-blocking read/write with reactor-based goroutine parking, per-direction deadlines and cancellation. Auto-closes on drop.") {
   int _fd;
   int _pd; // PollDesc pointer (as int) for reactor integration
   int _read_deadline; // absolute monotonic nanos, 0 = no deadline

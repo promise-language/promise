@@ -1,5 +1,5 @@
 // std/string.pr — String type with operators and methods
-type string `native `public {
+type string is Ordered, Hashable, Cloneable, Format, Encodable, Decodable `native `public {
   from_bytes(u8[] bytes) string `native `factory;
 
   get len int `native;

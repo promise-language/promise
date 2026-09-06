@@ -5,5 +5,9 @@
 type Channel[T] `native `public `sendable `sharable `interior {
   new(int? capacity) `native;
   send(T move value) `native;
+  // `structural(protocol: false): `close` is a protocol name (std.Closer), but a Channel
+  // is refcounted and shared across goroutines, so closing it is deliberately *not* a
+  // consuming operation — it takes a shared `this, not `~this. Channel is not a Closer
+  // and must never be boxed as one, so the near-miss is opted out rather than fixed (T1734).
   close() `structural(protocol: false) `native;
 }

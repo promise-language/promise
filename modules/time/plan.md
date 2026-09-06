@@ -154,10 +154,10 @@ type Time `public `doc("A time of day (hour, minute, second, nanosecond) without
 All construction and parsing goes through factory methods on the target type. No free-floating convenience wrappers — there is one obvious way to do each thing:
 
 - `DateTime.now()` — current wall-clock time
-- `DateTime.parse!(s)` — parse ISO 8601 / RFC 3339
+- `DateTime.parse!(Reader ~r)` — parse ISO 8601 / RFC 3339 (`scan[DateTime](s)` from a string)
 - `Date.today()` — current date
-- `Date.parse!(s)` — parse "2026-04-11"
-- `Time.parse!(s)` — parse "14:30:00"
+- `Date.parse!(Reader ~r)` — parse "2026-04-11" (`scan[Date](s)` from a string)
+- `Time.parse!(Reader ~r)` — parse "14:30:00" (`scan[Time](s)` from a string)
 
 Factories can set `` `final `` fields during construction, ensuring hermetic, immutable instances.
 

@@ -1,0 +1,270 @@
+// tests/std/protocol_conformance_test.pr
+//
+// T1734: every std implementation of a protocol interface now declares `is`
+// explicitly (`type int is Ordered, Hashable, Format, Parse, Encodable,
+// Decodable`, `type Vector[T] is Cloneable, Format`, and so on). The declaration
+// alone is checked by sema, but a declaration nobody exercises is still a claim
+// nobody tests — these assert that each declared conformance is *usable* in the
+// way the protocol advertises.
+//
+// Deliberately NOT asserted here: calling a `native` requirement through a boxed
+// view — `Ordered o = 3; o < 5`, `Hashable h = 3; h.hash`, `Cloneable c = [1];
+// c.clone()`. All three panic today. That is T1932 (boxed structural view
+// representation soundness), it is pre-existing, and it is independent of the
+// `is` clauses — verified identical with and without them. Do not "fix" this
+// file by deleting this note and adding those lines; add them when T1932 lands.
+// ---- Format: box each implementation and write through the view ----
+format_boxed_over_integers() `test {
+  Builder b = Builder();
+  Format i = 42;
+  i.format(b)?!;
+  assert(b.to_string() == "42", "int boxed as Format");
+
+  Builder b8 = Builder();
+  Format v8 = -8i8;
+  v8.format(b8)?!;
+  assert(b8.to_string() == "-8", "i8 boxed as Format");
+
+  Builder bu = Builder();
+  Format vu = 7u;
+  vu.format(bu)?!;
+  assert(bu.to_string() == "7", "uint boxed as Format");
+
+  Builder bu8 = Builder();
+  Format vu8 = 200u8;
+  vu8.format(bu8)?!;
+  assert(bu8.to_string() == "200", "u8 boxed as Format");
+}
+
+format_boxed_over_scalars() `test {
+  Builder b = Builder();
+  Format f = 2.5;
+  f.format(b)?!;
+  assert(b.to_string() == "2.5", "f64 boxed as Format");
+
+  Builder bc = Builder();
+  Format c = 'z';
+  c.format(bc)?!;
+  assert(bc.to_string() == "z", "char boxed as Format");
+
+  Builder bb = Builder();
+  Format t = true;
+  t.format(bb)?!;
+  assert(bb.to_string() == "true", "bool boxed as Format");
+
+  Builder bs = Builder();
+  Format s = "hi";
+  s.format(bs)?!;
+  assert(bs.to_string() == "hi", "string boxed as Format");
+}
+
+format_boxed_over_wide_integers() `test {
+  Builder b = Builder();
+  Format w = 255u128;
+  w.format(b)?!;
+  assert(b.to_string() == "ff", "u128 boxed as Format renders base 16");
+
+  Builder b2 = Builder();
+  Format w2 = 16i256;
+  w2.format(b2)?!;
+  assert(b2.to_string() == "10", "i256 boxed as Format renders base 16");
+}
+
+format_boxed_over_containers() `test {
+  Builder b = Builder();
+  Format v = [1, 2, 3];
+  v.format(b)?!;
+  assert(b.to_string() == "[1, 2, 3]", "Vector[T] boxed as Format");
+
+  map[string, int] fields = {
+    "a": 1
+  };
+  Builder bm = Builder();
+  Format m = fields;
+  m.format(bm)?!;
+  assert(bm.to_string() == "\{a: 1}", "Map[K, V] boxed as Format");
+
+  Set[int] members = Set[int]();
+  members.add(7);
+  Builder bs = Builder();
+  Format s = members;
+  s.format(bs)?!;
+  assert(bs.to_string() == "\{7}", "Set[T] boxed as Format");
+}
+
+format_boxed_over_duration() `test {
+  Builder b = Builder();
+  Format d = Duration.from_millis(1500);
+  d.format(b)?!;
+  assert(b.to_string() == "1.5s", "Duration boxed as Format");
+}
+
+format_writes_at_the_writers_position() `test {
+  // A Format appends to the writer it is handed; it does not own it.
+  Builder b = Builder();
+  b.write_string("n=");
+  Format n = 42;
+  n.format(b)?!;
+  b.write_string(";");
+  assert(b.to_string() == "n=42;", "format appends rather than replacing");
+}
+
+// ---- Parse: scan[T: Parse] is the string entry point onto parse!(Reader ~r) ----
+
+parse_via_scan_over_integers() `test {
+  assert(scan[int]("42")?! == 42, "scan int");
+  assert(scan[int]("-42")?! == -42, "scan negative int");
+  assert(scan[i8]("-8")?! == -8i8, "scan i8");
+  assert(scan[i16]("-300")?! == -300i16, "scan i16");
+  assert(scan[i32]("-70000")?! == -70000i32, "scan i32");
+  assert(scan[i64]("-5")?! == -5i64, "scan i64");
+  assert(scan[uint]("7")?! == 7u, "scan uint");
+  assert(scan[u8]("200")?! == 200u8, "scan u8");
+  assert(scan[u16]("40000")?! == 40000u16, "scan u16");
+  assert(scan[u32]("70000")?! == 70000u32, "scan u32");
+  assert(scan[u64]("5")?! == 5u64, "scan u64");
+}
+
+parse_via_scan_over_scalars() `test {
+  assert(scan[f64]("2.5")?! == 2.5, "scan f64");
+  assert(scan[f32]("1.5")?! == 1.5f32, "scan f32");
+  assert(scan[bool]("true")?! == true, "scan bool");
+  assert(scan[bool]("false")?! == false, "scan bool false");
+  assert(scan[char]("z")?! == 'z', "scan char");
+}
+
+parse_via_scan_over_wide_integers() `test {
+  // The wide integers' parse! carries an extra defaulted `base` parameter, which
+  // relaxed signature matching accepts; the default is base 16.
+  assert(scan[u128]("ff")?! == 255u128, "scan u128 defaults to base 16");
+  assert(scan[i128]("-a")?! == -10i128, "scan i128 negative");
+  assert(scan[u256]("10")?! == 16u256, "scan u256");
+  assert(scan[i256]("10")?! == 16i256, "scan i256");
+  assert(scan[u512]("10")?! == 16u512, "scan u512");
+  assert(scan[i512]("10")?! == 16i512, "scan i512");
+}
+
+parse_reports_bad_input() `test {
+  bool caught = false;
+  scan[int]("nope")? e {
+    caught = true;
+  };
+  assert(caught, "scan raises on a non-numeric string");
+}
+
+// ---- Parse: parse! is reachable directly, over any Reader ----
+
+parse_direct_from_a_reader() `test {
+  // scan[T] is sugar over Scanner + parse!; the underlying entry point takes any
+  // Reader, which is what `is Parse` publishes.
+  assert(int.parse(Scanner(s: "42"))?! == 42, "int.parse over a Scanner");
+  assert(f64.parse(Scanner(s: "2.5"))?! == 2.5, "f64.parse over a Scanner");
+  assert(bool.parse(Scanner(s: "true"))?!, "bool.parse over a Scanner");
+}
+
+// ---- Ordered / Hashable / Equal through the generic constraints ----
+
+hashable_and_equal_back_the_container_key_constraints() `test {
+  // Map[K: Hashable + Equal, V] and Set[T: Hashable + Equal] are written against
+  // the constraints the primitives now declare.
+  map[int, string] by_int = {
+    1: "one", 2: "two"
+  };
+  assert(by_int[1]! == "one", "int as a Map key");
+
+  map[string, int] by_string = {
+    "a": 1
+  };
+  assert(by_string["a"]! == 1, "string as a Map key");
+
+  map[char, int] by_char = {
+    'x': 9
+  };
+  assert(by_char['x']! == 9, "char as a Map key");
+
+  Set[u8] bytes = Set[u8]();
+  bytes.add(200u8);
+  assert(bytes.contains(200u8), "u8 as a Set member");
+}
+
+ordered_backs_sort() `test {
+  // sort(T[] move) requires Ordered.
+  int[] ints = sort[int]([3, 1, 2]);
+  assert(ints[0] == 1 && ints[2] == 3, "sort over int");
+
+  string[] strings = sort[string](["c", "a", "b"]);
+  assert(strings[0] == "a" && strings[2] == "c", "sort over string");
+
+  char[] chars = sort[char](['c', 'a']);
+  assert(chars[0] == 'a', "sort over char");
+}
+
+ordered_holds_for_duration_and_instant() `test {
+  Duration a = Duration.from_millis(1);
+  Duration b = Duration.from_millis(2);
+  assert(a < b, "Duration <");
+  assert(b > a, "Duration > (inherited default)");
+  assert(a <= b && b >= a, "Duration <= / >= (inherited defaults)");
+  assert(a != b, "Duration != (inherited from Equal)");
+
+  Instant early = Instant.from_nanos(1000);
+  Instant late = Instant.from_nanos(2000);
+  assert(early < late, "Instant <");
+  assert(late > early, "Instant > (inherited default)");
+  assert(early <= late && late >= early, "Instant <= / >= (inherited defaults)");
+  assert(early != late, "Instant != (inherited from Equal)");
+}
+
+// ---- Cloneable ----
+
+cloneable_produces_an_independent_copy() `test {
+  int[] original = [1, 2, 3];
+  int[] copy = original.clone();
+  copy.push(4);
+  assert(original.len == 3, "Vector clone is independent");
+  assert(copy.len == 4, "Vector clone is usable");
+
+  map[string, int] m = {
+    "a": 1
+  };
+  map[string, int] m2 = m.clone();
+  m2["b"] = 2;
+  assert(m.len == 1 && m2.len == 2, "Map clone is independent");
+
+  Set[int] s = Set[int]();
+  s.add(1);
+  Set[int] s2 = s.clone();
+  s2.add(2);
+  assert(s.len == 1 && s2.len == 2, "Set clone is independent");
+
+  string text = "abc";
+  string text2 = text.clone();
+  assert(text2 == "abc", "string clone");
+}
+
+// ---- Closer ----
+
+mutex_guard_closes_directly() `test {
+  // MutexGuard[T] does NOT declare `is Closer` — its close(~this) is
+  // non-failable where Closer requires close!(~this), and the explicit-`is`
+  // vtable path miscompiles that relaxed match (T1952). It still satisfies
+  // Closer structurally; this pins the direct call the type publishes.
+  Mutex[int] m = Mutex[int](5);
+  guard := m.lock();
+  assert(guard.borrow == 5, "guard reads the protected value");
+  guard.close();
+}
+
+file_handle_types_satisfy_closer() `test {
+  // The twelve `is Closer` declarations the sweep does land all spell
+  // close!(~this) exactly. std has no such type, so the boxed-Closer path is
+  // covered by a local stand-in of the same shape.
+  Closer c = _ExactCloser(fd: 3);
+  c.close()?!;
+}
+
+type _ExactCloser is Closer {
+  int fd;
+  close!(~this) `doc("Consuming, failable close — the shape io.File and friends use.") {
+  }
+}

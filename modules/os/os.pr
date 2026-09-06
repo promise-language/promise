@@ -129,7 +129,7 @@ type ProcessResult `public `doc("The result of executing a subprocess. Contains 
   string stderr;
 }
 
-type ProcessInput `public `doc("Write end of a subprocess stdin pipe. Satisfies the Writer structural interface. Auto-closes on drop.") {
+type ProcessInput is Closer `public `doc("Write end of a subprocess stdin pipe. Satisfies the Writer structural interface. Auto-closes on drop.") {
   int _fd;
 
   write!(~this, u8[] ~buf) int `public `doc("Writes bytes from buf to the subprocess stdin pipe. Returns the number of bytes written. Raises an error on I/O failure.") {
@@ -172,7 +172,7 @@ type ProcessInput `public `doc("Write end of a subprocess stdin pipe. Satisfies 
   }
 }
 
-type ProcessOutput `public `doc("Read end of a subprocess stdout or stderr pipe. Satisfies the Reader structural interface. Auto-closes on drop.") {
+type ProcessOutput is Closer `public `doc("Read end of a subprocess stdout or stderr pipe. Satisfies the Reader structural interface. Auto-closes on drop.") {
   int _fd;
 
   read!(~this, u8[] ~buf) int `public `doc("Reads up to buf.len bytes from the pipe. Returns the number of bytes read, or 0 at EOF. Raises an error on I/O failure.") {

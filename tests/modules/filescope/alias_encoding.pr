@@ -1,0 +1,11 @@
+use encoding as m;
+
+// T1692: the sibling of alias_io.pr — the same alias `m`, a different module.
+// See that file for why one of the two used to lose codegen's alias scan.
+alias_encoding_absent() bool `public `doc("True when an uninitialized m.EncodingError? (m = encoding) holds none.") {
+  m.EncodingError? e;
+  if found := e {
+    return found.at_index == 0;
+  }
+  return true;
+}

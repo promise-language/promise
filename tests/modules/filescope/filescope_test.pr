@@ -5,3 +5,10 @@ file_scoped_imports_compose() `test {
   assert(bin_path() == "/usr" + s + "bin", "roots.pr resolved its own use path");
   assert(lib_path() == "/opt" + s + "lib", "leaves.pr resolved its own use path");
 }
+
+same_alias_two_modules_resolve_per_file() `test {
+  // T1692: `m` is `io` in alias_io.pr and `encoding` in alias_encoding.pr, so a
+  // module-qualified type must resolve against the file it is written in.
+  assert(alias_io_absent(), "m.IoError? resolved against alias_io.pr's own import");
+  assert(alias_encoding_absent(), "m.EncodingError? resolved against alias_encoding.pr's own import");
+}

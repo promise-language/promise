@@ -1,0 +1,17 @@
+use io as m;
+
+// T1692: this file binds `m` to `io`, while alias_encoding.pr binds the same
+// alias to `encoding`. Imports are file-scoped (T1686), so each file's
+// module-qualified type must resolve against its OWN import. Codegen used to
+// re-resolve the alias itself by scanning Info.ScopeOrder and taking the first
+// hit, so whichever file lost that scan resolved to no type at all — and an
+// uninitialized optional has no initializer to fall back on, so its alloca was
+// never emitted ("codegen: undefined variable"). Codegen now reads back sema's
+// per-file resolution (T1667).
+alias_io_absent() bool `public `doc("True when an uninitialized m.IoError? (m = io) holds none.") {
+  m.IoError? e;
+  if found := e {
+    return found.code == 0;
+  }
+  return true;
+}

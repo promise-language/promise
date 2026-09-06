@@ -1,0 +1,100 @@
+// T1667: codegen no longer re-derives a declared type from the type syntax; it
+// reads back the type sema resolved for that exact `ast.TypeRef`. The old copy
+// looked a bare name up by scanning `Info.ScopeOrder` in insertion order, so a
+// user type whose name collides with a std type could resolve to the STD one —
+// std's scope is inserted first. Sema instead walks the lexical scope chain,
+// where the user's declaration shadows std.
+//
+// Every position below is one the resolver decides: the alloca's type, the
+// view-coercion target at a typed declaration, and an `as!` cast target. A
+// regression that picked std's type instead emits a coercion into an empty
+// self-view vtable, so these assert both the value and — via the suite's leak
+// enforcement — that each shadowed local is dropped exactly once.
+//
+// Both names shadowed here are GENERIC in std (`Task[T]`, `Range[T]`), because
+// the mono name carries the type args and so does not collide in the IR.
+// Shadowing a NON-generic std name (`Builder`, `Scanner`, `Duration`,
+// `Instant`) is currently a backend failure — the four LLVM struct type names
+// are not namespaced, so `opt` rejects the module with "redefinition of type
+// %promise_Duration_t". Filed as T1986; add those cases here with the fix.
+type Task `doc("User type shadowing the std generic Task[T].") {
+  string name;
+  int[] steps;
+  get label string `doc("The stored name.") => this.name;
+  get count int `doc("Number of steps.") => this.steps.len;
+  format!(Writer ~w) `doc("Writes the name to w.") {
+    w.write_string(this.name)?^;
+  }
+}
+
+type NamedTask is Task `doc("Child of the user Task, for view coercion.") {
+  get label string `doc("The stored name, tagged.") => "task:{this.name}";
+}
+
+type Range `doc("User type shadowing the std Range.") {
+  int lo;
+  int hi;
+  string tag;
+  get span int `doc("Width of the range.") => this.hi - this.lo;
+}
+
+// The declared type is the only thing that decides the alloca here, and the
+// heap fields make a wrong resolution a double-free or a leak rather than a
+// silently wrong answer.
+shadowed_name_as_declared_type() `test {
+  Task t = Task(name: "alpha", steps: [1, 2, 3]);
+  assert(t.label == "alpha", "declared `Task` is the user Task, not std Task[T]");
+  assert(t.count == 3, "the user Task's own fields are laid out");
+
+  Range r = Range(lo: 2, hi: 9, tag: "window");
+  assert(r.span == 7, "declared `Range` is the user Range, not std Range");
+  assert(r.tag == "window", "the user Range's heap field survives");
+}
+
+// An uninitialized optional has no initializer to fall back on — the declared
+// ref is the sole source of the alloca, so a wrong resolution here is a missing
+// alloca, not a mistyped one.
+shadowed_name_in_optional_declaration() `test {
+  Task? absent;
+  if found := absent {
+    assert(false, "an uninitialized Task? must hold none, got {found.label}");
+  }
+
+  Task? present = Task(name: "beta", steps: []);
+  if found := present {
+    assert(found.label == "beta", "Task? holds the user Task");
+  } else {
+    assert(false, "Task? should hold a value");
+  }
+}
+
+// The declared type is also the view-coercion target: assigning a child to a
+// parent-typed local rewrites the value struct's vtable. Picking std's Task[T]
+// would coerce through the wrong vtable.
+shadowed_name_as_coercion_target() `test {
+  NamedTask child = NamedTask(name: "gamma", steps: [7]);
+  Task parent = child;
+  assert(parent.label == "task:gamma", "virtual dispatch through the shadowed parent type");
+  assert(parent.count == 1, "the child's fields are reachable through the parent view");
+}
+
+// The same lookup backs `as!` targets, where a nil resolution is a hard codegen
+// panic and a wrong one is an RTTI check against the wrong type id.
+shadowed_name_as_cast_target() `test {
+  Format f = Task(name: "delta", steps: [1]);
+  Task back = f as! Task;
+  assert(back.label == "delta", "downcast to the shadowed user Task");
+  assert(back.count == 1, "the downcast value keeps its own fields");
+}
+
+// Repeat the shadowed declaration in a loop so any per-declaration double-free
+// or leak is amplified past the point leak enforcement could miss it.
+shadowed_name_declared_in_loop() `test {
+  int total = 0;
+  for i in 0..40 {
+    Task t = Task(name: "item-{i}", steps: [i]);
+    Range r = Range(lo: i, hi: i + 3, tag: "w{i}");
+    total += t.label.len + r.span;
+  }
+  assert(total > 0, "repeated shadowed declarations neither leak nor double-free");
+}

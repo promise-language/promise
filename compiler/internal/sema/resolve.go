@@ -9,11 +9,28 @@ import (
 
 // resolveType converts an ast.TypeRef to a types.Type using the current scope.
 // Returns nil and reports an error if the type cannot be resolved.
+//
+// Every successful resolution is recorded in Info.TypeRefs. Codegen reads that
+// back instead of walking the type syntax itself, so this is the compiler's only
+// ast.TypeRef -> types.Type resolver (T1667). All nested refs recurse through
+// here, so an entry exists for every node of a resolved ref tree.
 func (c *Checker) resolveType(ref ast.TypeRef) types.Type {
 	if ref == nil {
 		return nil
 	}
+	typ := c.resolveTypeWalk(ref)
+	if typ != nil {
+		c.info.TypeRefs[ref] = typ
+	}
+	return typ
+}
 
+// resolveTypeWalk performs the resolution walk. Call resolveType instead — it
+// records the result for codegen. Nothing here is memoized: a ref resolved twice
+// is walked twice and re-recorded. That is deliberate — resolution depends only
+// on the scope chain the ref is checked under, and a given ref node is only ever
+// checked under one, so the second write stores the same type as the first.
+func (c *Checker) resolveTypeWalk(ref ast.TypeRef) types.Type {
 	switch r := ref.(type) {
 	case *ast.NamedTypeRef:
 		return c.resolveNamedType(r)

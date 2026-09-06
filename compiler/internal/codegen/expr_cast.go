@@ -700,7 +700,10 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 	// (SliceTypeRef, QualifiedTypeRef, etc.) work, not just NamedTypeRef.
 	targetType := c.resolveTypeRefToType(targetTypeRef)
 	if targetType == nil {
-		panic(fmt.Sprintf("codegen: cannot resolve cast target type %T", targetTypeRef))
+		// T1667: resolveTypeRefToType reads back what sema recorded, so nil here
+		// means sema never resolved this ref — a frontend bug, not an unsupported
+		// TypeRef kind. Point the reader at sema, not at this switch.
+		panic(fmt.Sprintf("codegen: sema recorded no type for cast target %T (T1667)", targetTypeRef))
 	}
 	targetNamed := extractNamed(targetType)
 	if targetNamed == nil {

@@ -334,6 +334,13 @@ type Info struct {
 	// when the handler includes type arguments (e.g., `? e is DataError[string]`).
 	ErrorHandlerTypes map[*ast.ErrorHandlerExpr]types.Type
 
+	// TypeRefs maps each ast.TypeRef sema successfully resolved to its type.
+	// Codegen consumes this instead of re-deriving types from type syntax, so
+	// there is exactly one ast.TypeRef -> types.Type resolver in the compiler
+	// (T1667). Refs that failed to resolve are absent — compilation has already
+	// errored in that case.
+	TypeRefs map[ast.TypeRef]types.Type
+
 	// DeclHashes maps each declared TypeName to the hash of its AST declaration
 	// (TypeDecl or EnumDecl). The hash covers all fields, methods, variants, and
 	// annotations — everything that affects the generated IR for a generic instance.

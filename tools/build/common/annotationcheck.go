@@ -387,7 +387,9 @@ func parseAnnotationDoc(path string) (annotationDoc, error) {
 	if err != nil {
 		return annotationDoc{}, fmt.Errorf("annotation coverage: read %s: %w", annotationsDoc, err)
 	}
-	lines := strings.Split(string(data), "\n")
+	// A Windows checkout carries the document with CRLF endings (autocrlf), and
+	// the schema regexps are anchored at end of line.
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
 
 	doc := annotationDoc{
 		index:    map[string]annotationSpec{},

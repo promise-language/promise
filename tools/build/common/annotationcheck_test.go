@@ -131,6 +131,17 @@ func TestAnnotationCoverageCoherentTreePasses(t *testing.T) {
 	}
 }
 
+// A checkout made with autocrlf hands the check the same document with CRLF
+// endings; the entries must still be read as entries, not as names with a
+// stray carriage return that then "have no schema line".
+func TestAnnotationCoverageCoherentTreePassesWithCRLF(t *testing.T) {
+	doc := strings.ReplaceAll(coherentDocument(), "\n", "\r\n")
+	root := annotationTree(t, copyMetas+embedMetas, copySpecs+embedSpecs, doc)
+	if err := checkAnnotationCoverage(root); err != nil {
+		t.Fatalf("a coherent CRLF document must produce no findings, got:\n%v", err)
+	}
+}
+
 func TestAnnotationCoverageRegisteredAnnotationNeedsARow(t *testing.T) {
 	// The failure mode this check exists for: language-design.md §8.3 was
 	// missing thirteen rows because nothing asserted the compiler's table

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,7 +22,9 @@ func testPlatform() string { return runtime.GOOS + "-" + runtime.GOARCH }
 // sidecar, returning the root path. Uses the runtime platform for baselines.
 func setupGateTest(t *testing.T, baselines Baselines, gv *GateValues) string {
 	t.Helper()
-	root := t.TempDir()
+	// A git repo: CheckCommitGate identifies the worktree via WorktreeHash,
+	// which asks git for the project's file set.
+	root := initBareGitRepo(t)
 
 	// Write baselines.json.
 	gatesDir := filepath.Join(root, "tools", "gates")
@@ -30,16 +33,17 @@ func setupGateTest(t *testing.T, baselines Baselines, gv *GateValues) string {
 	data = append(data, '\n')
 	os.WriteFile(filepath.Join(gatesDir, "baselines.json"), data, 0o644)
 
-	// Write gate values sidecar.
-	promiseHome := filepath.Join(root, ".promise-home")
-	os.MkdirAll(promiseHome, 0o755)
+	// Write the gate values sidecar through the real writer, so the tree
+	// identity is stamped exactly as verify stamps it. Both files this helper
+	// creates are excluded from the hash, so the write order does not matter.
+	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
 	gv.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	if gv.Platform == "" {
 		gv.Platform = testPlatform()
 	}
-	sdata, _ := json.MarshalIndent(gv, "", "  ")
-	sdata = append(sdata, '\n')
-	os.WriteFile(filepath.Join(promiseHome, gateValuesFile), sdata, 0o644)
+	if err := WriteGateValues(root, gv); err != nil {
+		t.Fatalf("write gate values: %v", err)
+	}
 
 	return root
 }
@@ -193,32 +197,61 @@ func TestCheckCommitGate_UnknownPlatformCreatesEntries(t *testing.T) {
 	}
 }
 
-func TestCheckCommitGate_StaleSummary(t *testing.T) {
+// TestCheckCommitGate_AgeDoesNotMatter is the reported false negative (T1962):
+// verify blessed a tree, nothing changed, and the commit was refused purely
+// because the clock had moved on.
+func TestCheckCommitGate_AgeDoesNotMatter(t *testing.T) {
 	p := testPlatform()
-	root := t.TempDir()
-
-	// Write baselines.
-	gatesDir := filepath.Join(root, "tools", "gates")
-	os.MkdirAll(gatesDir, 0o755)
 	baselines := Baselines{p: {"host_test_count": {Value: fp(100), Direction: "up"}}}
-	data, _ := json.MarshalIndent(baselines, "", "  ")
-	os.WriteFile(filepath.Join(gatesDir, "baselines.json"), data, 0o644)
+	gv := &GateValues{Values: map[string]float64{"host_test_count": 100}}
+	root := setupGateTest(t, baselines, gv)
 
-	// Write gate values with an old mtime.
-	promiseHome := filepath.Join(root, ".promise-home")
-	os.MkdirAll(promiseHome, 0o755)
-	gvPath := filepath.Join(promiseHome, gateValuesFile)
-	gv := &GateValues{Timestamp: "2020-01-01T00:00:00Z", Values: map[string]float64{}}
-	sdata, _ := json.MarshalIndent(gv, "", "  ")
-	os.WriteFile(gvPath, sdata, 0o644)
-
-	// Set mtime to 20 minutes ago to trigger staleness.
-	old := time.Now().Add(-20 * time.Minute)
+	// Age the sidecar by two hours without touching the tree.
+	gvPath := filepath.Join(root, ".promise-home", gateValuesFile)
+	old := time.Now().Add(-2 * time.Hour)
 	os.Chtimes(gvPath, old, old)
+
+	if err := CheckCommitGate(root); err != nil {
+		t.Fatalf("expected an untouched tree to pass at any age, got: %v", err)
+	}
+}
+
+// TestCheckCommitGate_WorktreeChanged is the false positive the time window
+// silently admitted: a source edit made after verify, committed inside the
+// old 10-minute window.
+func TestCheckCommitGate_WorktreeChanged(t *testing.T) {
+	p := testPlatform()
+	baselines := Baselines{p: {"host_test_count": {Value: fp(100), Direction: "up"}}}
+	gv := &GateValues{Values: map[string]float64{"host_test_count": 100}}
+	root := setupGateTest(t, baselines, gv)
+
+	// Edit a source file after the values were produced.
+	os.WriteFile(filepath.Join(root, "source.txt"), []byte("edited"), 0o644)
 
 	err := CheckCommitGate(root)
 	if err == nil {
-		t.Fatal("expected stale gate values error, got nil")
+		t.Fatal("expected the gate to reject values describing a different tree, got nil")
+	}
+	if !strings.Contains(err.Error(), "worktree changed") {
+		t.Errorf("expected 'worktree changed' in error, got: %v", err)
+	}
+}
+
+// TestCheckCommitGate_BaselineRewriteDoesNotInvalidate pins the baselines.json
+// exclusion from the worktree hash: a passing gate rewrites baselines on an
+// improvement, so a second run over the same tree must still pass rather than
+// report that the tree changed under it.
+func TestCheckCommitGate_BaselineRewriteDoesNotInvalidate(t *testing.T) {
+	p := testPlatform()
+	baselines := Baselines{p: {"host_test_count": {Value: fp(100), Direction: "up"}}}
+	gv := &GateValues{Values: map[string]float64{"host_test_count": 110}}
+	root := setupGateTest(t, baselines, gv)
+
+	if err := CheckCommitGate(root); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if err := CheckCommitGate(root); err != nil {
+		t.Fatalf("second run after the gate rewrote baselines.json: %v", err)
 	}
 }
 
@@ -603,5 +636,49 @@ func TestCheckCommitGate_FloatValue(t *testing.T) {
 	bl := updated[p]["coverage"]
 	if bl.Value == nil || *bl.Value != 86.2 {
 		t.Errorf("baseline value = %v, want 86.2", bl.Value)
+	}
+}
+
+// TestCheckCommitGate_NoWorktreeIdentity covers the gate refusing to run at
+// all when it cannot establish what tree it is looking at. Passing without an
+// identity would be the old failure mode in a new shape: a gate that vouches
+// for a tree it never identified.
+func TestCheckCommitGate_NoWorktreeIdentity(t *testing.T) {
+	// Clear TMPDIR for the same reason as TestWorktreeHash_NotAGitRepo: under
+	// bin/verify it points inside the real work tree, where git ls-files works.
+	t.Setenv("TMPDIR", "")
+	root := t.TempDir()
+
+	err := CheckCommitGate(root)
+	if err == nil {
+		t.Fatal("expected an error with no worktree identity available, got nil")
+	}
+	if !strings.Contains(err.Error(), "identify worktree") {
+		t.Errorf("expected 'identify worktree' in error, got: %v", err)
+	}
+}
+
+// TestCheckCommitGate_StagingDoesNotInvalidate is the workflow the commit
+// skill relies on: verify, then git add, then the gate. Staging moves the
+// index, not the worktree, so the gate must still pass — otherwise every
+// commit would need a verify run wedged between `git add` and `git commit`.
+func TestCheckCommitGate_StagingDoesNotInvalidate(t *testing.T) {
+	p := testPlatform()
+	baselines := Baselines{p: {"host_test_count": {Value: fp(100), Direction: "up", Updated: "2026-04-06"}}}
+	gv := &GateValues{Values: map[string]float64{"host_test_count": 100}}
+	root := setupGateTest(t, baselines, gv)
+	os.WriteFile(filepath.Join(root, "source.txt"), []byte("verified content"), 0o644)
+
+	// Re-stamp so the sidecar describes the tree including source.txt, as a
+	// verify run over this tree would have.
+	if err := WriteGateValues(root, gv); err != nil {
+		t.Fatalf("write gate values: %v", err)
+	}
+	if err := RunIn(root, "git", "add", "-A"); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+
+	if err := CheckCommitGate(root); err != nil {
+		t.Fatalf("expected staging to leave the gate values valid, got: %v", err)
 	}
 }

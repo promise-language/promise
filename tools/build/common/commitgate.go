@@ -162,8 +162,12 @@ func ratchetVerb(direction string) string {
 // CheckCommitGate reads gate values and compares against baselines.
 // Returns nil if all metrics pass. Updates baselines.json on improvements.
 func CheckCommitGate(root string) error {
-	// 1. Read gate values.
-	gv, err := ReadGateValues(root, 10*time.Minute)
+	// 1. Read gate values, requiring that they describe this exact worktree.
+	worktree, err := WorktreeHash(root)
+	if err != nil {
+		return fmt.Errorf("identify worktree: %w", err)
+	}
+	gv, err := ReadGateValues(root, worktree)
 	if err != nil {
 		return err
 	}

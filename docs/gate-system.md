@@ -119,6 +119,7 @@ After a successful `bin/verify`, a sidecar file `.promise-home/gate-values.json`
 {
   "timestamp": "2026-04-11T12:00:00Z",
   "platform": "darwin-arm64",
+  "worktree": "9f2c...e1",
   "values": {
     "host_test_count": 3656,
     "host_leak_count": 0,
@@ -130,6 +131,17 @@ After a successful `bin/verify`, a sidecar file `.promise-home/gate-values.json`
 ```
 
 Gate values are a flat `map[string]float64`. Adding a new metric requires only writing a new key in `verify.go` -- no mapping code needed.
+
+The `worktree` field is the **identity of the tree the values were produced from** (`common.WorktreeHash`): a SHA-256 over every file git considers part of the project -- tracked, plus untracked and not ignored -- each contributed as path, length and bytes. Two paths are excluded, each because including it would break the gate rather than for tidiness: `.promise-home/`, which holds this sidecar itself, and `tools/gates/baselines.json`, which a *passing* gate rewrites (and which is never an input to any gate value).
+
+Two scoping decisions define what the identity covers, and both are deliberate:
+
+- **Untracked-but-not-ignored files are in.** `bin/verify` compiles what is on disk, not what is in the index, so a file nobody has staged yet is part of what was tested. Hashing only tracked files would readmit the false pass: write a new file after verify, then commit it. Scratch that should not count belongs in `.gitignore` or outside the repo -- expressed once, for every tool, rather than as a second exclusion list here.
+- **The index is out.** The identity is a function of worktree **content** alone, so `git add` and `git commit` leave it unchanged and no verify is spent on staging. The consequence is explicit rather than inherited: the gate vouches for the *worktree*, so a partial `git add` commits a subset of the tree that was verified -- the same scope the other worktree-reading pre-commit checks (formatting, docs) already assume.
+
+Within that scope, any content edit that would reach a commit changes the identity.
+
+This is what makes gate values *fresh*, and it replaces the wall-clock window the gate used to apply (T1962). The question the gate asks is "were these values produced from the tree I am about to commit?" -- a content question with an exact answer. A timestamp answered a different question ("was the sidecar written recently?") and was wrong in both directions: it rejected an unchanged tree once a long verify outlived the window, and it accepted values describing a *different* tree whenever an edit landed inside it. `InvalidateGateValues` (called by `bin/build` and `./make`) remains as a cheap "definitely invalid" fast path, but it is no longer load-bearing for correctness.
 
 ### Baselines
 
@@ -167,7 +179,7 @@ The `coverage` entry above is **Pending** (has direction but no value -- will be
 - `exact`: value must match exactly (zero failures)
 
 **How it works:**
-1. Reads `.promise-home/gate-values.json` (must be <10 min old)
+1. Reads `.promise-home/gate-values.json` and requires its recorded `worktree` identity to equal the current one -- values are valid at any age while the tree is unchanged, and rejected the moment it changes
 2. Reads `tools/gates/baselines.json` for current platform
 3. Auto-registers unknown gate values as **Informational** entries
 4. Auto-populates **Pending** entries with the current value
@@ -180,6 +192,7 @@ The `coverage` entry above is **Pending** (has direction but no value -- will be
 
 **Key files:**
 - `tools/build/common/verify_summary.go` -- `GateValues` type + IO, `ParseTestSummaryLine`
+- `tools/build/common/hash.go` -- `WorktreeHash`, the content identity gate values are stamped with
 - `tools/build/common/commitgate.go` -- `Baseline` struct (3-state), ratchet enforcement
 - `tools/build/common/verify.go` -- writes `gate-values.json` after verify
 - `tools/build/common/precommit.go` -- defense-in-depth baseline check

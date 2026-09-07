@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // TargetSummary holds test counts for a single target (e.g., host or wasm).
@@ -61,6 +60,7 @@ func ParseTestSummaryLine(output string) *TargetSummary {
 type GateValues struct {
 	Timestamp string             `json:"timestamp"`
 	Platform  string             `json:"platform"`
+	Worktree  string             `json:"worktree"`
 	Values    map[string]float64 `json:"values"`
 }
 
@@ -76,10 +76,20 @@ func gateValuesPath(root string) string {
 	return filepath.Join(root, ".promise-home", gateValuesFile)
 }
 
-// WriteGateValues writes the gate values sidecar to .promise-home/.
+// WriteGateValues writes the gate values sidecar to .promise-home/, stamping it
+// with the identity of the worktree the values were produced from. This is the
+// only place the sidecar is created, so every producer records the identity
+// without having to know about it.
 func WriteGateValues(root string, gv *GateValues) error {
+	worktree, err := WorktreeHash(root)
+	if err != nil {
+		return fmt.Errorf("worktree identity: %w", err)
+	}
+	stamped := *gv
+	stamped.Worktree = worktree
+
 	path := gateValuesPath(root)
-	data, err := json.MarshalIndent(gv, "", "  ")
+	data, err := json.MarshalIndent(&stamped, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal gate values: %w", err)
 	}
@@ -111,25 +121,30 @@ func InvalidateGateValues(root string) {
 	}
 }
 
-// ReadGateValues reads the gate values sidecar. Returns an error if the file
-// is missing or stale (older than maxAge).
-func ReadGateValues(root string, maxAge time.Duration) (*GateValues, error) {
+// ReadGateValues reads the gate values sidecar and returns it only if it
+// describes the worktree identified by wantWorktree (see WorktreeHash).
+//
+// Freshness is a content question, not a clock question: values produced from
+// this exact tree stay valid at any age, and values produced from any other
+// tree are rejected outright. Nothing here consults the time.
+func ReadGateValues(root string, wantWorktree string) (*GateValues, error) {
 	path := gateValuesPath(root)
-	info, err := os.Stat(path)
-	if err != nil {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
 		return nil, fmt.Errorf("no gate values found — run bin/verify first")
 	}
-	if maxAge > 0 && time.Since(info.ModTime()) > maxAge {
-		return nil, fmt.Errorf("gate values are stale (%s old) — run bin/verify again",
-			time.Since(info.ModTime()).Round(time.Second))
-	}
-	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read gate values: %w", err)
 	}
 	var gv GateValues
 	if err := json.Unmarshal(data, &gv); err != nil {
 		return nil, fmt.Errorf("parse gate values: %w", err)
+	}
+	if gv.Worktree == "" {
+		return nil, fmt.Errorf("gate values predate worktree identity — run bin/verify again")
+	}
+	if gv.Worktree != wantWorktree {
+		return nil, fmt.Errorf("the worktree changed since the last verify — run bin/verify again")
 	}
 	return &gv, nil
 }

@@ -2,6 +2,7 @@ package common
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -173,7 +174,7 @@ func TestExtractFailedSection_Empty(t *testing.T) {
 }
 
 func TestWriteReadGateValues(t *testing.T) {
-	root := t.TempDir()
+	root := initBareGitRepo(t)
 	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
 
 	gv := &GateValues{
@@ -188,7 +189,11 @@ func TestWriteReadGateValues(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	got, err := ReadGateValues(root, 5*time.Minute)
+	worktree, err := WorktreeHash(root)
+	if err != nil {
+		t.Fatalf("worktree hash: %v", err)
+	}
+	got, err := ReadGateValues(root, worktree)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -200,16 +205,36 @@ func TestWriteReadGateValues(t *testing.T) {
 	}
 }
 
+// TestWriteGateValues_NotAGitRepo pins the failure mode of the stamp: with no
+// tree identity available, no sidecar is written at all. An unstamped sidecar
+// would be worse than none — ReadGateValues would have to either trust it or
+// explain itself, and the commit gate would be back to guessing.
+func TestWriteGateValues_NotAGitRepo(t *testing.T) {
+	// Clear TMPDIR for the same reason as TestWorktreeHash_NotAGitRepo: under
+	// bin/verify it points inside the real work tree, where git ls-files works.
+	t.Setenv("TMPDIR", "")
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
+
+	gv := &GateValues{Platform: "linux-amd64", Values: map[string]float64{"host_test_count": 1}}
+	if err := WriteGateValues(root, gv); err == nil {
+		t.Fatal("expected an error with no worktree identity available, got nil")
+	}
+	if _, err := os.Stat(filepath.Join(root, ".promise-home", gateValuesFile)); !os.IsNotExist(err) {
+		t.Error("an unstamped gate values sidecar was written")
+	}
+}
+
 func TestReadGateValues_Missing(t *testing.T) {
 	root := t.TempDir()
-	_, err := ReadGateValues(root, 5*time.Minute)
+	_, err := ReadGateValues(root, "any-hash")
 	if err == nil {
 		t.Fatal("expected error for missing gate values, got nil")
 	}
 }
 
 func TestInvalidateGateValues(t *testing.T) {
-	root := t.TempDir()
+	root := initBareGitRepo(t)
 	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
 
 	// Write gate values, then invalidate — file should be gone.
@@ -222,7 +247,7 @@ func TestInvalidateGateValues(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	InvalidateGateValues(root)
-	_, err := ReadGateValues(root, 0)
+	_, err := ReadGateValues(root, "any-hash")
 	if err == nil {
 		t.Fatal("expected error after invalidation, got nil")
 	}
@@ -236,7 +261,7 @@ func TestInvalidateGateValues_Missing(t *testing.T) {
 }
 
 func TestInvalidateGateValues_PermissionError(t *testing.T) {
-	root := t.TempDir()
+	root := initBareGitRepo(t)
 	dir := filepath.Join(root, ".promise-home")
 	os.MkdirAll(dir, 0o755)
 
@@ -284,7 +309,7 @@ func TestReadGateValues_MalformedJSON(t *testing.T) {
 	path := filepath.Join(root, ".promise-home", gateValuesFile)
 	os.WriteFile(path, []byte("not json"), 0o644)
 
-	_, err := ReadGateValues(root, 0)
+	_, err := ReadGateValues(root, "any-hash")
 	if err == nil {
 		t.Fatal("expected error for malformed JSON, got nil")
 	}
@@ -293,27 +318,81 @@ func TestReadGateValues_MalformedJSON(t *testing.T) {
 	}
 }
 
-func TestReadGateValues_Stale(t *testing.T) {
-	root := t.TempDir()
+// TestReadGateValues_AgeIsIrrelevant pins the reported symptom (T1962): values
+// produced from a tree that has not changed since stay valid however old the
+// sidecar is. Freshness is a content question, not a clock question.
+func TestReadGateValues_AgeIsIrrelevant(t *testing.T) {
+	root := initBareGitRepo(t)
 	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
+	os.WriteFile(filepath.Join(root, "source.txt"), []byte("original"), 0o644)
 
 	gv := &GateValues{
 		Timestamp: "2020-01-01T00:00:00Z",
 		Platform:  "linux-amd64",
-		Values:    map[string]float64{},
+		Values:    map[string]float64{"host_test_count": 7},
 	}
 	if err := WriteGateValues(root, gv); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
-	// Set mtime to 20 minutes ago.
+	// Age the sidecar by two hours — far past any window the old check used.
 	path := filepath.Join(root, ".promise-home", gateValuesFile)
-	old := time.Now().Add(-20 * time.Minute)
+	old := time.Now().Add(-2 * time.Hour)
 	os.Chtimes(path, old, old)
 
-	_, err := ReadGateValues(root, 10*time.Minute)
+	worktree, err := WorktreeHash(root)
+	if err != nil {
+		t.Fatalf("worktree hash: %v", err)
+	}
+	got, err := ReadGateValues(root, worktree)
+	if err != nil {
+		t.Fatalf("expected an unchanged tree to stay valid at any age, got: %v", err)
+	}
+	if got.Values["host_test_count"] != 7 {
+		t.Errorf("host_test_count = %v, want 7", got.Values["host_test_count"])
+	}
+}
+
+// TestReadGateValues_WorktreeChanged covers the case the old time window
+// silently admitted: an edit made after verify, read back immediately.
+func TestReadGateValues_WorktreeChanged(t *testing.T) {
+	root := initBareGitRepo(t)
+	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
+	os.WriteFile(filepath.Join(root, "source.txt"), []byte("original"), 0o644)
+
+	gv := &GateValues{Platform: "linux-amd64", Values: map[string]float64{}}
+	if err := WriteGateValues(root, gv); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	os.WriteFile(filepath.Join(root, "source.txt"), []byte("edited"), 0o644)
+	worktree, err := WorktreeHash(root)
+	if err != nil {
+		t.Fatalf("worktree hash: %v", err)
+	}
+	_, err = ReadGateValues(root, worktree)
 	if err == nil {
-		t.Fatal("expected stale error, got nil")
+		t.Fatal("expected an error after the worktree changed, got nil")
+	}
+	if !strings.Contains(err.Error(), "worktree changed") {
+		t.Errorf("expected 'worktree changed' in error, got: %v", err)
+	}
+}
+
+// TestReadGateValues_NoRecordedWorktree rejects a sidecar written before the
+// identity field existed rather than trusting it.
+func TestReadGateValues_NoRecordedWorktree(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
+	os.WriteFile(filepath.Join(root, ".promise-home", gateValuesFile),
+		[]byte(`{"timestamp":"2020-01-01T00:00:00Z","platform":"linux-amd64","values":{}}`), 0o644)
+
+	_, err := ReadGateValues(root, "any-hash")
+	if err == nil {
+		t.Fatal("expected an error for a sidecar with no worktree identity, got nil")
+	}
+	if !strings.Contains(err.Error(), "predate worktree identity") {
+		t.Errorf("expected 'predate worktree identity' in error, got: %v", err)
 	}
 }
 
@@ -448,5 +527,84 @@ func TestVerifyReparsers_RejectTransientArtifacts(t *testing.T) {
 	// The clean stream still parses, so the assertion above is not vacuous.
 	if s := ParseTestSummaryLine(capturedPlainForm); s == nil {
 		t.Error("the clean plain-form stream must still parse")
+	}
+}
+
+// TestWriteGateValues_StampIsAuthoritative pins that the writer computes the
+// tree identity itself rather than trusting the caller's struct. Every
+// producer in gate.go builds a GateValues literal; if a stale or hand-set
+// Worktree could survive the write, the gate would validate against whatever
+// the producer happened to carry.
+func TestWriteGateValues_StampIsAuthoritative(t *testing.T) {
+	root := initBareGitRepo(t)
+	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
+	os.WriteFile(filepath.Join(root, "source.txt"), []byte("original"), 0o644)
+
+	gv := &GateValues{
+		Platform: "linux-amd64",
+		Worktree: "a-hash-from-some-other-tree",
+		Values:   map[string]float64{"host_test_count": 3},
+	}
+	if err := WriteGateValues(root, gv); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	worktree, err := WorktreeHash(root)
+	if err != nil {
+		t.Fatalf("worktree hash: %v", err)
+	}
+	got, err := ReadGateValues(root, worktree)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got.Worktree != worktree {
+		t.Errorf("recorded worktree = %q, want the real identity %q", got.Worktree, worktree)
+	}
+
+	// The caller's struct is stamped on a copy, so a producer that reuses it
+	// for a second write cannot carry the first tree's identity forward.
+	if gv.Worktree != "a-hash-from-some-other-tree" {
+		t.Errorf("caller's struct was mutated: Worktree = %q", gv.Worktree)
+	}
+}
+
+// TestReadGateValues_Unreadable separates "no values yet" from "values are
+// there but cannot be read": the first tells the reader to run verify, the
+// second is a real IO fault that must not be reported as a missing sidecar.
+func TestReadGateValues_Unreadable(t *testing.T) {
+	root := t.TempDir()
+	// A directory where the sidecar belongs: os.ReadFile fails with an error
+	// that is not os.ErrNotExist.
+	if err := os.MkdirAll(gateValuesPath(root), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	_, err := ReadGateValues(root, "any-hash")
+	if err == nil {
+		t.Fatal("expected an error for an unreadable sidecar, got nil")
+	}
+	if !strings.Contains(err.Error(), "read gate values") {
+		t.Errorf("expected 'read gate values' in error, got: %v", err)
+	}
+}
+
+// TestWriteGateValues_UnrepresentableValue covers the marshal failure that a
+// metric can actually produce: NaN and ±Inf have no JSON encoding, and a
+// ratio computed from an empty denominator yields one. The write must fail
+// loudly rather than leave a truncated sidecar the gate would then reject
+// with a misleading "parse gate values" error.
+func TestWriteGateValues_UnrepresentableValue(t *testing.T) {
+	root := initBareGitRepo(t)
+	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
+
+	gv := &GateValues{
+		Platform: "linux-amd64",
+		Values:   map[string]float64{"coverage": math.NaN()},
+	}
+	if err := WriteGateValues(root, gv); err == nil {
+		t.Fatal("expected an error for a NaN metric, got nil")
+	}
+	if _, err := os.Stat(gateValuesPath(root)); !os.IsNotExist(err) {
+		t.Error("a sidecar was written despite the marshal failure")
 	}
 }

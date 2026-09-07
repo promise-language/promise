@@ -21,8 +21,9 @@ Verify, rebase, and commit the current changes. **Does NOT push** — the orches
 
 4. **Commit gate.**
    - Run `bin/commitgate` from the repo root.
-   - If it fails, a quality metric regressed — fix the regression before committing.
-   - If it updates `tools/gates/baselines.json`, stage the updated file with the commit.
+   - If it reports a regressed metric, fix the regression before committing.
+   - If it reports `the worktree changed since the last verify`, the gate values describe a different tree than the one you are about to commit — some file changed after step 3. Re-run `bin/verify --wasm`; there is no way to wave this through. (Staging with `git add` does *not* change the tree identity, so ordering the commit after the gate is fine.)
+   - If it updates `tools/gates/baselines.json`, stage the updated file with the commit. That file is excluded from the tree identity, so the gate rewriting it does not invalidate its own result.
 
 5. **Commit.**
    - Stage the relevant files (avoid `git add -A`; be specific).

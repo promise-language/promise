@@ -360,10 +360,13 @@ func TestRunBytesIn_PreservesRawBytes(t *testing.T) {
 	}
 }
 
-// initBareGitRepo creates an empty temp git repo (no commits) for tests that
-// only exercise 'git var', which works without a commit history. Identity is
-// driven entirely by the env vars each test sets via t.Setenv, which
-// RunOutputIn's subprocess inherits since it does not override cmd.Env.
+// initBareGitRepo creates an empty temp git repo (no commits) — enough for the
+// checks in this package that never look at HEAD: 'git var' and 'git ls-files'
+// (which reads the index and the worktree). Contrast initGitRepo in
+// version_test.go, which seeds a commit because the provenance tests need a
+// SHA. For the 'git var' tests, identity is driven entirely by the env vars
+// each test sets via t.Setenv, which RunOutputIn's subprocess inherits since it
+// does not override cmd.Env.
 func initBareGitRepo(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

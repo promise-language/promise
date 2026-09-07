@@ -198,7 +198,9 @@ active epoch (which compiler runs builds). The channel is persisted in
 - **`promise update`** — update **Promise itself**: follow the persisted channel
   (`stable` → latest tagged `epoch-*`; `next` → the rolling `epoch-next` pre-release),
   download the channel's latest compiler, run its `install` (forward-updates the stub,
-  stages blobs), and **auto-activate** the freshly installed epoch.
+  stages blobs), and **auto-activate** the freshly installed epoch. `--force` (alias
+  `--reinstall`) skips the already-up-to-date short-circuit and reinstalls the
+  channel's latest unconditionally.
 - **`promise update check [--json]`** — report whether an update is available without
   mutating anything. Stable staleness compares epoch tags numerically; the rolling
   `next` channel compares the platform asset's sha256 (recorded at install as

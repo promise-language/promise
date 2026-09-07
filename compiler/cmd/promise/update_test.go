@@ -1827,6 +1827,210 @@ func TestDoUpdateNextAlreadyUpToDate(t *testing.T) {
 	}
 }
 
+// TestParseUpdateFlags: `update`'s own flag parsing, over the argument vectors
+// that normalizeArgs actually produces (T1513) — every case a user types goes
+// through normalizeArgs here exactly as main() dispatches it, which is the
+// step the original `case "--force":` was written as though it did not exist.
+// Both spellings must therefore set force, flag parsing must stop at the
+// subverb so `check --json` keeps delegating -json to runUpdateCheck, an
+// unrecognized flag must be reported rather than mistaken for an epoch
+// argument, and --force in front of a subverb must be rejected rather than
+// silently ignored.
+func TestParseUpdateFlags(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      []string
+		wantForce bool
+		wantRest  []string
+		wantErr   string // substring; "" means no error
+	}{
+		{"double dash force", normalizeArgs([]string{"--force"}), true, nil, ""},
+		{"normalized force", []string{"-force"}, true, nil, ""},
+		{"double dash reinstall", normalizeArgs([]string{"--reinstall"}), true, nil, ""},
+		{"normalized reinstall", []string{"-reinstall"}, true, nil, ""},
+		{"repeated force", []string{"-force", "-reinstall"}, true, nil, ""},
+		{"no args", nil, false, nil, ""},
+		{"check json", normalizeArgs([]string{"check", "--json"}), false, []string{"check", "-json"}, ""},
+		{"channel stable", []string{"channel", "stable"}, false, []string{"channel", "stable"}, ""},
+		{"epoch positional", []string{"2026.0"}, false, []string{"2026.0"}, ""},
+		{"subverb keeps its own flags", []string{"check", "-force"}, false, []string{"check", "-force"}, ""},
+		{"force then subverb", []string{"-force", "check"}, false, nil, "--force applies to"},
+		{"unknown flag", []string{"-bogus"}, false, nil, "unknown flag -bogus"},
+		{"unknown flag reports first", []string{"-bogus", "-worse"}, false, nil, "-bogus"},
+		{"bare separator rejected", []string{"--"}, false, nil, "unexpected `--`"},
+		{"lone dash is not a flag", []string{"-"}, false, []string{"-"}, ""},
+		{"reinstall then force", []string{"-reinstall", "-force"}, true, nil, ""},
+		{"bad flag after a good one", []string{"-force", "-bogus"}, false, nil, "unknown flag -bogus"},
+		{"attached value rejected", normalizeArgs([]string{"--force=true"}), false, nil, "--force applies to"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			force, rest, err := parseUpdateFlags(tc.args)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want one containing %q", err, tc.wantErr)
+			}
+			if force != tc.wantForce {
+				t.Errorf("force = %v, want %v", force, tc.wantForce)
+			}
+			if len(rest) != len(tc.wantRest) {
+				t.Fatalf("rest = %q, want %q", rest, tc.wantRest)
+			}
+			for i := range rest {
+				if rest[i] != tc.wantRest[i] {
+					t.Fatalf("rest = %q, want %q", rest, tc.wantRest)
+				}
+			}
+		})
+	}
+}
+
+// TestRunUpdateDispatchCheckJSON: `promise update check --json` must reach
+// runUpdateCheck with the subverb's own flag intact — the chain the T1513 fix
+// rests on. normalizeArgs rewrites --json to -json, update's flag parsing has
+// to stop at `check` rather than claim the flag or reject it as unknown, and
+// runUpdate's `check` arm has to hand the tail on. A parser that ate every
+// leading flag would leave `check` without -json and print human text; one
+// that validated the whole vector would exit 1 on a flag it does not own.
+func TestRunUpdateDispatchCheckJSON(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("GITHUB_TOKEN", "")
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := stableReleasesServer(t, "epoch-2026.0", "epoch-2026.2")
+	defer srv.Close()
+	t.Setenv("PROMISE_RELEASE_URL", srv.URL)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() { runUpdate(normalizeArgs([]string{"check", "--json"})) })
+	})
+	var res map[string]any
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("`update check --json` produced no JSON (%v), so -json did not reach the subverb: %s", err, out)
+	}
+	if res["latest"] != "2026.2" || res["updateAvailable"] != true {
+		t.Fatalf("unexpected check result: %v", res)
+	}
+}
+
+// TestMainDispatchUpdateForce is the T1513 repro driven through main() with the
+// argv a user actually types. Every other --force test hands runUpdate a vector
+// it normalized itself; only this one exercises the real dispatch path — main's
+// normalizeArgs rewrite, the help interception, the command switch — and that
+// path is exactly where the bug lived: `promise update --force` printed "no
+// longer takes an epoch argument" and exited 1 while every in-process test that
+// passed ["--force"] straight to runUpdate was happy. The mock release carries
+// only a wrong-platform asset so the forced update still fails at download; the
+// assertion is which path it took to get there. Run in a subprocess (main exits).
+func TestMainDispatchUpdateForce(t *testing.T) {
+	if os.Getenv("TEST_MAIN_UPDATE_FORCE") == "1" {
+		// Real argv, unnormalized — as a shell would deliver it.
+		os.Args = []string{"promise", "update", "--force"}
+		main()
+		return
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]ghRelease{
+			{TagName: "epoch-2026.0", Assets: []ghAsset{
+				{Name: "promise-windows-amd64.gz", BrowserDownloadURL: "https://example.com/x"},
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	// Active matches latest — without --force this would short-circuit.
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestMainDispatchUpdateForce")
+	cmd.Env = append(os.Environ(),
+		"TEST_MAIN_UPDATE_FORCE=1",
+		"PROMISE_HOME="+tmp,
+		"PROMISE_RELEASE_URL="+srv.URL,
+		"GITHUB_TOKEN=",
+	)
+	out, err := cmd.CombinedOutput()
+	s := string(out)
+	if err == nil {
+		t.Fatalf("expected non-zero exit after the forced update fails to download, got:\n%s", s)
+	}
+	if strings.Contains(s, "no longer takes an epoch argument") {
+		t.Errorf("`promise update --force` was parsed as an epoch argument (T1513), got:\n%s", s)
+	}
+	if strings.Contains(s, "Already up to date") {
+		t.Errorf("--force must bypass the up-to-date check, got:\n%s", s)
+	}
+	if !strings.Contains(s, "updating toolchain") {
+		t.Errorf("expected the forced update to reach the download, got:\n%s", s)
+	}
+}
+
+// TestUpdateUsageFlagsAreAccepted ties the printed usage back to the parser.
+// The precise shape of T1513 was a command whose own error message advertised
+// `--force` while its parser rejected it, so every flag the first usage line
+// advertises for `promise update` itself must parse — in both spellings, since
+// a user types `--force` and the parser sees `-force`. Later lines advertise
+// the subverbs' flags (`check [--json]`), which the subverbs own.
+func TestUpdateUsageFlagsAreAccepted(t *testing.T) {
+	var b strings.Builder
+	printUpdateUsage(&b)
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if len(lines) < 4 {
+		t.Fatalf("usage block lost lines: %q", b.String())
+	}
+	if !strings.Contains(lines[0], "promise update [") {
+		t.Fatalf("first usage line is not the `promise update` line: %q", lines[0])
+	}
+
+	var advertised []string
+	for _, tok := range strings.Fields(lines[0]) {
+		tok = strings.Trim(tok, "[]|()")
+		if strings.HasPrefix(tok, "--") {
+			advertised = append(advertised, tok)
+		}
+	}
+	if len(advertised) == 0 {
+		t.Fatalf("no flag advertised on the update line — the usage text stopped documenting --force: %q", lines[0])
+	}
+	for _, flag := range advertised {
+		for _, spelling := range []string{flag, flag[1:]} {
+			_, rest, err := parseUpdateFlags(normalizeArgs([]string{spelling}))
+			if err != nil {
+				t.Errorf("usage advertises %s but the parser rejects %s: %v", flag, spelling, err)
+			}
+			if len(rest) != 0 {
+				t.Errorf("%s left %q as a subverb argument — it was not consumed as a flag", spelling, rest)
+			}
+		}
+	}
+
+	// Every subverb the usage advertises must actually be dispatchable, so a
+	// renamed subverb cannot leave the usage block pointing at a path that falls
+	// through to "no longer takes an epoch argument".
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		if len(fields) < 3 || fields[0] != "promise" || fields[1] != "update" {
+			continue
+		}
+		subverb := fields[2]
+		_, rest, err := parseUpdateFlags([]string{subverb})
+		if err != nil || len(rest) != 1 || rest[0] != subverb {
+			t.Errorf("usage advertises `update %s` but it does not survive flag parsing: rest=%q err=%v", subverb, rest, err)
+		}
+		if subverb != "check" && subverb != "channel" {
+			t.Errorf("usage advertises an unknown subverb %q — runUpdate would reject it as an epoch argument", subverb)
+		}
+	}
+}
+
 // TestDoUpdateForceBypassesCheck: `promise update --force` must skip the
 // already-up-to-date check and proceed to download even when the active epoch
 // already matches the latest (T1100). The download fails (no real asset server)
@@ -1834,7 +2038,10 @@ func TestDoUpdateNextAlreadyUpToDate(t *testing.T) {
 // subprocess (doUpdate exits).
 func TestDoUpdateForceBypassesCheck(t *testing.T) {
 	if os.Getenv("TEST_DO_UPDATE_FORCE") == "1" {
-		runUpdate([]string{"--force"})
+		// Through normalizeArgs, exactly as main() dispatches: the vector that
+		// reaches runUpdate from a real `promise update --force` is ["-force"],
+		// not ["--force"] (T1513).
+		runUpdate(normalizeArgs([]string{"--force"}))
 		return
 	}
 
@@ -1926,6 +2133,37 @@ func TestDoUpdateCheckErrFailOpen(t *testing.T) {
 	// Must proceed to the download attempt, NOT print "Already up to date".
 	if strings.Contains(s, "Already up to date") {
 		t.Errorf("fail-open must not print 'already up to date', got: %s", s)
+	}
+}
+
+// TestRunUpdateBadFlag: runUpdate's flag-error arm — an unrecognized flag must
+// exit 1 with the flag named and the usage block printed, rather than falling
+// through to the positional switch and being reported as a stale epoch
+// argument (T1513). Run in a subprocess (runUpdate exits).
+func TestRunUpdateBadFlag(t *testing.T) {
+	if os.Getenv("TEST_UPDATE_BAD_FLAG") == "1" {
+		runUpdate(normalizeArgs([]string{"--bogus"}))
+		return
+	}
+	tmp := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunUpdateBadFlag")
+	cmd.Env = append(os.Environ(),
+		"TEST_UPDATE_BAD_FLAG=1",
+		"PROMISE_HOME="+tmp,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit for an unknown flag")
+	}
+	s := string(out)
+	if !strings.Contains(s, "unknown flag -bogus") {
+		t.Errorf("expected the flag to be named, got: %s", s)
+	}
+	if !strings.Contains(s, "promise update channel [stable|next]") {
+		t.Errorf("expected the usage block, got: %s", s)
+	}
+	if strings.Contains(s, "no longer takes an epoch argument") {
+		t.Errorf("a bad flag must not be reported as an epoch argument, got: %s", s)
 	}
 }
 
@@ -2185,7 +2423,8 @@ func TestRunUpdateCheckStableNoActive(t *testing.T) {
 // fails (wrong-platform asset) → exits 1 with "updating toolchain" in output.
 func TestRunUpdateReinstallAlias(t *testing.T) {
 	if os.Getenv("TEST_UPDATE_REINSTALL") == "1" {
-		runUpdate([]string{"--reinstall"})
+		// Through normalizeArgs, as main() dispatches (T1513).
+		runUpdate(normalizeArgs([]string{"--reinstall"}))
 		return
 	}
 

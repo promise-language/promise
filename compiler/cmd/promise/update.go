@@ -115,6 +115,55 @@ type ghAsset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
+// printUpdateUsage writes the `promise update` surface — the single source of
+// the usage text, shared by every failure arm in runUpdate so a new subverb or
+// flag cannot be added to one listing and forgotten in the other.
+func printUpdateUsage(w io.Writer) {
+	fmt.Fprint(w, "  promise update [--force]              follow the update channel (install + activate latest)\n"+
+		"  promise update check [--json]         report whether an update is available\n"+
+		"  promise update channel [stable|next]  show or set the update channel\n"+
+		"  promise use <epoch>                   activate a specific epoch (downloads on demand)\n")
+}
+
+// parseUpdateFlags splits `update`'s own flags out of args and returns the
+// remaining subverb arguments. Flag parsing stops at the first non-flag token,
+// because everything from the subverb on belongs to the subverb — `update
+// check --json` must hand `-json` to runUpdateCheck, not reject it here. That
+// split is the one thing the shared strict parser cannot express, so the head
+// is what gets handed to parseCLIArgs (T1604) rather than update growing a
+// parser of its own.
+//
+// The spec maps both `force` and `reinstall` onto the same destination, so
+// `--reinstall` is an alias and not a second piece of state. Keys are the
+// post-normalizeArgs spelling: normalizeArgs rewrites `--flag` to `-flag`
+// before dispatch, so a hand-rolled `case "--force":` — which is what this
+// used to be — could never match, and the flag fell through to runUpdate's
+// positional switch and exited 1 for every real invocation (T1513; same class
+// as T1779). Routing through the shared parser removes the spelling from this
+// file entirely.
+//
+// --force is rejected in front of a subverb rather than ignored: neither
+// `check` (which mutates nothing) nor `channel` (which follows the channel
+// unconditionally) has anything to force, and accepting a flag that does
+// nothing is the silent-no-op half of the same bug.
+func parseUpdateFlags(args []string) (force bool, rest []string, err error) {
+	head := args
+	for i, a := range args {
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			head, rest = args[:i], args[i:]
+			break
+		}
+	}
+	spec := flagSpec{flag: map[string]*bool{"force": &force, "reinstall": &force}}
+	if _, perr := parseCLIArgs("update", head, spec, false, false); perr != nil {
+		return false, nil, perr
+	}
+	if force && len(rest) > 0 {
+		return false, nil, fmt.Errorf("error: --force applies to `promise update` itself, not to `promise update %s`", rest[0])
+	}
+	return force, rest, nil
+}
+
 // runUpdate implements `promise update` and its subverbs (T0825) — self-update
 // of the toolchain (§2.6). The update channel (what `update` follows) is
 // orthogonal to the active epoch (which compiler runs builds): the channel is
@@ -131,17 +180,12 @@ type ghAsset struct {
 //	promise update channel                print the current update channel
 //	promise update channel <stable|next>  set the channel and immediately follow it
 func runUpdate(args []string) {
-	force := false
-	var rest []string
-	for _, a := range args {
-		switch a {
-		case "--force", "--reinstall":
-			force = true
-		default:
-			rest = append(rest, a)
-		}
+	force, args, ferr := parseUpdateFlags(args)
+	if ferr != nil {
+		fmt.Fprintln(os.Stderr, ferr)
+		printUpdateUsage(os.Stderr)
+		os.Exit(1)
 	}
-	args = rest
 
 	if len(args) > 0 {
 		switch args[0] {
@@ -155,11 +199,8 @@ func runUpdate(args []string) {
 			// `update` no longer takes an epoch argument — a specific epoch is now
 			// `promise use <epoch>` (which downloads on demand). This removes the old
 			// update-vs-sync target ambiguity.
-			fmt.Fprintf(os.Stderr, "promise update no longer takes an epoch argument.\n"+
-				"  promise update [--force]              follow the update channel (install + activate latest)\n"+
-				"  promise update check [--json]         report whether an update is available\n"+
-				"  promise update channel [stable|next]  show or set the update channel\n"+
-				"  promise use <epoch>                   activate a specific epoch (downloads on demand)\n")
+			fmt.Fprint(os.Stderr, "promise update no longer takes an epoch argument.\n")
+			printUpdateUsage(os.Stderr)
 			os.Exit(1)
 		}
 	}

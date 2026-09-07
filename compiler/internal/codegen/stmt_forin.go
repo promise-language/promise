@@ -36,6 +36,42 @@ func (c *Compiler) forInIterableType(s *ast.ForInStmt) types.Type {
 	return t
 }
 
+// genForInIterable evaluates a for-in's iterable (with implicit propagation, per
+// the T1896 note on genForInStmt) and re-homes any closure-env temp that
+// evaluation materialized from statement lifetime to SCOPE lifetime (T1515).
+//
+// A for-in's iterable outlives the loop body: a generator frame reads its
+// by-value args lazily on every resume, and a duck-typed iterator's next() reads
+// its fields on every call. The body's own statement-end drain
+// (cleanupStmtLevelTemps) drains the WHOLE envTemps array, so an intermediate
+// lambda a nested borrowing call consumed — `for s in gen(2, wrap(move |k| -> …))`
+// — was freed by the first body statement and then re-freed on every following
+// iteration. A scope binding is used rather than a per-block barrier for the same
+// reason the T0109 / T0494 / T0502 vector / string / channel promotions in this
+// file use one: it covers ALL exit paths (normal exit, early return, break,
+// panic), where a barrier would leak on an early `return` out of the body.
+//
+// Ordering matters and is preserved by evaluating here: the promoted bindings are
+// appended BEFORE genForInGenerator appends its bindingGenerator (LIFO scope
+// cleanup destroys the coroutine first, frees the env second — what
+// promoteGeneratorArgToScope's contract requires) and before each branch records
+// c.loopScopeDepth, so break/continue cleanup leaves them alone and the enclosing
+// scope frees each exactly once.
+func (c *Compiler) genForInIterable(s *ast.ForInStmt) value.Value {
+	return c.genForInIterableWith(func() value.Value { return c.genExprAutoPropagate(s.Iterable) })
+}
+
+// genForInIterableWith is genForInIterable for the two branches that do not use
+// genExprAutoPropagate: the raw generator branch (which keeps its own T0284
+// unwrap, see genForInStmt) and the fixed-size array branch (which needs a base
+// pointer, not a value).
+func (c *Compiler) genForInIterableWith(eval func() value.Value) value.Value {
+	floor := len(c.envTemps)
+	v := eval()
+	c.promoteEnvTempsToScopeFrom(floor)
+	return v
+}
+
 // T1896: every value branch below evaluates the iterable with
 // genExprAutoPropagate, not genExpr. A for-in subject is an expression position
 // like any other (§7.2 of docs/language-design.md gives implicit propagation in
@@ -57,7 +93,7 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 	if arr, ok := iterableType.(*types.Array); ok {
 		c.genForInArray(s, arr)
 	} else if elem, ok := types.AsVector(iterableType); ok {
-		slicePtr := c.genExprAutoPropagate(s.Iterable)
+		slicePtr := c.genForInIterable(s)
 		// T0109: Register a scope binding for temporary vectors returned by call
 		// expressions (e.g., for elem in set.to_vector()). Variable-backed vectors
 		// are dropped by their own scope bindings; only call results are orphaned.
@@ -94,10 +130,10 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		}
 		c.genForInVector(s, slicePtr, elem)
 	} else if key, val, ok := types.AsMap(iterableType); ok {
-		mapPtr := c.genExprAutoPropagate(s.Iterable)
+		mapPtr := c.genForInIterable(s)
 		c.genForInMap(s, mapPtr, key, val)
 	} else if elem, ok := types.AsChannel(iterableType); ok {
-		chPtr := c.genExprAutoPropagate(s.Iterable)
+		chPtr := c.genForInIterable(s)
 		// T0502: Same lifetime-extension fix as the vector/string for-in
 		// branches. When the iterable is a tracked stmt temp (getter result,
 		// call result), promote it to a scope binding so the body's
@@ -135,10 +171,10 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		// T1735: When sema recorded ForInIter, the value is a structural Stream[T]
 		// view (not a generator). Use the duck-typed iterable path (iter() + next()).
 		if kind, ok := c.info.ForInKinds[s]; ok && kind == sema.ForInIter {
-			iterVal := c.genExprAutoPropagate(s.Iterable)
+			iterVal := c.genForInIterable(s)
 			c.genForInCustomStream(s, iterVal, iterableType)
 		} else {
-			genVal := c.genExpr(s.Iterable)
+			genVal := c.genForInIterableWith(func() value.Value { return c.genExpr(s.Iterable) })
 			// T0284: Failable generator factory called without explicit error handling.
 			// Unwrap the result struct before passing to genForInGenerator.
 			if c.info.FailableExprs[s.Iterable] {
@@ -158,7 +194,7 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		// String iteration
 		named := extractNamed(iterableType)
 		if named == types.TypString {
-			strPtr := c.genExprAutoPropagate(s.Iterable)
+			strPtr := c.genForInIterable(s)
 			// T0494: Same lifetime-extension fix as the vector path. When the
 			// iterable is a tracked stmt temp (call result, getter result,
 			// string concat result, etc.), promote it to a scope binding so
@@ -189,7 +225,7 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		}
 		// Duck-typed for-in: check sema ForInKinds
 		if kind, ok := c.info.ForInKinds[s]; ok {
-			iterVal := c.genExprAutoPropagate(s.Iterable)
+			iterVal := c.genForInIterable(s)
 			switch kind {
 			case sema.ForInNext:
 				c.genForInCustomIter(s, iterVal, iterableType)
@@ -474,7 +510,7 @@ func (c *Compiler) emitIterNext(receiverVal value.Value, receiverType types.Type
 // Extracts start/end/inclusive from the value type struct and uses a direct counter loop.
 func (c *Compiler) genForInRange(s *ast.ForInStmt, elemType types.Type) {
 	// Auto-propagating evaluation, for the reason given on genForInStmt (T1896).
-	rangeVal := c.genExprAutoPropagate(s.Iterable)
+	rangeVal := c.genForInIterable(s)
 
 	// Get the layout to find field indices. T0971: unwrap a borrowed Range so
 	// its value-type layout resolves.
@@ -735,7 +771,7 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 
 // genForInArray iterates a fixed-size array with a compile-time-known length.
 func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
-	basePtr := c.genArrayBasePtr(s.Iterable, arr)
+	basePtr := c.genForInIterableWith(func() value.Value { return c.genArrayBasePtr(s.Iterable, arr) })
 	elemLLVM := c.resolveType(arr.Elem())
 	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
 	length := constant.NewInt(irtypes.I64, arr.Size())

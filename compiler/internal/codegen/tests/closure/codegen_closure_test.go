@@ -333,9 +333,18 @@ func TestClosureCallResultClaimedWhenBound(t *testing.T) {
 	codegentest.AssertContains(t, body, "env.free")
 }
 
-// T1160/T1227: a call that may hand back a closure it does not own (closure-typed
-// argument, or a receiver whose type transitively holds a closure field) must NOT
-// be tracked — freeing the result would double-free the real owner.
+// T1160/T1227: a call that may hand back a closure it does not own (a receiver
+// whose type transitively holds a closure field) must NOT be tracked — freeing
+// the result would double-free the real owner.
+//
+// T1515 removed the closure-typed ARGUMENT from that list: a closure value is
+// opaque, so a callee can only hand back the very argument it was given, and that
+// identical case is settled by machinery that already exists (the runtime claim
+// at the tracking site for a temp, the T1269 borrow clone for a borrowed param),
+// asserted on via_arg below. Suppressing tracking wholesale instead leaked every
+// genuinely fresh result. The removal is conditioned on the argument EXPRESSION
+// being one that machinery reaches — a closure field or container element still
+// suppresses; see TestT1515BorrowedClosureArgShapesStayConservative in regress1.
 func TestClosureCallResultAliasNotTracked(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		type Holder { () -> int cb; get_cb(this) () -> int { return this.cb; } }
@@ -359,7 +368,6 @@ func TestClosureCallResultAliasNotTracked(t *testing.T) {
 	// hands back a borrowed field. Every vtable-dispatched receiver is opaque here,
 	// not just the structural/abstract ones.
 	for _, fn := range []string{
-		"__user.via_arg",
 		"__user.via_receiver",
 		"__user.via_inherited_receiver",
 		"__user.via_virtual_receiver",
@@ -368,6 +376,13 @@ func TestClosureCallResultAliasNotTracked(t *testing.T) {
 		codegentest.AssertContains(t, body, "define") // guard: the body was actually found
 		codegentest.AssertNotContains(t, body, "env.tmp.drop")
 	}
+	// via_arg: `identity(g)` on a BORROWED closure param is now tracked, and stays
+	// double-free-free because emitReturnAliasCheckSubst's T1269 borrow clone
+	// replaces an aliasing result with a zeroed fat pointer — the env temp then
+	// null-checks and frees nothing, while the caller keeps sole ownership.
+	viaArg := codegentest.ExtractFunction(ir, "__user.via_arg")
+	codegentest.AssertContains(t, viaArg, "alias.borrow.clone")
+	codegentest.AssertContains(t, viaArg, "env.tmp.drop")
 }
 
 // T1160: an indirect call through a closure VALUE (not a declared function) may
@@ -506,7 +521,6 @@ func TestClosureCallResultNestedAliasNotTracked(t *testing.T) {
 	for _, fn := range []string{
 		"__user.via_vector",
 		"__user.via_map",
-		"__user.via_optional",
 		"__user.via_array",
 		"__user.via_instance",
 		"__user.via_instance_origin",
@@ -517,6 +531,14 @@ func TestClosureCallResultNestedAliasNotTracked(t *testing.T) {
 		codegentest.AssertContains(t, body, "define") // guard: the body was actually found
 		codegentest.AssertNotContains(t, body, "env.tmp.drop")
 	}
+	// via_optional: `(() -> int)?` is a TOP-LEVEL closure under one Optional layer,
+	// not a container that could hide a second closure — T1515 peels the wrapper, so
+	// the result is tracked and the T1269 borrow clone keeps the borrowed `o` the
+	// sole owner. Without the peel, every fresh closure returned from a call with an
+	// optional-closure argument leaked.
+	viaOptional := codegentest.ExtractFunction(ir, "__user.via_optional")
+	codegentest.AssertContains(t, viaOptional, "alias.borrow.clone")
+	codegentest.AssertContains(t, viaOptional, "env.tmp.drop")
 }
 
 // T1160: self-referential types must terminate the field walk (the `seen` set) AND,

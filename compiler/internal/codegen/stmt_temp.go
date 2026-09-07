@@ -1255,6 +1255,60 @@ func (c *Compiler) scopeOwnPointerTemp(name string, ptr value.Value, srcFlag *ir
 	})
 }
 
+// scopeOwnEnvPtr gives a bare i8* closure-env pointer a SCOPE-level owned free,
+// mirroring scopeOwnPointerTemp for the envTemps registry (T1515). emitEnvFree
+// reads only field 1 of its alloca, so a synthetic {null, envPtr} fat pointer is
+// all a bindingFreeEnv needs — the fn pointer is never called from a cleanup.
+//
+// The new flag is COPIED from srcFlag rather than hardcoded to 1, for the same
+// reason scopeOwnPointerTemp copies (T0951): a temp already claimed by
+// promoteGeneratorArgToScope §3 (T1467), by a `~`-param handoff (T1237) or by
+// claimAllEnvTemps (an _FnIter that swallowed the env) carries 0, and the
+// promoted binding must stay inert there rather than double-free.
+func (c *Compiler) scopeOwnEnvPtr(name string, envPtr value.Value, srcFlag *ir.InstAlloca) {
+	closureType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+	alloca := c.createEntryAlloca(closureType)
+	alloca.SetName(name)
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	dropFlag.SetName(name + ".dropflag")
+	c.entryBlock.NewStore(constant.NewZeroInitializer(closureType), alloca)
+	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+	fat := c.block.NewInsertValue(constant.NewZeroInitializer(closureType), envPtr, 1)
+	c.block.NewStore(fat, alloca)
+	c.block.NewStore(c.block.NewLoad(irtypes.I1, srcFlag), dropFlag)
+	c.scopeBindings = append(c.scopeBindings, scopeBinding{
+		kind:     bindingFreeEnv,
+		alloca:   alloca,
+		dropFlag: dropFlag,
+		varName:  name,
+	})
+}
+
+// promoteEnvTempsToScopeFrom re-homes every closure-env temp at or above `floor`
+// from statement lifetime to scope lifetime, then neutralizes and truncates the
+// window (T1515). Mirrors promoteGeneratorArgToScope §2's whole-window enum-ctor
+// treatment: the registry cannot say which temp holds the value that must outlive
+// the statement, so every temp in the window is re-homed, each keeping its own
+// live flag. Over-retaining an intermediate by one scope is harmless; untracking
+// one without re-registering it would leak.
+func (c *Compiler) promoteEnvTempsToScopeFrom(floor int) {
+	if len(c.envTemps) <= floor {
+		return
+	}
+	if c.block == nil || c.block.Term != nil || c.entryBlock == nil {
+		return
+	}
+	for _, temp := range c.envTemps[floor:] {
+		envPtr := c.block.NewLoad(irtypes.I8Ptr, temp.alloca)
+		c.scopeOwnEnvPtr(c.uniqueLocalName("_forinenv"), envPtr, temp.dropFlag)
+		// Neutralize the source (the flag was copied above), so the statement-end
+		// drain and the error-path drain both skip it.
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
+	}
+	c.envTemps = c.envTemps[:floor]
+	pruneTempMapSuffix(c.envTempMap, floor)
+}
+
 // tempSlot is the (storage, live flag) pair shared by heapTemp and envTemp,
 // letting takeOverPointerTempFlag serve both registries (T1467).
 type tempSlot struct {
@@ -1460,6 +1514,13 @@ func (c *Compiler) cleanupEnvTempsFrom(floor int) {
 		c.block.NewBr(doneBlock)
 
 		c.block = doneBlock
+		// T1515: reset the flag after freeing, exactly as cleanupStmtTempsFrom
+		// (B0172) and emitEnvTempCleanupForErrorPath already do. A drain that
+		// lands on a loop back-edge — a for-in whose iterable materialized an env
+		// temp — would otherwise re-free the same env on the next iteration
+		// (`fatal: invalid free (bad header magic)`). Flag-guarded idempotence is
+		// the B0198 invariant every sibling drain site upholds.
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
 		c.block.NewBr(skipBlock)
 
 		c.block = skipBlock
@@ -1708,7 +1769,24 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 	// closure they do not own (T1227) — freeing those double-frees the real owner.
 	if _, isSig := rt.(*types.Signature); isSig {
 		if !c.closureResultMayAliasCallInput(expr) {
-			c.trackEnvTemp(c.block.NewExtractValue(result, 1))
+			// T1515: an identity-style callee (`identity(make_adder(5))`) hands back
+			// the very closure an argument temp already owns — the one aliasing shape
+			// a top-level closure argument can produce. Claim first (a runtime pointer
+			// match over envTemps), then register the result as sole owner: the same
+			// claim-then-track ordering trackClosureOperatorResult (T1229) and the
+			// T1235 handler path use. Never two owners, never none.
+			c.claimEnvTemp(result)
+			envPtr := c.block.NewExtractValue(result, 1)
+			c.trackEnvTemp(envPtr)
+			// T1029: inside a DISCARDED statement the aliased source local outlives
+			// the statement and stays sole owner — emitReturnAliasCheckSubst recorded
+			// its env ptr rather than clearing its flag, so clear the RESULT temp's
+			// flag on a runtime match. Mirrors expr.go's i8* stmtTemp path.
+			if c.discardedExpr != nil && len(c.discardAliasArgPtrs) > 0 {
+				if idx, ok := c.envTempMap[envPtr]; ok && idx >= 0 {
+					c.emitDiscardAliasClears(envPtr, c.envTemps[idx].dropFlag)
+				}
+			}
 		}
 		return
 	}

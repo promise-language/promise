@@ -500,7 +500,7 @@ peel:
 			return true
 		}
 		for _, arg := range e.Args {
-			if c.typeMentionsSignature(c.resolvedExprType(arg.Value), map[*types.TypeName]bool{}) {
+			if c.argHidesForeignClosure(arg.Value) {
 				return true
 			}
 		}
@@ -548,6 +548,85 @@ peel:
 		}
 	}
 	return c.typeMentionsSignature(rt, map[*types.TypeName]bool{})
+}
+
+// argHidesForeignClosure reports whether a call argument could carry a closure
+// the callee is able to hand back while SOMEBODY ELSE still frees it — the case
+// that makes tracking the call's closure result a double free (T1160).
+//
+// A TOP-LEVEL closure argument can only be handed back IDENTICALLY: a closure
+// value is opaque, so a callee cannot build a distinct closure that aliases its
+// env, and sema rejects the one route that would ("cannot move-capture borrowed
+// parameter 'f' into a lambda; declare the parameter with `move` to consume it").
+// That identical hand-back is already settled — but only for the argument shapes
+// the alias machinery reaches, which is what closureArgOwnershipIsSettled decides
+// (T1515). The rest stay conservative.
+//
+// So does anything that merely MENTIONS a closure — a struct with a closure
+// field, `Vector[() -> int]`, or a closure whose own RESULT is a closure: such an
+// argument can hide a closure DISTINCT from itself, which the runtime claim
+// (matching on the argument's own env pointer) can never neutralize. A
+// signature's PARAM types are irrelevant: the callee supplies those values, it
+// does not receive them.
+func (c *Compiler) argHidesForeignClosure(arg ast.Expr) bool {
+	t := c.resolvedExprType(arg)
+	sig, isSig := peelRefsAndOptional(t).(*types.Signature)
+	if !isSig {
+		return c.typeMentionsSignature(t, map[*types.TypeName]bool{})
+	}
+	if c.typeMentionsSignature(sig.Result(), map[*types.TypeName]bool{}) {
+		return true
+	}
+	return !c.closureArgOwnershipIsSettled(arg)
+}
+
+// closureArgOwnershipIsSettled reports whether a top-level closure ARGUMENT is
+// one whose identical hand-back the existing alias machinery already resolves to
+// a single owner (T1515). Only three shapes qualify:
+//
+//   - a lambda literal — genLambdaExpr registered its env as a temp, so the
+//     runtime claim at the tracking site transfers sole ownership to the result;
+//   - a call / getter / propagate source whose OWN closure result is tracked, for
+//     the same reason (the recursion is what proves the nested source is owned
+//     rather than a borrowed view such as `identity(h.get_cb())`);
+//   - an IdentExpr — an owned local is settled by the T1029 discard clear or the
+//     T1031 source clone, a borrowed param by the T1269 borrow clone. Those two
+//     clones settle OWNERSHIP (exactly one free on every path) but null the fat
+//     pointer they clone, so the aliased closure is unusable afterwards — a
+//     pre-existing defect tracked as T2010, whose fix should re-check this
+//     admission.
+//
+// Everything else reaches NONE of them: a closure field (`identity(h.cb)`,
+// `identity(this.cb)`) and a container element (`identity(v[0])`) are borrowed
+// views their owner drops, they are not env temps, and emitReturnAliasCheckSubst
+// records only IdentExpr args — so tracking the result would free the env a
+// second time (segfault). They keep the conservative pre-T1515 answer.
+func (c *Compiler) closureArgOwnershipIsSettled(arg ast.Expr) bool {
+	switch e := unwrapDestructureParens(arg).(type) {
+	case *ast.IdentExpr, *ast.LambdaExpr:
+		return true
+	case *ast.CallExpr, *ast.MemberExpr, *ast.ErrorPropagateExpr, *ast.ErrorPanicExpr:
+		return !c.closureResultMayAliasCallInput(e)
+	}
+	return false
+}
+
+// peelRefsAndOptional strips the `T?` / `T&` / `T~` wrappers a closure argument
+// may arrive in, so argHidesForeignClosure can see the bare function type
+// underneath. Every one of these layers is a view of the same fat pointer.
+func peelRefsAndOptional(t types.Type) types.Type {
+	for {
+		switch tt := t.(type) {
+		case *types.Optional:
+			t = tt.Elem()
+		case *types.SharedRef:
+			t = tt.Elem()
+		case *types.MutRef:
+			t = tt.Elem()
+		default:
+			return t
+		}
+	}
 }
 
 // namedSubtreeMentionsSignature reports whether `root` — or any type that inherits

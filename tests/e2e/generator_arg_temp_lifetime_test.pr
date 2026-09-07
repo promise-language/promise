@@ -1074,17 +1074,396 @@ test_t1467_raise_from_loop_body_heap_arg() `test {
   assert(stop_at_boxed(99)?! == 10, "no raise, heap arg");
 }
 
+// --- 20. T1515: a closure-env temp materialized while evaluating the iterable --
+
+// A for-in's iterable outlives the loop body: a generator frame reads its
+// by-value args lazily on every resume, and a duck-typed iterator's next() reads
+// its fields on every call. But the body's own statement-end drain empties the
+// WHOLE closure-env registry, so an INTERMEDIATE lambda that a nested borrowing
+// call consumed was freed by the first body statement and then re-freed on every
+// following iteration (`fatal: invalid free (bad header magic)`). The fix gives
+// every closure-env temp the iterable materialized SCOPE lifetime — the same
+// treatment the vector (T0109), string (T0494) and channel (T0502) iterable
+// temps already get in this file — and makes the statement-end env drain reset
+// its drop flag, so it can free at most once.
+//
+// None of this is generator-specific: the duck-typed `next()` cases below carry
+// no coroutine at all, and `marker_items(counted(...))` takes no closure
+// parameter, so T1467's argument promotion never runs for it.
+
+fwrap((int) -> string f)(int) -> string `doc("Borrows f and returns a fresh capturing closure.") {
+  string t = "-" + "F";
+  return move |int k| -> "{k}{t}";
+}
+
+counted((int) -> string f) int `doc("Borrows f, returns a plain int — no closure parameter downstream.") {
+  return f(1).len;
+}
+
+marker_items(int n) stream[string] `doc("Streams n markers; takes no closure argument.") {
+  int i = 0;
+  while (i < n) {
+    yield "m{i}";
+    i += 1;
+  }
+}
+
+mapped_list(int n, (int) -> string f) string[] `doc("Collects f(i) for i in 0..n into a vector.") {
+  string[] out = [];
+  int i = 0;
+  while (i < n) {
+    out.push(f(i));
+    i += 1;
+  }
+  return out;
+}
+
+type Mapper `doc("Duck-typed iterator (next(~this)) over a stored closure.") {
+  int n;
+  int i;
+  (int) -> string f;
+
+  next(~this) string? `doc("Yields f(i) until i reaches n.") {
+    if (this.i >= this.n) {
+      return none;
+    }
+    string r = this.f(this.i);
+    this.i = this.i + 1;
+    return r;
+  }
+}
+
+make_mapper(int n, (int) -> string move f) Mapper `doc("Builds a duck-typed iterator over f.") {
+  return Mapper(n: n, i: 0, f: move f);
+}
+
+test_t1515_closure_intermediate_generator() `test {
+  string suffix = "-" + "c";
+  string acc = "";
+  for s in mapped_items(2, fwrap(move |int k| -> "{k}{suffix}")) {
+    acc = acc + s;
+  }
+  assert(acc == "0-F1-F", "closure intermediate (generator): {acc}");
+}
+
+first_wrapped() string `doc("Returns out of a generator loop whose iterable made an intermediate env.") {
+  string suffix = "-" + "c";
+  for s in mapped_items(5, fwrap(move |int k| -> "{k}{suffix}")) {
+    return s;
+  }
+  return "none";
+}
+
+test_t1515_closure_intermediate_generator_early_return() `test {
+  string r = first_wrapped();
+  assert(r == "0-F", "closure intermediate, early return: {r}");
+}
+
+// The generator takes no closure parameter at all — the env is materialized only
+// while evaluating the argument, so T1467's promotion never sees it. Before
+// T1515 this aborted exactly like the shape above.
+test_t1515_closure_env_from_non_closure_arg() `test {
+  string suffix = "-" + "c";
+  string acc = "";
+  for s in marker_items(counted(move |int k| -> "{k}{suffix}")) {
+    acc = acc + s;
+  }
+  assert(acc == "m0m1m2", "env from non-closure arg: {acc}");
+}
+
+// Duck-typed `next()` — no coroutine anywhere, same crash before T1515.
+test_t1515_closure_intermediate_duck_typed() `test {
+  string suffix = "-" + "c";
+  string acc = "";
+  for s in make_mapper(2, fwrap(move |int k| -> "{k}{suffix}")) {
+    acc = acc + s;
+  }
+  assert(acc == "0-F1-F", "closure intermediate (duck-typed): {acc}");
+}
+
+test_t1515_closure_intermediate_duck_typed_break() `test {
+  string suffix = "-" + "c";
+  string acc = "";
+  for s in make_mapper(5, fwrap(move |int k| -> "{k}{suffix}")) {
+    acc = acc + s;
+    if (acc.len >= 3) {
+      break;
+    }
+  }
+  assert(acc == "0-F", "closure intermediate, break: {acc}");
+}
+
+// A scope binding rather than a per-block barrier is what makes the promoted env
+// survive `break` and be freed on an early `return`. A vector iterable carries
+// both exits without the generator/iterator teardown leaks tracked separately as
+// T1453 (`break` out of a mid-yield generator) and T1442 (early `return` out of a
+// duck-typed iterator).
+test_t1515_closure_intermediate_vector_break() `test {
+  string suffix = "-" + "c";
+  string acc = "";
+  for s in mapped_list(5, fwrap(move |int k| -> "{k}{suffix}")) {
+    acc = acc + s;
+    if (acc.len >= 3) {
+      break;
+    }
+  }
+  assert(acc == "0-F", "vector iterable, break: {acc}");
+}
+
+first_listed() string `doc("Returns out of a vector loop whose iterable made an intermediate env.") {
+  string suffix = "-" + "c";
+  for s in mapped_list(5, fwrap(move |int k| -> "{k}{suffix}")) {
+    return s;
+  }
+  return "none";
+}
+
+test_t1515_closure_intermediate_vector_early_return() `test {
+  string r = first_listed();
+  assert(r == "0-F", "vector iterable, early return: {r}");
+}
+
+// --- 21. T1515: every for-in BRANCH re-homes the iterable's env temps ---------
+
+// genForInIterable is on the for-in statement, not on the generator: each of the
+// eight iterable branches (vector, map, string, channel, range, fixed array, raw
+// generator, duck-typed) evaluates through it, so each must re-home a closure-env
+// temp the iterable materialized. The generator, duck-typed and vector branches
+// are §20 above; the remaining five are here. `counted` is deliberately NOT a
+// closure-taking generator argument — the env exists only for the duration of the
+// argument expression, so T1467's promotion never sees it and only the for-in
+// re-homing keeps it alive. Every one of these aborted with `fatal: invalid free
+// (bad header magic)` before the fix.
+
+counted_len((int) -> string f) int `doc("Borrows f, returns f(1)'s length — always 3.") {
+  return f(1).len;
+}
+
+map_of(int n) map[string, int] `doc("Map of n entries, values 0..n.") {
+  map[string, int] m = {:};
+  int i = 0;
+  while (i < n) {
+    m["k{i}"] = i;
+    i += 1;
+  }
+  return m;
+}
+
+string_of(int n) string `doc("The string \"ab\" repeated n times.") {
+  return "ab".repeat(n);
+}
+
+channel_of(int n) channel[int] `doc("Closed channel holding 0..n.") {
+  ch := channel[int](n + 1);
+  int i = 0;
+  while (i < n) {
+    ch.send(i);
+    i += 1;
+  }
+  ch.close();
+  return ch;
+}
+
+array_of(int n) int[3] `doc("Fixed array [n, n+1, n+2].") {
+  int[3] a = [n, n + 1, n + 2];
+  return a;
+}
+
+type SeqCursor `doc("Cursor over 0..limit, driven by next().") {
+  int cur;
+  int limit;
+
+  next(~this) int? `doc("Yields cur until it reaches limit.") {
+    if (this.cur >= this.limit) {
+      return none;
+    }
+    int v = this.cur;
+    this.cur = this.cur + 1;
+    return v;
+  }
+}
+
+type Seq `doc("Iterable through iter(), not next() — the other duck-typed arm.") {
+  int n;
+
+  iter(~this) SeqCursor `doc("Fresh cursor over 0..n.") {
+    return SeqCursor(cur: 0, limit: this.n);
+  }
+}
+
+seq_of(int n) Seq `doc("Builds a Seq over 0..n.") {
+  return Seq(n: n);
+}
+
+test_t1515_forin_map_iterable_env() `test {
+  string suffix = "-" + "c";
+  int total = 0;
+  for k, v in map_of(counted_len(move |int k| -> "{k}{suffix}")) {
+    total = total + v;
+  }
+  assert(total == 3, "map iterable: {total}");
+}
+
+test_t1515_forin_string_iterable_env() `test {
+  string suffix = "-" + "c";
+  int n = 0;
+  for c in string_of(counted_len(move |int k| -> "{k}{suffix}")) {
+    n += 1;
+  }
+  assert(n == 6, "string iterable: {n}");
+}
+
+test_t1515_forin_channel_iterable_env() `test {
+  string suffix = "-" + "c";
+  int total = 0;
+  for v in channel_of(counted_len(move |int k| -> "{k}{suffix}")) {
+    total = total + v;
+  }
+  assert(total == 3, "channel iterable: {total}");
+}
+
+test_t1515_forin_range_iterable_env() `test {
+  string suffix = "-" + "c";
+  int total = 0;
+  for i in 0..counted_len(move |int k| -> "{k}{suffix}") {
+    total = total + i;
+  }
+  assert(total == 3, "range iterable: {total}");
+}
+
+// The fixed-array branch takes a base POINTER rather than a value, so it reaches
+// the promotion through genForInIterableWith rather than genForInIterable.
+test_t1515_forin_array_iterable_env() `test {
+  string suffix = "-" + "c";
+  int total = 0;
+  for x in array_of(counted_len(move |int k| -> "{k}{suffix}")) {
+    total = total + x;
+  }
+  assert(total == 12, "array iterable: {total}");
+}
+
+// The `iter()` arm of the duck-typed switch — §20's Mapper covers the `next()` arm.
+test_t1515_forin_iter_method_iterable_env() `test {
+  string suffix = "-" + "c";
+  int total = 0;
+  for i in seq_of(counted_len(move |int k| -> "{k}{suffix}")) {
+    total = total + i;
+  }
+  assert(total == 3, "iter() iterable: {total}");
+}
+
+// --- 22. T1515: exit paths, multiplicity, and enclosing-body shapes -----------
+
+// `continue` re-enters the body through the same back-edge the double free rode
+// on, and (unlike `break`) keeps the loop live afterwards — so a promoted binding
+// freed on the continue edge would be re-freed on the next iteration.
+test_t1515_closure_intermediate_continue() `test {
+  string suffix = "-" + "c";
+  string acc = "";
+  for s in mapped_items(4, fwrap(move |int k| -> "{k}{suffix}")) {
+    if (s == "1-F") {
+      continue;
+    }
+    acc = acc + s;
+  }
+  assert(acc == "0-F2-F3-F", "continue: {acc}");
+}
+
+two_wraps((int) -> string a, (int) -> string b) string[] `doc("Collects a(0) then b(1).") {
+  string[] out = [];
+  out.push(a(0));
+  out.push(b(1));
+  return out;
+}
+
+// The promotion re-homes the WHOLE window above the floor, not one temp: two
+// intermediate lambdas in a single iterable expression must each be freed once.
+test_t1515_two_closure_intermediates_in_one_iterable() `test {
+  string sa = "-" + "a";
+  string sb = "-" + "b";
+  string acc = "";
+  for s in two_wraps(fwrap(move |int k| -> "{k}{sa}"), fwrap(move |int k| -> "{k}{sb}")) {
+    acc = acc + s;
+  }
+  assert(acc == "0-F1-F", "two intermediates: {acc}");
+}
+
+// Nested loops: the inner for-in's floor is taken with the outer's promoted
+// bindings already on the scope stack, so the inner promotion must not re-home
+// them a second time. The captures are declared in the scope that owns them —
+// re-capturing the outer string from the inner lambda is a separate, unrelated
+// ownership hole (T2011).
+test_t1515_nested_forin_both_iterables_env() `test {
+  string outer_suffix = "-" + "o";
+  string acc = "";
+  for s in mapped_items(2, fwrap(move |int k| -> "{k}{outer_suffix}")) {
+    string inner_suffix = "-" + "i";
+    for t in mapped_items(2, fwrap(move |int k| -> "{k}{inner_suffix}")) {
+      acc = acc + s + t;
+    }
+  }
+  assert(acc == "0-F0-F0-F1-F1-F0-F1-F1-F", "nested iterables: {acc}");
+}
+
+type LoopRunner `doc("Drives the loop from a METHOD body.") {
+  int n;
+
+  run(this) string `doc("Folds the stream into a string.") {
+    string suffix = "-" + "c";
+    string acc = "";
+    for s in mapped_items(this.n, fwrap(move |int k| -> "{k}{suffix}")) {
+      acc = acc + s;
+    }
+    return acc;
+  }
+}
+
+// A method body, a lambda body and a generator body each get their own codegen
+// entry block and scope stack; the promotion allocates into that entry block, so
+// each is a distinct state for it. All three aborted before the fix.
+test_t1515_closure_intermediate_in_method_body() `test {
+  r := LoopRunner(n: 2);
+  assert(r.run() == "0-F1-F", "method body");
+}
+
+test_t1515_closure_intermediate_in_lambda_body() `test {
+  fold := move || -> string {
+    string suffix = "-" + "c";
+    string acc = "";
+    for s in mapped_items(2, fwrap(move |int k| -> "{k}{suffix}")) {
+      acc = acc + s;
+    }
+    return acc;
+  };
+  assert(fold() == "0-F1-F", "lambda body");
+}
+
+restream(int n) stream[string] `doc("Re-yields a wrapped inner stream.") {
+  string suffix = "-" + "c";
+  for s in mapped_items(n, fwrap(move |int k| -> "{k}{suffix}")) {
+    yield s;
+  }
+}
+
+// The enclosing body is itself a coroutine: the promoted binding lives in the
+// generator FRAME and is freed by the frame teardown, not by a stack scope exit.
+test_t1515_closure_intermediate_in_generator_body() `test {
+  string acc = "";
+  for s in restream(2) {
+    acc = acc + s;
+  }
+  assert(acc == "0-F1-F", "generator body: {acc}");
+}
+
 // Not covered here, deliberately — each is a pre-existing defect with its own
 // item, verified to reproduce identically on a clean pre-T1467 build:
 //   - a heap user-type INTERMEDIATE in the argument list
 //     (`boxed_items(2, rebox(Box(s: "-" + "i")))`) leaks: for-in's stream branch
 //     disarms every pending heap temp before building the generator (T0088), so
 //     an intermediate the promotion did not claim is never freed — T1514.
-//   - a closure-env INTERMEDIATE (`mapped_items(2, fwrap(move |..| ..))`) leaks
-//     on the ordinary call path and double-frees through a generator — T1515.
 //   - a mut-ref (`T ~p`) generator param reads garbage after the first resume —
 //     T1516.
 //   - a FAILABLE method returning its own heap default double-frees on the
 //     direct call path (the `{i1, T, i8*}` result skips the return-alias
 //     check) — T1517.
-// All four belong next to the shapes above once their own items are fixed.
+// All three belong next to the shapes above once their own items are fixed.

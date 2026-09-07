@@ -1410,3 +1410,243 @@ error_handler_closure_result_is_owned_by_binding() `test {
   f := make_adder_failable(5)? => make_noncapturing();
   assert(f() == 6, "");
 }
+
+// 55. T1515: the argument is itself a closure-returning call, and the CALLEE only
+//     BORROWS it. `fwrap` hands back a distinct, capturing closure of its own, so
+//     the result is fresh and must be freed — but the old alias filter suppressed
+//     tracking whenever ANY argument type merely mentioned a closure, leaking
+//     `fwrap`'s env and its captured string (2 allocations per call).
+//
+//     The narrowed rule is sound because a closure value is opaque: a callee
+//     cannot manufacture a distinct closure aliasing a closure argument's env, it
+//     can only hand that same argument back — and sema rejects the one route that
+//     would ("cannot move-capture borrowed parameter 'f' into a lambda"). The
+//     identical hand-back is settled by the runtime claim at the tracking site,
+//     which `identity` in #9 above still exercises. Argument types that only
+//     MENTION a closure (a struct field, `(() -> int)[]`, a closure whose own
+//     result is a closure) stay conservative — #9's cases are the guard rail —
+//     and so do argument EXPRESSIONS the claim cannot reach, which is #57.
+fwrap(() -> int f)() -> int {
+  int b = f();
+  string t = "-" + "F";
+  return move || -> b + t.len;
+}
+
+fwrap_move(() -> int move f)() -> int {
+  int b = f();
+  string t = "-" + "M";
+  return move || -> b + t.len;
+}
+
+take_closure(() -> int f) int {
+  return f();
+}
+
+closure_wrapper_result_inline_is_freed() `test {
+  assert(take_closure(fwrap(make_adder_free(5))) == 8, "");
+}
+
+closure_wrapper_result_move_param_inline_is_freed() `test {
+  assert(take_closure(fwrap_move(make_adder_free(5))) == 8, "");
+}
+
+closure_wrapper_result_discarded_is_freed() `test {
+  fwrap(make_adder_free(5));
+}
+
+closure_wrapper_result_bound_is_owned_by_binding() `test {
+  g := fwrap(make_adder_free(5));
+  assert(g() == 8, "");
+}
+
+// A closure-typed argument reaching the filter through an `?` wrapper: the peel
+// must see the bare function type underneath, or the shape stays conservative and
+// leaks again.
+wraps_optional_closure((() -> int)? f)() -> int {
+  int b = f!() + 6;
+  return move || -> b;
+}
+
+optional_closure_arg_result_is_freed() `test {
+  assert(wraps_optional_closure(make_adder_free(1))() == 8, "");
+}
+
+// 56. T1515: an optional-wrapped closure argument. `(() -> int)?` is a top-level
+//     closure under one Optional layer — not a container that could hide a second
+//     closure — so the wrapper is peeled and the result is tracked. The callee here
+//     hands the SAME closure back, which is the one aliasing shape a closure
+//     argument can produce; it stays single-owner through the runtime claim (temp
+//     argument) or the T1269 borrow clone (borrowed argument).
+unwraps_optional_closure((() -> int)? o)() -> int {
+  return o!;
+}
+
+discard_optional_closure_alias((() -> int)? o) {
+  unwraps_optional_closure(o);
+}
+
+optional_closure_alias_from_borrowed_param() `test {
+  g := make_adder_free(6);
+  discard_optional_closure_alias(g);
+  assert(g() == 7, "");
+}
+
+optional_closure_alias_discarded_owned_local() `test {
+  g := make_adder_free(6);
+  unwraps_optional_closure(g);
+  assert(g() == 7, "");
+}
+
+optional_closure_alias_inline_keeps_source() `test {
+  g := make_adder_free(6);
+  assert(unwraps_optional_closure(g)() == 7, "");
+  assert(g() == 7, "");
+}
+
+optional_closure_alias_from_temp_is_freed() `test {
+  assert(unwraps_optional_closure(make_adder_free(6))() == 7, "");
+}
+
+// 57. T1515: the narrowing above is decided on the argument EXPRESSION, not on
+//     its type alone. `identity` hands the same closure straight back, so the
+//     result may only be tracked when the caller's copy is settled by machinery
+//     that already exists — a lambda literal or an owned call result (the runtime
+//     claim), or an ident (the T1029 discard clear / T1031 source clone / T1269
+//     borrow clone). A closure reached through a FIELD, through `this`, or as a
+//     container ELEMENT reaches none of them: it is a borrowed view its owner
+//     drops and it is not an env temp, so tracking the result frees the env twice
+//     (`fatal: segmentation fault`). Those shapes stay conservative.
+type FieldClosureHolder {
+  () -> int cb;
+
+  identity_of_own_field(this)() -> int {
+    return identity(this.cb);
+  }
+}
+
+closure_field_arg_result_is_not_freed() `test {
+  h := FieldClosureHolder(cb: make_adder_free(6));
+  assert(identity(h.cb)() == 7, "");
+  assert(h.cb() == 7, "");
+}
+
+closure_this_field_arg_result_is_not_freed() `test {
+  h := FieldClosureHolder(cb: make_adder_free(6));
+  assert(h.identity_of_own_field()() == 7, "");
+  assert(h.cb() == 7, "");
+}
+
+closure_vector_element_arg_result_is_not_freed() `test {
+  (() -> int)[] v = [make_adder_free(6)];
+  assert(identity(v[0])() == 7, "");
+  assert(v[0]() == 7, "");
+}
+
+// The nested-call form: `get_cb` hands back a borrowed element, so `identity`'s
+// argument is a call result the caller does NOT own. The recursion through the
+// filter is what sees that — a plain "the argument is a call, so it is a temp"
+// rule would free the receiver's env here.
+closure_borrowed_call_result_arg_is_not_freed() `test {
+  h := CallbackHolder(cb: || -> 0, cbs: [make_adder_free(6)]);
+  identity(h.get_cb());
+  assert(h.cbs[0]() == 7, "");
+}
+
+// 58. T1515: the item's headline repro (a) — a LAMBDA LITERAL intermediate that a
+//     nested borrowing call consumes, on the ordinary (non-generator) call path.
+//     #55 above passes `fwrap` a CALL result; a lambda literal reaches
+//     closureArgOwnershipIsSettled through its other admitted arm (genLambdaExpr
+//     registered the env as a temp, so the runtime claim at the tracking site
+//     transfers sole ownership to `fwrap`'s result). Before the fix this leaked 2
+//     allocations — `fwrap`'s own env and the string it captured.
+fwrap_str((int) -> string f)(int) -> string {
+  string t = "-" + "F";
+  return move |int k| -> "{k}{t}";
+}
+
+plain_str(int n, (int) -> string f) string {
+  return f(n);
+}
+
+lambda_intermediate_inline_is_freed() `test {
+  string suffix = "-" + "c";
+  string r = plain_str(1, fwrap_str(move |int k| -> "{k}{suffix}"));
+  assert(r == "1-F", "nongen closure intermediate: {r}");
+}
+
+lambda_intermediate_discarded_is_freed() `test {
+  string suffix = "-" + "c";
+  fwrap_str(move |int k| -> "{k}{suffix}");
+}
+
+lambda_intermediate_bound_is_owned_by_binding() `test {
+  string suffix = "-" + "c";
+  g := fwrap_str(move |int k| -> "{k}{suffix}");
+  assert(g(3) == "3-F", "bound: {g(3)}");
+}
+
+// 59. T1515: the narrowing is only for an argument whose type is a TOP-LEVEL
+//     closure. An argument that is itself a closure RETURNING a closure can hand
+//     the callee a second, distinct closure — one the argument's own env may still
+//     free — and the runtime claim (which matches on the argument's own env
+//     pointer) can never neutralize that. Such an argument keeps the conservative
+//     answer, so the call result is not tracked. `nested_maker` returns a
+//     NON-capturing closure precisely so the conservative choice costs nothing
+//     here; the argument's own env is still freed by its statement temp.
+nested_maker(() -> (() -> int) mk)() -> int {
+  return || -> 5;
+}
+
+closure_returning_closure_arg_stays_conservative() `test {
+  int base = 6;
+  string tag = "-" + "n";
+  assert(nested_maker(move || -> make_adder_free(base + tag.len))() == 5, "");
+}
+
+// 60. T1515: `?^` and `?!` arguments. closureResultMayAliasCallInput peels both
+//     unwrap layers before deciding, so a failable source's success value is an
+//     owned closure exactly like a plain call result — the recursion in
+//     closureArgOwnershipIsSettled has to reach through the wrapper to see it.
+propagated_closure_arg_helper!() {
+  assert(identity(make_adder_failable(6)?^)() == 7, "");
+}
+
+propagated_closure_arg_is_settled() `test {
+  propagated_closure_arg_helper()?!;
+}
+
+panicked_closure_arg_is_settled() `test {
+  assert(identity(make_adder_failable(6)?!)() == 7, "");
+}
+
+// 61. T1515: a GETTER argument. `m.cb` is a MemberExpr, the same AST shape as the
+//     borrowed field `h.cb` in #57 — the two are told apart by recursing into the
+//     filter, not by the node kind. `Maker` holds no closure field, so its getter
+//     result is fresh and owned, and the call result is tracked.
+type Maker {
+  int x;
+
+  get cb() -> int {
+    return move || -> this.x + 1;
+  }
+}
+
+fresh_getter_closure_arg_result_is_freed() `test {
+  m := Maker(x: 6);
+  assert(identity(m.cb)() == 7, "");
+}
+
+// 62. T1515: a `&` shared-ref local. peelRefsAndOptional strips `T&` and `T~` for
+//     the same reason it strips `T?` — every one of those layers is a view of the
+//     same fat pointer, so the argument underneath is still a top-level closure.
+//     Without the peel the shape stays conservative and every fresh result leaks.
+//
+//     The source is an OWNED local. A `&` local over a BORROWED closure param is
+//     deliberately absent: that binding is broken on its own — `(() -> int)& r = f;`
+//     alone segfaults, while `string&` / `int[]&` over a borrowed param are fine —
+//     and the peel turns this variant of it into a double free. T2012.
+shared_ref_closure_local_arg_is_settled() `test {
+  g := make_adder_free(6);
+  (() -> int) & r = g;
+  assert(identity(r)() == 7, "");
+}

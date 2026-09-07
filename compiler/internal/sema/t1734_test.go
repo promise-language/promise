@@ -166,3 +166,37 @@ func TestT1734EnumDriftingFromFormatIsStillANearMiss(t *testing.T) {
 	`)
 	expectError(t, errs, "matching protocol Format")
 }
+
+// --- Two properties the sweep relies on that the cases above do not isolate. ---
+
+func TestT1734MultipleProtocolsAreCheckedIndependently(t *testing.T) {
+	// Most of the sweep declares several protocols at once (`type int is
+	// Ordered, Hashable, Format, Parse, Encodable, Decodable`). Each must be
+	// checked on its own: the Format half here is correct and the Parse half is
+	// not, so exactly the Parse method is named and Format is left alone.
+	errs := checkErrs(t, `
+		type Doc is Format, Parse {
+			int n;
+			format!(this, Writer ~w) { w.write_string("x"); }
+			parse!(string s) Doc `+t1734Tick+`factory { return Doc(n: 1); }
+		}
+		main() {}
+	`)
+	expectError(t, errs, "abstract method 'parse'")
+	expectNoErrorContaining(t, errs, "abstract method 'format'")
+}
+
+func TestT1734ProtocolOptOutSuppressesTheNearMiss(t *testing.T) {
+	// `structural(protocol: false)` is the escape hatch for a method that owns a
+	// reserved name without implementing the protocol. std.Channel's close() is
+	// the worked example the sweep deliberately kept rather than fixed, so the
+	// opt-out must actually silence the near-miss check.
+	errs := checkErrs(t, `
+		type Gate {
+			int n;
+			close() `+t1734Tick+`structural(protocol: false) { }
+		}
+		main() {}
+	`)
+	expectNoErrorContaining(t, errs, "matching protocol Closer")
+}

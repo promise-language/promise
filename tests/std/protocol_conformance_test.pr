@@ -268,3 +268,67 @@ type _ExactCloser is Closer {
   close!(~this) `doc("Consuming, failable close — the shape io.File and friends use.") {
   }
 }
+
+// ---- Encodable ----
+//
+// Every primitive gained `is Encodable, Decodable` in this sweep, but nothing
+// above reaches those two through a boxed view. A minimal Encoder is enough to
+// prove the boxed conformance dispatches to the right method. (The Decodable
+// half needs a real Decoder; the only one in the tree is json's, and this file
+// is deliberately std-only, so that half stays with the catalog tests.)
+type _TestEncoder is Encoder `doc("Records encoded scalars into a string, for conformance tests.") {
+  string log;
+
+  encode_bool!(~this, bool value) {
+    this.log = this.log + "b:" + value.to_string();
+  }
+  encode_int!(~this, int value) {
+    this.log = this.log + "i:" + value.to_string();
+  }
+  encode_uint!(~this, uint value) {
+    this.log = this.log + "u:" + value.to_string();
+  }
+  encode_f64!(~this, f64 value) {
+    this.log = this.log + "f:" + value.to_string();
+  }
+  encode_string!(~this, string value) {
+    this.log = this.log + "s:" + value;
+  }
+  encode_none!(~this) {
+    this.log = this.log + "n";
+  }
+  begin_object!(~this, int field_count) {
+    this.log = this.log + "<obj";
+  }
+  end_object!(~this) {
+    this.log = this.log + "obj>";
+  }
+  begin_array!(~this, int length) {
+    this.log = this.log + "<arr";
+  }
+  end_array!(~this) {
+    this.log = this.log + "arr>";
+  }
+  encode_key!(~this, string name) {
+    this.log = this.log + name + "=";
+  }
+}
+
+encodable_boxes_int() `test {
+  Encodable e = 42;
+  _TestEncoder enc = _TestEncoder(log: "");
+  e.encode(enc)?!;
+  assert(enc.log == "i:42", "int boxed as Encodable encodes");
+}
+
+encodable_boxes_string_and_bool() `test {
+  Encodable e = "hi";
+  _TestEncoder enc = _TestEncoder(log: "");
+  e.encode(enc)?!;
+  assert(enc.log == "s:hi", "string boxed as Encodable encodes");
+
+  Encodable e2 = true;
+  _TestEncoder enc2 = _TestEncoder(log: "");
+  e2.encode(enc2)?!;
+  assert(enc2.log == "b:true", "bool boxed as Encodable encodes");
+}

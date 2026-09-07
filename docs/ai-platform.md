@@ -1601,8 +1601,9 @@ promise ai sandbox file.pr          # Run file.pr in minimal sandbox
 ### 9.1 The `` `tool `` Annotation — A Compiler Extension
 
 `` `tool `` is the single compiler change required to make MCP server creation
-zero-boilerplate. It is added to the built-in metas table (language-design §8.3,
-implemented in `compiler/internal/sema/meta.go`) as a function-and-method annotation:
+zero-boilerplate. It joins the annotation set ([annotations.md](annotations.md) §6, registered
+in `compiler/internal/sema/meta.go` per that document's §17) as a function-and-method
+annotation:
 
 | Meta | Applies To | Description |
 |------|------------|-------------|

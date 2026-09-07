@@ -72,14 +72,16 @@ language, not an extension point.
 
 ## 3. How to read an entry
 
-Each entry states the same six things, in the same order. The last is load-bearing: an annotation
-whose *"Read by"* is honestly "nothing" is not implemented, however precisely its effect is
-described — and an annotation that cannot be implemented does not belong in this document.
+Each entry states these six things, in this order, omitting a field it has nothing to say under —
+most annotations declare a property that is not derived, and have no *Derivation* to state.
+**Targets**, **Effect** and **Read by** are never omitted, and the last is load-bearing: an
+annotation whose *"Read by"* is honestly "nothing" is not implemented, however precisely its effect
+is described — and an annotation that cannot be implemented does not belong in this document.
 
 | Field | Meaning |
 |---|---|
-| **Targets** | Which declaration kinds accept it. Must match `builtinMetas` in `compiler/internal/sema/meta.go`. |
-| **Parameters** | Positional and named parameters. Must match `metaParamSpecs` in `compiler/internal/sema/metaparams.go`. An undeclared parameter is a compile error, never silently discarded. |
+| **Targets** | Which declaration kinds accept it. Reconciled against `builtinMetas` in `compiler/internal/sema/meta.go`, and against the entry's own §6 row — an entry *repeats* its row, it never restates it differently. |
+| **Parameters** | Its positional and named parameters, reconciled against `metaParamSpecs` in `compiler/internal/sema/metaparams.go` and against the §6 row the same way. An undeclared parameter is a compile error, never silently discarded. |
 | **Effect** | The compiler decision it changes. |
 | **Derivation** | Whether the property is also derived structurally, and whether this annotation asserts, denies, or overrides that derivation. |
 | **Interactions** | Contradictions, implications, and mutual exclusions with other annotations. |
@@ -143,41 +145,51 @@ licenses can never be reached by a value that violated it.
 
 The complete set. Anything not listed here is not an annotation; see §16.
 
+**Targets** and **Parameters** are reconciled against `builtinMetas` and `metaParamSpecs`
+mechanically (§17), so both are written in a fixed vocabulary: the declaration kinds `types`,
+`enums`, `fields`, `methods`, `functions`, `parameters` and `variants`, and parameters spelled
+`` `name` (kind, positional|named[, optional]) ``. A positional parameter is required unless it
+carries `optional`; a named one may always be omitted, so it never does. **Targets** records the
+declaration kinds an annotation attaches to and nothing narrower — that `` `interior `` further
+requires `` `native ``, or that `` `embed ``'s function is a module-level getter, is in that
+entry's *Interactions*. Each entry below repeats its row's two cells rather than paraphrasing
+them, and the same check holds the two copies equal.
+
 | Annotation | Targets | Parameters | Effect |
 |---|---|---|---|
 | `` `copy `` | types, enums | — | Bitwise copy on assignment |
 | `` `clone `` | types, enums | — | Synthesize a deep `clone() Self` |
 | `` `single_owner `` | types, enums | — | Move-only handle; nothing may duplicate it |
-| `` `duplicates_elements `` | types (`` `native `` only) | — | Assert: duplicating a value duplicates the elements it holds |
-| `` `sendable `` | types, enums | — | Assert: may move across a goroutine boundary |
-| `` `sharable `` | types, enums | — | Assert: a reference may be aliased across goroutines |
+| `` `duplicates_elements `` | types | — | Assert: duplicating a value duplicates the elements it holds |
+| `` `sendable `` | types | — | Assert: may move across a goroutine boundary |
+| `` `sharable `` | types | — | Assert: a reference may be aliased across goroutines |
 | `` `not_sendable `` | types, enums | — | Deny sendability that fields would derive |
 | `` `not_sharable `` | types, enums | — | Deny sharability that fields would derive |
 | `` `confined `` | types, enums | — | Thread-confined; opts into the plain reference count |
-| `` `interior `` | types (`` `native `` only) | — | Mutating methods callable through a shared borrow |
+| `` `interior `` | types | — | Mutating methods callable through a shared borrow |
 | `` `value `` | fields | — | Field lives in the value struct, copied with it |
 | `` `raw `` | fields | — | Field types an LLVM type identifier directly |
 | `` `abstract `` | methods | — | No body; a subtype must implement it |
-| `` `structural `` | types, methods, enums | `protocol` (bool) | Satisfiable without `is`; `protocol: true` reserves requirement names |
+| `` `structural `` | types, methods, enums | `protocol` (bool, named) | Satisfiable without `is`; `protocol: true` reserves requirement names |
 | `` `open `` | types | — | Concrete type may be an `is` parent |
-| `` `sealed `` | abstract/structural types | — | Hierarchy closed outside the declaring module |
+| `` `sealed `` | types | — | Hierarchy closed outside the declaring module |
 | `` `native `` | types, methods | — | No Promise body; provided by the backend |
-| `` `builtin `` | types, enums | `role` (identifier, required) | Fills a role the compiler depends on |
+| `` `builtin `` | types, enums | `role` (identifier, positional) | Fills a role the compiler depends on |
 | `` `final `` | fields | — | Immutable after construction |
 | `` `factory `` | methods | — | Receiver-less constructor with `` `mono `` placement |
 | `` `global `` | methods | — | Namespaced function; no `this`, no `Self` |
 | `` `mono `` | methods | — | Per-monomorphization function; no `this`, `Self` available |
 | `` `public `` | types, enums, fields, methods, functions | — | Export from the module |
-| `` `doc `` | any, parameters | `text` (string, required) | Attach documentation to the AST node |
-| `` `deprecated `` | any, parameters | `message` (string, optional) | Mark deprecated |
-| `` `test `` | functions | `expected`, `exclude`, `timeout`, `memory_limit` | Declare a test |
-| `` `extern `` | functions | `symbol` (string, required) | Function linked by symbol name |
-| `` `wasm_import `` | functions | `module`, `name` (strings, required) | Bind to a WASM host import |
-| `` `target `` | types, enums, functions | `condition` (required) | Compile-time platform filtering |
-| `` `embed `` | module-level getters | `path` (string, required); `compress` (bool) | Embed a file at compile time |
-| `` `lifetime `` | parameters, functions, methods | `name` (identifier, required) | Explicit lifetime name |
-| `` `serializable `` | types, enums | `tag` (string) | Synthesize `encode`/`decode` |
-| `` `key `` | fields, variants | `name` (string, required) | Serialized name |
+| `` `doc `` | types, enums, fields, methods, functions, parameters, variants | `text` (string, positional) | Attach documentation to the AST node |
+| `` `deprecated `` | types, enums, fields, methods, functions, parameters, variants | `message` (string, positional, optional) | Mark deprecated |
+| `` `test `` | functions | `expected` (string, named); `exclude` (exclude-condition, named); `timeout` (string, named); `memory_limit` (string, named) | Declare a test |
+| `` `extern `` | functions | `symbol` (string, positional) | Function linked by symbol name |
+| `` `wasm_import `` | functions | `module` (string, positional); `name` (string, positional) | Bind to a WASM host import |
+| `` `target `` | types, enums, functions | `condition` (target-condition, positional) | Compile-time platform filtering |
+| `` `embed `` | functions | `path` (string, positional); `compress` (bool, named) | Embed a file at compile time |
+| `` `lifetime `` | parameters, functions, methods | `name` (identifier, positional) | Explicit lifetime name |
+| `` `serializable `` | types, enums | `tag` (string, named) | Synthesize `encode`/`decode` |
+| `` `key `` | fields, variants | `name` (string, positional) | Serialized name |
 | `` `skip `` | fields | — | Omit from serialization |
 | `` `include_none `` | fields | — | Emit the field when its value is none |
 | `` `required `` | fields | — | Must be present when decoding |
@@ -231,7 +243,7 @@ The complete set. Anything not listed here is not an annotation; see §16.
 
 ### `` `duplicates_elements ``
 
-- **Targets** types (`` `native `` only) · **Parameters** — none
+- **Targets** types · **Parameters** — none
 - **Effect** Declares that duplicating a value of this type duplicates the elements it holds — its
   buffer is held **by value** ([memory-model.md](memory-model.md) §3), so a deep copy reaches every
   element. Governs the container-element nesting rule, the `clone()`/`filled()` gate, and closure
@@ -264,7 +276,7 @@ with no Promise-level fields to derive from: the native concurrency primitives.
 
 ### `` `sendable `` / `` `sharable ``
 
-- **Targets** types (`` `native `` only) · **Parameters** — none
+- **Targets** types · **Parameters** — none
 - **Effect** Assert the capability for the declaration, skipping field derivation.
 - **Derivation** Overrides it — for the declaration. For a **generic** type the assertion cannot
   speak for every instantiation, so element types are still checked: a `` `sendable `` generic
@@ -377,7 +389,7 @@ every call site.
 
 ### `` `structural ``
 
-- **Targets** types, methods, enums · **Parameters** `protocol` (bool)
+- **Targets** types, methods, enums · **Parameters** `protocol` (bool, named)
 - **Effect** On a type: the interface may be satisfied without an `is` declaration — any type with
   matching method shapes conforms. `protocol: true` additionally reserves the interface's
   requirement names, making a same-name method with an incompatible signature an error;
@@ -390,7 +402,7 @@ every call site.
 
 ### `` `open `` / `` `sealed ``
 
-- **Targets** `` `open `` types; `` `sealed `` abstract or structural types · **Parameters** — none
+- **Targets** types · **Parameters** — none
 - **Effect** Concrete types are **sealed by default**: no other type may declare `is` on them.
   `` `open `` permits it. `` `sealed `` on an abstract or structural base closes the hierarchy
   *outside* the declaring `promise.toml` module while leaving it extensible within — the standard
@@ -429,7 +441,7 @@ compiler depends on this*. A type carries at most one of them.
 
 ### `` `builtin ``
 
-- **Targets** types, enums · **Parameters** `role` (identifier, required)
+- **Targets** types, enums · **Parameters** `role` (identifier, positional)
 - **Effect** Declares that this type fills a **role the compiler depends on**. Unlike `` `native ``
   the compiler does not implement it — the declaration is ordinary Promise, with fields and bodies
   — but the compiler binds syntax to it, constructs values of it, or relies on its shape.
@@ -511,7 +523,8 @@ duplicates its elements; that is a property, and §1 puts it out of reach.
 
 ### `` `doc ``
 
-- **Targets** any declaration, including parameters · **Parameters** `text` (string, required)
+- **Targets** types, enums, fields, methods, functions, parameters, variants · **Parameters**
+  `text` (string, positional)
 - **Effect** Attaches documentation to the AST node. Unlike a comment it is preserved in the parsed
   tree, unambiguously bound to its declaration, and available to tooling and to agents at compile
   time.
@@ -527,7 +540,8 @@ duplicates its elements; that is a property, and §1 puts it out of reach.
 
 ### `` `deprecated ``
 
-- **Targets** any declaration, including parameters · **Parameters** `message` (string, optional)
+- **Targets** types, enums, fields, methods, functions, parameters, variants · **Parameters**
+  `message` (string, positional, optional)
 - **Effect** Marks the declaration deprecated. Using it warns, quoting the message.
 - **Interactions** The message is positional — `` `deprecated("use NewThing instead") `` — and that
   is its only spelling. There is no version or date parameter: a value with no defined format and
@@ -539,8 +553,9 @@ duplicates its elements; that is a property, and §1 puts it out of reach.
 
 ### `` `test ``
 
-- **Targets** functions · **Parameters** `expected` (string), `exclude` (target condition),
-  `timeout` (duration string), `memory_limit` (size string) — all named
+- **Targets** functions · **Parameters** `expected` (string, named);
+  `exclude` (exclude-condition, named); `timeout` (string, named);
+  `memory_limit` (string, named)
 - **Effect** Declares a test. Without `expected` the function is a **batch test**: it asserts, and
   every such function in the files passed together compiles into a single binary. With `expected`,
   a `main()` becomes a **snapshot test**: its own binary, whose stdout is compared against the
@@ -562,7 +577,7 @@ leaks, and a leak is a regression to be fixed rather than declared acceptable.
 
 ### `` `extern ``
 
-- **Targets** functions · **Parameters** `symbol` (string, required)
+- **Targets** functions · **Parameters** `symbol` (string, positional)
 - **Effect** Declares a function whose body is not in Promise and whose linkage is by **symbol
   name**. The declaration gives the signature; the call is emitted against `symbol`.
 - **Interactions** This is the second of the two ways a declaration reaches an implementation the
@@ -592,7 +607,8 @@ exist can sit in a module indefinitely and fail only for whoever first calls it.
 
 ### `` `wasm_import ``
 
-- **Targets** functions · **Parameters** `module` (string, required), `name` (string, required)
+- **Targets** functions · **Parameters** `module` (string, positional);
+  `name` (string, positional)
 - **Effect** Binds the function to the WASM host import `name`, imported from host module `module`.
 - **Read by** validation in `sema/decl.go`; `WasmImportMod`/`WasmImportName` in
   `codegen/layout.go`; emitted by the bindgen passes.
@@ -601,7 +617,7 @@ exist can sit in a module indefinitely and fail only for whoever first calls it.
 
 ### `` `target ``
 
-- **Targets** types, enums, functions · **Parameters** `condition`, a required target condition
+- **Targets** types, enums, functions · **Parameters** `condition` (target-condition, positional)
 - **Effect** Filters the declaration out of compilation on non-matching targets. A filtered
   declaration is not type-checked, so a malformed annotation on it surfaces only on the targets
   that compile it — with the exception of `` `target `` itself, which is validated on the filtering
@@ -616,14 +632,16 @@ exist can sit in a module indefinitely and fail only for whoever first calls it.
 
 ### `` `embed ``
 
-- **Targets** module-level getters · **Parameters** `path` (string, required); `compress` (bool)
+- **Targets** functions · **Parameters** `path` (string, positional); `compress` (bool, named)
 - **Effect** Embeds the file or glob tree at `path` into the binary at compile time, exposed
   through the getter as an `EmbeddedFile` or `EmbeddedFiles`.
+- **Interactions** A module-level getter is a parameterless function declaration, which is why
+  §6 records the target as `functions`; there is no narrower declaration kind to name.
 - **Read by** the embed pass in `sema`; `codegen`; §8.6 has the path and glob rules.
 
 ### `` `lifetime ``
 
-- **Targets** parameters, functions, methods · **Parameters** `name`, a required identifier
+- **Targets** parameters, functions, methods · **Parameters** `name` (identifier, positional)
 - **Effect** Names a lifetime explicitly, overriding elision. The compiler uses aggressive lifetime
   elision (§6.3), so this is almost never needed.
 - **Read by** `Param.SetLifetime` / `Param.Lifetime` (`types/signature.go`).
@@ -635,23 +653,29 @@ exist can sit in a module indefinitely and fail only for whoever first calls it.
 
 ### `` `serializable ``
 
-- **Targets** types, enums · **Parameters** `tag` (string)
+- **Targets** types, enums · **Parameters** `tag` (string, named)
 - **Effect** Synthesizes `encode(Encoder)` and `decode(Decoder)` from the declaration's fields. On
   an enum, `tag` names the discriminator field.
 - **Read by** `processSerializableType` (`sema/decl.go`, `sema/serialize.go`).
 
 ### Field annotations
 
-| Annotation | Parameters | Effect |
-|---|---|---|
-| `` `key `` | `name` (string, required) | Use `name` as the serialized name instead of the field or variant name. |
-| `` `skip `` | — | Omit the field from both encoding and decoding. |
-| `` `include_none `` | — | Emit the field even when its value is none, instead of omitting it. |
-| `` `required `` | — | The field must be present when decoding; its absence is a decode error. |
-| `` `flatten `` | — | Inline the nested type's fields directly into the parent object rather than nesting. |
+These five share one entry rather than a heading each: one *Read by*, and effects that are only
+legible together. The columns are the same ones §6 declares, and are reconciled the same way.
 
-- **Targets** fields, and `` `key `` also variants · **Read by** `sema/serialize.go` and the
-  synthesized `encode`/`decode` bodies.
+| Annotation | Targets | Parameters | Effect |
+|---|---|---|---|
+| `` `key `` | fields, variants | `name` (string, positional) | Use `name` as the serialized name instead of the field or variant name. |
+| `` `skip `` | fields | — | Omit the field from both encoding and decoding. |
+| `` `include_none `` | fields | — | Emit the field even when its value is none, instead of omitting it. |
+| `` `required `` | fields | — | The field must be present when decoding; its absence is a decode error. |
+| `` `flatten `` | fields | — | Inline the nested type's fields directly into the parent object rather than nesting. |
+
+- **Interactions** `` `include_none `` is meaningful only on an optional (`T?`) field and
+  `` `flatten `` only on one whose type is `Encodable`; `` `required `` makes a missing key a
+  decode error even where the field has a fallback. All five are read only by the synthesized
+  `encode`/`decode`, so on a type that is not `` `serializable `` they are inert.
+- **Read by** `sema/serialize.go` and the synthesized `encode`/`decode` bodies.
 
 ## 16. Not annotations
 
@@ -671,10 +695,15 @@ these names is wrong.
 
 ## 17. Adding an annotation
 
-1. **Specify it here first** — an entry with all six fields of §3. If *"Read by"* cannot be filled
-   in, the design is not finished; if it can only be filled in with "nothing", the annotation does
-   not belong in the language.
-2. Register it in `builtinMetas` (targets) and `metaParamSpecs` (parameters).
+1. **Specify it here first** — a §6 row and an entry in §3's schema. If *"Read by"* cannot be
+   filled in, the design is not finished; if it can only be filled in with "nothing", the
+   annotation does not belong in the language.
+2. Register it in `builtinMetas` (targets) and `metaParamSpecs` (parameters). The §6 row and
+   those two tables are reconciled mechanically by `checkAnnotationCoverage`
+   (`tools/build/common/annotationcheck.go`), which runs on every commit: a registered annotation
+   with no §6 row, a §6 row naming nothing the compiler registers, a row whose targets or
+   parameters disagree with the tables, and an entry whose **Targets**/**Parameters** line
+   disagrees with its own row are each a build failure.
 3. Store it as a flag on `types.Named`/`types.Enum`, or on the field or parameter, with a getter.
 4. Set the flag from the annotation in `sema/decl.go` — on **both** the native and the
    source-declared paths, which are separate branches with separate returns.

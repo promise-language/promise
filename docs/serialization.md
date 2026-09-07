@@ -567,17 +567,11 @@ This is the escape hatch for dynamic JSON — APIs that return varying shapes, o
 
 ### 5.1 New Built-in Meta Annotations
 
-Add to `builtinMetas` in `sema/meta.go`:
-
-| Meta | Targets | Parameters |
-|------|---------|-----------|
-| `key` | field, variant | 1 positional string param (the wire name) |
-| `skip` | field | none |
-| `include_none` | field | none (only valid on `T?` fields — forces null encoding instead of omission) |
-| `required` | field | none (error on missing key during decode, even if field has a default) |
-| `flatten` | field | none (only valid on `Encodable` fields) |
-
-These are validated during sema. Using `` `key `` on a non-serializable type's field is allowed (it's inert — only read by the serializable codegen).
+The five field annotations this document's encoding rules read — `` `key ``, `` `skip ``,
+`` `include_none ``, `` `required `` and `` `flatten `` — are specified in
+[annotations.md](annotations.md) §15, which is where each one's targets, parameters and
+interactions live. Registering them is `builtinMetas` and `metaParamSpecs` in `sema/meta.go` and
+`sema/metaparams.go`, per that document's §17, and they are validated during sema.
 
 ### 5.2 `` `serializable `` Flag Storage
 

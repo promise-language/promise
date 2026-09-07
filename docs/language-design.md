@@ -2331,17 +2331,17 @@ Meta annotations appear in post-definition position:
 ### 8.2 Examples
 
 ```promise
-type OldThing `serializable(tag: "kind") `deprecated(since: "1.3", message: "Use NewThing instead") {
+type OldThing `serializable(tag: "kind") `deprecated("Use NewThing instead") {
   string name `key("user_name") `required;
   int age `key("user_age");
 }
 
-fastAdd(int a, int b) int `inline {
+add(int a, int b) int {
   return a + b;
 }
 
 testAddition() `test {
-  assert(fastAdd(1, 2) == 3, "fastAdd(1,2) is 3");
+  assert(add(1, 2) == 3, "add(1,2) is 3");
 }
 ```
 
@@ -2350,7 +2350,6 @@ testAddition() `test {
 Every annotation, what it means, its targets and its parameters: [annotations.md](annotations.md). That document is where an annotation is defined; this section defines only how one is written.
 
 The set is **closed** — both the annotation names and each annotation's parameters. There are no user-defined annotations, and no annotation accepts a parameter it does not declare.
-
 
 ### 8.4 Documentation (`` `doc ``)
 

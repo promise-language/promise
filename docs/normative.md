@@ -163,14 +163,15 @@ Two rules keep the invariant true over time:
 
 ## 8. What is enforced mechanically
 
-`CheckDocs` in `tools/build/common/docscheck.go` runs unconditionally in `RunPreCommit`, before the
-staged-file scan, so these cannot be skipped or deferred:
+`CheckDocs` in `tools/build/common/` runs unconditionally in `RunPreCommit`, before the staged-file
+scan, so these cannot be skipped or deferred:
 
 | Check | Asserts |
 |---|---|
 | `checkDocLinks` | Every relative `.md` link resolves to a file that exists. Anchors are not checked, which is what keeps the false-positive rate at zero. |
 | `checkDocIndex` | Every tracked `docs/**.md` is linked from `index.md`. |
 | `checkCatalogCoverage` | Every directory under `modules/` has a catalog entry, and every shipped module is named in each inventory document. |
+| `checkAnnotationCoverage` | Every annotation the compiler registers has a row in `annotations.md`, and every row names a registered annotation, with matching targets and parameters; every row has an entry, and every entry repeats its own row. Known divergences between the document and the compiler are excused one at a time by a ledger in the checker — never by a marker in the document — and a ledger entry whose divergence is gone is itself a finding. The document's internal consistency is not ledgerable. |
 
 Everything else here is upheld by review. The rules most worth adding a check for are the ones a
 reader cannot verify locally: §3's ban on status sections, and §4's ban on precedence language.

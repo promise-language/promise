@@ -182,7 +182,8 @@ func RunPreCommit(root string) error {
 	}
 
 	// Mechanical documentation checks: dangling relative .md links,
-	// docs/index.md coverage, and catalog/doc module coverage. Cheap enough
+	// docs/index.md coverage, catalog/doc module coverage, and the
+	// annotation set docs/annotations.md declares. Cheap enough
 	// to run unconditionally, and each catches drift that is otherwise only
 	// found by a manual sweep (T1675). Deliberately ahead of the staged-file
 	// scan, which returns early when nothing is staged.

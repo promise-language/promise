@@ -12,12 +12,16 @@ import (
 
 // CheckDocs runs the mechanical documentation checks: every relative Markdown
 // link resolves to a file that exists, every top-level doc is reachable from
-// docs/index.md, and the catalog stays in sync with what is actually on disk
-// and what the two module-inventory docs claim.
+// docs/index.md, the catalog stays in sync with what is actually on disk and
+// what the two module-inventory docs claim, and docs/annotations.md lists
+// exactly the annotations the compiler registers (checkAnnotationCoverage, in
+// annotationcheck.go).
 //
 // These are deliberately narrow. They verify link *targets*, index reachability,
-// and module-name *presence* — nothing about whether the surrounding prose is
-// accurate. Doc
+// module-name *presence*, and — for the annotation set alone, where the document
+// and the compiler declare the same closed set twice, and the document itself
+// renders it twice — the declared targets and parameters. Nothing about whether
+// the surrounding prose is accurate. Doc
 // staleness of the kind T1675 swept up (wrong API names, "planned" modules that
 // shipped) is not detectable this way and still needs human review.
 //
@@ -35,6 +39,9 @@ func CheckDocs(root string) error {
 		problems = append(problems, err.Error())
 	}
 	if err := checkCatalogCoverage(root); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if err := checkAnnotationCoverage(root); err != nil {
 		problems = append(problems, err.Error())
 	}
 	if len(problems) > 0 {

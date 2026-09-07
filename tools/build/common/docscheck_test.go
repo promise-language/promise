@@ -405,46 +405,60 @@ func notAGitRepo(t *testing.T, dir string) {
 }
 
 func TestCheckDocsCleanTreePasses(t *testing.T) {
+	withAnnotationGaps(t, nil)
 	root := docsRepo(t, map[string]string{
 		"catalog.toml":             "[modules.io]\ndescription = \"io\"\n",
 		"modules/io/io.pr":         "print_line(\"hi\");\n",
 		"CLAUDE.md":                "inventory: modules/io/io.pr — see [docs](docs/index.md)\n",
-		"docs/index.md":            "- [stdlib](standard-library.md)\n",
+		"docs/index.md":            "- [stdlib](standard-library.md)\n- [annotations](annotations.md)\n",
 		"docs/standard-library.md": "inventory: modules/io/io.pr\n",
+		"docs/annotations.md":      coherentDocument(),
+		builtinMetasGo:             "package sema\n\nvar builtinMetas = map[string][]MetaTarget{\n" + copyMetas + embedMetas + "}\n",
+		metaParamSpecGo: "package sema\n\nvar noParams = metaParamSpec{}\n\n" +
+			"var metaParamSpecs = map[string]metaParamSpec{\n" + copySpecs + embedSpecs + "}\n",
 	})
 	if err := CheckDocs(root); err != nil {
 		t.Fatalf("a coherent tree must produce no findings, got: %v", err)
 	}
 }
 
-func TestCheckDocsReportsAllThreeChecksNotJustTheFirst(t *testing.T) {
-	// The three checks are independent, so a tree that violates all three
-	// must report all three. An early return here would silently disable
+func TestCheckDocsReportsAllFourChecksNotJustTheFirst(t *testing.T) {
+	// The four checks are independent, so a tree that violates all four
+	// must report all four. An early return here would silently disable
 	// the later checks for anyone whose first violation is a dangling link
 	// — exactly the failure mode this gate exists to prevent.
+	withAnnotationGaps(t, nil)
 	root := docsRepo(t, map[string]string{
 		"catalog.toml":             "[modules.io]\ndescription = \"io\"\n",
 		"modules/io/io.pr":         "print_line(\"hi\");\n",
 		"CLAUDE.md":                "no module inventory here\n",
-		"docs/index.md":            "- [gone](tracker-tags.md)\n- [stdlib](standard-library.md)\n",
+		"docs/index.md":            "- [gone](tracker-tags.md)\n- [stdlib](standard-library.md)\n- [annotations](annotations.md)\n",
 		"docs/standard-library.md": "no module inventory here\n",
 		"docs/orphan.md":           "# Orphan\n",
+		"docs/annotations.md":      coherentDocument(),
+		// `mono is registered but has no §6 row.
+		builtinMetasGo: "package sema\n\nvar builtinMetas = map[string][]MetaTarget{\n" +
+			copyMetas + embedMetas + "\t\"mono\": {TargetMethod},\n}\n",
+		metaParamSpecGo: "package sema\n\nvar noParams = metaParamSpec{}\n\n" +
+			"var metaParamSpecs = map[string]metaParamSpec{\n" +
+			copySpecs + embedSpecs + "\t\"mono\": noParams,\n}\n",
 	})
 	err := CheckDocs(root)
 	if err == nil {
-		t.Fatal("expected findings from all three checks")
+		t.Fatal("expected findings from all four checks")
 	}
 	for _, want := range []string{
 		"dangling markdown links",
 		"docs not linked from docs/index.md",
 		"catalog coverage",
+		"annotation coverage",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("aggregate error is missing the %q section, got:\n%v", want, err)
 		}
 	}
 	// And the specifics survive aggregation, not just the headings.
-	for _, want := range []string{"tracker-tags.md", "docs/orphan.md", "modules/io/"} {
+	for _, want := range []string{"tracker-tags.md", "docs/orphan.md", "modules/io/", "`mono"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("aggregate error lost the detail %q, got:\n%v", want, err)
 		}
@@ -453,7 +467,8 @@ func TestCheckDocsReportsAllThreeChecksNotJustTheFirst(t *testing.T) {
 
 func TestCheckDocsBareRepoIsNoOp(t *testing.T) {
 	// RunPreCommit calls CheckDocs unconditionally, and its own tests run
-	// against bare temp repos with no docs/, no index, and no catalog.
+	// against bare temp repos with no docs/, no index, no catalog and no
+	// compiler source.
 	root := docsRepo(t, map[string]string{"README.md": "# Hi\n"})
 	if err := CheckDocs(root); err != nil {
 		t.Fatalf("a tree with no docs/ or catalog.toml must be a no-op, got: %v", err)

@@ -1087,9 +1087,26 @@ test_process_spawn_with_group() `test(exclude: wasm) `target(!windows) {
 test_process_signal_group() `test(exclude: wasm, timeout: "10s") `target(!windows) {
   // Spawn a shell that starts a child, in a new process group.
   // Signal the group — both should die. Verify wait returns.
-  Process p = Process.spawn("sh", ["-c", "sleep 60 & wait"], none, none, true)?!;
-  // Give the shell time to start the child (T1632 exemption: testing timing behavior)
-  sleep(Duration.from_millis(200));
+  //
+  // The shell echoes "ready" only after `sleep 60 &` has been forked, so reading
+  // that line is a real happens-before edge on "the child exists". A sleep here
+  // was only ever a guess at it, and was mislabelled a timing-behaviour test —
+  // this test measures no duration (T1632).
+  Process p = Process.spawn("sh", ["-c", "sleep 60 & echo ready; wait"], none, none, true)?!;
+  ProcessOutput stdout = p.take_stdout()?!;
+  u8[] line = u8[]();
+  u8[] one = u8[].filled(0u8, 1);
+  while true {
+    int n = stdout.read(one)?!;
+    if n == 0 {
+      break;
+    }
+    if one[0] == 10 {
+      break;
+    }
+    line.push(one[0]);
+  }
+  assert(string.from_bytes(line) == "ready", "the shell forked its child and announced it");
   p.signal_group(Signal.Terminate)?!;
   int code = p.wait()?!;
   assert(code >= 0, "wait after group signal should succeed");

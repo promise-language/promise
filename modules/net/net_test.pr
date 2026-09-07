@@ -1145,12 +1145,12 @@ test_cancel_before_read() `test(exclude: wasm, timeout: "20s") {
   _net_socket_close(sfd);
 }
 
-// _cancel_after sleeps briefly so the main goroutine is genuinely parked before
-// the cancellation lands, then consumes the handle.
+// _cancel_after cancels as soon as the goroutine is scheduled, and consumes the
+// handle. No delay: the cancel flag is sticky and the scan retries, so a
+// cancellation landing before the reader parks unblocks it just the same — which
+// is precisely what test_cancel_park_race_stress pins at delay 0 (T1632).
 _cancel_after(CancelHandle move handle) int {
-  sleep(Duration.from_millis(50));
-  handle.cancel();
-  return 1;
+  return _cancel_after_millis(move handle, 0);
 }
 
 test_cancel_unblocks_parked_read() `test(exclude: wasm, timeout: "30s") {
@@ -1817,10 +1817,12 @@ test_concurrent_deadlines_across_sockets() `test(exclude: wasm, timeout: "30s") 
   _net_socket_close(sfd);
 }
 
-// _cancel_after_millis is _cancel_after with a caller-chosen delay, so a stress
-// loop can walk the canceller across the arm/park window.
+// _cancel_after_millis cancels after a caller-chosen delay. The delay is the
+// subject of the test, not a synchronization: test_cancel_park_race_stress
+// sweeps it across the arm/park window and asserts the SAME outcome for every
+// value, including 0. Nothing here waits for another goroutine to reach a state.
 _cancel_after_millis(CancelHandle move handle, int millis) int {
-  sleep(Duration.from_millis(millis));
+  sleep(Duration.from_millis(millis)); // sleep-ok: the swept delay under test, not a happens-before edge
   handle.cancel();
   return 1;
 }
@@ -2127,14 +2129,6 @@ test_accept_succeeds_under_an_unexpired_deadline() `test(exclude: wasm, timeout:
   listener.close()?!;
 }
 
-// _drain_after gives the writer time to actually park before the peer frees up
-// space, so the wake under test comes from the reactor rather than from the
-// write never having blocked at all.
-_drain_after(int afd, int millis) int {
-  sleep(Duration.from_millis(millis));
-  return _drain_all(afd);
-}
-
 // test_read_deadline_not_hit's write-slot twin, and the only test that drives a
 // reactor write-readiness wake with a deadline armed: the PollDesc is on the
 // deadline registry for the whole park, so the scan walks it on every pass and
@@ -2152,10 +2146,16 @@ test_write_deadline_not_hit() `test(exclude: wasm, timeout: "60s") {
   u8[] chunk = u8[].filled(65u8, 65536);
   assert(_fill_until_blocked(client, chunk) == _wake_timeout(), "buffers are full");
 
-  // Now a deadline far beyond the drain delay. The write parks, the peer drains,
-  // and the reactor — not the deadline — is what has to wake it.
+  // Now a deadline far beyond any plausible drain. When the write parks, the
+  // reactor — not the deadline — is what has to wake it.
+  //
+  // The peer drain used to be delayed by a sleep, to bias the interleaving so the
+  // write was already parked when space freed up. That ordering was never
+  // guaranteed (T1632), so it is gone: the assertions below hold whether the write
+  // parks and is woken or completes straight away. Restoring the guaranteed parked
+  // interleaving needs scheduler park observability — T2013.
   client.set_write_deadline(Instant.now() + Duration.from_secs(30));
-  t := go _drain_after(afd, 100);
+  t := go _drain_all(afd);
 
   Instant start = Instant.now();
   u8[] small = "Ok".bytes();

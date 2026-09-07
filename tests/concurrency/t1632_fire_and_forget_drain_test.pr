@@ -1,0 +1,140 @@
+// T1632: the drain-side counterpart to tests/concurrency/t1636_go_join_signal_test.pr.
+//
+// T1636 covered the sweep's sites that gained a join. This file covers the other
+// half — the sites that correctly gained NOTHING. Deleting the sleeps from
+// goroutine_fire_and_forget.pr, go_method_call.pr and t1392_go_block_bare_return_test.pr
+// left those tests with no barrier at all before their leak snapshot, which is
+// right: the batch harness spins until (gs_created - gs_completed) falls back to
+// the test's own pre-test baseline before it reads alloc_count (T1639), so the
+// drain is the barrier.
+//
+// But nothing in those files makes that drain *load-bearing*. Their goroutines
+// owe a handful of allocations, so the body never wins the race to the leak
+// check: deleting the drain from codegen leaves all 47 of their tests passing.
+// The sleeps they replaced were equally decorative, which is why removing them
+// changed nothing. That is the hole this file fills — if the drain regresses,
+// something has to fail.
+//
+// Each test rendezvouses with its goroutine on an UNBUFFERED channel as the
+// body's last statement. An unbuffered send returns only at the handoff, so at
+// the instant the body returns the goroutine is provably still at its receive
+// with every allocation below still ahead of it. The leak check is then the
+// assertion: with the drain removed, alloc_count is read while that heap is live
+// and each test here reports LEAK.
+//
+// ---
+//
+// Rows each goroutine still owes when the test body returns. The rendezvous is
+// what makes the ordering deterministic; this number is what makes the resulting
+// window wide enough to observe. Calibrated with the drain removed from codegen:
+// 1 000 rows never reports LEAK, 2 000 reports it 10/15, 4 000 reports it 15/15 —
+// so 50 000 is better than a 10x margin over the knee.
+//
+// This is a bias, not a timing dependency, and the distinction is the whole point
+// of T1632: a slower or more loaded machine leaves MORE work outstanding, never
+// less, so saturation strengthens these tests where it erodes a sleep. Losing the
+// race can only miss a regression; it can never fail a healthy tree.
+t1632_rows() int {
+  return 50000;
+}
+
+// The heap work each goroutine owes: one string allocation per row plus the
+// vector reallocations behind them.
+t1632_owed_work(int n) string[] {
+  string[] out = string[]();
+  int i = 0;
+  while i < n {
+    out.push("row" + "-" + i.to_string());
+    i = i + 1;
+  }
+  return out;
+}
+
+// --- go block with heap locals: goroutine_fire_and_forget.pr's basic shape ---
+t1632_drain_covers_an_unstarted_go_block() `test(exclude: wasm, timeout: "30s") {
+  channel[int] gate = channel[int]();
+  go {
+    int n = (<-gate)!;
+    string tag = "tail" + "-work";
+    string[] rows = t1632_owed_work(n);
+    // `tag` and `rows` drop here — after the test body has already returned.
+  };
+  // Rendezvous, and the body's last statement: the send returns at the handoff,
+  // so everything above is still ahead of the goroutine.
+  gate.send(t1632_rows());
+}
+
+// --- transitively spawned goroutine: test_nested_fire_and_forget's shape ---
+// The outstanding goroutine is one the test body never spawned itself, so the
+// drain has to work off the global gs_created/gs_completed counters rather than
+// anything the body could have tracked for itself.
+t1632_drain_covers_a_transitively_spawned_goroutine() `test(exclude: wasm, timeout: "30s") {
+  channel[int] gate = channel[int]();
+  go {
+    go {
+      int n = (<-gate)!;
+      string[] rows = t1632_owed_work(n);
+    };
+  };
+  gate.send(t1632_rows());
+}
+
+// --- discarded heap result from `go free_fn()`: test_ff_freefn_vector's shape ---
+t1632_gated_rows(channel[int] gate) string[] {
+  int n = (<-gate)!;
+  return t1632_owed_work(n);
+}
+
+t1632_drain_covers_a_discarded_free_function_result() `test(exclude: wasm, timeout: "30s") {
+  channel[int] gate = channel[int]();
+  go t1632_gated_rows(gate);
+  gate.send(t1632_rows());
+}
+
+// --- discarded heap result from a moved-receiver method call ---
+// go_method_call.pr's fire-and-forget shape: §17.4 forbids borrowing the receiver
+// across the spawn, so ownership moves into the block and the trailing call's
+// result is discarded inside the goroutine.
+type T1632Builder {
+  int seed;
+
+  build(this, int n) string[] {
+    string[] out = string[]();
+    int i = 0;
+    while i < n {
+      out.push("row" + "-" + (this.seed + i).to_string());
+      i = i + 1;
+    }
+    return out;
+  }
+}
+
+t1632_drain_covers_a_discarded_method_result() `test(exclude: wasm, timeout: "30s") {
+  channel[int] gate = channel[int]();
+  T1632Builder b = T1632Builder(seed: 3);
+  go {
+    T1632Builder w = b;
+    int n = (<-gate)!;
+    w.build(n)
+  };
+  gate.send(t1632_rows());
+}
+
+// --- discarded capturing-closure env, discarded INSIDE the block (T1160) ---
+// The env temp's alloca lives in the coroutine's entry block and is freed on the
+// goroutine's own stack, so this is the discard path that most depends on the
+// goroutine having actually run to completion before alloc_count is read.
+t1632_gated_adder(channel[int] gate, int x)() -> int {
+  int n = (<-gate)!;
+  string[] rows = t1632_owed_work(n);
+  int extra = rows.len;
+  return || -> x + extra;
+}
+
+t1632_drain_covers_a_discarded_closure_env() `test(exclude: wasm, timeout: "30s") {
+  channel[int] gate = channel[int]();
+  go {
+    t1632_gated_adder(gate, 10);
+  };
+  gate.send(t1632_rows());
+}

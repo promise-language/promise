@@ -1,4 +1,7 @@
 // B0113: go method_call() — spawn method calls as goroutines.
+// The fire-and-forget cases below are leak-checked without any barrier of their
+// own: the harness drains outstanding goroutines before snapshotting alloc_count
+// (T1639). Do not add a sleep to "let the goroutine finish" (T1632).
 // T1397: §17.4 forbids borrowing a receiver across a go spawn boundary, so all
 // `go obj.method()` patterns use a go block with a binding to move ownership.
 type Counter {
@@ -46,7 +49,6 @@ test_go_method_call_fire_and_forget() `test(exclude: wasm) {
     Counter w = c;
     w.run()
   };
-  sleep(Duration.from_millis(50));
 }
 
 // Void method call as task (awaited but no value)
@@ -186,7 +188,6 @@ test_go_method_ff_string() `test(exclude: wasm) {
     Greeter w = g;
     w.greet(5)
   };
-  sleep(Duration.from_millis(30));
 }
 
 test_go_method_ff_struct() `test(exclude: wasm) {
@@ -195,7 +196,6 @@ test_go_method_ff_struct() `test(exclude: wasm) {
     Box w = b;
     w.make(5)
   };
-  sleep(Duration.from_millis(30));
 }
 
 test_go_method_ff_struct_string_field() `test(exclude: wasm) {
@@ -204,7 +204,6 @@ test_go_method_ff_struct_string_field() `test(exclude: wasm) {
     Labeled w = l;
     w.build(7)
   };
-  sleep(Duration.from_millis(30));
 }
 
 test_go_method_ff_struct_vector_field() `test(exclude: wasm) {
@@ -213,7 +212,6 @@ test_go_method_ff_struct_vector_field() `test(exclude: wasm) {
     VecBox w = v;
     w.build(5)
   };
-  sleep(Duration.from_millis(30));
 }
 
 test_go_method_ff_int() `test(exclude: wasm) {
@@ -222,7 +220,6 @@ test_go_method_ff_int() `test(exclude: wasm) {
     Counter w = c;
     w.get_value()
   };
-  sleep(Duration.from_millis(30));
 }
 
 type VecMaker {
@@ -237,7 +234,6 @@ test_go_method_ff_vector() `test(exclude: wasm) {
     VecMaker w = m;
     w.make_vec(5)
   };
-  sleep(Duration.from_millis(30));
 }
 
 test_go_method_ff_closure() `test(exclude: wasm) {
@@ -246,5 +242,4 @@ test_go_method_ff_closure() `test(exclude: wasm) {
     Adder w = a;
     w.make_adder(10)
   };
-  sleep(Duration.from_millis(30));
 }

@@ -1,5 +1,10 @@
 // Fire-and-forget goroutines: G struct should be freed by goroutine_exit
 // (not leaked). Tests that go expressions used as statements don't leak.
+//
+// These tests never wait for the goroutines they spawn: the harness drains all
+// outstanding goroutines before it snapshots alloc_count (T1639), so the drain —
+// not the test — is the barrier the leak check needs. Do not add a sleep here to
+// "let the goroutine finish"; it synchronizes on nothing (T1632).
 noop() {
 }
 
@@ -7,7 +12,6 @@ test_single_fire_and_forget() `test(exclude: wasm) {
   go {
     int x = 1 + 2;
   };
-  sleep(Duration.from_millis(50));
   assert(true, "fire-and-forget goroutine completed without crash");
 }
 
@@ -17,7 +21,6 @@ test_many_fire_and_forget() `test(exclude: wasm) {
       int x = i * 2;
     };
   }
-  sleep(Duration.from_millis(100));
   assert(true, "100 fire-and-forget goroutines completed without crash");
 }
 
@@ -42,7 +45,6 @@ test_task_go_block_still_works() `test(exclude: wasm) {
 test_fire_and_forget_go_call() `test(exclude: wasm) {
   // go func() as a statement (void function, fire-and-forget)
   go noop();
-  sleep(Duration.from_millis(50));
   assert(true, "fire-and-forget go call completed without crash");
 }
 
@@ -52,9 +54,7 @@ test_nested_fire_and_forget() `test(exclude: wasm) {
     go {
       int x = 42;
     };
-    sleep(Duration.from_millis(10));
   };
-  sleep(Duration.from_millis(100));
   assert(true, "nested fire-and-forget goroutines completed without crash");
 }
 
@@ -102,7 +102,6 @@ test_mixed_fire_and_forget_and_task() `test(exclude: wasm) {
     ch.send(3);
   };
   <-t;
-  sleep(Duration.from_millis(50));
 
   int total = 0;
   for i in 0..3 {
@@ -116,7 +115,6 @@ test_fire_and_forget_many_go_calls() `test(exclude: wasm) {
   for i in 0..100 {
     go noop();
   }
-  sleep(Duration.from_millis(100));
   assert(true, "100 fire-and-forget go calls completed");
 }
 
@@ -132,7 +130,6 @@ get_string() string {
 test_fire_and_forget_non_void() `test(exclude: wasm) {
   // go non_void_func() as fire-and-forget — result discarded, G must be freed
   go compute();
-  sleep(Duration.from_millis(50));
   assert(true, "fire-and-forget non-void go call completed without crash");
 }
 
@@ -141,14 +138,12 @@ test_fire_and_forget_non_void_many() `test(exclude: wasm) {
   for i in 0..100 {
     go compute();
   }
-  sleep(Duration.from_millis(100));
   assert(true, "100 fire-and-forget non-void go calls completed");
 }
 
 test_fire_and_forget_non_void_string() `test(exclude: wasm) {
   // Fire-and-forget with string return type
   go get_string();
-  sleep(Duration.from_millis(50));
   assert(true, "fire-and-forget non-void string go call completed");
 }
 
@@ -182,13 +177,11 @@ build_adder(int x)() -> int {
 // heap struct result, discarded — used to leak the struct instance (1 alloc).
 test_ff_freefn_struct() `test(exclude: wasm) {
   go build_bag(5);
-  sleep(Duration.from_millis(30));
 }
 
 // vector result, discarded — used to leak the backing block (1 alloc).
 test_ff_freefn_vector() `test(exclude: wasm) {
   go build_ints(5);
-  sleep(Duration.from_millis(30));
 }
 
 // capturing-closure result, discarded — the fast path drops it via
@@ -197,7 +190,6 @@ test_ff_freefn_vector() `test(exclude: wasm) {
 // added — see go_method_call.pr's test_go_method_ff_closure). Leak-checked.
 test_ff_freefn_closure() `test(exclude: wasm) {
   go build_adder(10);
-  sleep(Duration.from_millis(30));
 }
 
 // T1160: the discard happens INSIDE the goroutine body, so the env temp's alloca is
@@ -208,7 +200,6 @@ test_ff_go_block_discards_closure_result() `test(exclude: wasm) {
   go {
     build_adder(10);
   };
-  sleep(Duration.from_millis(30));
 }
 
 // T1105 + T1160: the counterpart of the fire-and-forget discards — the closure leaves

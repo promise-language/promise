@@ -63,6 +63,7 @@ test_tls_loopback_roundtrip() `test(exclude: wasm, timeout: "20s") {
   assert(port > 0, "listener bound to a port");
 
   // Client runs in a goroutine; it connects, sends a line, and checks the echo.
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
     TlsConfig cfg = TlsConfig.insecure();
@@ -75,6 +76,7 @@ test_tls_loopback_roundtrip() `test(exclude: wasm, timeout: "20s") {
       assert(false, "client expected an echo line");
     }
     client.close()?!;
+    done.send(true);
   };
 
   // Server handshakes, reads one line, echoes it back, and closes.
@@ -94,7 +96,7 @@ test_tls_loopback_roundtrip() `test(exclude: wasm, timeout: "20s") {
   }
   server.close()?!;
   listener.close()?!;
-  sleep(Duration.from_millis(150));
+  _ := <-done;
 }
 
 test_tls_handshake_error_on_plain_tcp() `test(exclude: wasm, timeout: "15s") {
@@ -103,9 +105,11 @@ test_tls_handshake_error_on_plain_tcp() `test(exclude: wasm, timeout: "15s") {
 
   // A plain-TCP server that speaks no TLS: it reads the ClientHello and replies
   // with non-TLS bytes, so the client handshake must fail.
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     net.TcpListener l = listener;
     net.TcpStream conn = l.accept()? e {
+      done.send(true); // the accept-error exit must signal too, or the join hangs
       return;
     };
     u8[] buf = u8[].filled(0u8, 1024);
@@ -116,6 +120,7 @@ test_tls_handshake_error_on_plain_tcp() `test(exclude: wasm, timeout: "15s") {
     };
     conn.close()? e {
     };
+    done.send(true);
     // l is owned by this goroutine and drops here, closing its socket.
   };
 
@@ -152,7 +157,7 @@ test_tls_handshake_error_on_plain_tcp() `test(exclude: wasm, timeout: "15s") {
     }
   }!;
   assert(caught, "TLS handshake against a plain-TCP server must fail");
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // Compile-time proof that TlsStream satisfies Reader and Writer, as its type doc
@@ -194,6 +199,7 @@ test_tls_verified_handshake_and_read_all() `test(exclude: wasm, timeout: "20s") 
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, cert, key)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
     TlsConfig cfg = TlsConfig.create();
@@ -205,6 +211,7 @@ test_tls_verified_handshake_and_read_all() `test(exclude: wasm, timeout: "20s") 
     u8[] got = client.read_all()?!;
     assert(string.from_bytes(got) == "payload-over-verified-tls",
     "client read_all decrypted the whole response over a verified TLS link");
+    done.send(true);
   };
 
   TlsStream server = listener.accept()?!;
@@ -216,7 +223,7 @@ test_tls_verified_handshake_and_read_all() `test(exclude: wasm, timeout: "20s") 
   server.write_string("payload-over-verified-tls")?!;
   server.close()?!; // close_notify while the client is still reading — clean EOF
   listener.close()?!;
-  sleep(Duration.from_millis(150));
+  _ := <-done;
 }
 
 // A verifying client whose trust anchor DOES cover the server cert still rejects
@@ -230,11 +237,13 @@ test_tls_verified_handshake_rejects_wrong_host() `test(exclude: wasm, timeout: "
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, cert, key)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     TlsListener l = listener;
     // Server accept fails once the client aborts on the bad hostname; swallow it.
     l.accept()? e {
     };
+    done.send(true);
   };
 
   net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
@@ -252,7 +261,7 @@ test_tls_verified_handshake_rejects_wrong_host() `test(exclude: wasm, timeout: "
     }
   }!;
   assert(caught_cert, "verifying client must reject a certificate whose host mismatches");
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // Certificate/key loading error paths that need no network: a valid client cert
@@ -349,6 +358,7 @@ test_tls_negotiated_parameters() `test(exclude: wasm, timeout: "20s") {
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, cert, key)?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
     TlsConfig cfg = TlsConfig.insecure();
@@ -359,6 +369,7 @@ test_tls_negotiated_parameters() `test(exclude: wasm, timeout: "20s") {
     "client cipher suite is a recognised name, not a raw suite number");
     client.write_string("params\n")?!;
     client.close()?!;
+    done.send(true);
   };
 
   TlsStream server = listener.accept()?!;
@@ -386,7 +397,7 @@ test_tls_negotiated_parameters() `test(exclude: wasm, timeout: "20s") {
   }
   server.close()?!;
   listener.close()?!;
-  sleep(Duration.from_millis(150));
+  _ := <-done;
 }
 
 // A `fullchain.pem`-shaped bundle: more than one PEM block. Real server
@@ -462,6 +473,7 @@ test_tls_certificate_chain_bundle() `test(exclude: wasm, timeout: "20s") {
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert_chain(), _test_key())?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
     TlsConfig cfg = TlsConfig.create();
@@ -469,6 +481,7 @@ test_tls_certificate_chain_bundle() `test(exclude: wasm, timeout: "20s") {
     TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
     client.write_string("chain\n")?!;
     client.close()?!;
+    done.send(true);
   };
 
   TlsStream server = listener.accept()?!;
@@ -479,7 +492,7 @@ test_tls_certificate_chain_bundle() `test(exclude: wasm, timeout: "20s") {
   }
   server.close()?!;
   listener.close()?!;
-  sleep(Duration.from_millis(150));
+  _ := <-done;
 }
 
 // 256 KiB of recognisable bytes. Deliberately far past both the 16 KiB TLS record
@@ -516,6 +529,7 @@ test_tls_bulk_transfer_spans_many_records() `test(exclude: wasm, timeout: "40s")
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
     TlsConfig cfg = TlsConfig.insecure();
@@ -525,6 +539,7 @@ test_tls_bulk_transfer_spans_many_records() `test(exclude: wasm, timeout: "40s")
     assert(back.len == size, "client received every byte of the bulk response");
     assert(string.from_bytes(back) == _bulk_payload(),
     "client bulk response is byte-exact after decryption");
+    done.send(true);
   };
 
   TlsStream server = listener.accept()?!;
@@ -545,7 +560,7 @@ test_tls_bulk_transfer_spans_many_records() `test(exclude: wasm, timeout: "40s")
   server.write_string(payload)?!;
   server.close()?!;
   listener.close()?!;
-  sleep(Duration.from_millis(150));
+  _ := <-done;
 }
 
 // Requesting a TLS 1.3 minimum must never break a connection, and must never make a
@@ -563,6 +578,7 @@ test_tls_min_version_1_3_request() `test(exclude: wasm, timeout: "20s") {
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
     TlsConfig cfg = TlsConfig.insecure();
@@ -570,6 +586,7 @@ test_tls_min_version_1_3_request() `test(exclude: wasm, timeout: "20s") {
     TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
     client.write_string("min13\n")?!;
     client.close()?!;
+    done.send(true);
   };
 
   TlsStream server = listener.accept()?!;
@@ -594,7 +611,7 @@ test_tls_min_version_1_3_request() `test(exclude: wasm, timeout: "20s") {
   }
   server.close()?!;
   listener.close()?!;
-  sleep(Duration.from_millis(150));
+  _ := <-done;
 }
 
 // Three connections in a row over one listener context and one client config. Every
@@ -611,6 +628,7 @@ test_tls_sequential_sessions_reuse_context() `test(exclude: wasm, timeout: "30s"
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     TlsConfig cfg = TlsConfig.insecure(); // one config, reused by all three sessions
     int i = 0;
@@ -626,6 +644,7 @@ test_tls_sequential_sessions_reuse_context() `test(exclude: wasm, timeout: "30s"
       client.close()?!;
       i = i + 1;
     }
+    done.send(true);
   };
 
   int served = 0;
@@ -643,7 +662,7 @@ test_tls_sequential_sessions_reuse_context() `test(exclude: wasm, timeout: "30s"
   }
   assert(served == 3, "three sessions served from one context");
   listener.close()?!;
-  sleep(Duration.from_millis(150));
+  _ := <-done;
 }
 
 // The Reader/Writer structural defaults work over TLS, not merely type-check
@@ -680,12 +699,14 @@ test_tls_reader_writer_defaults() `test(exclude: wasm, timeout: "20s") {
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
     TlsConfig cfg = TlsConfig.insecure();
     TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
     _tls_write_line_via_writer(client, "defaults");
     client.close()?!;
+    done.send(true);
   };
 
   TlsStream server = listener.accept()?!;
@@ -694,7 +715,7 @@ test_tls_reader_writer_defaults() `test(exclude: wasm, timeout: "20s") {
 
   server.close()?!;
   listener.close()?!;
-  sleep(Duration.from_millis(150));
+  _ := <-done;
 }
 
 // A second, entirely unrelated self-signed CA (CN=unrelated-authority, its own
@@ -730,11 +751,13 @@ test_tls_verified_handshake_rejects_untrusted_certificate() `test(exclude: wasm,
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     TlsListener l = listener;
     // The server's accept fails once the client aborts the handshake; swallow it.
     l.accept()? e {
     };
+    done.send(true);
   };
 
   net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
@@ -755,7 +778,7 @@ test_tls_verified_handshake_rejects_untrusted_certificate() `test(exclude: wasm,
     }
   }!;
   assert(caught_cert, "a verifying client must reject a chain that reaches none of its anchors");
-  sleep(Duration.from_millis(100));
+  _ := <-done;
 }
 
 // Six trust anchors on one config. Every other test adds at most one, which on
@@ -775,6 +798,7 @@ test_tls_many_trust_anchors_grow_the_anchor_array() `test(exclude: wasm, timeout
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     TlsConfig cfg = TlsConfig.create();
     int i = 0;
@@ -787,6 +811,7 @@ test_tls_many_trust_anchors_grow_the_anchor_array() `test(exclude: wasm, timeout
     TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
     client.write_string("anchors\n")?!;
     client.close()?!;
+    done.send(true);
   };
 
   TlsStream server = listener.accept()?!;
@@ -798,7 +823,7 @@ test_tls_many_trust_anchors_grow_the_anchor_array() `test(exclude: wasm, timeout
   }
   server.close()?!;
   listener.close()?!;
-  sleep(Duration.from_millis(150));
+  _ := <-done;
 }
 
 // Four TLS handshakes in flight at once against one listener. Every other test in
@@ -862,7 +887,6 @@ test_tls_concurrent_sessions() `test(exclude: wasm, timeout: "40s") {
   }
   assert(acked == 4, "all four concurrent TLS sessions completed");
   listener.close()?!;
-  sleep(Duration.from_millis(150));
 }
 
 // Replacing a config's client certificate before connecting must leave the
@@ -873,6 +897,7 @@ test_tls_config_replaces_client_certificate() `test(exclude: wasm, timeout: "20s
   TlsListener listener = TlsListener.bind("127.0.0.1", 0, _test_cert(), _test_key())?!;
   int port = listener.local_port;
 
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     net.TcpStream tcp = net.TcpStream.connect("127.0.0.1", port)?!;
     TlsConfig cfg = TlsConfig.insecure();
@@ -881,6 +906,7 @@ test_tls_config_replaces_client_certificate() `test(exclude: wasm, timeout: "20s
     TlsStream client = TlsStream.connect(move tcp, "localhost", cfg)?!;
     client.write_string("recert\n")?!;
     client.close()?!;
+    done.send(true);
   };
 
   TlsStream server = listener.accept()?!;
@@ -891,7 +917,7 @@ test_tls_config_replaces_client_certificate() `test(exclude: wasm, timeout: "20s
   }
   server.close()?!;
   listener.close()?!;
-  sleep(Duration.from_millis(150));
+  _ := <-done;
 }
 
 // --- server-side building blocks: TlsServerConfig, TlsStream.accept,
@@ -899,8 +925,8 @@ test_tls_config_replaces_client_certificate() `test(exclude: wasm, timeout: "20s
 //
 // These are what let a server keep its accept loop plaintext and run each TLS
 // handshake on the connection's own goroutine — the shape modules/http's
-// Server.bind_tls is built on. Synchronization here is by channel handshake
-// only (T1632).
+// Server.bind_tls is built on. Like every test in this file, they synchronize by
+// channel handshake only (T1632).
 
 test_tls_server_config_create_and_errors() `test(exclude: wasm) {
   // A well-formed cert/key pair loads.

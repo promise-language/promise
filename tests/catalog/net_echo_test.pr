@@ -1,9 +1,10 @@
 use net;
 
-main() `test(expected: "echo ok", exclude: wasm) {
+main() `test(expected: "echo ok", exclude: wasm, timeout: "30s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 19950)?!;
 
   // Client goroutine: connect, send "hi", read echo reply
+  channel[bool] done = channel[bool](capacity: 1);
   go {
     net.TcpStream client = net.TcpStream.connect("127.0.0.1", 19950)?!;
     u8[] msg = u8[].filled(0, 2);
@@ -16,6 +17,7 @@ main() `test(expected: "echo ok", exclude: wasm) {
     assert(buf[0] == 104, "echoed h");
     assert(buf[1] == 105, "echoed i");
     client.close()?!;
+    done.send(true);
   };
 
   // Server: accept, read, echo back
@@ -32,7 +34,8 @@ main() `test(expected: "echo ok", exclude: wasm) {
   server.close()?!;
   listener.close()?!;
 
-  // Wait for client goroutine to finish
-  sleep(Duration.from_millis(50));
+  // Join the client goroutine: its assertions above are only observed because
+  // the test waits for them here, rather than guessing with a sleep (T1632).
+  _ := <-done;
   print_line("echo ok");
 }

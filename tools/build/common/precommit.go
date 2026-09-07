@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -70,29 +69,6 @@ func identEmail(ident string) string {
 	return ident[open+1 : closeIdx]
 }
 
-// sleepAllowlist is the set of repo-relative (forward-slash) paths that are
-// permitted to call sleep() in their test source. Every entry here is either
-// a genuine timing-behaviour test (testing sleep/Duration/Instant directly)
-// or a pre-existing T1632 violation that has not yet been de-slept.
-//
-// Genuine timing tests stay in this list indefinitely; T1632 violations are
-// removed in the same commit that replaces their sleep() with deterministic
-// synchronization — the shrinking list is the T1632 progress tracker.
-var sleepAllowlist = map[string]bool{
-	// Genuine timing test — exercises sleep()/Duration/Instant directly.
-	"tests/std/time_test.pr": true,
-
-	// T1632 pre-existing violations — remove each entry when the file is de-slept.
-	"modules/net/net_test.pr":                              true,
-	"modules/os/os_test.pr":                                true,
-	"modules/tls/tls_test.pr":                              true,
-	"tests/catalog/net_echo_test.pr":                       true,
-	"tests/concurrency/go_method_call.pr":                  true,
-	"tests/concurrency/goroutine_fire_and_forget.pr":       true,
-	"tests/concurrency/select_send_recheck_test.pr":        true,
-	"tests/concurrency/t1392_go_block_bare_return_test.pr": true,
-}
-
 // isTestPrFile reports whether a repo-relative path is a Promise test file —
 // either any .pr file under tests/ or any file whose name ends in _test.pr
 // (module tests under modules/).
@@ -104,32 +80,72 @@ func isTestPrFile(rel string) bool {
 	return strings.HasSuffix(rel, "_test.pr")
 }
 
-// hasSleepCall reports whether any non-comment source line in data contains a
-// call to sleep(). Each line is stripped of its trailing // comment before the
-// check, so a sleep() that appears only in a comment does not trigger it.
-func hasSleepCall(data []byte) bool {
-	for _, line := range strings.Split(string(data), "\n") {
-		// Strip trailing line comment.
-		if i := strings.Index(line, "//"); i >= 0 {
-			line = line[:i]
+// sleepOKMarker annotates a single sleep() call as legitimate. It is the only
+// escape hatch from the T1632 guard, and it is deliberately per-line rather than
+// per-file: a file-level allowlist re-permits every future sleep in a file that
+// earned its entry for one call, which is exactly how the pattern crept back in
+// the first place. The marker must carry a reason.
+const sleepOKMarker = "// sleep-ok:"
+
+// isIdentByte reports whether b can appear inside a Promise identifier.
+func isIdentByte(b byte) bool {
+	return b == '_' ||
+		(b >= '0' && b <= '9') ||
+		(b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z')
+}
+
+// containsSleepCall reports whether code calls sleep(). It requires a word
+// boundary before the name, so an identifier that merely ends in "sleep" is not
+// a call — `test_sleep()` declares a test, it does not synchronize on one.
+func containsSleepCall(code string) bool {
+	for i := 0; ; {
+		j := strings.Index(code[i:], "sleep(")
+		if j < 0 {
+			return false
 		}
-		if strings.Contains(line, "sleep(") {
+		at := i + j
+		if at == 0 || !isIdentByte(code[at-1]) {
 			return true
 		}
+		i = at + len("sleep(")
 	}
-	return false
+}
+
+// sleepCallLines returns the 1-indexed line numbers of every sleep() call in
+// data that is not annotated with a non-empty `// sleep-ok: <reason>` marker on
+// the same line. A sleep( that appears only inside a comment is not a call.
+func sleepCallLines(data []byte) []int {
+	var lines []int
+	for i, line := range strings.Split(string(data), "\n") {
+		code, comment := line, ""
+		if j := strings.Index(line, "//"); j >= 0 {
+			code, comment = line[:j], line[j:]
+		}
+		if !containsSleepCall(code) {
+			continue
+		}
+		if k := strings.Index(comment, sleepOKMarker); k >= 0 &&
+			strings.TrimSpace(comment[k+len(sleepOKMarker):]) != "" {
+			continue // annotated with a reason — permitted
+		}
+		lines = append(lines, i+1)
+	}
+	return lines
 }
 
 // CheckTestSleeps scans all tracked Promise test files and returns an error
-// naming any that call sleep() outside the allowlist. It uses git ls-files so
-// it covers the full index, not just staged files — a violation committed on a
-// previous turn is caught on the next pre-commit invocation.
+// naming every unannotated sleep() call site. It uses git ls-files so it covers
+// the full index, not just staged files — a violation committed on a previous
+// turn is caught on the next pre-commit invocation.
 func CheckTestSleeps(root string) error {
 	out, err := RunOutputIn(root, "git", "ls-files", "-z", "*.pr")
 	if err != nil {
 		return fmt.Errorf("list tracked Promise files: %w", err)
 	}
 
+	// git ls-files emits paths in sorted index order, and sleepCallLines returns
+	// line numbers in ascending order, so violations come out already ordered.
 	var violations []string
 	for _, rel := range strings.Split(out, "\x00") {
 		if rel == "" {
@@ -139,23 +155,21 @@ func CheckTestSleeps(root string) error {
 		if !isTestPrFile(slashRel) {
 			continue
 		}
-		if sleepAllowlist[slashRel] {
-			continue
-		}
 		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 		if err != nil {
 			// Tracked but absent from the worktree (staged deletion). Skip.
 			continue
 		}
-		if hasSleepCall(data) {
-			violations = append(violations, "  "+slashRel)
+		for _, line := range sleepCallLines(data) {
+			violations = append(violations, fmt.Sprintf("  %s:%d", slashRel, line))
 		}
 	}
 	if len(violations) > 0 {
-		sort.Strings(violations)
-		return fmt.Errorf("test files call sleep() for synchronization (T1615/T1632 — use channels instead):\n%s\n"+
-			"If this is a genuine timing test, add the path to sleepAllowlist in tools/build/common/precommit.go.",
-			strings.Join(violations, "\n"))
+		return fmt.Errorf("test files synchronize on sleep() (T1632 — order concurrent operations "+
+			"with a channel, a ready handshake or an awaited task):\n%s\n"+
+			"If a call genuinely measures time rather than ordering two concurrent operations, "+
+			"annotate that line with `%s <why>`.",
+			strings.Join(violations, "\n"), sleepOKMarker)
 	}
 	return nil
 }

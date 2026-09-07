@@ -854,30 +854,68 @@ func TestIsTestPrFile_IgnoresNonTestPr(t *testing.T) {
 	}
 }
 
-func TestHasSleepCall_DetectsCall(t *testing.T) {
+func TestSleepCallLines_DetectsCall(t *testing.T) {
 	data := []byte("  sleep(Duration.from_millis(50));\n")
-	if !hasSleepCall(data) {
-		t.Error("hasSleepCall: expected true for sleep() call, got false")
+	if got := sleepCallLines(data); len(got) != 1 || got[0] != 1 {
+		t.Errorf("sleepCallLines = %v, want [1]", got)
 	}
 }
 
-func TestHasSleepCall_IgnoresLineComment(t *testing.T) {
+func TestSleepCallLines_IgnoresLineComment(t *testing.T) {
 	data := []byte("// sleep() only made that *likely*; the receive makes it ordered.\n")
-	if hasSleepCall(data) {
-		t.Error("hasSleepCall: expected false for sleep() in comment, got true")
+	if got := sleepCallLines(data); len(got) != 0 {
+		t.Errorf("sleepCallLines = %v, want none for sleep() in a comment", got)
 	}
 }
 
-func TestHasSleepCall_DetectsCallAfterCode(t *testing.T) {
+func TestSleepCallLines_DetectsCallAfterCode(t *testing.T) {
 	// sleep() after a // comment on the same line → not a real call.
 	commentOnly := []byte("x := 1; // not sleep(\n")
-	if hasSleepCall(commentOnly) {
-		t.Error("hasSleepCall: expected false when sleep( appears only after //, got true")
+	if got := sleepCallLines(commentOnly); len(got) != 0 {
+		t.Errorf("sleepCallLines = %v, want none when sleep( appears only after //", got)
 	}
 	// sleep() before any comment → real call.
 	realCall := []byte("x := 1; sleep(ms);\n")
-	if !hasSleepCall(realCall) {
-		t.Error("hasSleepCall: expected true for sleep() before comment, got false")
+	if got := sleepCallLines(realCall); len(got) != 1 {
+		t.Errorf("sleepCallLines = %v, want one call before the comment", got)
+	}
+}
+
+// A `// sleep-ok: <reason>` marker on the same line permits that one call.
+func TestSleepCallLines_AllowsMarkerWithReason(t *testing.T) {
+	data := []byte("  sleep(d); // sleep-ok: the swept delay is the subject under test\n")
+	if got := sleepCallLines(data); len(got) != 0 {
+		t.Errorf("sleepCallLines = %v, want none for an annotated call", got)
+	}
+}
+
+// The marker must carry a reason — a bare marker is not an escape hatch.
+func TestSleepCallLines_RejectsMarkerWithoutReason(t *testing.T) {
+	for _, line := range []string{
+		"  sleep(d); // sleep-ok:\n",
+		"  sleep(d); // sleep-ok:   \n",
+	} {
+		if got := sleepCallLines([]byte(line)); len(got) != 1 {
+			t.Errorf("sleepCallLines(%q) = %v, want the call reported (no reason given)", line, got)
+		}
+	}
+}
+
+// A marker on a different line does not cover the call.
+func TestSleepCallLines_RejectsMarkerOnAnotherLine(t *testing.T) {
+	data := []byte("// sleep-ok: this reason is on the wrong line\n  sleep(d);\n")
+	got := sleepCallLines(data)
+	if len(got) != 1 || got[0] != 2 {
+		t.Errorf("sleepCallLines = %v, want [2] — the marker does not reach the next line", got)
+	}
+}
+
+// Every unannotated site in a multi-site file is reported, not just the first.
+func TestSleepCallLines_ReportsEverySite(t *testing.T) {
+	data := []byte("sleep(a);\nx := 1;\nsleep(b); // sleep-ok: measured\nsleep(c);\n")
+	got := sleepCallLines(data)
+	if len(got) != 2 || got[0] != 1 || got[1] != 4 {
+		t.Errorf("sleepCallLines = %v, want [1 4]", got)
 	}
 }
 
@@ -890,19 +928,34 @@ func TestCheckTestSleeps_RejectsViolation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for sleep() in test file, got nil")
 	}
-	if !strings.Contains(err.Error(), "tests/foo/bad_test.pr") {
-		t.Errorf("error should name the violating path, got: %v", err)
+	if !strings.Contains(err.Error(), "tests/foo/bad_test.pr:1") {
+		t.Errorf("error should name the violating path AND line, got: %v", err)
 	}
 }
 
-// TestCheckTestSleeps_AllowsAllowlisted verifies that a path in sleepAllowlist
-// is not reported even when its source calls sleep().
-func TestCheckTestSleeps_AllowsAllowlisted(t *testing.T) {
+// TestCheckTestSleeps_AllowsAnnotatedSite verifies that a sleep() carrying a
+// `// sleep-ok: <reason>` marker is not reported. The guard is site-granular, so
+// nothing about the path matters — only the annotation on that line.
+func TestCheckTestSleeps_AllowsAnnotatedSite(t *testing.T) {
 	root, stage := initGitRepoWithStager(t)
-	// Use a path that is actually in the allowlist.
-	stage("tests/std/time_test.pr", []byte("test_t() `test { sleep(Duration.from_millis(15)); }\n"))
+	stage("tests/std/time_test.pr",
+		[]byte("test_t() `test { sleep(Duration.from_millis(15)); } // sleep-ok: sleep() is the subject under test\n"))
 	if err := CheckTestSleeps(root); err != nil {
-		t.Fatalf("expected no error for allowlisted path, got: %v", err)
+		t.Fatalf("expected no error for an annotated sleep site, got: %v", err)
+	}
+}
+
+// The same path is NOT privileged when the annotation is missing — the previous
+// file-level allowlist would have permitted this.
+func TestCheckTestSleeps_RejectsUnannotatedSiteInAnyFile(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("tests/std/time_test.pr", []byte("test_t() `test { sleep(Duration.from_millis(15)); }\n"))
+	err := CheckTestSleeps(root)
+	if err == nil {
+		t.Fatal("expected error for an unannotated sleep, got nil")
+	}
+	if !strings.Contains(err.Error(), "tests/std/time_test.pr:1") {
+		t.Errorf("error should name the site, got: %v", err)
 	}
 }
 
@@ -972,5 +1025,75 @@ func TestRunPreCommit_RejectsSleepInTestFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "tests/new/sync_test.pr") {
 		t.Errorf("error should name the violating file, got: %v", err)
+	}
+}
+
+// An identifier that merely ends in "sleep" is not a call — `test_sleep()` is a
+// test declaration. This false positive was previously masked by the file-level
+// allowlist that covered tests/std/time_test.pr.
+func TestSleepCallLines_IgnoresIdentifierEndingInSleep(t *testing.T) {
+	for _, line := range []string{
+		"test_sleep() `test(exclude: wasm) {\n",
+		"_drain_after_sleep(int fd) int {\n",
+	} {
+		if got := sleepCallLines([]byte(line)); len(got) != 0 {
+			t.Errorf("sleepCallLines(%q) = %v, want none — not a sleep() call", line, got)
+		}
+	}
+}
+
+// A qualified or bare call is still a call.
+func TestSleepCallLines_DetectsQualifiedAndBareCalls(t *testing.T) {
+	for _, line := range []string{
+		"  sleep(d);\n",
+		"  time.sleep(d);\n",
+		"  x := 1; sleep(d);\n",
+	} {
+		if got := sleepCallLines([]byte(line)); len(got) != 1 {
+			t.Errorf("sleepCallLines(%q) = %v, want one call", line, got)
+		}
+	}
+}
+
+// A non-boundary match must not stop the scan: an identifier ending in "sleep"
+// earlier on the line hides a real call after it. This is the loop-advance in
+// containsSleepCall, and the shape that actually occurs — a helper named
+// _drain_after_sleep calling sleep() on its own line.
+func TestSleepCallLines_DetectsCallAfterNonBoundaryMatch(t *testing.T) {
+	for _, line := range []string{
+		"  no_sleep(); sleep(d);\n",
+		"  _drain_after_sleep(fd); sleep(d);\n",
+	} {
+		if got := sleepCallLines([]byte(line)); len(got) != 1 || got[0] != 1 {
+			t.Errorf("sleepCallLines(%q) = %v, want [1] — the second match is a real call", line, got)
+		}
+	}
+}
+
+// The guard reports call *sites* by line, so two calls on one line are one
+// violation. The reported line still points the reader at both.
+func TestSleepCallLines_ReportsOneEntryPerLine(t *testing.T) {
+	data := []byte("x := 1;\nsleep(a); sleep(b);\n")
+	got := sleepCallLines(data)
+	if len(got) != 1 || got[0] != 2 {
+		t.Errorf("sleepCallLines = %v, want [2] — two calls on one line are one entry", got)
+	}
+}
+
+// CheckTestSleeps surfaces a git failure rather than silently reporting a clean
+// tree: with no index to scan there are no files to check, and treating that as
+// "no violations" would make the guard vacuous wherever it misfires.
+//
+// The root is a path that does not exist, not merely one outside a repository:
+// TMPDIR is sometimes inside the checkout (verify points it at .promise-home/),
+// and git would then walk up and find the real repo, quietly making this pass
+// for the wrong reason. A missing directory fails the same way from anywhere.
+func TestCheckTestSleeps_ErrorsWhenGitCannotList(t *testing.T) {
+	err := CheckTestSleeps(filepath.Join(t.TempDir(), "no-such-dir"))
+	if err == nil {
+		t.Fatal("expected an error when git cannot list the index, got nil")
+	}
+	if !strings.Contains(err.Error(), "list tracked Promise files") {
+		t.Errorf("error should name the failing step, got: %v", err)
 	}
 }

@@ -86,3 +86,15 @@ If the field itself is intended to be part of the public API and there's no deri
 ## Construction
 
 - Use factory methods on the type (e.g. `Response.ok(...)`, `Server.bind(...)`) rather than free functions for constructing instances. Factories can set `` `final `` fields and live alongside the type's other methods. (See [feedback memory](../README.md) — saved separately.)
+
+## Test synchronization
+
+The rule itself lives in the engineering guide — [Time is not a coordinate](org/engineering-guide.md#time-is-not-a-coordinate): nothing synchronizes on time, in tests or anywhere else. What follows is only what is specific to Promise.
+
+- **Join a `go` block over a completion channel.** Declare `channel[bool] done = channel[bool](capacity: 1);` in the test body, make `done.send(true);` the last statement of the block, and `_ := <-done;` where the wait belongs. Every early exit inside the block — an error handler that `return`s — must signal too, or the join hangs on exactly the path the test is about. `tests/concurrency/t1636_go_join_signal_test.pr` is the executable template and pins the exactly-once property; `modules/tls/tls_test.pr` and `modules/http/http_test.pr` are the worked examples.
+
+- **Joining is also what makes a goroutine's assertions count.** An `assert()` that fails inside a `go` block is recovered and discarded, so an unjoined block's assertions are silently vacuous (T2014). A join turns that into a bounded, named `TIMEOUT`, because a panicking goroutine never reaches its `done.send`. Size the `timeout:` annotation to the work the join waits on: the in-binary per-test watchdog already names the test at the 60s default, so the annotation decides how long a hung join *costs*, not whether it is attributed.
+
+- **Never wait for a fire-and-forget goroutine before a leak snapshot.** The batch harness drains every outstanding goroutine — spinning until `gs_created - gs_completed` falls back to the test's own pre-test baseline — *before* it reads `alloc_count` (T1639, `compiler/internal/codegen/compiler.go`). That drain is the barrier, so a test that deliberately discards a goroutine needs no barrier of its own. A `sleep(30ms) // let the goroutine finish tearing down` is not merely unsound, it is dead weight.
+
+- **`// sleep-ok: <reason>` annotates a legitimate call.** A pre-commit guard (`CheckTestSleeps` in `tools/build/common/precommit.go`) rejects any `sleep()` in a `tests/**.pr` or `*_test.pr` file unless that line carries the marker with a non-empty reason. The marker is per-line on purpose: a per-file exemption re-permits every future sleep in a file that earned it for one call. Use it only where the duration is the subject under test — `tests/std/time_test.pr` measuring `sleep()` itself, or `modules/net/net_test.pr` sweeping a delay across a race window and asserting the same outcome at every value, including zero.

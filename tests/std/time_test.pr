@@ -196,7 +196,7 @@ test_instant_comparison() `test {
 
 test_sleep() `test(exclude: wasm) {
   Instant start = Instant.now();
-  sleep(Duration.from_millis(15));
+  sleep(Duration.from_millis(15)); // sleep-ok: sleep() is the subject under test, measured by the assert below
   Duration elapsed = start.elapsed();
   assert(elapsed.as_millis >= 10, "sleep at least 10ms");
 }

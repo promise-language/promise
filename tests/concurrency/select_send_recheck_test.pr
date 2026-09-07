@@ -1,6 +1,16 @@
 // Tests for B0110: Select send case wake-path re-checks the send condition.
 // Verifies that a blocking select with a send case correctly handles the
 // scenario where the channel becomes full again between wake and re-lock.
+//
+// These previously opened each goroutine with a sleep, to bias the scheduler
+// into running the select's park before the goroutine's wake-triggering
+// operation. That was never a guarantee — a sleep orders nothing (T1632) — so
+// the coverage it claimed was already probabilistic. The sleeps are gone and
+// every assertion below holds under BOTH interleavings: the select either parks
+// and is woken (the B0110 path) or finds the channel ready and takes the fast
+// path. Forcing the parked interleaving needs scheduler-level park
+// observability, which the runtime does not expose yet (T2013) — note that
+// set_max_procs(1) does NOT supply it, because a disabled P's M still steals.
 // Basic: select send on a capacity-1 channel with a concurrent receiver.
 // The select blocks until the receiver drains, then the send succeeds.
 test_select_send_wake_basic() `test(exclude: wasm) {
@@ -9,8 +19,7 @@ test_select_send_wake_basic() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
 
   go {
-    sleep(Duration.from_millis(10));
-    <-ch; // drain, waking the select's send case
+    <-ch; // drain, waking the select's send case if it parked
   };
 
   select {
@@ -37,8 +46,7 @@ test_select_send_concurrent_race() `test(exclude: wasm) {
   // Goroutine drains and immediately re-fills, then drains again
   // so the select can eventually succeed after retrying.
   go {
-    sleep(Duration.from_millis(50));
-    <-ch; // drain — wakes select's SWN
+    <-ch; // drain — wakes select's SWN if it parked
     select {
       ch.send(99): {
           <-ch; // drain — no sleep needed
@@ -74,7 +82,6 @@ test_select_send_retry_picks_recv() `test(exclude: wasm) {
   // Goroutine: drain send_ch but immediately re-fill it,
   // then send to recv_ch so the select can pick that case.
   go {
-    sleep(Duration.from_millis(5));
     <-send_ch;
     select {
       send_ch.send(99): {
@@ -111,7 +118,6 @@ test_select_send_closed_retry() `test(exclude: wasm) {
   recv_ch := channel[int](capacity: 1);
 
   go {
-    sleep(Duration.from_millis(5));
     send_ch.close(); // close — wakes select's send SWN with closed flag already set
     recv_ch.send(3);
   };

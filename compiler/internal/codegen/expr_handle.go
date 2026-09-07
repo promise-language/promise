@@ -193,16 +193,13 @@ func (c *Compiler) genArcMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ele
 	switch method {
 	case "clone":
 		// Increment strong_count and return the same pointer (non-atomic when
-		// the element type is `confined — T0995).
-		rcPtr := c.block.NewBitCast(arcRaw, irtypes.NewPointer(irtypes.I64))
-		c.emitRefCountAdd(c.block, rcPtr, 1, irtypes.I64, c.refIsAtomic(elemType))
-		// T0499: Return a distinct SSA value so the clone result can be tracked
-		// separately from the receiver's stmtTemp. Without this, stmtTemp dedup
-		// causes the constructor intermediate to leak when used in a chain
-		// (e.g., Ref[int](42).clone()). The ptrtoint+inttoptr is a no-op at
-		// runtime — LLVM optimizes it away.
-		tmpInt := c.block.NewPtrToInt(arcRaw, c.ptrIntType())
-		return c.block.NewIntToPtr(tmpInt, irtypes.I8Ptr)
+		// the element type is `confined — T0995). T1885: dupArc is the single
+		// implementation, shared with the variant/field dup walk and the
+		// `Ref[T].clone` view-vtable shim. Its merge phi is also the distinct SSA
+		// value T0499 needs, so the clone result is tracked separately from the
+		// receiver's stmtTemp (otherwise stmtTemp dedup leaks the constructor
+		// intermediate in a chain like `Ref[int](42).clone()`).
+		return c.dupArc(arcRaw, elemType)
 	case "downgrade":
 		// T0157: Atomically increment weak_count, return same pointer as Weak[T]
 		return c.genArcDowngrade(arcRaw, elemType)
@@ -245,16 +242,11 @@ func (c *Compiler) genWeakMethodCall(e *ast.CallExpr, member *ast.MemberExpr, el
 
 	switch method {
 	case "clone":
-		// Atomically increment weak_count and return the same pointer
-		elemLLVM := c.resolveType(elemType)
-		arcStructTy := arcStructType(elemLLVM)
-		typedPtr := c.block.NewBitCast(weakRaw, irtypes.NewPointer(arcStructTy))
-		wcField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
-		c.emitRefCountAdd(c.block, wcField, 1, irtypes.I64, c.refIsAtomic(elemType))
-		// T0499: fresh SSA value so clone result is tracked separately from receiver stmtTemp
-		tmpInt := c.block.NewPtrToInt(weakRaw, c.ptrIntType())
-		return c.block.NewIntToPtr(tmpInt, irtypes.I8Ptr)
+		// Atomically increment weak_count and return the same pointer. T1885: dupWeak
+		// is the single implementation, shared with the variant/field dup walk and the
+		// `Weak[T].clone` view-vtable shim; its merge phi is the fresh SSA value T0499
+		// needs so the clone result is tracked separately from the receiver stmtTemp.
+		return c.dupWeak(weakRaw, elemType)
 	case "upgrade":
 		// CAS loop: atomically try to increment strong_count if > 0
 		return c.genWeakUpgrade(weakRaw, elemType)

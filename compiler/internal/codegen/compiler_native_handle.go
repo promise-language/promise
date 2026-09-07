@@ -1586,42 +1586,13 @@ func (c *Compiler) dupEnumElementInPlace(elemPtr value.Value, elemType types.Typ
 func (c *Compiler) emitVariantFieldDup(fieldVal value.Value, fieldPtr value.Value, typ types.Type) {
 	named := extractNamed(typ)
 	if named != nil {
-		if named == types.TypString {
-			dup := c.dupString(fieldVal)
-			c.block.NewStore(dup, fieldPtr)
-			return
-		}
-		if elemType, isVec := types.AsVector(typ); isVec {
-			elemLLVM := c.resolveType(elemType)
-			elemSize := int64(c.typeSize(elemLLVM))
-			dup := c.dupVector(fieldVal, elemSize)
-			c.emitVectorElementCloneLoop(dup, elemType)
-			c.block.NewStore(dup, fieldPtr)
-			return
-		}
-		if _, isCh := types.AsChannel(typ); isCh || named == types.TypChannel {
-			dup := c.dupChannel(fieldVal)
-			c.block.NewStore(dup, fieldPtr)
-			return
-		}
-		// T1109: Ref/Arc[T] variant field — strong-count increment (non-atomic when
-		// `confined). Native handle: LLVM value is a bare i8*, so it must NOT reach
-		// dupHeapValue (which assumes a value struct and panics on a *PointerType).
-		// Mirrors maybeDupPushElement (expr.go) and emitVariantFieldDrop's Arc branch.
-		if arcElem, isArc := types.AsArc(typ); isArc || named == types.TypArc {
-			if c.typeSubst != nil && arcElem != nil {
-				arcElem = types.Substitute(arcElem, c.typeSubst)
-			}
-			dup := c.dupArc(fieldVal, arcElem)
-			c.block.NewStore(dup, fieldPtr)
-			return
-		}
-		// T1109: Weak[T] variant field — atomic weak-count increment.
-		if weakElem, isWeak := types.AsWeak(typ); isWeak {
-			if c.typeSubst != nil {
-				weakElem = types.Substitute(weakElem, c.typeSubst)
-			}
-			dup := c.dupWeak(fieldVal, weakElem)
+		// T1885: string / Vector / Channel / Ref / Weak all duplicate through the one
+		// native-dup implementation (emitNativeDupValue) — the same one the AST call
+		// sites, the view-vtable `clone` shim and the structural box clone_fn use.
+		// T1109: a native handle's LLVM value is a bare i8*, so it must NOT reach
+		// dupHeapValue (which assumes a value struct and panics on a *PointerType);
+		// the strong/weak-count increments live behind this dispatch.
+		if dup, ok := c.emitNativeDupValue(fieldVal, typ); ok {
 			c.block.NewStore(dup, fieldPtr)
 			return
 		}

@@ -380,76 +380,45 @@ func (c *Compiler) getStringBoxTypeInfo() *ir.Global {
 	return g
 }
 
-// containerBoxKey names the per-concrete-type opaque-handle box thunks. Uses the
-// mono name so Channel[int] and Channel[string] get distinct thunks calling their
-// own drop.
-func (c *Compiler) containerBoxKey(fromNamed *types.Named, fromType types.Type) string {
+// containerBoxKey names the per-concrete-type opaque-handle box thunks, and
+// returns the payload type they are generated from. Uses the mono name so
+// Channel[int] and Channel[string] get distinct thunks calling their own drop.
+//
+// T1885: the active substitution is applied first. Without it a box emitted inside
+// a monomorphized body keyed on the UNBOUND instance (Vector[T]) — and since the
+// box's drop_fn and clone_fn are generated from the element type, Vector[int] and
+// Vector[string] would then have shared one wrong pair.
+func (c *Compiler) containerBoxKey(fromNamed *types.Named, fromType types.Type) (string, types.Type) {
+	if c.typeSubst != nil {
+		fromType = types.Substitute(fromType, c.typeSubst)
+	}
 	if k := c.resolveTypeName(fromType); k != "" {
-		return k
+		return k, fromType
 	}
 	if fromNamed != nil {
-		return fromNamed.Obj().Name()
+		return fromNamed.Obj().Name(), fromType
 	}
-	return ""
+	return "", fromType
 }
 
 // getContainerBoxDrop returns @__promise_container_box_drop$<T>, emitting it once
 // per concrete opaque handle type. The thunk takes the box (i8* to
-// { i8* typeinfo, i8* handle }), loads the handle from field 1, calls the
-// concrete container drop on it, then frees the box. This is the drop_fn carried
-// by the box's typeinfo header, which is what makes an opaque handle droppable
-// through __promise_structural_drop at every RTTI drop site (T1887).
-// Returns nil when the concrete type has no drop function at all.
-// resolveOpaqueContainerDrop returns the drop for an opaque native handle whose
-// release function is synthesized per instantiation under a mono name
-// (Channel[int].drop, Arc[T].drop, ...) rather than registered where
-// resolveTypeInfoDropFn looks. It is consulted ONLY as a fallback, after the
-// declared route returns nothing.
+// { i8* typeinfo, i8* handle }), loads the handle from field 1, drops it, then
+// frees the box. This is the drop_fn carried by the box's typeinfo header, which is
+// what makes an opaque handle droppable through __promise_structural_drop at every
+// RTTI drop site (T1887). Returns nil when the concrete type cannot be named.
 //
-// Testing type identity to recover a drop is what annotations.md §1 forbids, and
-// this is a deliberate, bounded deviation: today no single resolver answers
-// "which drop releases this native handle" — the same switch is already inlined
-// four times (compiler_fielddrop.go twice, compiler_synthdrop.go,
-// maybeRegisterOptionalDrop), and resolveTypeInfoDropFn silently yields pal_free
-// for these, which frees a channel without releasing its buffer or lock. Encoding
-// the answer once here is a step toward T1413's single declaration rather than a
-// fifth copy; the real fix is for these drops to be declared where the one
-// resolver can find them, at which point this function is deleted outright (T2000).
-func (c *Compiler) resolveOpaqueContainerDrop(typ types.Type) *ir.Func {
-	named := extractNamed(typ)
-	resolve := func(t types.Type) types.Type {
-		if t != nil && c.typeSubst != nil {
-			return types.Substitute(t, c.typeSubst)
-		}
-		return t
-	}
-	switch {
-	case types.IsMutexGuard(typ) || named == types.TypMutexGuard:
-		return c.funcs["MutexGuard.drop"]
-	case types.IsMutex(typ) || named == types.TypMutex:
-		elem, _ := types.AsMutex(typ)
-		return c.getOrCreateMutexDrop(resolve(elem))
-	case func() bool { _, ok := types.AsVector(typ); return ok }() || named == types.TypVector:
-		return c.funcs["Vector.drop"]
-	case func() bool { _, ok := types.AsChannel(typ); return ok }() || named == types.TypChannel:
-		elem, _ := types.AsChannel(typ)
-		return c.getOrCreateChannelDrop(resolve(elem))
-	case func() bool { _, ok := types.AsArc(typ); return ok }() || named == types.TypArc:
-		elem, _ := types.AsArc(typ)
-		return c.getOrCreateArcDrop(resolve(elem))
-	case func() bool { _, ok := types.AsWeak(typ); return ok }() || named == types.TypWeak:
-		elem, _ := types.AsWeak(typ)
-		return c.getOrCreateWeakDrop(resolve(elem))
-	case types.IsAnyTask(typ) || (named != nil && types.IsTaskLikeOrigin(named)):
-		failable := types.IsFailableTask(typ) || named == types.TypFailableTask
-		elem, _, _ := types.AsAnyTaskFailable(typ)
-		return c.getOrCreateTaskDrop(resolve(elem), failable)
-	}
-	return nil
-}
-
+// The payload drop is the ordinary field/variant drop walk (emitVariantFieldDrop) —
+// the same one a struct field or an enum variant of this type gets — so a Vector's
+// elements are dropped before its buffer, a Channel releases its buffer and lock,
+// and a Ref's strong count is decremented exactly as they are anywhere else. T1885:
+// resolving the drop by name (resolveTypeInfoDropFn) yielded the bare `Vector.drop`
+// for a Vector[string], which freed the buffer and leaked every element. A static
+// (.rodata) vector reaching here is safe: its elements are compile-time constants,
+// so no element drop loop is emitted, and Vector.drop itself skips the free when
+// bit 63 is set.
 func (c *Compiler) getContainerBoxDrop(fromNamed *types.Named, fromType types.Type) *ir.Func {
-	key := c.containerBoxKey(fromNamed, fromType)
+	key, payloadType := c.containerBoxKey(fromNamed, fromType)
 	if key == "" || fromNamed == nil {
 		return nil
 	}
@@ -459,72 +428,107 @@ func (c *Compiler) getContainerBoxDrop(fromNamed *types.Named, fromType types.Ty
 	if fn, ok := c.containerBoxDrops[key]; ok {
 		return fn
 	}
-	// Resolve the payload's drop through resolveTypeInfoDropFn — the SAME resolver
-	// that fills a typeinfo's drop_fn field. Reusing it keeps one answer to "what
-	// drops this type": annotations.md §1 forbids recovering that from the type's
-	// identity, and memory-model.md §4 makes the cost concrete — a switch over the
-	// standard library's handles silently mishandles a user-written one. Resolving
-	// here rather than reading the concrete typeinfo global at run time also avoids
-	// depending on that global existing: it is not emitted for every instance that
-	// reaches a view, and a missing one would silently downgrade this box to a
-	// null-drop header, leaking the handle it owns.
-	dropConst := c.resolveTypeInfoDropFn("", "", key, fromNamed)
-	var handleDrop *ir.Func
-	if _, isNull := dropConst.(*constant.Null); isNull {
-		handleDrop = c.resolveOpaqueContainerDrop(fromType)
-	}
 	boxParam := ir.NewParam("box", irtypes.I8Ptr)
 	fn := c.module.NewFunc(fmt.Sprintf("__promise_container_box_drop$%s", key), irtypes.Void, boxParam)
-	entry := fn.NewBlock(".entry")
+	c.containerBoxDrops[key] = fn
+
+	saved := c.saveState()
+	defer c.restoreState(saved)
+	c.beginSynthesizedBody(fn)
 
 	boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
-	typed := entry.NewBitCast(boxParam, irtypes.NewPointer(boxType))
-	hField := entry.NewGetElementPtr(boxType, typed,
+	typed := c.block.NewBitCast(boxParam, irtypes.NewPointer(boxType))
+	hField := c.block.NewGetElementPtr(boxType, typed,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	handle := entry.NewLoad(irtypes.I8Ptr, hField)
+	handle := c.block.NewLoad(irtypes.I8Ptr, hField)
+	c.emitNullGuardedVariantDrop(handle, func() {
+		c.emitVariantFieldDrop(handle, payloadType)
+	})
+	c.block.NewCall(c.palFree, boxParam)
+	c.block.NewRet(nil)
+	return fn
+}
 
-	_, dropIsNull := dropConst.(*constant.Null)
-	switch {
-	case dropIsNull && handleDrop != nil:
-		entry.NewCall(handleDrop, handle)
-	case dropIsNull:
-		// The payload has no drop of its own — its allocation is still ours.
-		entry.NewCall(c.palFree, handle)
-	default:
-		dropFnType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr)
-		typedFn := entry.NewBitCast(dropConst, irtypes.NewPointer(dropFnType))
-		entry.NewCall(typedFn, handle)
+// getContainerBoxClone returns @__promise_container_box_clone$<T>, emitting it once
+// per concrete: a fresh box carrying the same typeinfo header and an independently
+// owned copy of the payload, so __promise_structural_clone deep-copies a boxed
+// container instead of aliasing it (which the structural-aware element drop would
+// then double-free). T1885, mirroring getStringBoxClone.
+//
+// Returns nil for a handle that has no dup semantics (Mutex, MutexGuard, Task —
+// T1113): a structural clone/slice of one must not fabricate a second owner of the
+// same handle, so its box keeps a null clone_fn (T1887).
+func (c *Compiler) getContainerBoxClone(key string, payloadType types.Type) *ir.Func {
+	if !nativeDupSupported(payloadType) {
+		return nil
 	}
-	entry.NewCall(c.palFree, boxParam)
-	entry.NewRet(nil)
+	if c.containerBoxClones == nil {
+		c.containerBoxClones = map[string]*ir.Func{}
+	}
+	if fn, ok := c.containerBoxClones[key]; ok {
+		return fn
+	}
+	boxParam := ir.NewParam("box", irtypes.I8Ptr)
+	fn := c.module.NewFunc(fmt.Sprintf("__promise_container_box_clone$%s", key), irtypes.I8Ptr, boxParam)
+	c.containerBoxClones[key] = fn
 
-	c.containerBoxDrops[key] = fn
+	saved := c.saveState()
+	defer c.restoreState(saved)
+	c.beginSynthesizedBody(fn)
+
+	boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+	size := constant.NewInt(irtypes.I64, int64(c.typeSize(boxType)))
+	raw := c.block.NewCall(c.palAlloc, size)
+	newTyped := c.block.NewBitCast(raw, irtypes.NewPointer(boxType))
+	oldTyped := c.block.NewBitCast(boxParam, irtypes.NewPointer(boxType))
+
+	oldTiField := c.block.NewGetElementPtr(boxType, oldTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	ti := c.block.NewLoad(irtypes.I8Ptr, oldTiField)
+	newTiField := c.block.NewGetElementPtr(boxType, newTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(ti, newTiField)
+
+	oldPayloadField := c.block.NewGetElementPtr(boxType, oldTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	oldPayload := c.block.NewLoad(irtypes.I8Ptr, oldPayloadField)
+	newPayloadField := c.block.NewGetElementPtr(boxType, newTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	// Seed the slot: emitVariantFieldDup only writes it for the types it can dup,
+	// and this thunk is only ever built for those (nativeDupSupported above).
+	c.block.NewStore(oldPayload, newPayloadField)
+	c.emitVariantFieldDup(oldPayload, newPayloadField, payloadType)
+
+	c.block.NewRet(raw)
 	return fn
 }
 
 // getContainerBoxTypeInfo returns the immutable typeinfo global used as the RTTI
 // header of an opaque-handle structural box (T1887). Its drop_fn (field 1) is the
-// per-type thunk above. clone_fn (field 2) is null: an opaque handle has no
-// value-copy semantics, so a structural clone/slice of one must not fabricate a
-// second owner of the same handle. Returns nil when the type has no drop.
+// per-type thunk above; clone_fn (field 2) is the per-type clone thunk for a
+// duplicable payload and null otherwise. Returns nil when the type has no drop.
 func (c *Compiler) getContainerBoxTypeInfo(fromNamed *types.Named, fromType types.Type) *ir.Global {
 	dropFn := c.getContainerBoxDrop(fromNamed, fromType)
 	if dropFn == nil {
 		return nil
 	}
-	key := c.containerBoxKey(fromNamed, fromType)
+	key, payloadType := c.containerBoxKey(fromNamed, fromType)
 	if c.containerBoxTypeInfos == nil {
 		c.containerBoxTypeInfos = map[string]*ir.Global{}
 	}
 	if g, ok := c.containerBoxTypeInfos[key]; ok {
 		return g
 	}
+	var cloneFn constant.Constant = constant.NewNull(irtypes.I8Ptr)
+	if fn := c.getContainerBoxClone(key, payloadType); fn != nil {
+		cloneFn = constant.NewBitCast(fn, irtypes.I8Ptr)
+	}
 	// Layout mirrors a no-parent typeinfo: { vtable, drop_fn, clone_fn, typeID, numParents }.
 	structType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32)
 	init := constant.NewStruct(structType,
 		constant.NewNull(irtypes.I8Ptr),
 		constant.NewBitCast(dropFn, irtypes.I8Ptr),
-		constant.NewNull(irtypes.I8Ptr),
+		cloneFn,
 		constant.NewInt(irtypes.I32, 0),
 		constant.NewInt(irtypes.I32, 0))
 	g := c.module.NewGlobalDef(fmt.Sprintf("promise_typeinfo_containerbox$%s", key), init)

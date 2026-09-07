@@ -632,9 +632,13 @@ type Compiler struct {
 	// T1887: per-concrete-type RTTI header + drop thunk for an opaque native
 	// handle (MutexGuard, Mutex, Channel, Task, Arc, Weak, Vector) boxed into a
 	// structural view. Keyed by the concrete's mono name so Channel[int] and
-	// Channel[string] get distinct thunks calling their own drop.
+	// Channel[string] get distinct thunks calling their own drop. T1885 adds the
+	// per-concrete clone thunk for the handles that CAN be duplicated (Vector,
+	// Channel, Ref, Weak), so __promise_structural_clone deep-copies a boxed
+	// container instead of aliasing it; a single-owner handle keeps a null clone_fn.
 	containerBoxTypeInfos map[string]*ir.Global
 	containerBoxDrops     map[string]*ir.Func
+	containerBoxClones    map[string]*ir.Func
 	flatBoxClones         map[int64]*ir.Func // per-size @__promise_flat_box_clone_<size>(i8*)→i8* (T1284)
 
 	// Target triple and platform flags

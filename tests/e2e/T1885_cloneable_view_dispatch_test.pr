@@ -1,0 +1,386 @@
+// T1885: calling a `native` requirement through a boxed structural view.
+//
+// Two defects, both fixed here:
+//
+//  1. A `native` method has no LLVM body — it is open-coded at each AST call site —
+//     so the view vtable's function lookup missed and the slot was emitted as null.
+//     `Cloneable c = "x"; c.clone()` then jumped to address 0: SIGTRAP on macOS,
+//     SIGSEGV on Linux, and for a void-returning slot sometimes a silent exit 0.
+//     The four `native` clones in std (string, Vector[T], Ref[T], Weak[T]) now get a
+//     real concrete-signature shim that the ordinary adapter machinery dispatches.
+//
+//  2. An opaque container/handle coerced to a structural view was boxed as the RAW
+//     payload pointer, with no RTTI header. __promise_structural_drop reads field 0
+//     of the instance as a typeinfo pointer — a vector's `len|bit63`, an Arc's strong
+//     count — so dropping an OWNED box dereferenced an integer. It is now the same
+//     { i8* typeinfo, i8* payload } box a string gets (T1280).
+// A view that exposes both the `Self`-returning requirement and something readable,
+// so a clone reached through the view can be inspected rather than merely survived.
+type ShowClone `structural {
+  clone() Self `abstract;
+  to_string() string `abstract;
+}
+
+// Vector's own `get len` is `native too, and is NOT part of this fix — a `native
+// getter reached through a view is T1881. Everything below therefore observes a
+// cloned container through to_string(), which is an ordinary Promise method.
+
+// --- The two repros from the item, verbatim ------------------------------------
+
+repro_string_clone_through_box() `test {
+  Cloneable c = "x";
+  Cloneable d = c.clone();
+  assert(true, "clone through box");
+}
+
+repro_owned_vector_box() `test {
+  int[] v = [1, 2, 3];
+  Cloneable c = v.clone();
+  assert(true, "owned vector box drops through its RTTI header");
+}
+
+// --- string ---------------------------------------------------------------------
+
+string_clone_through_view_is_a_real_copy() `test {
+  ShowClone c = "hello";
+  ShowClone d = c.clone();
+  assert(d.to_string() == "hello", "clone through the view carries the content");
+  assert(c.to_string() == "hello", "receiver survives its own clone");
+}
+
+// Heap (non-literal) string: the box and its clone each own a heap payload, so a
+// missing drop leaks and a shared one double-frees.
+heap_string_clone_through_view() `test {
+  string s = "foo" + "bar";
+  ShowClone c = s;
+  ShowClone d = c.clone();
+  assert(d.to_string() == "foobar", "heap string clone through the view");
+}
+
+// --- Vector ---------------------------------------------------------------------
+
+// Borrowed source (argument position): the callee's box owns an independent copy, so
+// the caller still owns and can mutate the original after the call.
+render_clone(ShowClone c) string {
+  ShowClone copy = c.clone();
+  return copy.to_string();
+}
+
+vector_borrowed_box_clone_is_independent() `test {
+  int[] v = [1, 2, 3];
+  assert(render_clone(v) == "[1, 2, 3]", "clone through a borrowed argument box");
+  v.push(4);
+  assert(v.len == 4, "original still owned and mutable after being boxed");
+  assert(render_clone(v) == "[1, 2, 3, 4]", "second box sees the mutation");
+}
+
+// Borrowed source bound to a local: the box owns a copy and the ORIGINAL keeps its
+// own drop (T0082), so exactly two vectors are freed — no leak, no double free.
+vector_local_box_owns_a_copy() `test {
+  int[] v = [1, 2, 3];
+  ShowClone c = v;
+  ShowClone d = c.clone();
+  assert(c.to_string() == "[1, 2, 3]", "box owns a copy of the borrowed original");
+  assert(d.to_string() == "[1, 2, 3]", "clone through the view is independent too");
+}
+
+// Owned rvalue source: the box's drop must run through the box typeinfo's drop_fn.
+// This is the item's second repro with the result actually observed.
+vector_owned_box_clone() `test {
+  int[] v = [1, 2, 3];
+  ShowClone c = v.clone();
+  ShowClone d = c.clone();
+  assert(c.to_string() == "[1, 2, 3]", "owned vector box");
+  assert(d.to_string() == "[1, 2, 3]", "clone of an owned vector box");
+  v.push(4);
+  assert(v.len == 4, "the source of the cloned payload is untouched");
+}
+
+// Droppable elements: an aliased clone would double-free every string; a missing
+// element clone would leak one copy of each.
+vector_of_strings_clone_through_view() `test {
+  string[] v = ["alpha" + "", "beta" + ""];
+  assert(render_clone(v) == "[alpha, beta]", "clone of a string vector through a borrowed box");
+  assert(v[0] == "alpha", "original elements untouched");
+  ShowClone c = v;
+  ShowClone d = c.clone();
+  assert(d.to_string() == "[alpha, beta]", "clone of a string vector through a local box");
+}
+
+// --- Ref / Weak -------------------------------------------------------------------
+
+// Every clone taken through the view is a real strong reference: the value stays
+// alive while the boxes hold it, and is released exactly once when they all drop.
+ref_clone_through_view_balances_refcount() `test {
+  Ref[int] r = Ref[int](7);
+  Weak[int] w = r.downgrade();
+  {
+    Cloneable c = r.clone();
+    Cloneable d = c.clone();
+    if strong := w.upgrade() {
+      assert(strong.borrow == 7, "alive while the boxes hold references");
+    } else {
+      assert(false, "value released while boxes still held it");
+    }
+  }
+  assert(r.borrow == 7, "original reference outlives the boxes");
+}
+
+weak_clone_through_view() `test {
+  Ref[int] r = Ref[int](11);
+  Weak[int] w = r.downgrade();
+  {
+    Cloneable c = w.clone();
+    Cloneable d = c.clone();
+    assert(r.borrow == 11, "weak clones do not touch the strong count");
+  }
+  if strong := w.upgrade() {
+    assert(strong.borrow == 11, "weak handle still usable after its view clones drop");
+  } else {
+    assert(false, "allocation released early");
+  }
+}
+
+// --- Generic code taking a Cloneable ---------------------------------------------
+
+// "Any generic code taking a Cloneable parameter and calling clone() on it dies at
+// runtime" — the Impact section of the item.
+duplicate(ShowClone c) string {
+  ShowClone copy = c.clone();
+  return copy.to_string();
+}
+
+generic_cloneable_param() `test {
+  assert(duplicate("via param") == "via param", "clone() on a Cloneable parameter");
+  string heap = "via" + " heap";
+  assert(duplicate(heap) == "via heap", "clone() on a heap-string Cloneable parameter");
+}
+
+// A boxed view returned from a function: the clone escapes its defining frame.
+clone_of(ShowClone c) ShowClone {
+  return c.clone();
+}
+
+cloneable_view_escapes_frame() `test {
+  ShowClone c = clone_of("escaped");
+  int[] junk = [9, 8, 7, 6, 5];
+  assert(c.to_string() == "escaped", "clone survives the returning frame");
+  assert(junk.len == 5, "intervening allocation intact");
+}
+
+// --- Regression guards for the paths the box change disturbs ----------------------
+
+// Boxing a container as `Format` (interpolation / print) still works and still frees.
+vector_format_view() `test {
+  int[] v = [1, 2, 3];
+  assert("{v}" == "[1, 2, 3]", "vector rendered through a Format box");
+  assert(v.len == 3, "original vector untouched by the Format box");
+  Format f = v;
+  assert("{f}" == "[1, 2, 3]", "vector bound as Format");
+}
+
+map_format_view() `test {
+  map[string, int] m = {
+    "a": 1
+  };
+  string rendered = "{m}";
+  assert(rendered.contains("a"), "map rendered through a Format box");
+  assert(rendered.contains("1"), "map value rendered through a Format box");
+  assert(m.len == 1, "original map untouched by the Format box");
+}
+
+print_containers() `test {
+  int[] v = [4, 5];
+  map[string, int] m = {
+    "k": 9
+  };
+  print_line("{v} {m}");
+  assert(v.len == 2, "printed vector intact");
+  assert(m.len == 1, "printed map intact");
+}
+
+// An OWNED vector whose elements are themselves droppable: the box moves the payload
+// in, so its drop has to run the element walk before freeing the buffer. Every other
+// owned-source test here uses `int` elements, which a bare buffer free would silently
+// get away with. Before this item the same line segfaulted — the box had no RTTI
+// header, so __promise_structural_drop read the vector's `len|bit63` as a typeinfo
+// pointer.
+owned_vector_of_strings_box() `test {
+  string[] v = ["alpha" + "", "beta" + ""];
+  ShowClone c = v.clone();
+  ShowClone d = c.clone();
+  assert(c.to_string() == "[alpha, beta]", "owned string-vector box");
+  assert(d.to_string() == "[alpha, beta]", "clone of an owned string-vector box");
+  assert(v[0] == "alpha", "the source of the cloned payload is untouched");
+}
+
+// --- Boxing from inside a monomorphized body ------------------------------------
+//
+// The box's typeinfo, drop_fn and clone_fn are keyed on the concrete and GENERATED
+// FROM the payload type. Inside a generic body the boxed type is still the unbound
+// `Vector[T]` until the active substitution is applied, so without it every
+// instantiation would share one pair — and that pair would be built for whichever
+// element type reached codegen first. Instantiating at both `int` and `string` in
+// one binary is what makes a shared pair observable: the string elements would go
+// unfreed (a leak the harness fails on), or the int buffer would be walked as
+// pointers (a fault).
+
+box_clone_in_generic_body[T](Vector[T] v) string {
+  ShowClone c = v.clone();
+  ShowClone d = c.clone();
+  return d.to_string();
+}
+
+generic_vector_box_is_per_instance() `test {
+  int[] ints = [1, 2, 3];
+  string[] strs = ["alpha" + "", "beta" + ""];
+  assert(box_clone_in_generic_body(ints) == "[1, 2, 3]", "Vector[int] boxed inside a generic body");
+  assert(box_clone_in_generic_body(strs) == "[alpha, beta]", "Vector[string] boxed inside a generic body");
+  assert(ints.len == 3, "int source untouched");
+  assert(strs[0] == "alpha", "string source untouched");
+}
+
+// Same for the refcounted handles: every clone taken through the view inside the
+// generic body is a real strong/weak reference, so the value is still upgradeable
+// after the boxes drop and released exactly once when the owner does.
+ref_boxes_balance_in_generic_body[T](T move seed) bool {
+  Ref[T] r = Ref[T](move seed);
+  Weak[T] w = r.downgrade();
+  {
+    Cloneable c = r.clone();
+    Cloneable d = c.clone();
+    Cloneable e = w.clone();
+  }
+  if strong := w.upgrade() {
+    return true;
+  }
+  return false;
+}
+
+generic_ref_and_weak_boxes_balance() `test {
+  assert(ref_boxes_balance_in_generic_body[int](5), "Ref[int]/Weak[int] view boxes balance");
+  assert(ref_boxes_balance_in_generic_body[string]("shared" + ""), "Ref[string]/Weak[string] view boxes balance");
+}
+
+// --- Channel: the one native handle whose dup is a refcount bump ------------------
+//
+// The four `native clones and the channel refcount bump now share one implementation
+// (emitNativeDupValue), reached from the AST call sites, the field/variant dup walk,
+// the view-vtable shim and the structural box clone_fn alike. These two cover the two
+// non-call-site entries for a channel, where a missed bump is a use-after-free and a
+// double bump is a leak.
+
+type ChannelHolder {
+  channel[int] ch;
+  int id;
+}
+
+// The field/variant dup walk: cloning a container of a type with a channel field.
+channel_field_survives_a_clone() `test {
+  channel[int] c = channel[int](2);
+  ChannelHolder[] holders = [ChannelHolder(ch: move c, id: 1)];
+  ChannelHolder[] copy = holders.clone();
+  assert(copy.len == 1, "holder vector cloned");
+  copy[0].ch.send(9);
+  if got := <-holders[0].ch {
+    assert(got == 9, "the cloned channel field is the same refcounted channel");
+  } else {
+    assert(false, "the clone released the channel");
+  }
+}
+
+// The structural box: a BORROWED channel is cloned into the box (a refcount bump), so
+// the box's drop must put that count back when the argument box dies.
+type Closeable2 `structural {
+  close() `abstract;
+}
+
+peek_channel(Closeable2 c) bool {
+  return true;
+}
+
+channel_borrowed_into_a_view_box_balances_its_refcount() `test {
+  channel[int] ch = channel[int](2);
+  assert(peek_channel(ch), "channel boxed into a borrowed structural view");
+  ch.send(1);
+  if got := <-ch {
+    assert(got == 1, "channel still usable after its view box dropped");
+  } else {
+    assert(false, "the view box released the channel");
+  }
+}
+
+// One field of each kind the collapsed dup dispatch has to tell apart, cloned in one
+// go. emitVariantFieldDup's five hand-written branches became a single
+// emitNativeDupValue call that reports false for a type it has no dup semantics for,
+// and the walk must then fall through to the ordinary heap-value dup. A branch lost in
+// that rewrite aliases a field two owners will each free.
+type Inner {
+  string s;
+  int n;
+}
+
+type Mixed {
+  Inner i;
+  string tag;
+  int[] nums;
+  channel[int] ch;
+  Ref[int] r;
+}
+
+mixed_native_and_user_fields_all_dup() `test {
+  channel[int] c = channel[int](1);
+  Ref[int] shared = Ref[int](7);
+  Mixed[] v = [Mixed(i: Inner(s: "deep" + "", n: 1), tag: "t" + "", nums: [1, 2],
+  ch: move c, r: shared.clone())];
+  Mixed[] copy = v.clone();
+  assert(copy[0].i.s == "deep", "nested user-type field deep-cloned (the fallthrough)");
+  assert(copy[0].tag == "t", "string field deep-cloned");
+  assert(copy[0].nums.len == 2, "vector field deep-cloned");
+  assert(copy[0].r.borrow == 7, "Ref field shares the same allocation");
+  assert(shared.borrow == 7, "the original Ref outlives the clone");
+  copy[0].ch.send(3);
+  if got := <-v[0].ch {
+    assert(got == 3, "channel field is the same refcounted channel");
+  } else {
+    assert(false, "the clone released the channel");
+  }
+}
+
+// --- Unary operators through a view adapter --------------------------------------
+//
+// A method's bare Name() is not unique within an interface: a getter and a setter
+// share one (T1905), and so do a binary and a unary operator. The adapter name
+// therefore carries the same arity marker the method mangler uses. The collision
+// itself is unreachable today — no concrete declaring both arities of a symbol can
+// satisfy a structural interface requiring the unary one (T1911) — so this covers the
+// naming and the dispatch, with a lone unary requirement.
+type Flip `structural {
+  !() bool? `abstract;
+}
+
+type Flag {
+  bool b;
+  !() bool => !this.b;
+}
+
+unary_operator_dispatches_through_a_view_adapter() `test {
+  Flag f = Flag(b: true);
+  Flip v = f;
+  if r := !v {
+    assert(r == false, "unary ! dispatched through the view adapter");
+  } else {
+    assert(false, "the unary adapter returned none");
+  }
+}
+
+// Three neighbouring shapes are NOT asserted here, and deliberately. A box that
+// enters a VECTOR — via a vector literal, or `push` of a moved named local — leaks
+// its payload (T1909). A vector LITERAL with heap elements coerced straight into a
+// view leaks every element of the orphaned literal (T1912) — note the test just
+// above uses `v.clone()`, which is the leak-free spelling. And a user type with a
+// structural-interface field segfaults when cloned (T1910). All three are
+// pre-existing and reproduce with a plain heap string, so they are neither caused nor
+// fixed by this item; before it, the container spellings segfaulted rather than
+// leaking. The box clone_fn's own deep copy is covered at the IR level instead
+// (TestT1885_BoxCloneDeepCopiesThePayload).

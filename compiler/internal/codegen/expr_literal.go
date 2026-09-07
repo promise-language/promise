@@ -802,7 +802,9 @@ func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		return c.genStringByteAt(strPtr, argVal), true
 
 	case "clone":
-		return c.dupString(strPtr), true
+		// T1885: same implementation the view-vtable `string.clone` shim uses.
+		dup, _ := c.emitNativeDupValue(strPtr, types.TypString)
+		return dup, true
 
 	default:
 		return nil, false

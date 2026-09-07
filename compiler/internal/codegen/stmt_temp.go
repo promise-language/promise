@@ -804,6 +804,26 @@ func (c *Compiler) trackHeapTempWithFlag(instancePtr value.Value, dropFunc *ir.F
 	c.heapTempMap[instancePtr] = idx
 }
 
+// staticViewInstance returns the instance pointer a view/value struct was built
+// from, when it was built by `insertvalue <struct>, i8* %inst, 1` — the shape every
+// box and view construction produces. Returns nil when field 1 was not filled in by
+// a statically visible insertvalue.
+func staticViewInstance(val value.Value) value.Value {
+	for {
+		iv, ok := val.(*ir.InstInsertValue)
+		if !ok {
+			return nil
+		}
+		if len(iv.Indices) == 1 && iv.Indices[0] == 1 {
+			if iv.Elem.Type() == irtypes.I8Ptr {
+				return iv.Elem
+			}
+			return nil
+		}
+		val = iv.X
+	}
+}
+
 // claimHeapTemp marks a tracked heap instance as consumed (ownership transferred
 // to a variable). Clears the drop flag so the temp won't be dropped at statement end.
 // Accepts either an i8* instance pointer or a value struct — extracts field 1
@@ -822,6 +842,20 @@ func (c *Compiler) claimHeapTemp(val value.Value) {
 		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.heapTemps[idx].dropFlag)
 		c.heapTempMap[val] = -1
 		return
+	}
+	// T1885: the runtime comparison loop below cannot tell the compiler WHICH temp
+	// matched, so it captures the FIRST tracked temp's drop function for the scope
+	// binding. With more than one heap temp live in the statement that is the wrong
+	// one — boxing a vector literal into a structural view tracks two (the literal,
+	// dropped with Vector.drop, and the box, dropped with its own box drop), and the
+	// binding would then drop the BOX using the payload's drop function, freeing the
+	// 16-byte box and leaking everything inside it. When field 1 was insertvalue'd
+	// from a statically known tracked temp — which is how every box/view is built —
+	// name that temp's drop function up front; the loop leaves it alone.
+	if inst := staticViewInstance(val); inst != nil {
+		if idx, ok := c.heapTempMap[inst]; ok && idx >= 0 {
+			c.lastClaimedDropFunc = c.heapTemps[idx].dropFunc
+		}
 	}
 	// For value structs ({vtable, instance}): extract field 1 and do a runtime
 	// comparison against each tracked temp. This handles method call results

@@ -412,13 +412,9 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 	case "clone":
 		// Deep-copy the vector: shallow memcpy of header+elements, then deep-clone
 		// non-copy elements so the cloned vector owns independent copies. B0275.
-		resolvedElem := elemType
-		if c.typeSubst != nil {
-			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
-		}
-		result := c.dupVector(slicePtr, elemSize)
-		c.emitVectorElementCloneLoop(result, resolvedElem)
-		return result
+		// T1885: dupVectorDeep is the single implementation, shared with the
+		// variant/field dup walk and the `Vector[T].clone` view-vtable shim.
+		return c.dupVectorDeep(slicePtr, elemType)
 
 	case "remove":
 		idx := c.genCallArgExpr(e.Args[0].Value)

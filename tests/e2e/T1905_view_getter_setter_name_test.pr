@@ -1,0 +1,32 @@
+// T1905: a structural view whose interface declares a same-named getter and setter
+// needs two DISTINCT adapter thunks. The adapter was named from the bare member
+// name, which a getter and its setter share (the `$set` marker lives only in the
+// method mangler), so both vtable slots resolved to one symbol and codegen emitted
+// two definitions under it — `opt` rejected the module with `invalid redefinition
+// of function`. Compiling this file at all is the regression test; the assertions
+// then check each slot dispatches to its own member.
+type Prop `structural {
+  get val! int `abstract;
+  set val!(int v) `abstract;
+}
+
+type Holder {
+  int n;
+  get val int => this.n;
+  set val(int v) {
+    this.n = v;
+  }
+}
+
+// The interface pair is failable and the concrete pair is not, so BOTH slots need
+// an adapter — which is what made the name collision reachable.
+round_trip!(Prop ~p) int {
+  p.val = 9;
+  return p.val;
+}
+
+view_getter_and_setter_are_distinct_slots() `test {
+  Holder h = Holder(n: 5);
+  Prop p = h;
+  assert(round_trip(p)?! == 9, "getter and setter dispatch to their own slots");
+}

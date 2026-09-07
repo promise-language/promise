@@ -837,10 +837,7 @@ func (c *Compiler) defineTypeIsFunc() {
 // type args are used for type substitution during default method synthesis.
 func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType types.Type, viewTypes ...types.Type) *ir.Global {
 	// Build cache key that distinguishes mono instances (Entity[int] vs Entity[string]).
-	concreteCacheKey := concrete.Obj().Name()
-	if inst, ok := fromType.(*types.Instance); ok {
-		concreteCacheKey = monoName(inst)
-	}
+	concreteCacheKey := c.concreteViewKey(concrete, fromType)
 	viewCacheKey := view.Obj().Name()
 	var viewInst *types.Instance
 	if len(viewTypes) > 0 {
@@ -870,6 +867,17 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 	}
 
 	methods := view.AllVirtualMethods()
+
+	// T1885: publish the (zero-filled) global and cache it BEFORE resolving any slot.
+	// A `Self`-returning requirement's adapter boxes its concrete result back into
+	// this same view, which re-enters here — without the entry already present that
+	// recursion never terminates.
+	arrayType := irtypes.NewArray(uint64(len(methods)), irtypes.I8Ptr)
+	name := fmt.Sprintf("promise_vtable_%s_as_%s", concreteCacheKey, viewCacheKey)
+	global := c.module.NewGlobalDef(name, constant.NewZeroInitializer(arrayType))
+	global.Immutable = true
+	c.viewVtables[key] = global
+
 	var entries []constant.Constant
 	var nulls []nullVtableSlot
 	for _, m := range methods {
@@ -893,26 +901,31 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 				mangledName = concreteMonoMangled
 			}
 		}
-		if fn, ok := c.funcs[mangledName]; ok {
+		fn, ok := c.funcs[mangledName]
+		concreteMethod := c.lookupMethodForMethod(concrete, m)
+		// T1885: a `native` requirement has no LLVM body at all — it is open-coded at
+		// each AST call site — so the lookup above missed and the slot was emitted as
+		// null, turning `c.clone()` through a boxed `Cloneable` into a jump to address
+		// 0. Synthesize a real function with the concrete signature; the adapter path
+		// below then applies unchanged.
+		if !ok && concreteMethod != nil && concreteMethod.IsNative() {
+			fn, ok = c.getOrEmitNativeMethodFunc(concreteCacheKey, fromType, concreteMethod)
+		}
+		if ok {
 			// Check if the concrete method signature differs from the interface method
 			// (extra optional/default params, non-failable→failable, T→T? return,
 			// or primitive scalar receiver vs i8* receiver).
 			// If so, generate an adapter thunk with the interface's signature.
-			concreteMethod := c.lookupMethodForMethod(concrete, m)
-			// T1280: a string concrete always needs an adapter — the receiver behind the
-			// view is now the heap box { i8* typeinfo, i8* string_ptr }, so the raw
-			// string.method (which expects the string ptr as `this`) cannot be used
-			// directly; the adapter loads field 1 from the box first.
-			// T1887: a boxed receiver ALWAYS needs an adapter, whatever its
-			// signature — the vtable hands the method field 1 of the view, which
-			// for a boxed concrete is the box, not the payload. Only the adapter
-			// unwraps it. `!isUserValueType` is exactly the set boxForStructuralView
-			// boxes (primitive scalar, string, opaque native handle), so it
-			// subsumes the two cases previously spelled out here.
+			//
+			// T1280 / T1885 / T1887: a boxed receiver ALWAYS needs an adapter, whatever
+			// its signature — the vtable hands the method field 1 of the view, which for
+			// a boxed concrete (primitive scalar, string, opaque native handle) is the
+			// heap box { i8* typeinfo, i8* payload }, not the payload. Only the adapter
+			// unwraps it: it loads field 1 from the box first.
 			needsAdapter := concreteMethod != nil && (needsViewAdapter(concreteMethod.Sig(), m.Sig()) || c.viewBoxesConcrete(concrete))
 			switch {
 			case needsAdapter:
-				adapter := c.emitViewMethodAdapter(concrete, concreteCacheKey, view, concreteMethod, m, fn)
+				adapter := c.emitViewMethodAdapter(concrete, concreteCacheKey, fromType, view, concreteMethod, m, fn)
 				entries = append(entries, constant.NewBitCast(adapter, irtypes.I8Ptr))
 			case c.viewBoxesConcrete(concrete):
 				// T1887: the receiver is boxed but the signature needs no other
@@ -927,19 +940,133 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 				entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
 			}
 		} else {
+			structuralDefault := c.structuralDefaultOwner(concrete, m) != nil
+			// T1885: a slot nothing can fill becomes a stub that PANICS with the
+			// unimplemented pair rather than a null that jumps to address 0. A
+			// structural default keeps its null so verifyNoNullVtableSlots still
+			// catches the T1880 synthesis gap it is responsible for.
+			if !structuralDefault {
+				if stub := c.emitUnimplementedViewStub(concreteCacheKey, view, m); stub != nil {
+					entries = append(entries, constant.NewBitCast(stub, irtypes.I8Ptr))
+					continue
+				}
+			}
 			nulls = append(nulls, nullVtableSlot{slot: len(entries), typeName: concreteCacheKey, method: m,
-				structuralDefault: c.structuralDefaultOwner(concrete, m) != nil})
+				structuralDefault: structuralDefault})
 			entries = append(entries, constant.NewNull(irtypes.I8Ptr))
 		}
 	}
-	arrayType := irtypes.NewArray(uint64(len(entries)), irtypes.I8Ptr)
-	init := constant.NewArray(arrayType, entries...)
-	name := fmt.Sprintf("promise_vtable_%s_as_%s", concreteCacheKey, viewCacheKey)
-	global := c.module.NewGlobalDef(name, init)
-	global.Immutable = true
+	global.Init = constant.NewArray(arrayType, entries...)
 	c.recordNullVtableSlots(global, nulls)
-	c.viewVtables[key] = global
 	return global
+}
+
+// concreteViewKey is the cache/name key for a concrete type boxed into a view: the
+// type's name, or its monomorphized name when the boxed value is a generic instance
+// (so Entity[int] and Entity[string] never share a vtable, adapter or box typeinfo).
+//
+// T1885: the active substitution is applied first. Without it a box emitted inside a
+// monomorphized body keyed on the UNBOUND instance (Vector[T]) — and since the box's
+// drop_fn and clone_fn are generated from the element type, Vector[int] and
+// Vector[string] would then have shared one wrong pair.
+func (c *Compiler) concreteViewKey(concrete *types.Named, fromType types.Type) string {
+	if c.typeSubst != nil {
+		fromType = types.Substitute(fromType, c.typeSubst)
+	}
+	if inst, ok := fromType.(*types.Instance); ok {
+		return monoName(inst)
+	}
+	return concrete.Obj().Name()
+}
+
+// viewInstanceSubst is the type-parameter substitution implied by boxing a value of
+// fromType into a view: the concrete instance's own type arguments, plus those it
+// inherits. Nil when the concrete is not a generic instance.
+func (c *Compiler) viewInstanceSubst(concrete *types.Named, fromType types.Type) map[*types.TypeParam]types.Type {
+	if c.typeSubst != nil {
+		fromType = types.Substitute(fromType, c.typeSubst)
+	}
+	inst, ok := fromType.(*types.Instance)
+	if !ok {
+		return nil
+	}
+	subst := types.BuildSubstMap(concrete.TypeParams(), inst.TypeArgs())
+	if len(subst) == 0 {
+		return nil
+	}
+	mergeParentSubst(concrete, subst)
+	return subst
+}
+
+// viewMemberTag disambiguates a view member inside a synthesized function name.
+// A method's bare Name() is NOT unique within an interface — a getter and a setter
+// share one name, as do a binary and a unary operator — so an adapter or stub named
+// from it alone emits two definitions under one LLVM name, which opt rejects as an
+// invalid redefinition. Mirrors mangleMethodNameForMethod's suffixes, and is empty
+// for the ordinary method so existing names are unchanged.
+func viewMemberTag(m *types.Method) string {
+	switch {
+	case m.IsSetter():
+		return "$set"
+	case m.IsUnaryOperator():
+		return "$unary"
+	}
+	return ""
+}
+
+// emitUnimplementedViewStub generates a function with the interface method's exact
+// LLVM signature that panics naming the (view, method, concrete) triple, for a view
+// vtable slot no concrete implementation could be resolved for (T1885).
+//
+// A null there is a jump to address 0: on macOS a SIGTRAP with no message, on Linux
+// a SIGSEGV, and for a void-returning slot sometimes a silent exit 0 — a truncated
+// test batch only the harness's INCOMPLETE synthesis stops from reading as a pass.
+// The stub costs nothing at any call site and replaces that undefined jump with a
+// defined panic naming the (view, method, concrete) triple.
+//
+// How promptly the panic SURFACES is a separate matter: promise_panic sets a TLS
+// flag for the caller to check, and no such check is emitted after an indirect
+// vtable call (T1907). The message therefore reaches the user at the next check —
+// under `promise test` that is often the assert on the stub's own zero return
+// value, which double-panics and prints `fatal: panic during panic recovery`
+// instead. Strictly better than address 0 either way, and exact once T1907 lands.
+func (c *Compiler) emitUnimplementedViewStub(concreteCacheKey string, view *types.Named, m *types.Method) *ir.Func {
+	if c.funcs["promise_panic"] == nil {
+		return nil
+	}
+	name := fmt.Sprintf("%s.%s%s$view_stub_as_%s", concreteCacheKey, m.Name(), viewMemberTag(m), view.Obj().Name())
+	if fn, ok := c.funcs[name]; ok {
+		return fn
+	}
+	sig := m.Sig()
+	var params []*ir.Param
+	if sig.Recv() != nil {
+		params = append(params, ir.NewParam("this", irtypes.I8Ptr))
+	}
+	for i, p := range sig.Params() {
+		params = append(params, ir.NewParam(fmt.Sprintf("p%d", i), c.resolveParamType(p)))
+	}
+	retType := irtypes.Type(irtypes.Void)
+	if sig.Result() != nil {
+		retType = c.resolveType(sig.Result())
+	}
+	if sig.CanError() {
+		retType = computeResultType(retType)
+	}
+	fn := c.module.NewFunc(name, retType, params...)
+	c.funcs[name] = fn
+
+	saved := c.saveState()
+	defer c.restoreState(saved)
+	c.beginSynthesizedBody(fn)
+	c.emitPanicCString(fmt.Sprintf("no implementation of %s.%s for %s",
+		view.Obj().Name(), m.Name(), concreteCacheKey))
+	if retType.Equal(irtypes.Void) {
+		c.block.NewRet(nil)
+	} else {
+		c.block.NewRet(constant.NewZeroInitializer(retType))
+	}
+	return fn
 }
 
 // nullVtableSlot records a vtable slot that was emitted as a null function
@@ -1082,12 +1209,20 @@ func needsViewAdapter(concrete, iface *types.Signature) bool {
 func (c *Compiler) emitViewMethodAdapter(
 	concreteType *types.Named,
 	concreteCacheKey string,
+	concreteFromType types.Type,
 	view *types.Named,
 	concreteMethod, ifaceMethod *types.Method,
 	concreteFn *ir.Func,
 ) *ir.Func {
 	ifaceSig := ifaceMethod.Sig()
 	concreteSig := concreteMethod.Sig()
+	// T1885: the concrete method's declared types are written in the GENERIC type's
+	// terms — `Vector[T].clone() Self` resolves to `Vector[T]`, not `Vector[int]`.
+	// The adapter is per-instance, so resolve them against this instance's arguments;
+	// otherwise the covariant return below boxes the result under the unbound
+	// `Vector[T]` view vtable, whose box drop/clone would be built for the wrong
+	// element type.
+	instSubst := c.viewInstanceSubst(concreteType, concreteFromType)
 
 	// Build adapter function type matching the interface method's signature.
 	// T1468: name the adapter from the per-instance mono key (e.g. GBox[int]),
@@ -1100,7 +1235,8 @@ func (c *Compiler) emitViewMethodAdapter(
 	// (concreteCacheKey, view) pair, so boxing one concrete into two DIFFERENT
 	// views that each expose a same-named adapter-requiring method would
 	// otherwise emit two definitions under one LLVM name (invalid IR).
-	adapterName := fmt.Sprintf("%s.%s$view_adapt_as_%s", concreteCacheKey, ifaceMethod.Name(), view.Obj().Name())
+	adapterName := fmt.Sprintf("%s.%s%s$view_adapt_as_%s",
+		concreteCacheKey, ifaceMethod.Name(), viewMemberTag(ifaceMethod), view.Obj().Name())
 
 	var params []*ir.Param
 	if ifaceSig.Recv() != nil {
@@ -1124,43 +1260,14 @@ func (c *Compiler) emitViewMethodAdapter(
 	saved := c.saveState()
 	defer c.restoreState(saved)
 
-	c.fn = fn
-	c.locals = make(map[string]*ir.InstAlloca)
-	c.localNameCount = make(map[string]int)
-
 	// T1460: the adapter is a synthesized FUNCTION BODY, not a continuation of the
-	// caller's. saveState() saves the caller's temp/scope state but does not clear
-	// it, so the default expressions below were compiled against the caller's live
-	// state: their temps landed in the caller's lists (whose entries restoreState
-	// then discards → leak), and any default emitting an unwind path made
-	// emitPanicReturn walk the CALLER's scopeBindings, emitting loads of the
-	// caller's allocas inside this function (malformed IR). Give the adapter its
-	// own state, exactly as genLambdaExpr does for a lambda body; restoreState
-	// brings the caller's back.
-	c.scopeBindings = nil
-	c.dropFlags = make(map[string]*ir.InstAlloca)
-	c.dropBindings = make(map[string]scopeBinding)
-	c.castSubjectMatch = nil
-	c.forInHandleSlotPtr = make(map[string]*ir.InstAlloca)
-	c.lambdaWritebacks = nil
-	c.loopScopeDepth = 0
-	c.canError = false // the adapter forwards the failable tuple; it never propagates
-	c.currentRetType = nil
-	c.stmtTemps = nil
-	c.stmtTempMap = make(map[value.Value]int)
-	c.heapTemps = nil
-	c.heapTempMap = make(map[value.Value]int)
-	c.envTemps = nil
-	c.envTempMap = make(map[value.Value]int)
-	c.enumCtorTemps = nil
-	c.tempTrackingEnabled = true
-	// The coroutine/generator body flags are cleared by saveState above (and put
-	// back by restoreState), so a default's channel/task operation can never branch
-	// to an enclosing coroutine's suspend/cleanup blocks.
-
-	entry := fn.NewBlock(".entry")
-	c.block = entry
-	c.entryBlock = entry
+	// caller's — beginSynthesizedBody gives it its own temp/scope state, so the
+	// default expressions below cannot leak temps into the caller's lists or make
+	// an unwind path walk the caller's scopeBindings. The coroutine/generator body
+	// flags are cleared by saveState above (and put back by restoreState), so a
+	// default's channel/task operation can never branch to an enclosing coroutine's
+	// suspend/cleanup blocks.
+	c.beginSynthesizedBody(fn)
 
 	// Build arguments for the concrete method call
 	var args []value.Value
@@ -1178,29 +1285,18 @@ func (c *Compiler) emitViewMethodAdapter(
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 			scalar := c.block.NewLoad(scalarType, scalarField)
 			args = append(args, scalar)
-		} else if concreteType == types.TypString {
-			// T1280: The string box is { i8* typeinfo, i8* string_ptr } (heap-allocated by
-			// boxForStructuralView), so load the string pointer receiver from field 1.
-			boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
-			typedPtr := c.block.NewBitCast(params[paramIdx], irtypes.NewPointer(boxType))
-			strField := c.block.NewGetElementPtr(boxType, typedPtr,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-			strPtr := c.block.NewLoad(irtypes.I8Ptr, strField)
-			args = append(args, strPtr)
 		} else if c.viewBoxesConcrete(concreteType) {
-			// T1887: everything that is not a user value struct reaches a view
-			// through boxForStructuralView — primitives and strings are handled
-			// above, so what remains is an opaque native handle, boxed as
-			// { i8* typeinfo, i8* handle }. Load the handle receiver from field 1.
+			// T1280 / T1885 / T1887: everything else that reaches a view through
+			// boxForStructuralView — a string or an opaque native handle — is boxed as
+			// { i8* typeinfo, i8* payload }, so load the concrete receiver from field 1.
 			// Asking about the representation rather than listing the handle types
 			// keeps this in step with the box site and covers any future handle
 			// (annotations.md §1).
 			boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
 			typedPtr := c.block.NewBitCast(params[paramIdx], irtypes.NewPointer(boxType))
-			hField := c.block.NewGetElementPtr(boxType, typedPtr,
+			payloadField := c.block.NewGetElementPtr(boxType, typedPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-			handle := c.block.NewLoad(irtypes.I8Ptr, hField)
-			args = append(args, handle)
+			args = append(args, c.block.NewLoad(irtypes.I8Ptr, payloadField))
 		} else {
 			args = append(args, params[paramIdx])
 		}
@@ -1246,6 +1342,9 @@ func (c *Compiler) emitViewMethodAdapter(
 	concreteCanError := concreteSig.CanError()
 	ifaceCanError := ifaceSig.CanError()
 	concreteResult := concreteSig.Result()
+	if concreteResult != nil && instSubst != nil {
+		concreteResult = types.Substitute(concreteResult, instSubst)
+	}
 	ifaceResult := ifaceSig.Result()
 	// T1735: Substitute TypeParams in the interface result for generic views.
 	if c.typeSubst != nil && ifaceResult != nil {
@@ -1296,6 +1395,12 @@ func (c *Compiler) emitViewMethodAdapter(
 	// from the failable result, coerce it, then rebuild the failable tuple.
 	var retResult value.Value = result
 	if needsCovariantCoerce {
+		// T1885: the concrete method's result is freshly produced and owned by this
+		// adapter, so the box must MOVE it rather than clone it (T1282). Without this
+		// the box built below cloned a value nothing else will ever free — a leak on
+		// every adapter returning a string or container as a structural view.
+		prevOwned := c.boxSrcOwned
+		c.boxSrcOwned = true
 		if concreteCanError && ifaceCanError {
 			// Both failable: extract inner value {i8*, i8*} from {i1, {i8*, i8*}, i8*}
 			innerVal := c.block.NewExtractValue(result, 1)
@@ -1304,6 +1409,7 @@ func (c *Compiler) emitViewMethodAdapter(
 		} else {
 			retResult = c.coerceToView(result, concreteResult, ifaceResultUnwrapped)
 		}
+		c.boxSrcOwned = prevOwned
 	}
 
 	if !concreteCanError && ifaceCanError {
@@ -1634,7 +1740,8 @@ func isMaterializedViewPtr(val value.Value) bool {
 // For primitives: heap-allocates a { typeinfo, scalar } box and creates {vtable, box}.
 // For string (T1280): heap-allocates a { typeinfo, string_ptr } box holding an owned
 // deep clone and creates {vtable, box}, so the box drops cleanly on escape.
-// For opaque containers: creates {vtable, i8*} directly (the raw pointer).
+// For opaque containers/handles (T1885): the same { typeinfo, payload } box, so the
+// RTTI drop dispatch has a header to read instead of the payload's own first word.
 func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
 	// Only box when target is a structural interface represented as a fat pointer
 	// (a `structural target that is itself a value type is a flat struct — T1550).
@@ -1715,39 +1822,60 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 		c.trackHeapTemp(raw, c.getStringBoxDrop())
 		instancePtr = raw
 	} else {
-		// T1887: an opaque native handle (MutexGuard, Mutex, Channel, Task, Arc,
-		// Weak, Vector) carries no RTTI header of its own, so a view holding the
-		// bare handle cannot be dropped: __promise_structural_drop reads the
-		// typeinfo from field 0 of the instance it is handed, and an opaque
-		// handle's first word is not one. Box it as { i8* typeinfo, i8* handle }
-		// exactly as strings and primitives are, so every RTTI drop site — scope
-		// binding, struct field, container element — dispatches uniformly.
+		// T1885 / T1887: an opaque native handle (MutexGuard, Mutex, Channel, Task,
+		// Arc, Weak, Vector) carries no RTTI header of its own, so a view holding the
+		// bare handle cannot be dropped: __promise_structural_drop reads the typeinfo
+		// from field 0 of the instance it is handed, and an opaque handle's first word
+		// is not one — a vector's `len|bit63`, an Arc's strong count. Box it as
+		// { i8* typeinfo, i8* handle } exactly as strings and primitives are, so every
+		// RTTI drop site — scope binding, struct field, container element — dispatches
+		// uniformly.
+		//
+		// Ownership follows T1282, as for the string box. An OWNED source — a move
+		// position, or a live statement temp such as a fresh `m.lock()` or `v.clone()`
+		// — is moved into the box, which takes over the drop obligation. A BORROWED
+		// source that can be duplicated (Vector, Channel, Ref, Weak) is cloned so the
+		// box owns its payload independently of the caller's — the box can outlive the
+		// borrow. A borrowed single-owner handle (Mutex/MutexGuard/Task) has no dup
+		// semantics at all (T1113), so it keeps aliasing the payload under a null-drop
+		// header: the original binding still drops it, and dropping the box just frees
+		// the box. The box shape, and therefore the receiver unbox in
+		// emitViewMethodAdapter, stays uniform either way.
 		boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
 		boxSize := int64(c.typeSize(boxType))
+		// Resolve the payload type once, under the active substitution: the box's
+		// drop_fn and clone_fn are generated FROM it and cached under the same key, so
+		// Vector[int] and Vector[string] boxed inside one generic body must not share
+		// a pair built for whichever element type reached codegen first.
+		boxPayloadType := fromType
+		if c.typeSubst != nil {
+			boxPayloadType = types.Substitute(boxPayloadType, c.typeSubst)
+		}
+		var stored value.Value
+		var typeInfo *ir.Global
+		var boxDrop *ir.Func
+		owningDrop := c.getContainerBoxDrop(fromNamed, fromType)
+		switch {
+		case owningDrop != nil && c.opaqueSrcOwned(val):
+			stored = val
+			c.claimStringTemp(val) // ownership moves into the box
+			typeInfo, boxDrop = c.getContainerBoxTypeInfo(fromNamed, fromType), owningDrop
+		case owningDrop != nil && nativeDupSupported(boxPayloadType):
+			stored, _ = c.emitNativeDupValue(val, boxPayloadType)
+			typeInfo, boxDrop = c.getContainerBoxTypeInfo(fromNamed, fromType), owningDrop
+		default:
+			stored = val
+			typeInfo, boxDrop = c.getFlatBoxTypeInfo(boxSize), c.palFree
+		}
 		raw := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, boxSize))
 		typed := c.block.NewBitCast(raw, irtypes.NewPointer(boxType))
 		tiField := c.block.NewGetElementPtr(boxType, typed,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		hField := c.block.NewGetElementPtr(boxType, typed,
+		c.block.NewStore(constant.NewBitCast(typeInfo, irtypes.I8Ptr), tiField)
+		payloadField := c.block.NewGetElementPtr(boxType, typed,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-		c.block.NewStore(val, hField)
-
-		// Ownership mirrors T1282's clone-vs-move reasoning for strings, minus the
-		// clone: a handle cannot be duplicated. The box owns the handle only when
-		// the source was an owned frame temp or a move position; for a borrowed
-		// source the original owner still drops it, so the box carries a null-drop
-		// header and dropping it just frees the box.
-		boxDrop := c.getContainerBoxDrop(fromNamed, fromType)
-		if boxDrop != nil && c.opaqueSrcOwned(val) {
-			if ti := c.getContainerBoxTypeInfo(fromNamed, fromType); ti != nil {
-				c.block.NewStore(constant.NewBitCast(ti, irtypes.I8Ptr), tiField)
-			}
-			c.claimStringTemp(val) // ownership moves into the box
-			c.trackHeapTemp(raw, boxDrop)
-		} else {
-			c.block.NewStore(constant.NewBitCast(c.getFlatBoxTypeInfo(boxSize), irtypes.I8Ptr), tiField)
-			c.trackHeapTemp(raw, c.palFree)
-		}
+		c.block.NewStore(stored, payloadField)
+		c.trackHeapTemp(raw, boxDrop)
 		instancePtr = raw
 	}
 
@@ -2018,7 +2146,9 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 // untouched — the signature already matched, which is why no full adapter was
 // required (T1887).
 func (c *Compiler) emitBoxedReceiverThunk(concreteCacheKey string, view *types.Named, m *types.Method, fn *ir.Func) *ir.Func {
-	name := fmt.Sprintf("%s.%s$view_unbox_as_%s", concreteCacheKey, m.Name(), view.Obj().Name())
+	// The member tag keeps a getter/setter (or binary/unary) pair from sharing one
+	// symbol (T1905), exactly as the adapter name does.
+	name := fmt.Sprintf("%s.%s%s$view_unbox_as_%s", concreteCacheKey, m.Name(), viewMemberTag(m), view.Obj().Name())
 	if existing, ok := c.funcs[name]; ok {
 		return existing
 	}

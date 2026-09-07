@@ -138,9 +138,9 @@ func TestT1887_ChannelBoxedAsCloserGetsItsOwnThunk(t *testing.T) {
 		t.Fatalf("expected a Channel[int]-keyed box drop thunk in IR")
 	}
 	// It must run the channel's real release, not pal_free on the handle: a
-	// pal_free'd channel keeps its buffer, mutex and waiter list. This is the case
-	// resolveTypeInfoDropFn alone gets wrong — Channel's drop is synthesized per
-	// instantiation under a mono name — so it also guards the fallback that covers it.
+	// pal_free'd channel keeps its buffer, mutex and waiter list. Channel's drop is
+	// synthesized per instantiation under a mono name, which resolving the drop by
+	// name got wrong — the thunk now runs the ordinary field-drop walk (T1885).
 	if !strings.Contains(thunk, `Channel[int].drop`) {
 		t.Fatalf("box thunk must call the channel's own drop, not pal_free the handle:\n%s", thunk)
 	}
@@ -172,9 +172,12 @@ func TestT1887_ViewAdapterUnwrapsBoxedReceiver(t *testing.T) {
 	}
 }
 
-// A borrowed handle must NOT be adopted by the box: the original binding still
-// drops it, so a box that also owned it would double-release.
-func TestT1887_BorrowedHandleBoxIsNotGivenOwnership(t *testing.T) {
+// A borrowed handle that can be duplicated (a channel is a refcounted handle) is
+// cloned INTO the box, exactly as a borrowed string is (T1282): the box owns a
+// second reference and releases it through its owning header, while the original
+// binding still drops its own — so the release count balances without the box
+// ever aliasing a payload it does not own (T1885).
+func TestT1887_BorrowedDuplicableHandleIsClonedIntoTheBox(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		t() {
 		  channel[int] ch = channel[int]();
@@ -186,10 +189,38 @@ func TestT1887_BorrowedHandleBoxIsNotGivenOwnership(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected __user.t in IR")
 	}
-	if strings.Contains(body, `promise_typeinfo_containerbox$Channel`) {
-		t.Fatalf("a borrowed channel was boxed with an owning header — its drop would run twice:\n%s", body)
+	if !strings.Contains(body, "chdup.inc") {
+		t.Fatalf("a borrowed channel must be duplicated (refcount bump) into its box:\n%s", body)
+	}
+	if !strings.Contains(body, `promise_typeinfo_containerbox$Channel[int]`) {
+		t.Fatalf("the box owns its duplicated channel, so it needs the owning header:\n%s", body)
+	}
+	// The original binding keeps its own release: two references, two drops.
+	if !strings.Contains(body, `Channel[int].drop`) {
+		t.Fatalf("the borrowed channel's own drop must still run at scope exit:\n%s", body)
+	}
+}
+
+// A borrowed handle that CANNOT be duplicated must NOT be adopted by the box: the
+// original binding still drops it, so a box that also owned it would double-release.
+// It aliases the payload under a null-drop flat header instead.
+func TestT1887_BorrowedSingleOwnerHandleBoxIsNotGivenOwnership(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		t() {
+		  Mutex[int] m = Mutex[int](value: 1);
+		  MutexGuard[int] g = m.lock();
+		  Closer c = g;
+		}
+		main() {}
+	`)
+	body := codegentest.ExtractFunction(ir, "__user.t")
+	if body == "" {
+		t.Fatalf("expected __user.t in IR")
+	}
+	if strings.Contains(body, `promise_typeinfo_containerbox$MutexGuard`) {
+		t.Fatalf("a borrowed guard was boxed with an owning header — its drop would run twice:\n%s", body)
 	}
 	if !strings.Contains(body, "promise_typeinfo_flatbox") {
-		t.Fatalf("expected the borrowed handle to get a null-drop flat header:\n%s", body)
+		t.Fatalf("expected the borrowed guard to get a null-drop flat header:\n%s", body)
 	}
 }

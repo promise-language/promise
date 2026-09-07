@@ -140,15 +140,20 @@ const (
 	winSchannelShutdown = 1
 
 	// wincrypt.h
-	winCryptStringBase64Header = 0x00000003 // CRYPT_STRING_BASE64HEADER
-	winX509AsnEncoding         = 0x00000001
-	winPkcs7AsnEncoding        = 0x00010000
-	winCertEncodingAny         = winX509AsnEncoding | winPkcs7AsnEncoding
-	winCertStoreProvMemory     = 2 // (LPCSTR) CERT_STORE_PROV_MEMORY
-	winCertStoreCreateNew      = 0x2000
-	winCertStoreAddAlways      = 4
-	winCertCloseStoreForce     = 1
-	winCertFindExisting        = 0x000D0000 // CERT_COMPARE_EXISTING << CERT_COMPARE_SHIFT
+	winCryptStringBase64Header    = 0x00000003 // CRYPT_STRING_BASE64HEADER
+	winX509AsnEncoding            = 0x00000001
+	winPkcs7AsnEncoding           = 0x00010000
+	winCertEncodingAny            = winX509AsnEncoding | winPkcs7AsnEncoding
+	winCertStoreProvMemory        = 2  // (LPCSTR) CERT_STORE_PROV_MEMORY
+	winCertStoreProvCollection    = 11 // (LPCSTR) CERT_STORE_PROV_COLLECTION
+	winCertStoreProvSystemA       = 9  // (LPCSTR) CERT_STORE_PROV_SYSTEM_A
+	winCertSystemStoreCurrentUser = 0x10000
+	winCertStoreAddUseExisting    = 2
+	winCertCtxOffHCertStore       = 32 // CERT_CONTEXT.hCertStore (x64)
+	winCertStoreCreateNew         = 0x2000
+	winCertStoreAddAlways         = 4
+	winCertCloseStoreForce        = 1
+	winCertFindExisting           = 0x000D0000 // CERT_COMPARE_EXISTING << CERT_COMPARE_SHIFT
 
 	// Certificate → private-key association. SChannel resolves a credential's
 	// private key through CryptAcquireCertificatePrivateKey, which only consults
@@ -267,8 +272,7 @@ const (
 	winCtxFKey       = 7  // NCRYPT_KEY_HANDLE
 	winCtxFKeyProv   = 8  // NCRYPT_PROV_HANDLE
 	winCtxFKeyName   = 9  // UTF-16 CNG key name (pal_alloc'd)
-	winCtxFChain     = 10 // HCERTSTORE holding leaf + intermediates (T1612)
-	winCtxFCredLock  = 11 // CRITICAL_SECTION serializing __pal_tls_ensure_cred
+	winCtxFCredLock  = 10 // CRITICAL_SECTION serializing __pal_tls_ensure_cred
 )
 
 // Field indices into the session struct (tlsWinTypes.sess).
@@ -309,7 +313,6 @@ func newTLSWinTypes() *tlsWinTypes {
 		irtypes.I64, // key
 		irtypes.I64, // key provider
 		i8p,         // key name (UTF-16)
-		i8p,         // chain store: leaf + intermediates (T1612)
 		// CRITICAL_SECTION (40 bytes, 8-aligned on x64 — the size
 		// pal_mutex_init allocates). Appended last so every field index above
 		// stays put; tlsWinSizeOf derives the allocation size from this type.
@@ -388,6 +391,7 @@ type tlsWinEmitter struct {
 	certAddEnc     *ir.Func
 	certFind       *ir.Func
 	certGetChain   *ir.Func
+	certAddToColl  *ir.Func
 	certFreeChain  *ir.Func
 	certVerifyPol  *ir.Func
 	certSetProp    *ir.Func
@@ -405,6 +409,7 @@ type tlsWinEmitter struct {
 	bufConsume *ir.Func
 	bufFree    *ir.Func
 	pemDER     *ir.Func
+	pemEnd     *ir.Func
 	widen      *ir.Func
 	ensureCred *ir.Func
 	hsStep     *ir.Func
@@ -413,13 +418,14 @@ type tlsWinEmitter struct {
 	hexWide    *ir.Func
 
 	// string globals
-	pkgName   constant.Constant
-	provName  constant.Constant
-	blobName  constant.Constant
-	keyPrefix constant.Constant
-	verEmpty  constant.Constant
-	ver12     constant.Constant
-	ver13     constant.Constant
+	pkgName     constant.Constant
+	caStoreName constant.Constant
+	provName    constant.Constant
+	blobName    constant.Constant
+	keyPrefix   constant.Constant
+	verEmpty    constant.Constant
+	ver12       constant.Constant
+	ver13       constant.Constant
 }
 
 func i32c(v int64) *constant.Int { return constant.NewInt(irtypes.I32, v) }
@@ -600,6 +606,9 @@ func (e *tlsWinEmitter) declareExterns() {
 		ir.NewParam("time", i8p), ir.NewParam("addStore", i8p),
 		ir.NewParam("para", i8p), ir.NewParam("flags", irtypes.I32),
 		ir.NewParam("reserved", i8p), ir.NewParam("out", i8p))
+	e.certAddToColl = getOrDeclareFunc(m, "CertAddStoreToCollection", irtypes.I32,
+		ir.NewParam("collection", i8p), ir.NewParam("sibling", i8p),
+		ir.NewParam("updateFlags", irtypes.I32), ir.NewParam("priority", irtypes.I32))
 	e.certFreeChain = getOrDeclareFunc(m, "CertFreeCertificateChain", irtypes.Void,
 		ir.NewParam("chain", i8p))
 	e.certVerifyPol = getOrDeclareFunc(m, "CertVerifyCertificateChainPolicy", irtypes.I32,
@@ -624,6 +633,7 @@ func (e *tlsWinEmitter) declareExterns() {
 	e.getPid = getOrDeclareFunc(m, "GetCurrentProcessId", irtypes.I32)
 
 	e.pkgName = tlsCStr(m, "__promise_tls_win_pkg", "Microsoft Unified Security Protocol Provider")
+	e.caStoreName = tlsCStr(m, "__promise_tls_win_ca_store", "CA")
 	e.provName = tlsWinWStr(m, "__promise_tls_win_ksp", "Microsoft Software Key Storage Provider")
 	e.blobName = tlsWinWStr(m, "__promise_tls_win_blob", "PKCS8_PRIVATEKEY")
 	e.keyPrefix = tlsWinWStr(m, "__promise_tls_win_keyprefix", "promise-tls-")

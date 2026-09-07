@@ -181,26 +181,17 @@ func (e *tlsWinEmitter) sessBuf(b *ir.Block, s value.Value, idx int) value.Value
 
 // --- PEM / string helpers --------------------------------------------------
 
-// emitPemDER defines i8* @__pal_tls_pem_der(i8* pem, i64 len, i64* outLen,
-// i64* outSkip): decodes a PEM block (BEGIN/END armour + base64 body) into a
-// pal_alloc'd DER buffer. Returns null when the input is not a well-formed PEM
+// emitPemDER defines i8* @__pal_tls_pem_der(i8* pem, i64 len, i64* outLen):
+// decodes the first PEM block (BEGIN/END armour + base64 body) at or after `pem`
+// into a pal_alloc'd DER buffer. Returns null when there is no well-formed PEM
 // block, which is what lets tls.pr surface TlsErrorKind.certificate for
-// malformed input.
-//
-// outSkip receives CryptStringToBinaryA's pdwSkip: the number of characters
-// before the block's base64 body, i.e. any preamble plus the -----BEGIN----- line.
-// Advancing a scan cursor by it lands strictly inside the block just decoded, so
-// the next forward search for -----BEGIN finds the *following* block. That is what
-// lets a caller walk a multi-block bundle (T1612) without guessing the block's
-// text extent from the size of the DER it decoded to. Callers that only ever read
-// the first block pass a throwaway slot.
+// malformed input and what ends a bundle walk.
 func (e *tlsWinEmitter) emitPemDER() {
 	i8p := irtypes.I8Ptr
 	nullI32P := constant.NewNull(irtypes.NewPointer(irtypes.I32))
 	fn := e.newFn("__pal_tls_pem_der", i8p,
 		ir.NewParam("pem", i8p), ir.NewParam("len", irtypes.I64),
-		ir.NewParam("outLen", irtypes.NewPointer(irtypes.I64)),
-		ir.NewParam("outSkip", irtypes.NewPointer(irtypes.I64)))
+		ir.NewParam("outLen", irtypes.NewPointer(irtypes.I64)))
 	b := fn.NewBlock(".entry")
 	cb := b.NewAlloca(irtypes.I32)
 	skip := b.NewAlloca(irtypes.I32)
@@ -233,7 +224,6 @@ func (e *tlsWinEmitter) emitPemDER() {
 
 	final := okBlk.NewLoad(irtypes.I32, cb)
 	okBlk.NewStore(okBlk.NewZExt(final, irtypes.I64), fn.Params[2])
-	okBlk.NewStore(okBlk.NewZExt(okBlk.NewLoad(irtypes.I32, skip), irtypes.I64), fn.Params[3])
 	okBlk.NewRet(der)
 	e.pemDER = fn
 }
@@ -381,10 +371,23 @@ func (e *tlsWinEmitter) emitVerifyPeer() {
 	b.NewStore(tlsWinNull, certPP)
 	chainPP := b.NewAlloca(i8p)
 	b.NewStore(tlsWinNull, chainPP)
+	collP := b.NewAlloca(i8p)
+	b.NewStore(tlsWinNull, collP)
+	resP := b.NewAlloca(irtypes.I32)
 	chainPara := e.zeroed(b, winCertChainParaSize)
 	sslPara := e.zeroed(b, winSSLPolicyParaSize)
 	polPara := e.zeroed(b, winChainPolicyParaSize)
 	polStat := e.zeroed(b, winChainPolicyStatSize)
+
+	// Closes the collection store, if one was opened, on the way from `from` to
+	// `next`. Every path that leaves after .have_cert goes through here.
+	closeColl := func(from, next *ir.Block, name string) {
+		v := from.NewLoad(i8p, collP)
+		doClose := fn.NewBlock(name)
+		from.NewCondBr(e.notNull(from, v), doClose, next)
+		doClose.NewCall(e.certCloseStore, v, i32c(0))
+		doClose.NewBr(next)
+	}
 
 	ctxtH := e.i8ptr(b, e.field(b, e.t.sess, s, winSFCtxt))
 	qst := b.NewCall(e.queryCtxAttr, ctxtH, i32c(winSecpkgAttrRemoteCertContext),
@@ -399,15 +402,48 @@ func (e *tlsWinEmitter) emitVerifyPeer() {
 	roots := haveCert.NewLoad(i8p, e.field(haveCert, e.t.ctx,
 		haveCert.NewBitCast(haveCert.NewLoad(i8p, e.field(haveCert, e.t.sess, s, winSFCtx)), e.t.ctxP),
 		winCtxFRoots))
-	chainOK := haveCert.NewCall(e.certGetChain, tlsWinNull, cert, tlsWinNull, roots,
+
+	// The issuers the peer sent arrive in the memory store SChannel attaches to
+	// the remote certificate context (CERT_CONTEXT.hCertStore). The chain engine
+	// does not consult the end certificate's own store, only hAdditionalStore
+	// (measured on Windows 11: a leaf whose store holds its issuer still builds a
+	// one-element partial chain), so that store and the caller's extra anchors
+	// are handed over together through one collection store. The collection is a
+	// view: closing it drops its references to the siblings without closing
+	// them. Should the collection fail to open, the anchors alone are used: a
+	// chain that needs a peer-sent issuer then fails closed as a certificate
+	// error rather than passing unverified.
+	peerStore := e.loadPtrAt(haveCert, cert, winCertCtxOffHCertStore)
+	coll := haveCert.NewCall(e.certOpenStore,
+		constant.NewIntToPtr(i64c(winCertStoreProvCollection), i8p), i32c(0), tlsWinNull,
+		i32c(0), tlsWinNull)
+	haveCert.NewStore(coll, collP)
+	addRoots := fn.NewBlock(".coll_roots")
+	addRootsCall := fn.NewBlock(".coll_roots_add")
+	addPeer := fn.NewBlock(".coll_peer")
+	addPeerCall := fn.NewBlock(".coll_peer_add")
+	buildBlk := fn.NewBlock(".build_chain")
+	haveCert.NewCondBr(e.notNull(haveCert, coll), addRoots, buildBlk)
+	addRoots.NewCondBr(e.notNull(addRoots, roots), addRootsCall, addPeer)
+	addRootsCall.NewCall(e.certAddToColl, coll, roots, i32c(0), i32c(0))
+	addRootsCall.NewBr(addPeer)
+	addPeer.NewCondBr(e.notNull(addPeer, peerStore), addPeerCall, buildBlk)
+	addPeerCall.NewCall(e.certAddToColl, coll, peerStore, i32c(0), i32c(0))
+	addPeerCall.NewBr(buildBlk)
+
+	collV := buildBlk.NewLoad(i8p, collP)
+	addStore := buildBlk.NewSelect(e.notNull(buildBlk, collV), collV, roots)
+	chainOK := buildBlk.NewCall(e.certGetChain, tlsWinNull, cert, tlsWinNull, addStore,
 		chainPara, i32c(winCertChainCacheOnlyURL|winCertChainDisableAIA), tlsWinNull,
-		e.i8ptr(haveCert, chainPP))
+		e.i8ptr(buildBlk, chainPP))
 	noChain := fn.NewBlock(".no_chain")
 	haveChain := fn.NewBlock(".have_chain")
-	haveCert.NewCondBr(haveCert.NewICmp(enum.IPredNE, chainOK, i32c(0)), haveChain, noChain)
+	buildBlk.NewCondBr(buildBlk.NewICmp(enum.IPredNE, chainOK, i32c(0)), haveChain, noChain)
 
-	noChain.NewCall(e.certFree, cert)
-	noChain.NewRet(i32c(-1))
+	noChainRet := fn.NewBlock(".no_chain_ret")
+	closeColl(noChain, noChainRet, ".no_chain_close_coll")
+	noChainRet.NewCall(e.certFree, cert)
+	noChainRet.NewRet(i32c(-1))
 
 	chain := haveChain.NewLoad(i8p, chainPP)
 	rootCheck := fn.NewBlock(".root_check")
@@ -423,6 +459,10 @@ func (e *tlsWinEmitter) emitVerifyPeer() {
 	elemBlk := fn.NewBlock(".terminal_elem")
 	rootCheck.NewCondBr(haveElems, elemBlk, policyBlk)
 
+	// The lookup is against the caller's anchors alone, never the collection,
+	// which also holds whatever the peer chose to send: a peer that appends its
+	// own self-signed "root" to its chain must not be able to waive its own
+	// verdict.
 	rgpElem := e.loadPtrAt(elemBlk, simple, winSimpleOffRgpElement)
 	lastIdx := elemBlk.NewZExt(elemBlk.NewSub(cElem, i32c(1)), irtypes.I64)
 	elemSlot := elemBlk.NewGetElementPtr(i8p,
@@ -465,7 +505,6 @@ func (e *tlsWinEmitter) emitVerifyPeer() {
 
 	polOK := policyBlk.NewCall(e.certVerifyPol,
 		constant.NewIntToPtr(i64c(winCertChainPolicySSL), i8p), chain, polPara, polStat)
-	resP := policyBlk.NewAlloca(irtypes.I32)
 	policyBlk.NewStore(i32c(-1), resP)
 	readBlk := fn.NewBlock(".read_status")
 	doneBlk := fn.NewBlock(".done")
@@ -476,7 +515,9 @@ func (e *tlsWinEmitter) emitVerifyPeer() {
 
 	doneBlk.NewCall(e.certFreeChain, chain)
 	doneBlk.NewCall(e.certFree, cert)
-	doneBlk.NewRet(doneBlk.NewLoad(irtypes.I32, resP))
+	retBlk := fn.NewBlock(".ret")
+	closeColl(doneBlk, retBlk, ".done_close_coll")
+	retBlk.NewRet(retBlk.NewLoad(irtypes.I32, resP))
 	e.verifyPeer = fn
 }
 

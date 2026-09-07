@@ -6,6 +6,7 @@
 LIBRARY crypt32.dll
 EXPORTS
 CertAddEncodedCertificateToStore
+CertAddStoreToCollection
 CertCloseStore
 CertCreateCertificateContext
 CertFindCertificateInStore

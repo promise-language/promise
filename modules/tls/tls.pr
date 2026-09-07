@@ -138,7 +138,7 @@ type TlsConfig `public `doc("TLS configuration for a connection. Controls certif
     this._has_trust_store = true;
   }
 
-  set_client_certificate!(~this, u8[] cert_pem, u8[] key_pem) `public `doc("Sets the client certificate and private key (both PEM-encoded) for mutual TLS.") {
+  set_client_certificate!(~this, u8[] cert_pem, u8[] key_pem) `public `doc("Sets the client certificate and private key (both PEM-encoded) for mutual TLS. On Windows, the issuers in the bundle are registered in the current user's Intermediate Certification Authorities store, because SChannel builds the chain it sends from the system stores; they stay there after the process exits.") {
     if this._ctx == 0 {
       raise _tls_err(TlsErrorKind.unsupported, "TLS is not supported on this platform");
     }
@@ -175,7 +175,7 @@ type TlsServerConfig `public `doc("Server-side TLS credentials: a certificate ch
   int _ctx; // backend context handle (server) as int (0 = no backend / unsupported)
   Duration _handshake_timeout; // max time allowed for each TLS handshake (T1769)
 
-  create!(u8[] cert_pem, u8[] key_pem) Self `factory `public `doc("Creates server credentials from a PEM-encoded certificate chain and its matching PEM-encoded private key. Raises TlsError(kind: unsupported) with no backend, or TlsError(kind: certificate) when either PEM fails to load.") {
+  create!(u8[] cert_pem, u8[] key_pem) Self `factory `public `doc("Creates server credentials from a PEM-encoded certificate chain and its matching PEM-encoded private key. Raises TlsError(kind: unsupported) with no backend, or TlsError(kind: certificate) when either PEM fails to load. On Windows, the issuers in the bundle are registered in the current user's Intermediate Certification Authorities store, because SChannel builds the chain it sends from the system stores; they stay there after the process exits.") {
     int ctx = _tls_ctx_new_server();
     if ctx == 0 {
       raise _tls_err(TlsErrorKind.unsupported, "TLS is not supported on this platform");
@@ -514,7 +514,7 @@ type TlsListener is Closer `public `doc("A TLS server listener. Binds a TCP port
   net.TcpListener _listener;
   TlsServerConfig _config;
 
-  bind!(string host, int port, u8[] cert_pem, u8[] key_pem) Self `factory `public `doc("Binds a TLS listener to host:port using the given PEM-encoded certificate chain and private key.") {
+  bind!(string host, int port, u8[] cert_pem, u8[] key_pem) Self `factory `public `doc("Binds a TLS listener to host:port using the given PEM-encoded certificate chain and private key. On Windows, the issuers in the bundle are registered in the current user's Intermediate Certification Authorities store, because SChannel builds the chain it sends from the system stores; they stay there after the process exits.") {
     TlsServerConfig config = TlsServerConfig.create(cert_pem, key_pem)?^;
     net.TcpListener listener = net.TcpListener.bind(host, port)? e {
       raise TlsError(code: 0, kind: TlsErrorKind.io, message: "TLS I/O error: " + e.message);

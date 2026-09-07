@@ -21,6 +21,7 @@ func (p *WindowsPAL) EmitTLS(module *ir.Module) map[string]*ir.Func {
 	e.declareExterns()
 	e.emitBufHelpers()
 	e.emitPemDER()
+	e.emitPemEnd()
 	e.emitWiden()
 	e.emitHexWide()
 	e.emitKeyName()
@@ -122,15 +123,6 @@ func (e *tlsWinEmitter) emitCtxFree() *ir.Func {
 	closeBlk.NewCall(e.certCloseStore, roots, i32c(winCertCloseStoreForce))
 	closeBlk.NewBr(afterStoreBlk)
 
-	// Close the chain store holding leaf + intermediates (T1612).
-	chainStore := afterStoreBlk.NewLoad(i8p, e.field(afterStoreBlk, e.t.ctx, c, winCtxFChain))
-	closeChainBlk := fn.NewBlock(".close_chain_store")
-	afterChainBlk := fn.NewBlock(".after_chain_store")
-	afterStoreBlk.NewCondBr(e.notNull(afterStoreBlk, chainStore), closeChainBlk, afterChainBlk)
-	closeChainBlk.NewCall(e.certCloseStore, chainStore, i32c(winCertCloseStoreForce))
-	closeChainBlk.NewBr(afterChainBlk)
-	afterStoreBlk = afterChainBlk // redirect subsequent code to use the new block
-
 	// NCryptDeleteKey removes the key from the provider's store *and* closes the
 	// handle, so the named key created in pal_tls_ctx_use_key never outlives the
 	// TlsConfig / TlsListener that owns it.
@@ -202,8 +194,7 @@ func (e *tlsWinEmitter) emitCtxAddCA() *ir.Func {
 	c := b.NewIntToPtr(fn.Params[0], e.t.ctxP)
 	dlen := b.NewAlloca(irtypes.I64)
 	b.NewStore(i64c(0), dlen)
-	skipUnused := b.NewAlloca(irtypes.I64) // add_ca reads only the first block
-	der := b.NewCall(e.pemDER, fn.Params[1], fn.Params[2], dlen, skipUnused)
+	der := b.NewCall(e.pemDER, fn.Params[1], fn.Params[2], dlen)
 	failBlk := fn.NewBlock(".fail")
 	haveBlk := fn.NewBlock(".have_der")
 	b.NewCondBr(e.notNull(b, der), haveBlk, failBlk)
@@ -233,12 +224,65 @@ func (e *tlsWinEmitter) emitCtxAddCA() *ir.Func {
 	return fn
 }
 
+// emitPemEnd defines i64 @__pal_tls_pem_end(i8* pem, i64 len, i64 from): the
+// index just past the first "-----END" at or after `from`, or -1 when there is
+// none. It is how a bundle walk steps from one PEM block to the next: the
+// search for the following block starts after the END line of the one just
+// decoded, so no block is decoded twice and none is skipped — independent of
+// how CryptStringToBinaryA reports the offset of a header it found (T1612).
+func (e *tlsWinEmitter) emitPemEnd() {
+	i64p := irtypes.NewPointer(irtypes.I64)
+	fn := e.newFn("__pal_tls_pem_end", irtypes.I64,
+		ir.NewParam("pem", irtypes.I8Ptr), ir.NewParam("len", irtypes.I64),
+		ir.NewParam("from", irtypes.I64))
+	entry := fn.NewBlock(".entry")
+	iSlot := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(fn.Params[2], iSlot)
+	loop := fn.NewBlock(".loop")
+	entry.NewBr(loop)
+
+	i := loop.NewLoad(irtypes.I64, iSlot)
+	end := loop.NewAdd(i, i64c(8))
+	past := loop.NewICmp(enum.IPredSGT, end, fn.Params[1])
+	none := fn.NewBlock(".none")
+	cmp := fn.NewBlock(".compare")
+	loop.NewCondBr(past, none, cmp)
+	none.NewRet(i64c(-1))
+
+	// "-----END" as one little-endian i64, read unaligned.
+	word := cmp.NewLoad(irtypes.I64,
+		cmp.NewBitCast(cmp.NewGetElementPtr(irtypes.I8, fn.Params[0], i), i64p))
+	word.Align = 1
+	found := fn.NewBlock(".found")
+	next := fn.NewBlock(".next")
+	cmp.NewCondBr(cmp.NewICmp(enum.IPredEQ, word, i64c(0x444E452D2D2D2D2D)), found, next)
+	found.NewRet(end)
+	next.NewStore(next.NewAdd(i, i64c(1)), iSlot)
+	next.NewBr(loop)
+	e.pemEnd = fn
+}
+
 // emitCtxUseCert defines i32 @pal_tls_ctx_use_cert(i64 ctx, i8* pem, i64 len).
-// Decodes the first PEM certificate as the leaf and adds any subsequent ones
-// to an in-memory store so SChannel can build the full chain (T1612). The leaf
-// cert is added to the store too (via CertAddEncodedCertificateToStore with an
-// out-param) so its PCCERT_CONTEXT is store-associated; SChannel searches the
-// cert's own store for issuers during chain building.
+// The first PEM block is the leaf; every block after it is an issuer (T1612).
+//
+// SChannel builds the chain it sends from the system certificate stores, not
+// from anything the process hands it: a credential is materialised in lsass,
+// so a memory store the leaf context belongs to is invisible there, and the
+// chain engine does not consult an end certificate's own store in any case
+// (measured on Windows 11: a leaf whose memory store held its issuer was still
+// sent alone, with or without the root alongside; SCH_CREDENTIALS.hRootStore
+// changed nothing either). The issuers are therefore registered in the current
+// user's Intermediate Certification Authorities store ("CA"), which is what
+// SChannel does consult — the arrangement .NET's SslStream makes on Windows.
+//
+// They are added with CERT_STORE_ADD_USE_EXISTING, so a bundle can be loaded
+// any number of times, and they are never removed: an intermediate is not a
+// trust anchor, and deleting it on drop would pull the chain out from under
+// another process serving the same certificate — a rolling restart is exactly
+// two processes doing that. A leaf-only bundle never opens the system store.
+// An issuer that cannot be registered fails the call, because a credential
+// that loads cleanly and serves a partial chain is the T1612 defect wearing a
+// success code.
 func (e *tlsWinEmitter) emitCtxUseCert() *ir.Func {
 	i8p := irtypes.I8Ptr
 	fn := e.newFn("pal_tls_ctx_use_cert", irtypes.I32,
@@ -246,128 +290,87 @@ func (e *tlsWinEmitter) emitCtxUseCert() *ir.Func {
 		ir.NewParam("len", irtypes.I64))
 	b := fn.NewBlock(".entry")
 	c := b.NewIntToPtr(fn.Params[0], e.t.ctxP)
+	pem, pemLen := fn.Params[1], fn.Params[2]
+	// Every alloca lives here: the bundle walk loops back to .next_block.
 	dlen := b.NewAlloca(irtypes.I64)
 	b.NewStore(i64c(0), dlen)
-	skipSlot := b.NewAlloca(irtypes.I64) // chars before the leaf's base64 body
-	b.NewStore(i64c(0), skipSlot)
-	der := b.NewCall(e.pemDER, fn.Params[1], fn.Params[2], dlen, skipSlot)
+	posSlot := b.NewAlloca(irtypes.I64) // where the search for the current block's END starts
+	b.NewStore(i64c(0), posSlot)
+	caSlot := b.NewAlloca(i8p) // the CA system store, opened on the first issuer
+	b.NewStore(tlsWinNull, caSlot)
+
+	der := b.NewCall(e.pemDER, pem, pemLen, dlen)
 	failBlk := fn.NewBlock(".fail")
 	haveBlk := fn.NewBlock(".have_der")
 	b.NewCondBr(e.notNull(b, der), haveBlk, failBlk)
 	failBlk.NewRet(i32c(0))
 
-	// Open an in-memory cert store for the chain (leaf + intermediates).
-	store := haveBlk.NewCall(e.certOpenStore,
-		constant.NewIntToPtr(i64c(winCertStoreProvMemory), i8p),
-		i32c(0), i64c(0), i32c(winCertStoreCreateNew), tlsWinNull)
-	storeNull := haveBlk.NewICmp(enum.IPredEQ, store, tlsWinNull)
-	noStore := fn.NewBlock(".no_store")
-	haveStore := fn.NewBlock(".have_store")
-	haveBlk.NewCondBr(storeNull, noStore, haveStore)
+	cert := haveBlk.NewCall(e.certCreate, i32c(winCertEncodingAny), der,
+		haveBlk.NewTrunc(haveBlk.NewLoad(irtypes.I64, dlen), irtypes.I32))
+	haveBlk.NewCall(e.free, der)
+	installBlk := fn.NewBlock(".install")
+	haveBlk.NewCondBr(e.notNull(haveBlk, cert), installBlk, failBlk)
 
-	// Without a store there is nowhere to put the issuers, and a credential built
-	// from the leaf alone is the incomplete chain this function exists to prevent.
-	// Serving one while reporting success is the failure mode, so the call fails.
-	noStore.NewCall(e.free, der)
-	noStore.NewRet(i32c(0))
+	// Release the previous leaf and invalidate the cached credential so the
+	// next session picks up the new certificate.
+	certP := e.field(installBlk, e.t.ctx, c, winCtxFCert)
+	oldCert := installBlk.NewLoad(i8p, certP)
+	dropOld := fn.NewBlock(".drop_old_cert")
+	storeNew := fn.NewBlock(".store_new_cert")
+	installBlk.NewCondBr(e.notNull(installBlk, oldCert), dropOld, storeNew)
+	dropOld.NewCall(e.certFree, oldCert)
+	dropOld.NewBr(storeNew)
+	storeNew.NewStore(cert, certP)
+	storeNew.NewStore(i32c(0), e.field(storeNew, e.t.ctx, c, winCtxFCredValid))
+	nextBlk := fn.NewBlock(".next_block")
+	storeNew.NewBr(nextBlk)
 
-	// Add the leaf DER to the store, getting a store-associated cert context.
-	outCertP := haveStore.NewAlloca(i8p)
-	haveStore.NewStore(tlsWinNull, outCertP)
-	addOK := haveStore.NewCall(e.certAddEnc, store, i32c(winCertEncodingAny), der,
-		haveStore.NewTrunc(haveStore.NewLoad(irtypes.I64, dlen), irtypes.I32),
-		i32c(winCertStoreAddAlways), outCertP)
-	haveStore.NewCall(e.free, der)
-	addFail := fn.NewBlock(".add_fail")
-	addOK2 := fn.NewBlock(".add_ok")
-	haveStore.NewCondBr(haveStore.NewICmp(enum.IPredNE, addOK, i32c(0)), addOK2, addFail)
-	addFail.NewCall(e.certCloseStore, store, i32c(winCertCloseStoreForce))
+	// Step past the END line of the block just decoded, then decode whatever
+	// block follows. No block after it means the bundle is done.
+	doneBlk := fn.NewBlock(".done")
+	after := nextBlk.NewCall(e.pemEnd, pem, pemLen, nextBlk.NewLoad(irtypes.I64, posSlot))
+	remaining := nextBlk.NewSub(pemLen, after)
+	noEnd := nextBlk.NewICmp(enum.IPredSLT, after, i64c(0))
+	noRest := nextBlk.NewICmp(enum.IPredSLE, remaining, i64c(0))
+	decodeBlk := fn.NewBlock(".decode_issuer")
+	nextBlk.NewCondBr(nextBlk.NewOr(noEnd, noRest), doneBlk, decodeBlk)
+	issuer := decodeBlk.NewCall(e.pemDER,
+		decodeBlk.NewGetElementPtr(irtypes.I8, pem, after), remaining, dlen)
+	decodeBlk.NewStore(after, posSlot)
+	storeBlk := fn.NewBlock(".ca_store")
+	decodeBlk.NewCondBr(e.notNull(decodeBlk, issuer), storeBlk, doneBlk)
+
+	// Open the CA store on the first issuer only.
+	ca := storeBlk.NewLoad(i8p, caSlot)
+	openBlk := fn.NewBlock(".open_ca_store")
+	addBlk := fn.NewBlock(".add_issuer")
+	storeBlk.NewCondBr(e.isNull(storeBlk, ca), openBlk, addBlk)
+	opened := openBlk.NewCall(e.certOpenStore,
+		constant.NewIntToPtr(i64c(winCertStoreProvSystemA), i8p), i32c(0), tlsWinNull,
+		i32c(winCertSystemStoreCurrentUser), e.caStoreName)
+	openBlk.NewStore(opened, caSlot)
+	openFail := fn.NewBlock(".open_ca_failed")
+	openBlk.NewCondBr(e.notNull(openBlk, opened), addBlk, openFail)
+	openFail.NewCall(e.free, issuer)
+	openFail.NewBr(failBlk)
+
+	caNow := addBlk.NewLoad(i8p, caSlot)
+	added := addBlk.NewCall(e.certAddEnc, caNow, i32c(winCertEncodingAny), issuer,
+		addBlk.NewTrunc(addBlk.NewLoad(irtypes.I64, dlen), irtypes.I32),
+		i32c(winCertStoreAddUseExisting), tlsWinNull)
+	addBlk.NewCall(e.free, issuer)
+	addFail := fn.NewBlock(".add_issuer_failed")
+	addBlk.NewCondBr(addBlk.NewICmp(enum.IPredNE, added, i32c(0)), nextBlk, addFail)
+	addFail.NewCall(e.certCloseStore, caNow, i32c(0))
 	addFail.NewBr(failBlk)
 
-	// Release previous cert, chain store, identity.
-	storeCert := addOK2.NewLoad(i8p, outCertP)
-	certP2 := e.field(addOK2, e.t.ctx, c, winCtxFCert)
-	oldCert := addOK2.NewLoad(i8p, certP2)
-	dropOldCert := fn.NewBlock(".drop_old_cert")
-	afterDropCert := fn.NewBlock(".after_drop_cert")
-	addOK2.NewCondBr(e.notNull(addOK2, oldCert), dropOldCert, afterDropCert)
-	dropOldCert.NewCall(e.certFree, oldCert)
-	dropOldCert.NewBr(afterDropCert)
-
-	// Close any previous chain store.
-	chainP := e.field(afterDropCert, e.t.ctx, c, winCtxFChain)
-	oldChain := afterDropCert.NewLoad(i8p, chainP)
-	closeOld := fn.NewBlock(".close_old_chain")
-	afterCloseOld := fn.NewBlock(".after_close_old")
-	afterDropCert.NewCondBr(e.notNull(afterDropCert, oldChain), closeOld, afterCloseOld)
-	closeOld.NewCall(e.certCloseStore, oldChain, i32c(winCertCloseStoreForce))
-	closeOld.NewBr(afterCloseOld)
-
-	// Invalidate the cached credential so the next session picks up the new cert.
-	credValidP := e.field(afterCloseOld, e.t.ctx, c, winCtxFCredValid)
-	afterCloseOld.NewStore(i32c(0), credValidP)
-
-	// Store the new leaf cert and chain store.
-	afterCloseOld.NewStore(storeCert, certP2)
-	afterCloseOld.NewStore(store, chainP)
-
-	// Loop: decode remaining PEM blocks and add intermediates to the chain store.
-	// CryptStringToBinaryA (via pemDER) searches forward for -----BEGIN, so running
-	// it over progressively shorter suffixes of the buffer walks the bundle — as
-	// long as each step lands strictly *inside* the block just decoded, past its
-	// BEGIN line so the next forward search cannot re-find it, and before its END
-	// so no following block is skipped.
-	//
-	// pemDER reports that offset directly as pdwSkip: the characters preceding the
-	// block's base64 body. Advancing by it is exact and holds for any preamble or
-	// armour, rather than inferring the block's text extent from the size of the
-	// DER it decoded to (T1612).
-	posSlot := b.NewAlloca(irtypes.I64)
-	skip2 := b.NewAlloca(irtypes.I64) // per-iteration skip, reused
-	leafSkip := afterCloseOld.NewLoad(irtypes.I64, skipSlot)
-	leafLt1 := afterCloseOld.NewICmp(enum.IPredULT, leafSkip, i64c(1))
-	afterCloseOld.NewStore(afterCloseOld.NewSelect(leafLt1, i64c(1), leafSkip), posSlot)
-	chainLoop := fn.NewBlock(".chain_loop")
-	afterCloseOld.NewBr(chainLoop)
-
-	pos := chainLoop.NewLoad(irtypes.I64, posSlot)
-	pemLen := fn.Params[2]
-	remaining := chainLoop.NewSub(pemLen, pos)
-	noMore := chainLoop.NewICmp(enum.IPredSLE, remaining, i64c(0))
-	doneBlk := fn.NewBlock(".done")
-	tryNext := fn.NewBlock(".try_next")
-	chainLoop.NewCondBr(noMore, doneBlk, tryNext)
-
-	pemOff := tryNext.NewGetElementPtr(irtypes.I8, fn.Params[1], pos)
-	dlen2 := b.NewAlloca(irtypes.I64) // entry-block alloca; reused each iteration
-	tryNext.NewStore(i64c(0), dlen2)
-	tryNext.NewStore(i64c(0), skip2)
-	der2 := tryNext.NewCall(e.pemDER, pemOff, remaining, dlen2, skip2)
-	der2Null := tryNext.NewICmp(enum.IPredEQ, der2, tlsWinNull)
-	addInter := fn.NewBlock(".add_inter")
-	tryNext.NewCondBr(der2Null, doneBlk, addInter)
-
-	// Add the issuer to the chain store (ppCertContext = NULL — we don't need it).
-	// A block that decoded as base64 but is not a certificate ends the chain here,
-	// the same way PEM_read_bio_X509 returning null ends OpenSSL's loop: the
-	// backends have to agree on where a bundle stops.
-	addRC := addInter.NewCall(e.certAddEnc, store, i32c(winCertEncodingAny), der2,
-		addInter.NewTrunc(addInter.NewLoad(irtypes.I64, dlen2), irtypes.I32),
-		i32c(winCertStoreAddAlways), tlsWinNull)
-	addInter.NewCall(e.free, der2)
-	advanceBlk := fn.NewBlock(".advance")
-	addInter.NewCondBr(addInter.NewICmp(enum.IPredNE, addRC, i32c(0)), advanceBlk, doneBlk)
-
-	// Advance by max(skip, 1). A well-formed block always has a BEGIN line, so skip
-	// is ~28 or more; the floor of 1 only guarantees the loop cannot spin should a
-	// backend ever hand back 0.
-	skip2V := advanceBlk.NewLoad(irtypes.I64, skip2)
-	advLt1 := advanceBlk.NewICmp(enum.IPredULT, skip2V, i64c(1))
-	adv := advanceBlk.NewSelect(advLt1, i64c(1), skip2V)
-	advanceBlk.NewStore(advanceBlk.NewAdd(pos, adv), posSlot)
-	advanceBlk.NewBr(chainLoop)
-
-	doneBlk.NewRet(i32c(1))
+	caEnd := doneBlk.NewLoad(i8p, caSlot)
+	closeBlk := fn.NewBlock(".close_ca_store")
+	okBlk := fn.NewBlock(".ok")
+	doneBlk.NewCondBr(e.notNull(doneBlk, caEnd), closeBlk, okBlk)
+	closeBlk.NewCall(e.certCloseStore, caEnd, i32c(0))
+	closeBlk.NewBr(okBlk)
+	okBlk.NewRet(i32c(1))
 	return fn
 }
 
@@ -413,8 +416,7 @@ func (e *tlsWinEmitter) emitCtxUseKey() *ir.Func {
 	decodeBlk := fn.NewBlock(".decode_pem")
 	b.NewCondBr(e.notNull(b, cert), decodeBlk, failBlk)
 
-	keySkipUnused := b.NewAlloca(irtypes.I64) // use_key reads only the first block
-	der := decodeBlk.NewCall(e.pemDER, fn.Params[1], fn.Params[2], dlen, keySkipUnused)
+	der := decodeBlk.NewCall(e.pemDER, fn.Params[1], fn.Params[2], dlen)
 	provBlk := fn.NewBlock(".open_provider")
 	decodeBlk.NewCondBr(e.notNull(decodeBlk, der), provBlk, failBlk)
 

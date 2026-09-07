@@ -1041,9 +1041,20 @@ imposed it on an operator whose certificate was perfectly correct would be the o
 fault — so dropping the issuers is not an option any backend takes. OpenSSL adds each
 one with `SSL_CTX_add_extra_chain_cert`, which takes ownership of the `X509`. Secure
 Transport keeps them beside the identity and passes `SSLSetCertificate` the
-`[identity, issuer...]` array it has always accepted. SChannel puts leaf and issuers in
-one in-memory `HCERTSTORE` and lets the store answer the issuer lookups chain building
-performs.
+`[identity, issuer...]` array it has always accepted. SChannel builds the chain it
+sends from the system certificate stores — the credential lives in `lsass`, where a
+memory store the leaf belongs to does not exist, and `CertGetCertificateChain` does not
+consult an end certificate's own store in any case — so the issuers are registered in
+the current user's Intermediate Certification Authorities store (`CA`), added with
+`CERT_STORE_ADD_USE_EXISTING` and never removed: an intermediate is not a trust anchor,
+and removing it on drop would strand another process serving the same certificate mid
+rolling-restart. It is the arrangement .NET makes on the same platform. On the
+receiving side a peer's issuers arrive in the memory store SChannel attaches to the
+remote certificate context, which the chain engine ignores for the same reason, so
+`__pal_tls_verify` hands that store and the caller's extra anchors to
+`CertGetCertificateChain` together through a collection store — while the
+untrusted-root waiver still consults the anchors alone, so a peer cannot vouch for
+itself by appending a root of its own.
 
 A bundle that cannot be installed whole is refused, never truncated. Whatever a backend
 needs in order to hold the issuers — an extra chain slot, a growable array, a certificate

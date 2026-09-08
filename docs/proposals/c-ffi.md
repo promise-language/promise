@@ -813,6 +813,9 @@ target_triple = "x86_64-unknown-linux-musl"
 minimum_os = "linux:5.4"
 runtime_profile = "promise-linux-amd64-musl"
 runtime_sha256 = "..."
+toolchain_profile = "promise-c-clang-22.1.0-r1"
+toolchain_profile_sha256 = "..."
+producer_host = "linux-amd64"
 compiler_id = "clang-22.1.0"
 compiler_sha256 = "..."
 resource_headers_sha256 = "..."
@@ -836,16 +839,36 @@ Their meaning and validation are:
 | `target_triple` | Canonical triple selected by the managed target profile; must agree with the active manifest target and every archive member's architecture/object format |
 | `minimum_os` | `<os>:<version>` deployment floor, e.g. `linux:5.4`, `macos:11.0`, or `windows:10.0`; must use the target OS and must not exceed the consuming build's deployment floor |
 | `runtime_profile` / `runtime_sha256` | Identifier and content digest of the managed runtime profile, including libc/CRT, compiler runtime, and linkage mode; both must match the consuming build |
-| `compiler_id` / `compiler_sha256` | Producer's pinned C frontend version identity and executable digest; both must match the managed frontend used for header validation |
-| `resource_headers_sha256` / `sysroot_sha256` | Managed payload digests for compiler resource headers and target sysroot; must match the consuming profile |
+| `toolchain_profile` / `toolchain_profile_sha256` | Host-independent managed C toolchain release/profile identity and its catalog-record content digest; both must match the consuming build |
+| `producer_host` | Host OS/architecture on which the producer's C frontend ran; selects its compiler payload in the toolchain profile, not the archive's target |
+| `compiler_id` / `compiler_sha256` | Producer frontend version identity and executable digest, recorded as provenance; must match the profile's entry for `producer_host`, not the consumer's executable |
+| `resource_headers_sha256` / `sysroot_sha256` | Host-independent content digests for the selected compiler resource-header tree and target sysroot; must match the consuming profile, not host-specific packaging digests |
 | `headers_sha256` | Digest of the resolved module-owned header dependency manifest, including all transitive non-sysroot includes; recomputed with Clang |
 | `compile` | Fully expanded header-validation configuration, using module-relative paths and explicit defaults; must equal the native entry's effective `c_standard`, `headers`, `include_dirs`, `defines`, and `compile_options` |
 
-`runtime_profile` identifiers and canonical target triples come from the managed toolchain
-catalog, not arbitrary strings interpreted by the linker. The catalog defines supported
-OS-version formats and deployment floors; comparisons are component-wise numeric, never
-lexical. The producer must build against the declared floor, not merely record the oldest
-OS on which someone happened to test it. The consuming profile must support that floor.
+`runtime_profile`, `toolchain_profile`, host identifiers, and canonical target triples come
+from the managed toolchain catalog, not arbitrary strings interpreted by the linker.
+Each immutable toolchain-profile record identifies one pinned frontend release/configuration
+and maps supported build hosts to their permitted compiler version and executable digest,
+with the targets each host payload supports. Its content digest covers the entire record.
+The consumer verifies its own frontend against the entry for its own host, and verifies the
+producer's recorded frontend against the entry for `producer_host`; both entries must support
+the selected target. Missing entries or mismatched digests fail. The producer executable
+need not be downloaded or run by the consumer. Matching provenance to the catalog does not
+prove that the producer actually used that executable.
+
+Thus one `linux-amd64` archive can be produced on Linux and consumed on macOS using distinct
+host executables from the same toolchain profile. Neither executable-byte equality across
+hosts nor equality of host packaging is an ABI requirement. Header-tree and target-sysroot
+identities use canonical content manifests (the path/digest encoding below, relative to each
+tree root); download archives and host installation prefixes are excluded from those identities.
+Local build caches still include the actual executing compiler digest as required by §13.1;
+archive acceptance and local cache reuse are separate decisions.
+
+The catalog defines supported OS-version formats and deployment floors; comparisons are
+component-wise numeric, never lexical. The producer must build against the declared floor,
+not merely record the oldest OS on which someone happened to test it. The consuming profile
+must support that floor.
 
 The header dependency manifest is a UTF-8 JSON array of `[module-relative-path, sha256]`
 pairs, sorted bytewise by slash-normalized path, serialized with no insignificant whitespace;
@@ -856,25 +879,29 @@ Producer options affecting exposed ABI (including enum size, character signednes
 packing) must be recorded and applied consistently to the compiled library and its headers.
 Unsupported layout/ABI options remain errors under §13.1, even if recorded in a sidecar.
 
-V1 deliberately requires exact managed toolchain/runtime identities instead of maintaining
-an implicit compatibility whitelist. Updating one requires rebuilding/revalidating the
+V1 deliberately requires exact host-independent toolchain-profile and target-runtime
+identities instead of maintaining an implicit compatibility whitelist across releases.
+Changing build hosts within one profile does not invalidate an archive. Updating a required
+profile identity requires rebuilding/revalidating the
 archive and publishing its matching headers and sidecar. The sidecar is metadata, not a
 build script: consumers do not execute producer commands, and undeclared native dependencies
 cannot be supplied through it. Final link options and dependency ordering remain owned by
 the native manifest (§13.1, §13.5).
 
 **The cost of that choice is that an archive's usable life is bounded by the toolchain it
-was built against.** Because the consuming build must match the producer's compiler,
-resource-header, sysroot, and runtime-profile digests exactly, any compiler release that
-bumps one of them invalidates every Path B archive built against the previous set. That is
-a hard failure at the sidecar check, not a warning and not a degraded mode, and no consumer
-can clear it locally: only the producer can, by rebuilding, re-running the §17 probes, and
-republishing headers and sidecar together. The exposure is worst precisely where this path
-gets chosen, since a library is vendored as a prebuilt because building it is expensive or
-slow, and those are the producers least able to turn a rebuild around quickly. A project
-that cannot accept that coupling should prefer Path A, where the vendored source is
-recompiled against whatever toolchain the consumer's compiler ships. §19 asks whether the
-resulting per-epoch churn is acceptable as specified.
+was built against.** Because the consuming build must match the producer's host-independent
+toolchain profile, resource-header, target-sysroot, and runtime-profile digests exactly,
+any compiler release that bumps one of them invalidates every Path B archive built against
+the previous set. That is a hard failure at the sidecar check, not a warning and not a
+degraded mode, and no consumer can clear it locally: only the producer can, by rebuilding,
+re-running the §17 probes, and republishing headers and sidecar together. What does *not*
+invalidate an archive is a consumer using a different supported host executable within the
+same profile, which is the whole point of keeping those identities host-independent. The
+exposure is worst precisely where this path gets chosen, since a library is vendored as a
+prebuilt because building it is expensive or slow, and those are the producers least able
+to turn a rebuild around quickly. A project that cannot accept that coupling should prefer
+Path A, where the vendored source is recompiled against whatever toolchain the consumer's
+compiler ships. §19 asks whether the resulting per-epoch churn is acceptable as specified.
 
 **What the build can prove:** byte checksums; sidecar schema; agreement with the active
 target/profile; parsed object architecture/format; reproducible header resolution and
@@ -887,6 +914,17 @@ the supplied headers, and that it truly runs on its declared minimum OS. Object 
 not uniformly encode those facts; a checksummed sidecar is not an attestation. Producers
 must run the ABI/runtime probes in §17 on matching target runners, including the minimum
 supported OS. Missing evidence cannot be replaced by claiming symbol-table verification.
+
+**What the catalog asserts:** that every host entry within one toolchain profile produces
+ABI-identical output for a given target. Host-independent identities depend on this, and
+neither the build nor the producer establishes it: both host executables verify against
+their own entries, so a host payload that was patched, or built from a different source
+revision, and still listed under the same profile would pass every check while diverging
+in what it emits. Falsifying that claim is a catalog obligation, discharged by running the
+§17 ABI probes for each host entry against every target it is listed as supporting, not
+by the single cross-host fixture that exercises one library. A profile record is immutable
+for this reason: correcting a host entry means publishing a new profile, which invalidates
+archives built against the old one exactly as any other identity change does.
 
 ### 13.4 Non-Goal for v1 — Dynamic Loading
 
@@ -1237,10 +1275,19 @@ integration tests. All advertised targets must pass these gates before being ena
   object formats; do not treat absent object metadata as proof of producer assertions.
   Exercise dependency-module propagation, duplicate imports, conflicting library versions,
   missing symbols, PAL collisions, and transitive static archive resolution.
+  Accept different producer/consumer executable hashes when each matches its own host entry
+  in the same toolchain profile. Reject unknown producer hosts, forged producer digests,
+  unlisted consumer executables, unsupported host/target pairs, and mismatched profile digests.
+  Verify local cache invalidation still uses the consumer's actual executable digest.
 - **Distribution:** build native-source and archive fixtures on clean hosts without a
   preinstalled C compiler/SDK; test managed acquisition, checksums, pre-staged offline builds,
   and actionable missing-payload failures. Cross-compile each supported host/target pair;
   run target binaries on matching CI runners as well as checking object architecture.
+  Produce a `linux-amd64` archive on Linux, then consume the exact same archive and sidecar
+  on both Linux and macOS targeting `linux-amd64`. Use different, catalog-approved host
+  compiler executables from the same profile and identical target/header content identities;
+  both builds must pass validation and their binaries must pass the ABI probes on Linux.
+  Do not rewrite the sidecar or require the producer's executable on the macOS consumer.
 - **Bindgen/targets:** resolve typedefs, conditionals, enums, `_Bool`, and character buffers
   using the manifest configuration. Ignore unselected callbacks/variadics in SQLite headers;
   reject selected ones without replacing output. Reject stale target-specific bindings.
@@ -1300,13 +1347,18 @@ inputs. These are proposed decisions for ratification, not unresolved implementa
   updates and security advisories? Tooling must not assume updates are infrequent or safe
   without re-running ABI and wrapper tests.
 - **Is per-epoch rebuild churn acceptable for prebuilt archives?** §13.3 ties every archive
-  to one exact toolchain and runtime identity, so a pinned-frontend or sysroot bump breaks
-  every Path B consumer until the producer republishes. Refusing an implicit compatibility
-  whitelist is right, since nothing would check it. The open question is whether a *declared*
-  compatibility range, validated by the §17 probes on each target it claims, is worth
-  specifying so an archive survives toolchain bumps that provably do not change the C ABI.
-  Doing nothing is a defensible answer, but it should be a decision rather than a
-  side effect, because it sets how long a published archive stays usable.
+  to one exact host-independent toolchain profile and target-runtime identity, so a
+  toolchain-profile or target-sysroot bump breaks every Path B consumer until the producer
+  republishes. Refusing an implicit compatibility whitelist is right, since nothing would
+  check it. The open question is whether a *declared* compatibility range, validated by the
+  §17 probes on each target it claims, is worth specifying so an archive survives toolchain
+  bumps that provably do not change the C ABI. Doing nothing is a defensible answer, but it
+  should be a decision rather than a side effect, because it sets how long a published
+  archive stays usable. The sidecar schema compounds the same question: with every listed
+  field required and unknown fields rejected, any field added after ratification is a
+  breaking change that forces every producer to republish, so the version rule should say
+  whether new fields may ever be optional within a schema version, or whether each addition
+  is deliberately an epoch-scale event.
 - **How does ratification split this document without duplicating facts?** §13 and §17
   currently state cache-key composition, link ordering, symbol-collision policy, and
   distribution payload rules in full. Those facts are owned by

@@ -191,11 +191,19 @@ Rules, enforced in sema and codegen using the `IsRaw()` field property:
   non-copyable Promise wrapper with `drop()` (§11). Ordinary statically dispatched methods
   with Promise bodies are permitted on foreign records, but user-written native methods
   and resource destructors are not.
-4. Size, field offsets, natural alignment, and trailing padding follow the exact target
+4. **Construction follows the pure-value-type rules.** A foreign record keeps the implicit
+  field constructor, which is what §9's output-buffer example uses, and every field must be
+  given a value there (rule 2). An explicit `new` may replace it for validation or computed
+  initialization, exactly as for any other type. A **failable** `new` is rejected, matching
+  the same restriction on pure value types and for the same reason: a copyable record with
+  no destructor has no partially-constructed state to unwind, so a raising constructor would
+  promise cleanup that does not exist. Validation that can fail belongs in the ordinary
+  Promise wrapper that owns the record, not in the record itself.
+5. Size, field offsets, natural alignment, and trailing padding follow the exact target
   triple's C ABI (§10), checked against pinned Clang layout probes. This includes nested
   records and fixed arrays. `CTimeval` above illustrates two `i64` fields, not a portable
   declaration of every platform's `struct timeval`; bindgen resolves actual header types.
-5. **Non-default packing/alignment is unsupported in v1.** Packed records, explicit alignment
+6. **Non-default packing/alignment is unsupported in v1.** Packed records, explicit alignment
   attributes, flexible array members, unions, and bitfields must be rejected by bindgen
   when required by the selected surface. No undocumented native-only packing mechanism
   exists. Use a C shim with supported scalar/pointer parameters instead.
@@ -230,14 +238,28 @@ copyability alone cannot make a C handle safe to use across goroutines.
   `offset_unchecked` are unavailable for `Void`. Fixed arrays are record fields only in v1.
 - **Constness:** `ConstRawPtr[T]` models `const T*`, not an immutable pointer variable.
   `RawPtr[T].as_const` explicitly weakens access. No reverse conversion or integer-to-pointer
-  constructor exists in v1. Casts cannot remove constness at any pointer depth; multi-level
-  pointer conversions are invariant except for the outer `as_const` operation. Constness
+  constructor exists in v1. Casts preserve the outer capability and obey the pointee
+  legality matrix below; multi-level pointer conversions are invariant. Constness
   is shallow, as in C: reading a stored mutable pointer does not freeze its own pointee.
 - **Addresses of Promise storage:** `addr_of_unchecked[T](T~ value) RawPtr[T]` and
   `addr_of_const_unchecked[T](T value) ConstRawPtr[T]` are compiler intrinsics, not addresses
-  of by-value parameter copies. They require an addressable local or field with identical
-  Promise-storage and C layout. Sema checks the mutable/shared borrow at the call site and
-  rejects temporaries and unsupported storage types. Codegen materializes stable storage
+  of by-value parameter copies. They require an addressable local, field, or fixed-array
+  element with identical Promise-storage and C layout. An element such as `buffer.bytes[index]`
+  must belong to an addressable fixed array, not a vector, slice, temporary, or user-defined
+  index getter. **A bare local fixed array qualifies on its own**, with no enclosing record:
+  `T[N]` of a C-ABI element type is already N contiguous elements at natural alignment, which
+  is what the C array it maps to requires, so `u8[4] buffer` and an all-`raw` record holding
+  `u8[4]` export identically. Wrapping a buffer in a record is a way to group it with related
+  fields or give it an owner that outlives the call, never a precondition for addressing it.
+  The element type still has to be a C-ABI type: `string[2]` is contiguous too, but its
+  elements are Promise values with no C counterpart, so it is rejected by the layout rule
+  above rather than by a separate one. Evaluate its base and index once and perform the ordinary bounds check before
+  producing the pointer: `0 <= index < N`, including for address-taking. No address can be
+  taken of a zero-length array element or of index `N`; a valid element pointer may be offset
+  to one-past without dereferencing it. The mutable form borrows the containing storage
+  mutably; the const form borrows it read-only. The pointer is to the element, not a copy or
+  pointer-to-array, and is valid only while the entire owner remains alive and stable.
+  Sema rejects temporaries and unsupported storage types. Codegen materializes stable storage
   (including coroutine-frame storage when needed); it must not retain stale SSA values
   across foreign writes. `CBool` (§9), not Promise `bool`, provides addressable C booleans.
 - **Caller obligations:** the owner must remain alive and its address stable for every use,
@@ -254,6 +276,35 @@ Violating an unchecked operation's preconditions can cause memory corruption, ra
 undefined behavior; runtime checks cannot prove these preconditions for arbitrary C memory.
 Keeping separate read-only pointers prevents accidental writes through shared exports,
 but does not make foreign memory access safe in general.
+
+### Cast Legality
+
+For `cast_unchecked[U]()` on a pointer with pointee `T`, the following matrix is exhaustive.
+Type equality means semantic identity after resolving aliases, not equal size or layout.
+A **pointer-free storage type** is a §9 scalar or an all-`raw` record whose fields, recursively
+including fixed arrays and nested records, contain no `RawPtr` or `ConstRawPtr`. `Void` is
+unsized and treated separately. Generic checks apply after substitution.
+
+| Source `T` and destination `U` | Permitted? |
+|---|---|
+| `T` and `U` are the same type | Yes, including pointer-bearing types and `Void` |
+| Both are pointer-free storage types | Yes, subject to the unchecked access obligations |
+| One is `Void` and the other is pointer-free storage | Yes; erasure/restoration does not prove the allocation's actual type |
+| Any other pair | No |
+
+`RawPtr[T]` returns `RawPtr[U]`; `ConstRawPtr[T]` returns `ConstRawPtr[U]`. No cast changes
+that outer capability. In particular, `RawPtr[ConstRawPtr[u8]]` cannot cast to
+`RawPtr[RawPtr[u8]]`, to `RawPtr[Void]`, or to a byte pointer. `RawPtr[Void]` cannot restore
+to a pointer-bearing record. A record containing const pointers cannot be reinterpreted as
+one containing mutable pointers, even through `Void` or an intermediate byte view.
+
+This deliberately limits generic allocation and memory-inspection APIs in v1. Pointer-bearing
+storage must be obtained through correctly typed addresses or header-validated C functions;
+use a typed C shim where the C API returns erased storage. A permitted scalar/record cast
+still does not authorize incompatible effective-type access, invalid scalar representations,
+or misalignment. These are caller obligations, not inferred from the legality matrix.
+Constness checks constrain Promise's pointer operations, not arbitrary C: a foreign function
+can still return a misqualified pointer or violate its own header contract (§8).
 
 ## 7. `` `extern `` — Widening the Symbol Registry
 
@@ -396,8 +447,58 @@ allocation, so it binds every C API used this way to accept the null-and-zero pa
 Read-only access is essential:
 vector literals may reside in read-only storage and writes would bypass copy-on-write.
 There is no mutable vector export or const-removing cast in v1. For C output, use initialized
-addressable scalars, an all-`raw` record containing a fixed buffer, or C-allocated memory
-with its matching C release function. No generic foreign allocator is introduced here.
+addressable scalars, a fixed array (bare local or `raw` record field, §6), or C-allocated
+memory with its matching C release function. No generic foreign allocator is introduced here.
+
+**Fixed output-buffer example.** Vendor this C function, declare the same prototype in its
+header, and select `fill_bytes` through the owning native entry's `symbols` list (§13):
+
+```c
+#include <stdint.h>
+
+void fill_bytes(uint8_t *dest, uint64_t capacity) {
+    for (uint64_t index = 0; index < capacity; ++index) {
+        dest[index] = (uint8_t)(index + 1);
+    }
+}
+```
+
+The Promise side passes the address of the first element of initialized fixed storage:
+
+```promise
+use cffi as _;
+
+type OutputBuffer {
+  u8[4] bytes `raw;
+}
+
+fill_bytes_unchecked(RawPtr[u8] dest, u64 capacity) `extern("fill_bytes");
+
+main() {
+  buffer := OutputBuffer(bytes: [0u8, 0u8, 0u8, 0u8]);
+  fill_bytes_unchecked(addr_of_unchecked(buffer.bytes[0]), 4u64);
+  assert(buffer.bytes[0] == 1u8);
+  assert(buffer.bytes[3] == 4u8);
+}
+```
+
+The record here groups the buffer with an owner that could carry other fields; it is not
+required. A bare local is the shorter form of the same export and behaves identically:
+
+```promise
+main() {
+  u8[4] buffer = [0u8; 4];
+  fill_bytes_unchecked(addr_of_unchecked(buffer[0]), 4u64);
+  assert(buffer[3] == 4u8);
+}
+```
+
+The function writes only within the supplied capacity and retains no pointer. The owner
+remains live and exclusively accessible for the call. `addr_of_unchecked(buffer.bytes)`
+is rejected because it would require a pointer-to-array; the element form yields `RawPtr[u8]`.
+For a zero-capacity call use `RawPtr[u8].null` only if the C function permits null with zero
+capacity; do not attempt to form an element address in empty storage. This example is also
+a required runtime fixture (§17), not a claim that the proposed API already compiles.
 
 ## 10. Calling Convention & Unsupported Shapes
 
@@ -467,19 +568,32 @@ onto a C resource with no new mechanism:
 ```promise
 use cffi as _;
 
-type Sqlite {
-  RawPtr[Void] db;
+type Sqlite `single_owner {
+  RawPtr[Void] _db;
 
   drop(~this) {
-    sqlite3_close_unchecked(this.db);
+    sqlite3_close_unchecked(this._db);
   }
 }
 ```
+
+This excerpt shows storage and destruction only; §16 supplies the explicit constructor
+that replaces implicit field construction. It is not a complete public wrapper by itself.
 
 - **Unique ownership applies to the wrapper, not to copied raw pointers.** Moving a `Sqlite`
   transfers its cleanup responsibility, but the wrapper author must prevent constructing
   two owners from the same handle, exposing the handle, or closing it early without clearing
   ownership. The move checker cannot infer these C-resource invariants.
+- **Owning wrappers are `single_owner`.** A destructor alone does not prevent container
+  operations from structurally duplicating a value. The existing `single_owner` capability
+  prohibits `copy`, `clone`, slicing, and nested-container operations that would duplicate
+  the handle, including through containing types. Raw pointers remain copyable borrowed
+  values; the owning wrapper supplies the non-duplication guarantee.
+- **Encapsulation includes construction.** An exported type's unprefixed members are public,
+  so the handle is `_db`, not `db`, and no public getter exposes it. A failable `new(path: ...)`
+  replaces the implicit field constructor: callers can acquire a database from a path, not
+  adopt an arbitrary pointer. Code inside the wrapper's module is trusted; a separate
+  importing module must be unable to read/write `_db` or construct an owner from a handle.
 - **A shared borrow (`db: Sqlite`) or mutable borrow (`db: Sqlite~`) means "use the handle
   without taking ownership,"** exactly as for any other type.
 - Every `` `extern `` call that operates on the handle stays inside the wrapping type's methods
@@ -603,7 +717,8 @@ declared inputs yield identical outputs.
 
 Header validation and generated-binding cache keys include the same configuration plus the
 selected symbols and generator version. Final executable/test cache keys include all native
-objects/archives, their order, link options, dependency graph, and linker/runtime identities.
+objects/archives, their ABI sidecars (§13.3), their order, link options, dependency graph,
+and linker/runtime identities.
 Changing only a header, define, sysroot, or archive must invalidate all affected downstream
 artifacts, not just the C compilation cache.
 
@@ -656,12 +771,18 @@ include_dirs = ["native/libfoo/include"]
 [native.libfoo.targets.linux-amd64]
 archive = "native/libfoo/linux-amd64/libfoo.a"
 sha256 = "..."
+abi = "native/libfoo/linux-amd64/abi.toml"
+abi_sha256 = "..."
 [native.libfoo.targets.macos-arm64]
 archive = "native/libfoo/macos-arm64/libfoo.a"
 sha256 = "..."
+abi = "native/libfoo/macos-arm64/abi.toml"
+abi_sha256 = "..."
 [native.libfoo.targets.windows-amd64]
 archive = "native/libfoo/windows-amd64/libfoo.lib"
 sha256 = "..."
+abi = "native/libfoo/windows-amd64/abi.toml"
+abi_sha256 = "..."
 ```
 
 This is explicitly **not** the recommended default: it requires a human (or that project's own
@@ -676,6 +797,96 @@ bitcode. Every non-platform dependency must be another declared, vendored native
 Linux archives must target the managed musl environment; Windows archives must match the
 managed MSVC-compatible CRT contract. Header checks cannot detect a dishonest or mistaken
 producer ABI declaration, so archive producers must run the cross-language probes in §17.
+
+#### Required ABI Sidecar
+
+Every archive target supplies `abi`, a module-relative path to a checked-in TOML sidecar,
+and `abi_sha256`, the SHA-256 of that file's exact bytes. These are required, not optional
+documentation. The sidecar binds itself to the archive and records the producer's effective
+configuration. Example for the Linux archive above (hash placeholders must be replaced by
+64 lowercase hexadecimal digits in a real manifest):
+
+```toml
+schema_version = 1
+archive_sha256 = "..."
+target_triple = "x86_64-unknown-linux-musl"
+minimum_os = "linux:5.4"
+runtime_profile = "promise-linux-amd64-musl"
+runtime_sha256 = "..."
+compiler_id = "clang-22.1.0"
+compiler_sha256 = "..."
+resource_headers_sha256 = "..."
+sysroot_sha256 = "..."
+headers_sha256 = "..."
+
+[compile]
+c_standard = "c11"
+headers = ["native/libfoo/include/foo.h"]
+include_dirs = ["native/libfoo/include"]
+defines = {}
+compile_options = []
+```
+
+All fields above are required in schema version 1; unknown fields or schema versions fail.
+Their meaning and validation are:
+
+| Field | Contract |
+|---|---|
+| `archive_sha256` | Must equal the target entry's `sha256` and the archive's actual byte digest; a sidecar cannot be reused for a different archive |
+| `target_triple` | Canonical triple selected by the managed target profile; must agree with the active manifest target and every archive member's architecture/object format |
+| `minimum_os` | `<os>:<version>` deployment floor, e.g. `linux:5.4`, `macos:11.0`, or `windows:10.0`; must use the target OS and must not exceed the consuming build's deployment floor |
+| `runtime_profile` / `runtime_sha256` | Identifier and content digest of the managed runtime profile, including libc/CRT, compiler runtime, and linkage mode; both must match the consuming build |
+| `compiler_id` / `compiler_sha256` | Producer's pinned C frontend version identity and executable digest; both must match the managed frontend used for header validation |
+| `resource_headers_sha256` / `sysroot_sha256` | Managed payload digests for compiler resource headers and target sysroot; must match the consuming profile |
+| `headers_sha256` | Digest of the resolved module-owned header dependency manifest, including all transitive non-sysroot includes; recomputed with Clang |
+| `compile` | Fully expanded header-validation configuration, using module-relative paths and explicit defaults; must equal the native entry's effective `c_standard`, `headers`, `include_dirs`, `defines`, and `compile_options` |
+
+`runtime_profile` identifiers and canonical target triples come from the managed toolchain
+catalog, not arbitrary strings interpreted by the linker. The catalog defines supported
+OS-version formats and deployment floors; comparisons are component-wise numeric, never
+lexical. The producer must build against the declared floor, not merely record the oldest
+OS on which someone happened to test it. The consuming profile must support that floor.
+
+The header dependency manifest is a UTF-8 JSON array of `[module-relative-path, sha256]`
+pairs, sorted bytewise by slash-normalized path, serialized with no insignificant whitespace;
+`headers_sha256` hashes those bytes. Each file digest hashes the actual header bytes.
+Sysroot/resource headers are covered by their payload digests. Include order and flags
+remain significant in `compile`; define tables compare by key/value, not TOML field order.
+Producer options affecting exposed ABI (including enum size, character signedness, or
+packing) must be recorded and applied consistently to the compiled library and its headers.
+Unsupported layout/ABI options remain errors under §13.1, even if recorded in a sidecar.
+
+V1 deliberately requires exact managed toolchain/runtime identities instead of maintaining
+an implicit compatibility whitelist. Updating one requires rebuilding/revalidating the
+archive and publishing its matching headers and sidecar. The sidecar is metadata, not a
+build script: consumers do not execute producer commands, and undeclared native dependencies
+cannot be supplied through it. Final link options and dependency ordering remain owned by
+the native manifest (§13.1, §13.5).
+
+**The cost of that choice is that an archive's usable life is bounded by the toolchain it
+was built against.** Because the consuming build must match the producer's compiler,
+resource-header, sysroot, and runtime-profile digests exactly, any compiler release that
+bumps one of them invalidates every Path B archive built against the previous set. That is
+a hard failure at the sidecar check, not a warning and not a degraded mode, and no consumer
+can clear it locally: only the producer can, by rebuilding, re-running the §17 probes, and
+republishing headers and sidecar together. The exposure is worst precisely where this path
+gets chosen, since a library is vendored as a prebuilt because building it is expensive or
+slow, and those are the producers least able to turn a rebuild around quickly. A project
+that cannot accept that coupling should prefer Path A, where the vendored source is
+recompiled against whatever toolchain the consumer's compiler ships. §19 asks whether the
+resulting per-epoch churn is acceptable as specified.
+
+**What the build can prove:** byte checksums; sidecar schema; agreement with the active
+target/profile; parsed object architecture/format; reproducible header resolution and
+configuration; and header-to-Promise ABI checks. When object formats record deployment
+versions or runtime/link directives, contradictory values are rejected too.
+
+**What remains a producer assertion:** that these bytes were actually compiled with the
+declared flags, that unrecorded runtime assumptions are absent, that the archive honors
+the supplied headers, and that it truly runs on its declared minimum OS. Object files do
+not uniformly encode those facts; a checksummed sidecar is not an attestation. Producers
+must run the ABI/runtime probes in §17 on matching target runners, including the minimum
+supported OS. Missing evidence cannot be replaced by claiming symbol-table verification.
 
 ### 13.4 Non-Goal for v1 — Dynamic Loading
 
@@ -873,10 +1084,10 @@ type SqliteError is error {
   string message;
 }
 
-type Sqlite {
-  RawPtr[Void] db;
+type Sqlite `single_owner {
+  RawPtr[Void] _db;
 
-  open!(string path) Sqlite `factory {
+  new!(~this, string path) {
     cpath := CString.from(path);
     slot := RawPtr[Void].null;
     rc := sqlite3_open_unchecked(cpath.ptr_unchecked, addr_of_unchecked(slot));
@@ -890,14 +1101,14 @@ type Sqlite {
       }
       raise SqliteError(message: move message);
     }
-    return Sqlite(db: slot);
+    this._db = slot;
   }
 
   exec!(~this, string sql) {
     cs := CString.from(sql);
-    rc := sqlite_exec_no_callback_unchecked(this.db, cs.ptr_unchecked);
+    rc := sqlite_exec_no_callback_unchecked(this._db, cs.ptr_unchecked);
     if rc != 0 {
-      msg := from_c_string_unchecked(sqlite3_errmsg_unchecked(this.db)) ? {
+      msg := from_c_string_unchecked(sqlite3_errmsg_unchecked(this._db)) ? {
         "sqlite3 error {rc}";
       };
       raise SqliteError(message: move msg);
@@ -905,7 +1116,7 @@ type Sqlite {
   }
 
   drop(~this) {
-    sqlite3_close_unchecked(this.db);
+    sqlite3_close_unchecked(this._db);
   }
 }
 ```
@@ -914,7 +1125,7 @@ Application code:
 
 ```promise
 main!() {
-  db := Sqlite.open("app.db");
+  db := Sqlite(path: "app.db");
   db.exec("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)");
 }
 ```
@@ -922,9 +1133,13 @@ main!() {
 The slot holds a `sqlite3*`; taking its address passes `sqlite3**`. After the call the
 updated slot itself is the handle, so there is no extra `read_unchecked()`. On open failure,
 SQLite may still supply a handle: its diagnostic is copied before closing it and raising.
+Only successful acquisition assigns `_db`; failure cleanup does not rely on a destructor
+running for an incomplete instance. The explicit `new` suppresses the field-based constructor,
+so `Sqlite(_db: handle)` is not an alternate acquisition path, even inside the module.
 The mutable slot borrow ends with the call, and SQLite does not retain that slot address.
 Likewise, neither open nor the callback-free exec retains the `CString` input.
 
+`single_owner` prevents structural duplication of the wrapper, including via containers.
 `drop` closes the handle once because the wrapper never duplicates ownership or exposes
 statements, backups, or blob handles that could make close return `SQLITE_BUSY`. This is
 a wrapper invariant to test, not a general property of SQLite close. Adding such APIs
@@ -933,7 +1148,10 @@ sendable nor sharable, and its mutating method prevents concurrent shared access
 
 These files are proposed integration fixtures, not claims that the unimplemented `cffi`
 API compiles today. When packaged as a reusable module, only the wrapper API becomes
-`public`, with `doc` annotations; raw bindings and the handle remain private. Application
+`public`, with `doc` annotations on the exported type, constructor, and methods; raw bindings
+and `_db` remain private. The public constructor accepts only a path, never a raw handle.
+Cross-module access tests are required; same-module examples do not establish encapsulation.
+Application
 safety depends on the audited invariants above (§8). The example must become executable
 as part of implementing this proposal (§17).
 
@@ -946,12 +1164,16 @@ expected before shipping):
   `` `raw `` struct not wrapped in `RawPtr[T]` (§10), and Promise's own `int`/`uint` (must use
   explicit-width types).
 - A `raw` field outside the storage set, a mixed-layout or empty foreign record, unsupported
-  inheritance/packing/alignment, or a foreign record with `drop()` (§5). Arbitrary user
-  `native` declarations remain rejected under the existing annotation contract.
+  inheritance/packing/alignment, or a foreign record with `drop()` or a failable `new` (§5).
+  Arbitrary user `native` declarations remain rejected under the existing annotation contract.
 - Either pointer type with an invalid pointee, a write through a read-only pointer, any
-  const-removing cast, or dereferencing/arithmetic on `Void` (§6). Taking a mutable address
+  cast forbidden by §6's matrix, or dereferencing/arithmetic on `Void` (§6). Taking a mutable address
   of a temporary, or of a binding held only by a shared (read-only) borrow, is rejected, as
   is exporting storage whose Promise layout differs from its C counterpart (§6, §9).
+  Address-taking of a fixed-array element retains ordinary bounds checking; known invalid
+  indices fail statically where the existing array rules require, otherwise they panic
+  before any pointer is formed. Vector elements and temporary/index-getter results are
+  not an alternate mutable-buffer export.
 - Missing explicit `cffi` imports or missing `_unchecked` suffixes on user-bound extern
   declarations (§8). Pointer escape/lifetime correctness is not claimed as a diagnostic.
 - An `extern` symbol absent from the owning module's active allow-listed definitions,
@@ -960,6 +1182,9 @@ expected before shipping):
 - Missing/incorrect managed toolchain payloads, archive checksum/architecture/runtime
   mismatches, escaping include paths, unknown targets, ambiguous providers, dependency
   cycles, and conflicting native/PAL symbols (§13).
+  Archive targets also reject missing or malformed ABI sidecars, checksum mismatches,
+  stale header/configuration digests, incompatible deployment floors, and toolchain/runtime
+  profile mismatches. These checks do not verify unencoded producer assertions (§13.3).
 - A `[native]`/`` `extern `` combination reachable from a `wasm32-wasi`/`wasm32-web` build target
   without a `` `target(cond) `` split excluding it (§14).
 - Bindgen fails atomically with a dependency-path diagnostic when a selected symbol or its
@@ -974,16 +1199,30 @@ integration tests. All advertised targets must pass these gates before being ena
   records, arrays, scalars, and pointers; round-trip signed/unsigned narrow integers,
   floats, `CBool`, nulls, and pointer out-parameters through compiled C. Check call and
   declaration attributes in IR, on AMD64 and ARM64 including Apple-specific behavior.
-- **Safety rejection:** read-only writes, nested const stripping, unsupported pointees,
+- **Safety rejection:** read-only writes, casts outside §6's matrix, unsupported pointees,
   callback placeholders, invalid `native`, raw destructors, by-value records, shared
   mutable exports, and `Vector[bool]` exports fail. Valid read-only literal-vector access
   succeeds without writing read-only pages or bypassing copy-on-write.
+  Exercise identity casts, pointer-free scalar/record casts, and their `Void` round-trips
+  with outer constness preserved. Reject direct nested qualification changes and erasure
+  or byte-view casts involving pointer-bearing records/pointees, including generic cases.
+  Run both of §9's output-buffer fixtures, the `raw` record and the bare local array, and
+  check every byte of each; they must produce identical exports. Test read-only element addresses,
+  mutable-address rejection under a shared borrow, negative/out-of-range indices, empty
+  arrays, temporary arrays, vector elements, and one-time evaluation of base/index expressions.
+  Bounds failures must happen before C is called; C must observe and update the original
+  array element storage rather than a temporary copy.
 - **Ownership:** execute §16 with a temporary database; cover successful open/exec/drop,
   invalid SQL, embedded-NUL rejection, failed opens returning null and non-null handles,
   and failed error-text conversion. Use deterministic C test doubles where failure
   injection is needed. Count acquired/released C handles and allocations explicitly;
   Promise's leak counter alone cannot establish zero C leaks. Check moving the wrapper
-  closes exactly once and no application-visible raw handle can escape the wrapper API.
+  closes exactly once. Reject `copy`/`clone` on the `single_owner` wrapper and duplication
+  through vector slicing, containing records, and nested-container operations; nonduplicating
+  moves remain valid. Package the wrapper as a public module with documented public members
+  and compile a separate consumer: path construction and `exec` succeed, while `_db` reads,
+  writes, `Sqlite(_db: handle)`, and access to private extern declarations fail. Count exactly
+  one close after an owner moves across an ordinary function boundary.
 - **Execution:** a blocking C fixture signals entry using an explicit synchronization
   primitive while another goroutine makes progress with one P; no sleeps order the test.
   Verify multiple concurrent foreign waits do not exhaust all runnable workers. Verify
@@ -991,6 +1230,11 @@ integration tests. All advertised targets must pass these gates before being ena
   out-parameters preventing cross-goroutine contamination.
 - **Build/cache:** header-only changes, include-search resolution changes, defines, compiler
   and sysroot digests, mode, archive content, and link options invalidate affected results.
+  Include sidecar bytes and every ABI/configuration field in invalidation tests. Reject a
+  sidecar attached to the wrong archive, a stale header digest, a changed define/include
+  order, unknown schema fields/versions, mismatched toolchain/runtime profiles, and an OS
+  floor newer than the consumer's. Validate both success and rejection paths on all archive
+  object formats; do not treat absent object metadata as proof of producer assertions.
   Exercise dependency-module propagation, duplicate imports, conflicting library versions,
   missing symbols, PAL collisions, and transitive static archive resolution.
 - **Distribution:** build native-source and archive fixtures on clean hosts without a
@@ -1055,6 +1299,14 @@ inputs. These are proposed decisions for ratification, not unresolved implementa
   affected bindings in one reviewed change. Should later package tooling automate those
   updates and security advisories? Tooling must not assume updates are infrequent or safe
   without re-running ABI and wrapper tests.
+- **Is per-epoch rebuild churn acceptable for prebuilt archives?** §13.3 ties every archive
+  to one exact toolchain and runtime identity, so a pinned-frontend or sysroot bump breaks
+  every Path B consumer until the producer republishes. Refusing an implicit compatibility
+  whitelist is right, since nothing would check it. The open question is whether a *declared*
+  compatibility range, validated by the §17 probes on each target it claims, is worth
+  specifying so an archive survives toolchain bumps that provably do not change the C ABI.
+  Doing nothing is a defensible answer, but it should be a decision rather than a
+  side effect, because it sets how long a published archive stays usable.
 - **How does ratification split this document without duplicating facts?** §13 and §17
   currently state cache-key composition, link ordering, symbol-collision policy, and
   distribution payload rules in full. Those facts are owned by

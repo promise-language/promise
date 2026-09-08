@@ -56,6 +56,60 @@ const (
 	EnqueueDropped = 1 // dropped per the subscription's overflow policy
 )
 
+// Internal delivery primitives (§19 phase 2). These never cross the wasm/JS
+// boundary — only ExportEnqueue does that — but they still get one name here
+// rather than an ad hoc string at each call site, since web.pr and codegen's
+// emitters both have to agree on them. Each subscription is backed by a real
+// Channel[i32] (promise_channel_new); promise_web_enqueue writes into it and
+// wakes parked receivers the same way channel send already does, so the
+// Promise-side consumer is just ordinary `for e in events` — no invented
+// wait/wake primitive, no new grammar.
+const (
+	// SubscribeFunc allocates a subscription's backing Channel[i32] and
+	// returns its sub_id, or -1 if the table is full.
+	//
+	//	promise_web_subscribe(capacity: i32, policy: i32) -> i32
+	SubscribeFunc = "promise_web_subscribe"
+
+	// ChannelFunc returns a subscription's backing channel pointer, for
+	// web.pr to wrap as a proper Channel[i32] value. Null if sub_id is out
+	// of range.
+	//
+	//	promise_web_channel(sub_id: i32) -> i8* (Channel[i32])
+	ChannelFunc = "promise_web_channel"
+
+	// UnsubscribeFunc marks a subscription's slot free so
+	// promise_web_enqueue stops touching its channel. Must be called before
+	// the subscription's Channel[i32] value is dropped (§12).
+	//
+	//	promise_web_unsubscribe(sub_id: i32) -> void
+	UnsubscribeFunc = "promise_web_unsubscribe"
+
+	// SubscriptionDroppedFunc reads a subscription's drop count (§8.1 —
+	// "readable (subscription.dropped)").
+	//
+	//	promise_web_subscription_dropped(sub_id: i32) -> i32
+	SubscriptionDroppedFunc = "promise_web_subscription_dropped"
+)
+
+// Queue overflow policies (§8.1), selected per subscription at subscribe
+// time.
+const (
+	// QueueDropOldest evicts the oldest queued event to make room. Default —
+	// right for positional/state events where the newest value is the truth.
+	QueueDropOldest = 0
+	// QueueDropNewest rejects the arriving event, keeping what's already
+	// queued. Right when early events matter more than late ones.
+	QueueDropNewest = 1
+	// QueueCoalesce overwrites the most recently queued event in place.
+	// Right for mousemove/resize/scroll; wrong for click, so it is opt-in.
+	QueueCoalesce = 2
+)
+
+// DefaultQueueCapacity is used when a subscription requests capacity <= 0
+// (§8.1: "Default capacity 256").
+const DefaultQueueCapacity = 256
+
 // SchedulePumpImport is the host function the runtime calls to schedule its own
 // continuation when a pump exhausts its budget with work still pending.
 //

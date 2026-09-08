@@ -1,0 +1,45 @@
+// modules/web/web_test.pr — web-only tests (docs/web-apps.md §17.2:
+// "Promise-level tests for the queue, overflow policies, and subscription
+// close semantics — these are ordinary channel behaviour and testable
+// natively").
+//
+// Each test carries a bare `target(web) tag, not `test(exclude: ...)`: web.pr's
+// declarations are dropped from the AST entirely on every other target before
+// sema runs (its own header comment: "referencing it from a native or
+// wasm32-wasi program is a plain compile error, not a link failure"), so a
+// test body that calls `events`/`document` must be dropped the same way, pre-
+// sema — `test(exclude: ...)` only skips *running* a test post-compile, which
+// is too late here (examples/11_wasm/web_console.pr's
+// `test_console_log_links() `test `target(web)` is the established pattern
+// this follows).
+test_subscribe_and_close() `test `target(web) {
+  sub := events(document.body, ["click"]);
+  assert(sub.dropped == 0, "freshly subscribed subscription has dropped nothing");
+  sub.close();
+}
+
+// The Node test harness stubs every unrecognized promise_env import as a
+// no-op returning 0 (§17: "it would happily pass a build whose JS→WASM
+// direction is entirely wrong"), so document_get_body's actual return value
+// here is meaningless — this only checks that querying .body compiles and
+// runs without crashing. The real behaviour (a distinct element handle) is a
+// browser integration test (§17, point 3), not something this harness can see.
+test_document_body_element() `test `target(web) {
+  el := document.body;
+  assert(el._handle >= 0, "body handle is a plain (stubbed) i32 here");
+}
+
+// web.on itself is NOT tested here: it spawns a goroutine that parks forever
+// on a subscription it never exposes a way to close (§8 — that's inherent to
+// the sugar, not a gap), and this file's own header explains why that can't
+// be a batch `test`: sched_wasm_web.go's reactor "idle-is-not-deadlock" drain
+// (§4.3) only wraps a real `main()` (wrapMainWithScheduler) — every batch
+// test binary runs via promise_sched_coop_run instead, which always expects
+// to reach completion (compiler.go's GenerateTestMain calls it unconditionally,
+// regardless of target), so a goroutine still parked when the test function
+// returns is correctly reported as a deadlock, not tolerated as idle. on()'s
+// own type-checking (the move-closure-into-go pattern, T1640/T1634) is still
+// exercised: this whole file is compiled and sema/ownership-checked as part
+// of every run here, including on()'s body. Runtime validation of on() needs
+// a real `main()`-based reactor program — a headless browser integration
+// test (§17, point 3), not this harness.

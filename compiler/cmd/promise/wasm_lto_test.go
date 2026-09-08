@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // TestWasmCRTObjectsLandUnderPromiseCache: the allocator and math objects every
@@ -111,5 +113,27 @@ func TestWasmLinkWebTargetExportsInitialize(t *testing.T) {
 	}
 	if strings.Contains(joined, "--export=_start") {
 		t.Errorf("wasm32-web link should not export _start (only _initialize). Args: %v", args)
+	}
+}
+
+// TestWasmLinkWebTargetExportsWebPump verifies that the wasm32-web target
+// exports promise_web_pump — the bounded pump every JS callback calls after
+// delivering an event (docs/wasm-web-callbacks.md §14, §19 phase 1) — and
+// that wasm32-wasi (unaffected by the reactor design, §18) does not.
+func TestWasmLinkWebTargetExportsWebPump(t *testing.T) {
+	webArgs, err := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-web", "out.wasm", true)
+	if err != nil {
+		t.Fatalf("buildWasmLinkArgs: %v", err)
+	}
+	if !strings.Contains(strings.Join(webArgs, " "), "--export="+wasmweb.ExportPump) {
+		t.Errorf("wasm32-web link does not export %s. Args: %v", wasmweb.ExportPump, webArgs)
+	}
+
+	wasiArgs, err := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-wasi", "out.wasm", true)
+	if err != nil {
+		t.Fatalf("buildWasmLinkArgs: %v", err)
+	}
+	if strings.Contains(strings.Join(wasiArgs, " "), wasmweb.ExportPump) {
+		t.Errorf("wasm32-wasi link should not reference %s. Args: %v", wasmweb.ExportPump, wasiArgs)
 	}
 }

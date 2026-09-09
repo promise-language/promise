@@ -229,20 +229,27 @@ func checkStale(input hookInput) string {
 		return ""
 	}
 
+	// The recovery command a staleness message names must be one this same
+	// binary will accept from wherever the caller actually is (T1813). The
+	// absolute path to the repo's own make script qualifies from any cwd; a
+	// bare ./make only works — and is only allowed — at the repo root, so it
+	// is offered second and labelled with where it applies. Both spellings
+	// come from common.MakeCommands, shared with the tools' own staleness
+	// message; TestCheckStaleFromForeignRoot is what holds the suggestion and
+	// isRepoMakeChain's acceptance together, by re-deriving the remedy from
+	// this message and requiring the guard to accept it.
+	absMake, hint := common.MakeCommands(root)
+
 	// Stale — allow Edit/Write through. Edit gates are loaded from disk
 	// at runtime (tools/gates/edit_gates.json), so the stale binary's gate
 	// enforcement is still correct. Blocking these creates a deadlock when
 	// the agent needs to fix a compilation error in tools code (T0276).
 	if tool := detectTool(input); tool == "edit" || tool == "write" {
-		fmt.Fprintf(os.Stderr, "guard: stale binary — edit/write gates still enforced (run ./make to rebuild)\n")
+		fmt.Fprintf(os.Stderr, "guard: stale binary — edit/write gates still enforced (run %s to rebuild)\n", absMake)
 		return ""
 	}
 
-	makeCmd := "./make"
-	if runtime.GOOS == "windows" {
-		makeCmd = ".\\make.cmd"
-	}
-	return "guard binary is stale — run " + makeCmd + " to rebuild tools before continuing"
+	return fmt.Sprintf("guard binary is stale — rebuild before continuing: %s (or %s from the repo root)", absMake, hint)
 }
 
 // isRepoMakeChain reports whether the given command chain contains an
@@ -254,12 +261,12 @@ func checkStale(input hookInput) string {
 // `.\make.cmd`, or the absolute path to the repo's make script. A bare
 // `make` (no `./`) is not a Promise bootstrap invocation and is rejected.
 //
-// cwd may be empty if the hook input lacks CWD; in that case we can't verify
-// resolution and refuse to whitelist.
+// cwd may be empty if the hook input lacks CWD. That makes the cwd unknown,
+// not disqualifying (T1813): an absolute path to the repo's own make script is
+// unambiguous without it and is still accepted, while the relative forms are
+// skipped rather than resolved against a guess — otherwise stale tools wedge
+// the session with no accepted way to rebuild.
 func isRepoMakeChain(command, cwd, root string) bool {
-	if cwd == "" {
-		return false
-	}
 	expectedMake := filepath.Join(root, "make")
 	expectedExe := filepath.Join(root, "make.exe")
 	expectedCmd := filepath.Join(root, "make.cmd")
@@ -271,12 +278,8 @@ func isRepoMakeChain(command, cwd, root string) bool {
 			continue
 		}
 		// `cd <path>` updates cwd for subsequent subcommands in the same chain.
-		if tokens[0] == "cd" && len(tokens) >= 2 {
-			target := stripQuotes(tokens[1])
-			if !filepath.IsAbs(target) {
-				target = filepath.Join(cwd, target)
-			}
-			cwd = filepath.Clean(target)
+		if next, isCd := applyCd(tokens, cwd); isCd {
+			cwd = next
 			continue
 		}
 		first := tokens[0]
@@ -299,6 +302,9 @@ func isRepoMakeChain(command, cwd, root string) bool {
 			basename = "make.cmd"
 		}
 		if basename != "" {
+			if cwd == "" {
+				continue
+			}
 			resolved := filepath.Clean(filepath.Join(cwd, basename))
 			if resolved == filepath.Join(root, basename) {
 				return true
@@ -539,6 +545,31 @@ func splitCommands(cmd string) []string {
 	return strings.Split(s, "\n")
 }
 
+// applyCd resolves the cwd a `cd <path>` leaves behind, reporting false when
+// the sub-command is not a cd at all. Both chain walkers (checkAll and
+// isRepoMakeChain) track cwd across a chain, and they must agree on it: one
+// decides which directory a git command is scoped to, the other whether a
+// `./make` is this repo's.
+//
+// An unknown cwd stays unknown. Joining a relative target against "" yields a
+// root-relative path naming some directory neither the caller nor the guard
+// meant, and a verdict about the wrong directory is the T1813 failure in
+// miniature — there it made the named remedy unrunnable; here it would make a
+// git command look like it runs outside the project and skip branch hygiene.
+func applyCd(tokens []string, cwd string) (string, bool) {
+	if len(tokens) < 2 || tokens[0] != "cd" {
+		return cwd, false
+	}
+	target := stripQuotes(tokens[1])
+	if !filepath.IsAbs(target) {
+		if cwd == "" {
+			return "", true
+		}
+		target = filepath.Join(cwd, target)
+	}
+	return filepath.Clean(target), true
+}
+
 // checkAll checks all sub-commands. Returns the first deny reason, or "".
 //
 // cwd is the shell's working directory; a leading `cd <path>` in the chain
@@ -554,12 +585,8 @@ func checkAll(cmd, cwd string) string {
 		// Track `cd <path>` so the next sub-command's cwd is correct (e.g.
 		// `cd flow && git checkout <sha>` must resolve git in the submodule).
 		tokens := tokenize(trimmed)
-		if len(tokens) >= 2 && tokens[0] == "cd" {
-			target := stripQuotes(tokens[1])
-			if !filepath.IsAbs(target) {
-				target = filepath.Join(cwd, target)
-			}
-			cwd = filepath.Clean(target)
+		if next, isCd := applyCd(tokens, cwd); isCd {
+			cwd = next
 		}
 		if reason := checkSingle(trimmed, cwd); reason != "" {
 			return reason

@@ -313,10 +313,14 @@ check here is cheap enough to run on each commit — the expensive suites live i
 The meta-builder (`./make`) computes an FNV hash of all `.go` and `go.mod` files under `tools/` and injects it into each binary at compile time via `-X main.sourceHash=<hash>`. When a tool binary runs, it recomputes the hash and compares. If they differ, the binary prints:
 
 ```
-tools source has changed — run: ./make (or /abs/path/to/repo/make)
+tools source has changed — rebuild before continuing: /abs/path/to/repo/make (or ./make from the repo root)
 ```
 
 and exits with code 1. This ensures you never accidentally use a stale tool after editing the build system.
+
+The `bin/guard` PreToolUse hook applies the same check per tool call. While the guard is stale it blocks Bash but lets Edit/Write through — its gates are read from disk at runtime, so a stale binary still enforces them correctly (T0276) — and it lifts the stale block for any command chain that invokes the repository's own make script, including wrapped forms such as `./make && go test ./...`, `./make 2>&1 | tail`, and `cd <repo> && ./make`. Only the stale block is lifted: every sub-command in such a chain still goes through the ordinary per-command checks, so a destructive second half is refused exactly as it would be on its own.
+
+The rule both messages follow: **the recovery command a staleness message names must be one the same binary will accept from the caller's cwd.** That is why each leads with the absolute path — it is unambiguous from any directory, whereas a bare `./make` is valid only at the repo root and is offered second, labelled with where it applies. Both spellings come from one helper (`common.MakeCommands`), so what a message suggests cannot drift from what the guard accepts. Which repository the verdict is about is the build-time stamp, never the working directory — see [Which Repository a Tool Acts On](#which-repository-a-tool-acts-on).
 
 ## Previous Build System
 

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -469,6 +470,26 @@ func TestCheckStaleAllowsMake(t *testing.T) {
 		t.Errorf("expected 'cd root && ./make' to be allowed when stale, got: %s", reason)
 	}
 
+	// Wrapped forms at the root: rebuilding is rarely the whole command, and
+	// refusing the wrapper leaves the named remedy as the only accepted
+	// spelling of it (T1813).
+	if reason := checkStale(mk("./make && go test ./...", root)); reason != "" {
+		t.Errorf("expected './make && go test ./...' to be allowed when stale, got: %s", reason)
+	}
+	if reason := checkStale(mk("./make 2>&1 | tail", root)); reason != "" {
+		t.Errorf("expected './make 2>&1 | tail' to be allowed when stale, got: %s", reason)
+	}
+
+	// Wrapping only lifts the *stale* block. Every sub-command still faces the
+	// ordinary per-command checks, so a rebuild prefix is not a way to smuggle
+	// a blocked command through.
+	if reason := checkStale(mk("./make && git push", root)); reason != "" {
+		t.Errorf("expected './make && git push' to clear the stale gate, got: %s", reason)
+	}
+	if checkAll("./make && git push", root) == "" {
+		t.Error("expected './make && git push' to be blocked by the per-command checks")
+	}
+
 	// ./make from outside the repo root must NOT be allowed (e.g. cwd has
 	// drifted into a subdirectory that happens to contain a stray ./make).
 	if reason := checkStale(mk("./make", filepath.Join(root, "tools", "build"))); reason == "" {
@@ -759,8 +780,15 @@ func TestIsRepoMakeChain(t *testing.T) {
 		{"bare make", "make", root, false},
 		// Blocked: a stray ./make that's not the repo's.
 		{"./make in other via cd", "cd " + other + " && ./make foo", root, false},
-		// Blocked: empty cwd — can't verify.
+		// Allowed: an absolute path to the repo's make script needs no cwd to
+		// resolve, so an unknown cwd does not disqualify it (T1813).
+		{"abs path, empty cwd", filepath.Join(root, "make"), "", true},
+		{"abs path from foreign root", filepath.Join(root, "make"), other, true},
+		{"cd root && ./make, empty cwd", "cd " + root + " && ./make", "", true},
+
+		// Blocked: relative forms with an unknown cwd — nothing to resolve against.
 		{"empty cwd", "./make", "", false},
+		{"relative cd, empty cwd", "cd tools && ./make", "", false},
 		// Blocked: empty command.
 		{"empty cmd", "", root, false},
 		// Other commands without make in chain — false.
@@ -774,6 +802,290 @@ func TestIsRepoMakeChain(t *testing.T) {
 					tt.cmd, tt.cwd, root, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCheckStaleFromForeignRoot is the T1813 scenario: the session's cwd is a
+// scratch directory that itself looks like a Promise repo (it has a
+// catalog.toml). The staleness verdict must still be about the repo the guard
+// was built for, and — the load-bearing part — the recovery command the deny
+// message names must be one this same binary accepts from that cwd. A message
+// naming a command the guard then refuses is what wedged the session.
+func TestCheckStaleFromForeignRoot(t *testing.T) {
+	old := sourceHash
+	sourceHash = "stale-hash-for-test"
+	defer func() { sourceHash = old }()
+
+	root, err := common.RootForTests()
+	if err != nil {
+		t.Fatalf("find repo root: %v", err)
+	}
+
+	// A scratch tree that a cwd walk would mistake for the repository:
+	// catalog.toml marker, an empty tools tree, a bin/.
+	scratch := t.TempDir()
+	if err := os.WriteFile(filepath.Join(scratch, "catalog.toml"), []byte("# scratch\n"), 0o644); err != nil {
+		t.Fatalf("write scratch catalog.toml: %v", err)
+	}
+	for _, dir := range []string{filepath.Join("tools", "build", "cmd"), "bin"} {
+		if err := os.MkdirAll(filepath.Join(scratch, dir), 0o755); err != nil {
+			t.Fatalf("mkdir scratch %s: %v", dir, err)
+		}
+	}
+
+	// Put the process itself in that tree, not just the hook input. The
+	// original failure came from the hook resolving its root by walking up
+	// from its own cwd, which would find this scratch dir and then hash an
+	// empty tools tree — permanently "stale", about the wrong repository.
+	// Without the chdir the fixture above is decoration and a reintroduced
+	// cwd walk would sail past this test.
+	t.Chdir(scratch)
+
+	mk := func(cmd string) hookInput {
+		h := hookInput{ToolName: "Bash", CWD: scratch}
+		h.ToolInput.Command = cmd
+		return h
+	}
+
+	if reason := checkStale(mk("cd " + root + " && ./make")); reason != "" {
+		t.Errorf("expected 'cd root && ./make' from a foreign root to be allowed, got: %s", reason)
+	}
+	if reason := checkStale(mk("./make")); reason == "" {
+		t.Error("expected bare ./make inside the scratch dir to be blocked — it is not the repo's make")
+	}
+
+	reason := checkStale(mk("pwd"))
+	if reason == "" {
+		t.Fatal("expected an ordinary command to be blocked when stale")
+	}
+
+	// The message must name a cwd-independent remedy, and that remedy must be
+	// one this same binary accepts from here. The spelling comes from
+	// common.MakeCommands rather than being written out again, so a change on
+	// the suggesting side that the accepting side does not follow fails here.
+	// Matching the whole path rather than scanning tokens also keeps the test
+	// working for a checkout whose path contains a space.
+	absMake, _ := common.MakeCommands(root)
+	if !strings.Contains(reason, absMake) {
+		t.Fatalf("stale deny message names no cwd-independent remedy (%s): %s", absMake, reason)
+	}
+	if !isRepoMakeChain(absMake, scratch, root) {
+		t.Fatalf("remedy %q named by the stale message is not one the guard accepts from %s", absMake, scratch)
+	}
+	if r := checkAll(absMake, scratch); r != "" {
+		t.Errorf("recovery command %q named by the stale message is itself blocked: %s", absMake, r)
+	}
+}
+
+// TestApplyCdUnknownCwd pins the contract both chain walkers share: a relative
+// `cd` from an unknown cwd leaves it unknown. Joining against "" would name a
+// directory relative to wherever the guard happens to be running, and git
+// scoping would then read a wrong-directory answer as "outside the project"
+// and waive branch hygiene.
+func TestApplyCdUnknownCwd(t *testing.T) {
+	tests := []struct {
+		name   string
+		tokens []string
+		cwd    string
+		want   string
+		wantCd bool
+	}{
+		{"relative cd, unknown cwd", []string{"cd", "tools"}, "", "", true},
+		{"absolute cd, unknown cwd", []string{"cd", "/tmp/x"}, "", filepath.Clean("/tmp/x"), true},
+		{"relative cd, known cwd", []string{"cd", "tools"}, "/repo", filepath.Join("/repo", "tools"), true},
+		{"not a cd", []string{"ls", "-l"}, "/repo", "/repo", false},
+		{"bare cd", []string{"cd"}, "/repo", "/repo", false},
+	}
+	for _, tt := range tests {
+		got, isCd := applyCd(tt.tokens, tt.cwd)
+		if got != tt.want || isCd != tt.wantCd {
+			t.Errorf("%s: applyCd(%v, %q) = (%q, %v), want (%q, %v)",
+				tt.name, tt.tokens, tt.cwd, got, isCd, tt.want, tt.wantCd)
+		}
+	}
+}
+
+// captureStderr runs fn with os.Stderr redirected and returns what it wrote.
+// The stale edit/write hint is advice printed to the agent rather than a deny
+// reason, so it is only observable this way.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	fn()
+	os.Stderr = saved
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close read end: %v", err)
+	}
+	return string(out)
+}
+
+// TestStaleMessageSpellingsAreAccepted holds the deny message to its own words.
+// It offers two rebuild spellings and says where each applies; both claims are
+// checked against the function that decides what the stale guard lets through,
+// so neither the wording nor the acceptance can drift alone (T1813).
+func TestStaleMessageSpellingsAreAccepted(t *testing.T) {
+	old := sourceHash
+	sourceHash = "stale-hash-for-test"
+	defer func() { sourceHash = old }()
+
+	root, err := common.RootForTests()
+	if err != nil {
+		t.Fatalf("find repo root: %v", err)
+	}
+	absMake, relativeMake := common.MakeCommands(root)
+
+	input := hookInput{ToolName: "Bash", CWD: filepath.Join(root, "tools", "build")}
+	input.ToolInput.Command = "go test ./..."
+	reason := checkStale(input)
+	if reason == "" {
+		t.Fatal("expected an ordinary command to be denied when stale")
+	}
+	if !strings.Contains(reason, absMake) || !strings.Contains(reason, relativeMake) {
+		t.Fatalf("stale message names neither spelling (%s / %s): %s", absMake, relativeMake, reason)
+	}
+
+	// The absolute spelling is offered unconditionally, so it must be accepted
+	// from anywhere — including a cwd the hook input never reported.
+	for _, cwd := range []string{root, filepath.Join(root, "tools", "build"), t.TempDir(), ""} {
+		if !isRepoMakeChain(absMake, cwd, root) {
+			t.Errorf("absolute remedy %q from the stale message is refused with cwd %q", absMake, cwd)
+		}
+	}
+
+	// The relative spelling is offered "from the repo root", and that
+	// qualification is the whole of its contract: accepted there, refused
+	// elsewhere, where it would name some other directory's script.
+	if !isRepoMakeChain(relativeMake, root, root) {
+		t.Errorf("relative remedy %q is refused at the repo root, where the message says to run it", relativeMake)
+	}
+	if isRepoMakeChain(relativeMake, filepath.Join(root, "tools"), root) {
+		t.Errorf("relative remedy %q was accepted outside the repo root", relativeMake)
+	}
+}
+
+// TestCheckStaleEditHintNamesAcceptedCommand: Edit/Write stay allowed while
+// stale, and the hint printed alongside them names a rebuild command the same
+// binary accepts — the identical trap as the deny message, in the branch that
+// does not deny. The edit that fixes tools code is typically made from a cwd
+// that is not the repo root, so a bare ./make would be wrong advice there.
+func TestCheckStaleEditHintNamesAcceptedCommand(t *testing.T) {
+	old := sourceHash
+	sourceHash = "stale-hash-for-test"
+	defer func() { sourceHash = old }()
+
+	root, err := common.RootForTests()
+	if err != nil {
+		t.Fatalf("find repo root: %v", err)
+	}
+	absMake, _ := common.MakeCommands(root)
+	elsewhere := t.TempDir()
+
+	for _, tool := range []string{"Edit", "Write"} {
+		input := hookInput{ToolName: tool, CWD: elsewhere}
+		input.ToolInput.FilePath = filepath.Join(root, "tools", "build", "common", "stale.go")
+		input.ToolInput.NewString = "package common"
+		input.ToolInput.Content = "package common"
+
+		var reason string
+		hint := captureStderr(t, func() { reason = checkStale(input) })
+		if reason != "" {
+			t.Fatalf("%s must stay allowed while stale, got: %s", tool, reason)
+		}
+		if !strings.Contains(hint, absMake) {
+			t.Errorf("%s hint names no cwd-independent rebuild (%s): %s", tool, absMake, hint)
+		}
+		if !isRepoMakeChain(absMake, elsewhere, root) {
+			t.Errorf("%s hint names %q, which the guard refuses from %s", tool, absMake, elsewhere)
+		}
+	}
+}
+
+// TestCheckStaleFreshBinaryAllows: the gate is about staleness and nothing
+// else. With the compiled hash matching the tree, every tool goes through
+// untouched — this is the path every real invocation takes.
+func TestCheckStaleFreshBinaryAllows(t *testing.T) {
+	root, err := common.RootForTests()
+	if err != nil {
+		t.Fatalf("find repo root: %v", err)
+	}
+	hash, err := common.ToolsSourceHash(root)
+	if err != nil {
+		t.Fatalf("hash tools source: %v", err)
+	}
+	old := sourceHash
+	sourceHash = hash
+	defer func() { sourceHash = old }()
+
+	bash := hookInput{ToolName: "Bash", CWD: t.TempDir()}
+	bash.ToolInput.Command = "go test ./..."
+	if reason := checkStale(bash); reason != "" {
+		t.Errorf("a fresh guard must not block anything, got: %s", reason)
+	}
+	if reason := checkStale(hookInput{ToolName: "Read"}); reason != "" {
+		t.Errorf("a fresh guard must not block a Read, got: %s", reason)
+	}
+}
+
+// TestCheckStaleFailsOpenWhenRootUnusable: when the guard cannot work out
+// which tree to hash, it has no staleness verdict to give and must not invent
+// one. Denying instead would be the T1813 wedge in its purest form — every
+// command refused over a comparison that never happened, and the rebuild the
+// message named unable to fix it.
+func TestCheckStaleFailsOpenWhenRootUnusable(t *testing.T) {
+	old := sourceHash
+	sourceHash = "stale-hash-for-test"
+	defer func() { sourceHash = old }()
+
+	// A repo-shaped scratch tree with no tools/build to hash — the exact shape
+	// of the directory that wedged the session, reachable now only by stamping
+	// it in, since the root no longer comes from the working directory.
+	emptyRepo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(emptyRepo, "catalog.toml"), nil, 0o644); err != nil {
+		t.Fatalf("write scratch catalog.toml: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		root string
+	}{
+		{"stamped root is not a repo", filepath.Join(t.TempDir(), "gone")},
+		{"stamped root has no tools tree", emptyRepo},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			common.SetRootForTest(t, tc.root)
+
+			input := hookInput{ToolName: "Bash", CWD: tc.root}
+			input.ToolInput.Command = "pwd"
+			if reason := checkStale(input); reason != "" {
+				t.Errorf("expected no staleness verdict when the root is unusable, got: %s", reason)
+			}
+		})
+	}
+}
+
+// TestCheckAllUnknownCwdKeepsGitHygiene is applyCd's other caller. A relative
+// cd from an unknown cwd must leave it unknown rather than resolve against
+// wherever the guard is running: a wrong-directory answer would read as "this
+// git repo is outside the project" and quietly waive branch hygiene.
+func TestCheckAllUnknownCwdKeepsGitHygiene(t *testing.T) {
+	if reason := checkAll("cd tools && git switch -c feature", ""); reason == "" {
+		t.Error("branch creation was allowed after a relative cd from an unknown cwd")
+	}
+	if reason := checkAll("cd tools && git push", ""); reason == "" {
+		t.Error("push was allowed after a relative cd from an unknown cwd")
 	}
 }
 

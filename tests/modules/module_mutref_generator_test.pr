@@ -1,0 +1,90 @@
+// T1516: a mut-ref (`T ~p`) parameter on a generator must keep aliasing the
+// caller's storage across every coroutine suspend — including when the generator
+// is declared in a MODULE.
+//
+// Module method bodies are bound by defineModulePhase's own parameter loop, a
+// separate copy of the logic from the main file's, so the write-back asserted
+// here would not be covered by tests/e2e/t1516_mutref_generator_test.pr.
+use genmod "./genmod";
+
+module_mutref_generator_method() `test(timeout: "5s") {
+  genmod.ModGen g = genmod.ModGen(base: 10);
+  int k = 1;
+  int total = 0;
+  for x in g.scaled(2, k) {
+    total += x;
+  }
+  assert(total == 23, "module mut-ref generator method: {total}"); // 11 + 12
+  assert(k == 8, "write reaches the caller across the module boundary: {k}");
+}
+
+module_mutref_generator_heap_borrow() `test(timeout: "5s") {
+  genmod.ModGen g = genmod.ModGen(base: 9);
+  string sep = "-";
+  string joined = "";
+  for s in g.tagged(2, sep) {
+    joined = joined + s;
+  }
+  assert(joined == "9-09-1", "module heap mut-ref borrow: {joined}");
+  assert(sep == "-", "the borrow is not consumed by the generator: {sep}");
+}
+
+module_mutref_generator_abandoned_early() `test(timeout: "5s") {
+  // Breaking out destroys a suspended module coroutine. Writes made through the
+  // borrow before the abandon point must be visible, and the borrowed storage
+  // must come back usable rather than freed.
+  genmod.ModGen g = genmod.ModGen(base: 10);
+  int k = 1;
+  int first = 0;
+  for x in g.scaled(3, k) {
+    first = x;
+    break;
+  }
+  assert(first == 11, "first yield: {first}"); // 10 + 1 + 0
+  assert(k == 1, "the post-loop bump never ran: {k}");
+
+  // Reborrowing the same variable proves the destroy left it intact.
+  int total = 0;
+  for x in g.scaled(2, k) {
+    total += x;
+  }
+  assert(total == 23, "reborrow after an abandoned generator: {total}"); // 11 + 12
+  assert(k == 8, "write-back on the completed run: {k}");
+}
+
+module_mutref_heap_borrow_abandoned_early() `test(timeout: "5s") {
+  // The borrow is a heap string. If the destroy path treated the mut-ref param
+  // as owned it would free this frame's string. The generator yields ints, so an
+  // abandoned run stays about the borrow — breaking out of a generator that
+  // yields freshly allocated heap values leaks them (T2038, pre-existing).
+  genmod.ModGen g = genmod.ModGen(base: 1);
+  string sep = "|";
+  int seen = 0;
+  for x in g.sep_len(3, sep) {
+    seen = x;
+    break;
+  }
+  assert(seen == 1, "first yield: {seen}");
+  assert(sep == "|", "caller's string survives the destroy: {sep}");
+  assert(sep.len == 1, "and is still readable: {sep.len}");
+}
+
+module_mutref_generator_generic_owner() `test(timeout: "5s") {
+  genmod.ModHolder[string] hs = genmod.ModHolder[string](items: ["a", "b", "c"]);
+  int count = 0;
+  string last = "";
+  for s in hs.drain(count) {
+    last = s;
+  }
+  assert(count == 3, "generic module owner write-back: {count}");
+  assert(last == "c", "last item: {last}");
+
+  genmod.ModHolder[int] hi = genmod.ModHolder[int](items: [4, 5]);
+  int icount = 0;
+  int ilast = 0;
+  for v in hi.drain(icount) {
+    ilast = v;
+  }
+  assert(icount == 2, "second instantiation write-back: {icount}");
+  assert(ilast == 5, "last item: {ilast}");
+}

@@ -66,7 +66,9 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 		coroParams = append(coroParams, ir.NewParam("this", irtypes.I8Ptr))
 	}
 	for _, p := range sig.Params() {
-		coroParams = append(coroParams, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+		// T1516: use resolveParamType so a `~` param is declared as a pointer to
+		// the caller's storage (B0149) — exactly what the factory forwards.
+		coroParams = append(coroParams, ir.NewParam(p.Name(), c.resolveParamType(p)))
 	}
 	coroParams = append(coroParams, ir.NewParam("yield_slot", irtypes.I8Ptr))
 	if isFailable {
@@ -109,12 +111,18 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	savedThisRecvIsOwned := c.thisRecvIsOwned    // T0436
 	savedOpValueParams := c.currentOpValueParams // T0897: preserve caller-set value
 	savedBorrowedParams := c.borrowedValueParams // T0945: preserve caller-set value
+	savedMutRefPtrs := c.mutRefPtrs              // T1516: per-function, like T1588's saveState
+	savedMutRefTypes := c.mutRefTypes            // T1516
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 	c.blockCounter = 0
 	c.canError = false // keep false — error path handled via generatorCanError
+	// T1516: the generator body sees only its own `~` params, never the enclosing
+	// function's (same leak class as T1588 for saveState and T1661 for lambdas).
+	c.mutRefPtrs = nil
+	c.mutRefTypes = nil
 	c.currentRetType = nil
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
@@ -200,6 +208,20 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 			paramIdx++
 			continue
 		}
+		if _, isMutRef := p.Type().(*types.MutRef); isMutRef {
+			// T1516: a `~` param is a pointer to the caller's storage — reads load
+			// through it and writes store through it, as in defineFunc. No alloca:
+			// coro-split spills the ramp argument into the frame, so the pointer
+			// (not a copy of the pointee) survives every suspend.
+			if c.mutRefPtrs == nil {
+				c.mutRefPtrs = make(map[string]value.Value)
+				c.mutRefTypes = make(map[string]irtypes.Type)
+			}
+			c.mutRefPtrs[p.Name()] = coroFn.Params[paramIdx]
+			c.mutRefTypes[p.Name()] = c.resolveType(p.Type())
+			paramIdx++
+			continue
+		}
 		alloca := startBlk.NewAlloca(c.resolveType(p.Type()))
 		alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
 		startBlk.NewStore(coroFn.Params[paramIdx], alloca)
@@ -227,6 +249,9 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 		}
 		alloca := c.locals[p.Name()]
 		if alloca == nil {
+			// T1516: a `~` param has no alloca — it binds through c.mutRefPtrs.
+			// A mutable borrow is not owned, so it has no drop obligation here
+			// (defineFunc/defineMethodFunc skip it for the same reason).
 			continue
 		}
 		paramType := p.Type()
@@ -356,6 +381,8 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.thisRecvIsOwned = savedThisRecvIsOwned    // T0436
 	c.currentOpValueParams = savedOpValueParams // T0897
 	c.borrowedValueParams = savedBorrowedParams // T0945
+	c.mutRefPtrs = savedMutRefPtrs              // T1516
+	c.mutRefTypes = savedMutRefTypes            // T1516
 
 	// 7. Build factory body for original function
 	c.fn = fn
@@ -365,6 +392,8 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.castSubjectMatch = nil // T0849: fresh per generated function body
 	c.dropBindings = make(map[string]scopeBinding)
 	c.blockCounter = 0
+	c.mutRefPtrs = nil // T1516: the factory only forwards fn.Params verbatim
+	c.mutRefTypes = nil
 
 	factoryEntry := fn.NewBlock(".entry")
 	c.block = factoryEntry

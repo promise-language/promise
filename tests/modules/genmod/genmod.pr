@@ -1,0 +1,57 @@
+// genmod: generator METHODS carrying a mut-ref parameter, compiled in a module
+// rather than in the main file (T1516).
+//
+// Module bodies go through defineModulePhase, which binds `~` params in its own
+// loop (compiler_module.go) before handing the body to buildGeneratorCoroutine.
+// That is a second, independent copy of the binding logic the fix touched, so a
+// mut-ref generator declared here exercises a path the main-file tests cannot.
+//
+// Only methods, deliberately: a module-level generator *function* panics the
+// compiler today because defineModuleFuncs never dispatches to
+// defineGeneratorFunc (T2039).
+type ModGen `public `doc("Owns generator methods that borrow a caller's variable mutably.") {
+  int base `public `doc("Added to every yielded value.");
+
+  scaled(this, int n, int ~k) stream[int] `public `doc("Yields base+k+i, then bumps k through the borrow.") {
+    int i = 0;
+    while (i < n) {
+      yield this.base + k + i;
+      i += 1;
+    }
+    k += 7;
+  }
+
+  tagged(this, int n, string ~sep) stream[string] `public `doc("Borrows a heap string across every suspend.") {
+    int i = 0;
+    while (i < n) {
+      yield "{this.base}{sep}{i}";
+      i += 1;
+    }
+  }
+
+  // Yields ints rather than strings so an abandoned run stays about the borrow:
+  // breaking out of a generator that yields freshly allocated heap values leaks
+  // them regardless of the consumer (T2038), which would mask what this covers.
+  sep_len(this, int n, string ~sep) stream[int] `public `doc("Yields the borrowed string's length, plus i.") {
+    int i = 0;
+    while (i < n) {
+      yield sep.len + i;
+      i += 1;
+    }
+  }
+}
+
+type ModHolder[T] `public `doc("Generic module owner of a mut-ref generator method.") {
+  T[] items `public `doc("Values yielded in order.");
+
+  // Indexed rather than for-in: a for-in with a yield in its body over a heap
+  // element type corrupts the allocator (T2038, unrelated to mut-refs).
+  drain(this, int ~count) stream[T] `public `doc("Yields every item, counting through the borrow.") {
+    int i = 0;
+    while (i < this.items.len) {
+      count += 1;
+      yield this.items[i];
+      i += 1;
+    }
+  }
+}

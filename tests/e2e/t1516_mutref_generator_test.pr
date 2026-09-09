@@ -1,0 +1,403 @@
+// T1516: a mut-ref (`T ~p`) parameter on a generator must alias the caller's
+// storage across every coroutine suspend. The ramp used to declare the pointee
+// type while the factory forwarded a pointer, so each resume read the caller's
+// address as a value.
+mut_int_items(int n, int ~k) stream[int] `doc("Yields k+i, then bumps k — the item's repro.") {
+  int i = 0;
+  while (i < n) {
+    yield k + i;
+    i += 1;
+  }
+  k += 20;
+}
+
+// Reads only. `sep = sep + "!"` would be the natural write-back case, but plain
+// assignment through a `~` param double-frees the RHS temp today — T2034, a
+// pre-existing defect of the shared mutRefPtrs assign path, not of generators.
+mut_string_items(int n, string ~sep) stream[string] `doc("Borrows sep mutably across suspends.") {
+  int i = 0;
+  while (i < n) {
+    yield "{i}{sep}";
+    i += 1;
+  }
+}
+
+mut_vector_items(int n, int[] ~v) stream[int] `doc("Pushes into a borrowed vector between yields.") {
+  int i = 0;
+  while (i < n) {
+    v.push(i);
+    yield i;
+    i += 1;
+  }
+}
+
+fail_items!(int n, int ~k) stream[int] `doc("Failable generator with a mut-ref param.") {
+  int i = 0;
+  while (i < n) {
+    yield k + i;
+    i += 1;
+  }
+  k += 7;
+}
+
+inner_delegate(int n, int ~k) stream[int] `doc("Inner generator of the delegation test.") {
+  int i = 0;
+  while (i < n) {
+    yield k * 2;
+    k += 1;
+    i += 1;
+  }
+}
+
+outer_delegate(int n, int ~k) stream[int] `doc("Delegates to inner_delegate, threading the mut-ref through.") {
+  yield * inner_delegate(n, k);
+}
+
+generic_accumulate[T](T[] ~acc, T[] source) stream[int] `doc("Generic generator taking a mut-ref vector.") {
+  for item in source {
+    acc.push(move item);
+    yield acc.len;
+  }
+}
+
+type Counter `doc("Owner type for the generator-method test.") {
+  int base;
+
+  scaled(this, int n, int ~k) stream[int] `doc("Generator method with a mut-ref param.") {
+    int i = 0;
+    while (i < n) {
+      yield this.base + k + i;
+      i += 1;
+    }
+    k += 100;
+  }
+}
+
+mutref_int_generator() `test(timeout: "5s") {
+  int k = 5;
+  int total = 0;
+  for x in mut_int_items(2, k) {
+    total += x;
+  }
+  assert(total == 11, "mutref int gen: {total}");
+  assert(k == 25, "write-back to caller: {k}");
+}
+
+mutref_string_generator() `test(timeout: "5s") {
+  string sep = "-";
+  string joined = "";
+  for s in mut_string_items(3, sep) {
+    joined = joined + s;
+  }
+  assert(joined == "0-1-2-", "mutref string gen: {joined}");
+  assert(sep == "-", "separator unchanged: {sep}");
+}
+
+mutref_vector_generator() `test(timeout: "5s") {
+  int[] v = [];
+  int seen = 0;
+  for x in mut_vector_items(3, v) {
+    seen += x;
+  }
+  assert(seen == 3, "yields: {seen}");
+  assert(v.len == 3, "caller sees the pushes (realloc included): {v.len}");
+  assert(v[0] == 0 && v[1] == 1 && v[2] == 2, "vector contents: {v}");
+}
+
+mutref_failable_generator() `test(timeout: "5s") {
+  int k = 3;
+  int total = 0;
+  for x in fail_items(2, k)?! {
+    total += x;
+  }
+  assert(total == 7, "failable mutref gen: {total}");
+  assert(k == 10, "failable write-back: {k}");
+}
+
+mutref_delegated_generator() `test(timeout: "5s") {
+  int k = 1;
+  int total = 0;
+  for x in outer_delegate(3, k) {
+    total += x;
+  }
+  assert(total == 12, "delegated mutref gen: {total}"); // 2 + 4 + 6
+  assert(k == 4, "write reaches the outermost caller: {k}");
+}
+
+mutref_generic_generator() `test(timeout: "5s") {
+  string[] acc = [];
+  int last = 0;
+  for n in generic_accumulate(acc, ["a", "b"]) {
+    last = n;
+  }
+  assert(last == 2, "generic mutref gen: {last}");
+  assert(acc.len == 2, "generic write-back: {acc.len}");
+  assert(acc[0] == "a" && acc[1] == "b", "generic contents: {acc}");
+}
+
+mutref_generator_method() `test(timeout: "5s") {
+  Counter c = Counter(base: 10);
+  int k = 2;
+  int total = 0;
+  for x in c.scaled(2, k) {
+    total += x;
+  }
+  assert(total == 25, "mutref gen method: {total}"); // 12 + 13
+  assert(k == 102, "method write-back: {k}");
+}
+
+mutref_not_leaked_into_generator() `test(timeout: "5s") {
+  // A mut-ref param in an *enclosing* function must not be visible to a
+  // generator compiled after it — the identical name `k` would otherwise read
+  // the outer function's pointer.
+  int k = 4;
+  int total = 0;
+  enclosing_with_own_mutref(k, total);
+  assert(k == 5, "enclosing mutref still writes back: {k}");
+  assert(total == 201, "generator saw its own k: {total}"); // 100 + 101
+}
+
+enclosing_with_own_mutref(int ~k, int ~total) `doc("Has a mut-ref `k` of its own, then runs a generator that also names a param `k`.") {
+  int inner = 100;
+  for x in later_items(2, inner) {
+    total += x;
+  }
+  k += 1;
+}
+
+// Declared AFTER its caller on purpose: codegen defines functions in declaration
+// order, so this is the ramp that would inherit enclosing_with_own_mutref's `~k`
+// binding if buildGeneratorCoroutine did not reset c.mutRefPtrs. The starting
+// values are kept distinct so a leak cannot coincide with the correct answer.
+later_items(int n, int ~k) stream[int] `doc("Generator whose `k` must resolve to its own param, not the caller's.") {
+  int i = 0;
+  while (i < n) {
+    yield k + i;
+    i += 1;
+  }
+  k += 3;
+}
+
+// ---------------------------------------------------------------------------
+// Parameter shapes beyond the item's int/string repro, plus the two lifetime
+// edges the fix has to survive: abandoning the generator early, and sitting
+// beside a by-value droppable param.
+// ---------------------------------------------------------------------------
+
+type Box `doc("Heap user type borrowed mutably by a generator.") {
+  int n `doc("Bumped once per yield.");
+}
+
+type Pt `doc("Pure value type borrowed mutably by a generator.") {
+  int x `value `doc("Bumped once per yield.");
+  int y `value `doc("Left alone.");
+}
+
+only_mut(int ~k) stream[int] `doc("The mut-ref is the sole parameter — index 0 is the pointer.") {
+  yield k;
+  k += 1;
+  yield k;
+  k += 1;
+}
+
+box_items(int n, Box ~b) stream[int] `doc("Mutates a borrowed heap user type between yields.") {
+  int i = 0;
+  while (i < n) {
+    b.n += 1;
+    yield b.n;
+    i += 1;
+  }
+}
+
+pt_items(int n, Pt ~p) stream[int] `doc("Mutates a borrowed pure value type between yields.") {
+  int i = 0;
+  while (i < n) {
+    p.x += 1;
+    yield p.x + p.y;
+    i += 1;
+  }
+}
+
+map_items(int n, map[string, int] ~m) stream[int] `doc("Inserts into a borrowed map between yields.") {
+  int i = 0;
+  while (i < n) {
+    m["k{i}"] = i;
+    yield m.len;
+    i += 1;
+  }
+}
+
+early_mut(int ~k) stream[int] `doc("Writes to the borrow before every yield, so an abandon point is observable.") {
+  k += 10;
+  yield k;
+  k += 100;
+  yield k;
+  k += 1000;
+}
+
+early_str(string ~s) stream[int] `doc("Holds a borrow of a heap string across a suspend that is never resumed.") {
+  yield s.len;
+  yield s.len + 1;
+}
+
+mixed_params(string owned, int ~k) stream[string] `doc("By-value droppable param beside a mut-ref one.") {
+  int i = 0;
+  while (i < 2) {
+    yield "{owned}{k}";
+    k += 1;
+    i += 1;
+  }
+}
+
+type Holder[T] `doc("Generic owner of a generator method with a mut-ref param.") {
+  T[] items `doc("Values yielded in order.");
+
+  // Indexed rather than `for it in this.items`: a for-in with a yield in its body
+  // over a heap element type corrupts the allocator — T2038, pre-existing and
+  // unrelated to the mut-ref ABI this file covers.
+  drain(this, int ~count) stream[T] `doc("Yields every item, counting through the borrow.") {
+    int i = 0;
+    while (i < this.items.len) {
+      count += 1;
+      yield this.items[i];
+      i += 1;
+    }
+  }
+}
+
+mutref_only_param() `test(timeout: "5s") {
+  int k = 7;
+  int total = 0;
+  for x in only_mut(k) {
+    total += x;
+  }
+  assert(total == 15, "sole mut-ref param: {total}"); // 7 + 8
+  assert(k == 9, "write-back: {k}");
+}
+
+mutref_heap_user_type() `test(timeout: "5s") {
+  Box b = Box(n: 0);
+  int total = 0;
+  for x in box_items(3, b) {
+    total += x;
+  }
+  assert(total == 6, "heap user type yields: {total}"); // 1 + 2 + 3
+  assert(b.n == 3, "caller sees the field writes: {b.n}");
+}
+
+mutref_value_type() `test(timeout: "5s") {
+  Pt p = Pt(x: 1, y: 10);
+  int total = 0;
+  for x in pt_items(2, p) {
+    total += x;
+  }
+  assert(total == 25, "value type yields: {total}"); // 12 + 13
+  assert(p.x == 3, "caller sees the write: {p.x}");
+  assert(p.y == 10, "untouched field: {p.y}");
+}
+
+mutref_map() `test(timeout: "5s") {
+  map[string, int] m = {:};
+  int last = 0;
+  for x in map_items(2, m) {
+    last = x;
+  }
+  assert(last == 2, "map len at the last yield: {last}");
+  assert(m.len == 2, "caller sees the inserts (rehash included): {m.len}");
+  int found = 0;
+  if v0 := m["k0"] {
+    found += v0 + 1;
+  }
+  if v1 := m["k1"] {
+    found += v1 + 1;
+  }
+  assert(found == 3, "map contents: {m}"); // (0+1) + (1+1)
+}
+
+mutref_generator_abandoned_early() `test(timeout: "5s") {
+  // Breaking out leaves the coroutine suspended and destroys it. Writes made
+  // before the abandon point must be visible; writes after it must not happen,
+  // and the borrowed storage must survive the destroy path intact.
+  int k = 1;
+  int seen = 0;
+  for x in early_mut(k) {
+    seen += x;
+    break;
+  }
+  assert(seen == 11, "first yield: {seen}");
+  assert(k == 11, "only the writes before the abandon point land: {k}");
+
+  // Running the same generator to completion afterwards proves the caller's
+  // storage was left usable, not freed or poisoned by the destroy.
+  int total = 0;
+  for x in early_mut(k) {
+    total += x;
+  }
+  assert(k == 1121, "reborrow after an abandoned generator: {k}");
+  assert(total == 142, "yields: {total}"); // 21 + 121
+}
+
+mutref_heap_borrow_abandoned_early() `test(timeout: "5s") {
+  // The borrow is a heap string: if the destroy path treated the mut-ref param
+  // as owned, this would double-free the caller's string.
+  string s = "hello";
+  int seen = 0;
+  for x in early_str(s) {
+    seen = x;
+    break;
+  }
+  assert(seen == 5, "first yield: {seen}");
+  assert(s == "hello", "caller's string survives the abandoned generator: {s}");
+  assert(s.len == 5, "and is still readable: {s.len}");
+}
+
+mutref_beside_by_value_param() `test(timeout: "5s") {
+  // T1467 promotes by-value droppable generator args; the mut-ref beside one
+  // must not be promoted with it, and must not shift its frame index.
+  int k = 1;
+  string joined = "";
+  for s in mixed_params("v", k) {
+    joined = joined + s;
+  }
+  assert(joined == "v1v2", "by-value and mut-ref side by side: {joined}");
+  assert(k == 3, "write-back: {k}");
+}
+
+mutref_generic_owner_generator_method() `test(timeout: "5s") {
+  // Two instantiations, so the mono path resolves the mut-ref param type under
+  // two different substitutions.
+  Holder[string] hs = Holder[string](items: ["a", "b", "c"]);
+  int count = 0;
+  string last = "";
+  for s in hs.drain(count) {
+    last = s;
+  }
+  assert(count == 3, "generic owner write-back: {count}");
+  assert(last == "c", "last item: {last}");
+
+  Holder[int] hi = Holder[int](items: [4, 5]);
+  int icount = 0;
+  int ilast = 0;
+  for v in hi.drain(icount) {
+    ilast = v;
+  }
+  assert(icount == 2, "second instantiation write-back: {icount}");
+  assert(ilast == 5, "last item: {ilast}");
+}
+
+mutref_generator_called_through_lambda() `test(timeout: "5s") {
+  // A lambda has its own mut-ref params (T1661 resets the same maps). Forwarding
+  // one straight into a generator has to reach the outermost caller's storage.
+  int k = 5;
+  run := |int ~kk| {
+    for x in early_mut(kk) {
+      consume_int(x);
+    }
+  };
+  run(k);
+  assert(k == 1115, "lambda mut-ref param forwarded to a generator: {k}");
+}
+
+consume_int(int v) `doc("Sink so the lambda's loop body has an effect the optimizer must keep.") {
+  assert(v > 0, "sink: {v}");
+}

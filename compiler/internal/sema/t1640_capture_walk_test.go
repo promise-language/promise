@@ -407,54 +407,6 @@ func TestT1658GoBlockWalkNewArmsIgnoreBlockLocals(t *testing.T) {
 	}
 }
 
-// The last two statement arms of the walk with no coverage. Both are reachable
-// from user source today: a `go { … }` block lexically nested in a generator body
-// keeps the enclosing generator context, so `yield` inside it parses and passes
-// the "yield outside of generator function" guard. The gate below is the only
-// thing standing between that shape and a `not_sendable` value crossing the
-// boundary.
-//
-// NOTE — T1428: the same shape then emits invalid IR (`use of undefined value
-// '%yield_slot.addr'`), because codegen keeps the generator's yield slot while
-// compiling the go block into a separate coroutine. Its fix is a sema REJECTION
-// of `yield` inside a `go` block, at which point these arms become dead and
-// these two cases should be deleted along with them. They are sema-only (no
-// codegen) precisely so T1428's backend crash does not block them.
-func TestT1640GoBlockWalkYieldArms(t *testing.T) {
-	for _, tc := range []struct{ name, src string }{
-		{"yield_stmt", "type Handle `not_sendable" + ` {
-				int fd;
-			}
-			gen() stream[int] {
-				h := Handle(fd: 3);
-				go {
-					yield h.fd;
-				};
-				yield 1;
-			}
-		`},
-		{"yield_delegate_stmt", "type Handle `not_sendable" + ` {
-				int fd;
-			}
-			inner(int n) stream[int] {
-				yield n;
-			}
-			gen() stream[int] {
-				h := Handle(fd: 3);
-				go {
-					yield * inner(h.fd);
-				};
-				yield 1;
-			}
-		`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			errs := checkErrs(t, tc.src)
-			expectError(t, errs, "cannot send non-sendable variable 'h'")
-		})
-	}
-}
-
 // `*ast.AutoCloneExpr` is the one walkExpr arm with no test, and deliberately so:
 // the intrinsic is synth-only (internal/sema/clone.go builds it into generated
 // `clone()` bodies for generic fields, T0605), so it can never appear inside a

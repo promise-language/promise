@@ -346,10 +346,11 @@ func (c *Checker) checkGoBlockCaptures(e *ast.GoExpr) {
 			walkBlock(st.Body)
 		case *ast.RaiseStmt:
 			walkExpr(st.Value)
-		case *ast.YieldStmt:
-			walkExpr(st.Value)
-		case *ast.YieldDelegateStmt:
-			walkExpr(st.Value)
+		// No `*ast.YieldStmt` / `*ast.YieldDelegateStmt` arm: since T1428 a `yield`
+		// inside a `go {}` block is a sema error (§12.4), so neither statement can
+		// reach this walk from user source. That rejection is what makes their
+		// absence safe, and it is pinned by internal/sema/t1428_test.go — restore
+		// these arms if it is ever lifted.
 		case *ast.IncDecStmt:
 			walkExpr(st.Target)
 		case *ast.SelectStmt:

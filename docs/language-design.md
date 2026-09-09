@@ -3316,7 +3316,7 @@ fetchPages(string url) stream[Page] {
 }
 ```
 
-**Restrictions:** `yield` must appear directly in the generator function body — it cannot appear inside a nested closure or lambda. Use a `for` loop instead:
+**Restrictions:** `yield` must appear directly in the generator function body — it cannot appear inside a nested closure, lambda, or `go { … }` block. Use a `for` loop instead:
 
 ```promise
 // ERROR — yield inside a closure
@@ -3327,6 +3327,23 @@ example() stream[int] {
 // OK — yield in a for loop
 example() stream[int] {
   for item in items { yield item; }
+}
+```
+
+A `go { … }` / `go! { … }` block body is compiled into its own coroutine and has no consumer driving `next()`, so `yield` there is rejected for the same reason (§17.2). Produce the values over a channel and `yield` them from the generator body:
+
+```promise
+// ERROR — yield inside a go block
+example() stream[int] {
+  t := go { yield 1; 5 };  // compile error
+  yield <-t;
+}
+
+// OK — the goroutine produces, the generator yields
+example() stream[int] {
+  ch := channel[int](capacity: 4);
+  go { for i in 1..=3 { ch.send(i); } ch.close(); };
+  for v in ch { yield v; }
 }
 ```
 
@@ -4242,6 +4259,7 @@ users := <-handles;                           // drain: awaits all, propagates f
 | `go { … }` | non-failable scope → `task[T]` (block handles its own errors) |
 | `go! { … }` | failable scope → `failable_task[T]` (escaping error captured) |
 | `go! { … }` — body cannot fail | **compile error** → use plain `go` |
+| `yield` / `yield*` inside a `go { … }` / `go! { … }` block | **compile error** → the block is a separate coroutine; `yield` belongs to the generator body (§12.4) |
 | `go { … }` / `go! { … }` block result | yielded by a trailing expression **or** by `return <expr>` — one style per block; `T` inferred either way (§17.2) |
 | trailing expression in a block that also uses `return <expr>` | **compile error** → mixing the two styles is rejected |
 | bare `return;` on a value-producing path | **compile error** → every path must return a value |

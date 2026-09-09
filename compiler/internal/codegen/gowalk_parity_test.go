@@ -45,8 +45,8 @@ import (
 // `Info.GoCaptures` instead of re-deriving it) — tracked as T1674.
 
 // goWalkArmParityAllowlist names arms codegen walks that sema deliberately does
-// not. Neither names an OWNED capture, so neither can produce the env divergence
-// above — one is a borrow, the other a type reference:
+// not. None names an OWNED capture, so none can produce the env divergence
+// above — one is a borrow, one is a type reference, and two are unreachable:
 //
 //   - ThisExpr: `this` is a BORROW of the receiver, not an owned capture. Codegen
 //     threads it into the arg pack (T1219) as a private snapshot; there is no
@@ -59,9 +59,21 @@ import (
 //   - SliceTypeExpr: `Inner` is by definition a TYPE reference (T0685), never a
 //     variable, so walking it can never reach a capture. Codegen's arm is
 //     harmless; sema has nothing to record.
+//   - YieldStmt / YieldDelegateStmt: since T1428 a `yield` / `yield*` inside a
+//     `go {}` block is a sema error (§12.4 — the block body is compiled into its
+//     own coroutine, which has no yield slot), so neither statement can reach
+//     either walk from user source. Codegen's arms are unreachable leftovers;
+//     sema has nothing to record. If the restriction is ever lifted, sema's arms
+//     must come back with it, and these two entries must go — the reachability
+//     claim they rest on would no longer hold. The restriction itself is pinned
+//     by TestT1428YieldInGoBlockRejected and friends in
+//     internal/sema/t1428_test.go, which is what fails first if someone lifts it;
+//     that file points back here.
 var goWalkArmParityAllowlist = map[string]string{
-	"ThisExpr":      "borrowed receiver, not an owned capture (T1219; sendability is T1657/T1650)",
-	"SliceTypeExpr": "Inner is a type reference, never a variable (T0685)",
+	"ThisExpr":          "borrowed receiver, not an owned capture (T1219; sendability is T1657/T1650)",
+	"SliceTypeExpr":     "Inner is a type reference, never a variable (T0685)",
+	"YieldStmt":         "`yield` inside a `go {}` block is a sema error, so the shape is unreachable (T1428)",
+	"YieldDelegateStmt": "`yield*` inside a `go {}` block is a sema error, so the shape is unreachable (T1428)",
 }
 
 // typeSwitchArms returns every `*ast.X` type-switch case arm inside the named

@@ -1,0 +1,118 @@
+// T1428: `yield` inside a `go { … }` block nested in a generator body is a sema
+// error — the block body is compiled into its own coroutine, which has no yield
+// slot, so the shape used to reach the backend and emit invalid IR
+// (`use of undefined value '%yield_slot.addr'`). The rejection itself is pinned
+// by compiler/internal/sema/t1428_test.go; it cannot be tested from Promise,
+// because a rejected program does not compile.
+//
+// What IS testable here is the other half of the contract — the replacement
+// idiom the diagnostic's hint and §12.4 of docs/language-design.md point at, and
+// the shapes the guard must NOT reject. If the guard ever over-triggers (say, on
+// a `go` block that merely sits in a generator body), these stop compiling.
+// --- The documented workaround: the goroutine produces, the generator yields ---
+// This is verbatim the "OK" example in §12.4. A goroutine fills a channel; the
+// generator's own body owns every `yield`.
+t1428_channel_handoff() stream[int] {
+  ch := channel[int](capacity: 4);
+  go {
+    for i in 1..=3 {
+      ch.send(i);
+    }
+    ch.close();
+  };
+  for v in ch {
+    yield v;
+  }
+}
+
+t1428_workaround_produces_all_values() `test {
+  int[] values = [];
+  for v in t1428_channel_handoff() {
+    values.push(v);
+  }
+  assert(values.len == 3, "the goroutine's three sends all reach the consumer");
+  assert(values[0] == 1 && values[1] == 2 && values[2] == 3,
+  "channel order is preserved through the generator");
+}
+
+// --- A `go` block in a generator body is still legal when it does not yield ---
+// The guard keys off `c.goBlock`, which is set for EVERY go block in a generator
+// body, so an over-broad guard would reject this too.
+t1428_gen_with_plain_go_block() stream[int] {
+  t := go {
+    41 + 1
+  };
+  yield <-t;
+  yield 2;
+}
+
+t1428_plain_go_block_in_generator_ok() `test {
+  total := 0;
+  for v in t1428_gen_with_plain_go_block() {
+    total = total + v;
+  }
+  assert(total == 44, "a non-yielding go block in a generator body is unaffected");
+}
+
+// --- Same, for the failable `go!` form ---
+t1428_double!(int n) int {
+  return n * 2;
+}
+
+t1428_gen_with_failable_go_block() stream[int] {
+  t := go! {
+    t1428_double(21)?^
+  };
+  yield (<-t)?!;
+  yield 1;
+}
+
+t1428_failable_go_block_in_generator_ok() `test {
+  total := 0;
+  for v in t1428_gen_with_failable_go_block() {
+    total = total + v;
+  }
+  assert(total == 43, "a non-yielding go! block in a generator body is unaffected");
+}
+
+// --- A `yield` AFTER a go block in the same body still binds to the generator ---
+// The guard saves and restores `c.goBlock` around the block; a leak of the
+// go-block context past the block's end would reject the trailing yields here.
+t1428_gen_yields_around_go_block() stream[string] {
+  yield "before";
+  t := go {
+    "mid"
+  };
+  yield <-t;
+  yield "after";
+}
+
+t1428_yields_survive_around_go_block() `test {
+  joined := "";
+  for s in t1428_gen_yields_around_go_block() {
+    joined = joined + s + ".";
+  }
+  assert(joined == "before.mid.after.", "yields on both sides of a go block still bind to the generator");
+}
+
+// --- A generator METHOD with a go block behaves the same way ---
+type T1428Source {
+  int base;
+
+  rows(this) stream[int] {
+    t := go {
+      10
+    };
+    yield this.base + <-t;
+    yield this.base;
+  }
+}
+
+t1428_generator_method_with_go_block_ok() `test {
+  s := T1428Source(base: 5);
+  total := 0;
+  for v in s.rows() {
+    total = total + v;
+  }
+  assert(total == 20, "a go block inside a generator method body is unaffected");
+}

@@ -82,6 +82,14 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 	case *ast.YieldStmt:
 		if !c.inGenerator {
 			c.errorf(s.Pos(), "yield outside of generator function")
+		} else if c.goBlock != nil {
+			// T1428: a `go {}` body is compiled into its OWN coroutine, so a
+			// `yield` here would load the enclosing generator's yield slot from a
+			// function that has none (invalid IR). §12.4: `yield` must appear
+			// directly in the generator body. Checked before the lambda arm so the
+			// innermost enclosing construct is the one named.
+			c.errorf(s.Pos(), "yield inside a `go` block is not allowed")
+			c.hintf(s.Pos(), "a goroutine has no consumer driving `next()` — send the values over a channel and `yield` them from the generator body")
 		} else if c.lambdaDepth > 0 {
 			c.errorf(s.Pos(), "yield inside lambda/closure is not allowed")
 		} else {
@@ -98,6 +106,10 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 	case *ast.YieldDelegateStmt:
 		if !c.inGenerator {
 			c.errorf(s.Pos(), "yield* outside of generator function")
+		} else if c.goBlock != nil {
+			// T1428: see the `*ast.YieldStmt` arm above.
+			c.errorf(s.Pos(), "yield* inside a `go` block is not allowed")
+			c.hintf(s.Pos(), "a goroutine has no consumer driving `next()` — send the values over a channel and `yield` them from the generator body")
 		} else if c.lambdaDepth > 0 {
 			c.errorf(s.Pos(), "yield* inside lambda/closure is not allowed")
 		} else {

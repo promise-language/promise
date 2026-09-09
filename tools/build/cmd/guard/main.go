@@ -561,13 +561,35 @@ func applyCd(tokens []string, cwd string) (string, bool) {
 		return cwd, false
 	}
 	target := stripQuotes(tokens[1])
-	if !filepath.IsAbs(target) {
+	if !isAbsPath(target) {
 		if cwd == "" {
 			return "", true
 		}
 		target = filepath.Join(cwd, target)
 	}
 	return filepath.Clean(target), true
+}
+
+// isAbsPath reports whether target names a directory on its own, without a
+// working directory to resolve it against.
+//
+// filepath.IsAbs does not answer that question on Windows. The guard reads
+// command strings written for the Bash tool's shell, which is Git Bash here,
+// and there `/tmp/x` is absolute — but filepath.IsAbs("/tmp/x") is false under
+// GOOS=windows, because the path names no volume. Calling such a path relative
+// made both walkers join it onto the shell's cwd: `cd /tmp/x` from C:\repo
+// resolved to C:\repo\tmp\x, and `git -C /tmp/x` was scoped the same wrong way.
+// A path that depends on no directory then got a verdict that depended on one —
+// the cwd-keying hazard T1814 removed from root discovery, one layer down.
+//
+// os.IsPathSeparator keeps this a question about the path rather than about the
+// platform: it accepts `\` as well on Windows, and on POSIX the leading-slash
+// case is already covered by filepath.IsAbs.
+func isAbsPath(target string) bool {
+	if filepath.IsAbs(target) {
+		return true
+	}
+	return target != "" && os.IsPathSeparator(target[0])
 }
 
 // checkAll checks all sub-commands. Returns the first deny reason, or "".
@@ -868,7 +890,7 @@ func effectiveGitDir(tokens []string, cwd string) string {
 		t := tokens[i]
 		if t == "-C" && i+1 < len(tokens) {
 			d := tokens[i+1]
-			if !filepath.IsAbs(d) {
+			if !isAbsPath(d) {
 				d = filepath.Join(dir, d)
 			}
 			dir = filepath.Clean(d)

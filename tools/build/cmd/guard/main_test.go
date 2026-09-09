@@ -1403,6 +1403,34 @@ func TestEffectiveGitDir(t *testing.T) {
 	}
 }
 
+// TestShellAbsolutePathsAreNotJoinedToCwd pins the property both chain walkers
+// have to hold: a path the shell resolves on its own must not be resolved
+// against the caller's directory.
+//
+// The guard reads command strings written for the Bash tool's shell, which on
+// Windows is Git Bash — `/tmp/x` is absolute there, but filepath.IsAbs calls it
+// relative under GOOS=windows because it names no volume. Both walkers then
+// joined it onto cwd (`C:\repo\tmp\x`) and judged a directory nobody named.
+//
+// Asserting "not under cwd" rather than a literal expected path keeps one test
+// meaningful on both platforms: on POSIX these inputs were always absolute, so
+// the property held there already and this pins that it keeps holding.
+func TestShellAbsolutePathsAreNotJoinedToCwd(t *testing.T) {
+	cwd := filepath.Clean(string(filepath.Separator) + "repo") // "/repo" or "\repo"
+	for _, target := range []string{"/tmp/x", "/etc"} {
+		got, isCd := applyCd([]string{"cd", target}, cwd)
+		if !isCd {
+			t.Errorf("applyCd(cd %s, %q) did not report a cd", target, cwd)
+		}
+		if isWithin(cwd, got) {
+			t.Errorf("applyCd(cd %s, %q) = %q — absolute target resolved against cwd", target, cwd, got)
+		}
+		if got := effectiveGitDir([]string{"git", "-C", target, "status"}, cwd); isWithin(cwd, got) {
+			t.Errorf("effectiveGitDir(git -C %s, %q) = %q — absolute -C resolved against cwd", target, cwd, got)
+		}
+	}
+}
+
 func TestInManagedRepo(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

@@ -21,11 +21,22 @@ func TestMakeCommands(t *testing.T) {
 		wantRelative = `.\make.cmd`
 	}
 
+	// The fixture roots stand in for a real checkout, so they have to be
+	// absolute the way the platform means it — the first assertion below is
+	// about the path MakeCommands returns, and a fixture that fails it teaches
+	// nothing. On Windows that needs a volume: filepath.Join(`\`, …) yields
+	// `\srv\promise`, which is rooted but drive-relative, so filepath.IsAbs
+	// rejects it and the test fails on its own input.
+	volume := string(filepath.Separator)
+	if runtime.GOOS == "windows" {
+		volume = `C:\`
+	}
+
 	// A path with a space is an ordinary checkout (/Users/John Doe/promise),
 	// so the spellings have to survive one without quoting or splitting.
 	for _, root := range []string{
-		filepath.Join(string(filepath.Separator), "srv", "promise"),
-		filepath.Join(string(filepath.Separator), "Users", "John Doe", "promise"),
+		filepath.Join(volume, "srv", "promise"),
+		filepath.Join(volume, "Users", "John Doe", "promise"),
 	} {
 		abs, relative := MakeCommands(root)
 

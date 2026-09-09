@@ -644,7 +644,9 @@ type MapBox085 {
 // phi-tracking branch, and the call-source case hits genExpr's non-ident,
 // non-owner-governed branch. (MutexGuard's call-source form is omitted — a
 // function returning `MutexGuard[T]?` would have to outlive the guard's borrowed
-// Mutex, which isn't constructible; the ident form covers its phi branch.)
+// Mutex, which isn't constructible; the ident form covers its phi branch. The
+// FAILABLE spelling of the same node lifts that restriction — see the T1940
+// section at the end of this file.)
 // ----------------------------------------------------------------------------
 
 mk_mutex_opt() Mutex[int]? {
@@ -764,4 +766,104 @@ borrow_then_owned_reassign(Base085r b) int {
 reassign_borrow_to_owned_handler() `test {
   assert(borrow_then_owned_reassign(Sub085r(x: 1, y: 2)) == 20,
   "owned reassignment of borrow optional, tracked, no leak");
+}
+
+// ============================================================================
+// T1940: the FAILABLE spelling of the same node.
+// ----------------------------------------------------------------------------
+// `f()? e { … }` on a failable call and `o? _ { … }` on an optional are both an
+// `*ast.ErrorHandlerExpr`, and both land on the one genExpr arm the tests above
+// exercise. T1940 replaced that arm's longhand Arc/Weak/Mutex/Task/MutexGuard/
+// Channel chain with the shared `trackNativeHandleResult`, so the arm needs to
+// keep behaving identically — and every handle case above is an optional.
+//
+// Only the shapes the optional spelling provably cannot reach are added here.
+// Stub the arm's dispatch and the Channel/Arc/Mutex/Weak tests above go red —
+// but MutexGuard, a discarded Task, and a channel holding buffered heap elements
+// all stay green with only those tests present, which is what earns these three
+// their compile time:
+//
+//   - MutexGuard. The note at the top of the T1085 section is right that no
+//     function can return `MutexGuard[T]?` — the guard would outlive its Mutex.
+//     A failable factory can take the Mutex as a borrowed parameter the caller
+//     still owns, so `mk_guard085f!(Mutex[int] m)` is constructible and this is
+//     the first test of that branch in the call-source position.
+//   - Task. `call_task_handler_temp` awaits its result with `<-`, and the
+//     receive claims the temp — so it stays green with the arm stubbed. A
+//     discarded task is what actually pins the Task branch.
+//   - A channel carrying buffered heap elements. The per-element-type drop must
+//     walk the un-received items (T0663); `call_channel_handler_temp`'s channel
+//     is empty, so a handle-only free would look identical there.
+//
+// `handler085f_bound_*` are the counter-tests: a binding claims the phi, so
+// exactly one drop fires. They must stay green both ways, and would double-free
+// if the arm ever claimed a handle its binding already owns.
+// ============================================================================
+
+worker085f() int {
+  return 42;
+}
+
+mk_chan085f!(bool ok) channel[int] {
+  if !ok {
+    raise error("boom");
+  }
+  return Channel[int](capacity: 1);
+}
+
+mk_chan_string085f!() channel[string] {
+  channel[string] c = Channel[string](capacity: 2);
+  c.send("alpha".repeat(4));
+  c.send("beta".repeat(4));
+  return c;
+}
+
+mk_guard085f!(Mutex[int] m) MutexGuard[int] {
+  return m.lock();
+}
+
+mk_task085f!() task[int] {
+  return go worker085f();
+}
+
+// The branch T1085 recorded as unreachable through an optional.
+failable_guard_handler_temp() `test {
+  m := Mutex[int](9);
+  v := (mk_guard085f(m)? e {
+    m.lock()
+  }).borrow;
+  assert(v == 9, "call-source guard temp dropped, no leak");
+}
+
+// Discarded rather than awaited, so the receive cannot claim the temp.
+failable_task_handler_discarded() `test(exclude: wasm) {
+  mk_task085f()? e {
+    go worker085f()
+  };
+}
+
+// T0663: the two buffered strings must be dropped with the channel.
+failable_chan_string_handler_temp() `test {
+  mk_chan_string085f()? e {
+    Channel[string](capacity: 1)
+  };
+}
+
+// Counter-tests: the binding claims the phi on both incoming paths.
+handler085f_bound_ok() `test {
+  channel[int] c = mk_chan085f(true)? e {
+    Channel[int](capacity: 3)
+  };
+  c.send(9);
+  c.close();
+  assert((<-c)! == 9, "bound handler result, ok path");
+}
+
+handler085f_bound_recovery() `test {
+  channel[int] c = mk_chan085f(false)? e {
+    Channel[int](capacity: 3)
+  };
+  c.send(8);
+  c.close();
+  assert((<-c)! == 8, "bound handler result, recovery path");
 }

@@ -820,11 +820,12 @@ func TestForInBareFailableRangeAutoPropagates(t *testing.T) {
 	codegentest.AssertContains(t, body, "forin.header")
 }
 
-// The channel branch is asserted here and not in tests/e2e/failable_forin.pr
-// because running it leaks 5 allocations — T1940, a gap in
-// trackUnwrappedFailableTemp's handling of native handles that the explicit
-// `?^` spelling hits identically. The IR still shows what this item is about:
-// the receive loop is built on the unwrapped channel.
+// The channel branch is pinned here at the IR level: the receive loop is built
+// on the unwrapped channel, which is what this item is about. Its runtime
+// behaviour — that both spellings iterate correctly and free the handle — is
+// covered by forin_channel_bare_matches_caret in tests/e2e/failable_forin.pr
+// (it leaked 5 allocations per spelling — 10 for the test, which runs both —
+// until T1940 gave trackUnwrappedFailableTemp its native-handle dispatch).
 func TestForInBareFailableChannelAutoPropagates(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		mkch!() channel[int] {
@@ -843,6 +844,11 @@ func TestForInBareFailableChannelAutoPropagates(t *testing.T) {
 	codegentest.AssertContains(t, body, "auto.propagate")
 	codegentest.AssertContains(t, body, "auto.ok")
 	codegentest.AssertContains(t, body, "forin_ch.header")
+	// T1940: the unwrapped channel is a tracked statement temp, so genForInStmt
+	// promotes it to a scope binding that frees it on every exit path. Before the
+	// native-handle dispatch it was untracked, the promotion never fired, and the
+	// handle leaked — so this line is what makes the IR test see that regression.
+	codegentest.AssertContains(t, body, "__forin_ch_tmp")
 }
 
 // The `iter()`-method shape lands on the ForInIter case of the duck-typed

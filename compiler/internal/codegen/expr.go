@@ -164,28 +164,15 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					} else {
 						c.trackVectorTemp(result)
 					}
-				} else if arcElem, isArc := types.AsArc(rt); isArc {
-					c.trackTempWithDrop(result, c.getOrCreateArcDrop(arcElem))
-				} else if weakElem, isWeak := types.AsWeak(rt); isWeak {
-					c.trackTempWithDrop(result, c.getOrCreateWeakDrop(weakElem))
-				} else if mutexElem, isMutex := types.AsMutex(rt); isMutex {
-					c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
-				} else if taskElem, isTask, taskFail := types.AsAnyTaskFailable(rt); isTask {
-					c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem, taskFail))
-				} else if _, isMG := types.AsMutexGuard(rt); isMG {
-					// T0561: MutexGuard.drop is a single non-per-element-type symbol.
-					if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
-						c.trackTempWithDrop(result, dropFn)
-					}
-				} else if chElem, isCh := types.AsChannel(rt); isCh || named == types.TypChannel {
-					// T0653: Channel[T] call/constructor result is a heap-allocated
-					// channel struct + ring buffer + mutex + cond. Without tracking,
-					// a discarded statement-expression temporary (e.g. `Channel[int](1);`,
-					// `fresh();`, `fresh().send(9);`) leaks ~5 allocations because the
-					// existing field-dup (B0219), element-dup (T0383/T0648), and
-					// getter-result (T0486) trackers don't cover the call-result path.
-					// T0663: per-element-type drop also walks any un-received buffered items.
-					c.trackChannelTempWithElemType(result, chElem)
+				} else {
+					// T0555/T0561/T0653: a native handle call/constructor result is a
+					// heap-allocated handle nothing else owns. Without tracking, a
+					// discarded statement-expression temporary (`Channel[int](1);`,
+					// `fresh();`, `fresh().send(9);`) leaks ~5 allocations — the
+					// field-dup (B0219), element-dup (T0383/T0648) and getter-result
+					// (T0486) trackers do not cover the call-result path. T0663: the
+					// per-element-type Channel drop also walks un-received buffered items.
+					c.trackNativeHandleResult(result, rt)
 				}
 			}
 		} else {
@@ -379,21 +366,7 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 				// are handled in genOptionalHandlerExpr's T0778 block; owner-
 				// governed member sources stay untracked (the owner's drop frees
 				// the field on the present path).
-				if arcElem, isArc := types.AsArc(exprType); isArc {
-					c.trackTempWithDrop(result, c.getOrCreateArcDrop(arcElem))
-				} else if weakElem, isWeak := types.AsWeak(exprType); isWeak {
-					c.trackTempWithDrop(result, c.getOrCreateWeakDrop(weakElem))
-				} else if mutexElem, isMutex := types.AsMutex(exprType); isMutex {
-					c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
-				} else if taskElem, isTask, taskFail := types.AsAnyTaskFailable(exprType); isTask {
-					c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem, taskFail))
-				} else if _, isMG := types.AsMutexGuard(exprType); isMG {
-					if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
-						c.trackTempWithDrop(result, dropFn)
-					}
-				} else if chElem, isCh := types.AsChannel(exprType); isCh {
-					c.trackChannelTempWithElemType(result, chElem)
-				}
+				c.trackNativeHandleResult(result, exprType)
 			}
 		} else if _, isSig := exprType.(*types.Signature); isSig && result != nil {
 			// T1235: an error-handler result of function type is an owned closure

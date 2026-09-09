@@ -935,12 +935,16 @@ func (c *Compiler) blockResultTransfersOwnedFlag(block *ast.Block) bool {
 }
 
 // ownedI8PtrResultDrop resolves the drop function (and vector element type, if any)
-// for a match/if expression result represented as a bare i8* owned heap value
-// (T1107): string → promise_string_drop, Vector[T] → Vector.drop (+elem), and the
-// single-owner native handles Arc/Weak/Mutex/MutexGuard/Task/Channel → their
-// per-instantiation drop. Returns (nil, nil) for every other result type (value
-// structs, heap user types, refs) — those are not i8* and are handled elsewhere.
-// rt must already be substituted (typeSubst applied by the caller).
+// for a result represented as a bare i8* owned heap value (T1107): string →
+// promise_string_drop, Vector[T] → Vector.drop (+elem), and the single-owner
+// native handles Arc/Weak/Mutex/MutexGuard/Task/Channel → their per-instantiation
+// drop. Returns (nil, nil) for every other result type (value structs, heap user
+// types, refs) — those are not i8* and are handled elsewhere. rt must already be
+// substituted (typeSubst applied by the caller).
+//
+// This is the canonical copy of that mapping. It was written for the match/if
+// merge result below, and trackNativeHandleResult (T1940) now routes the handle
+// half of three more sites through it; the remaining longhand copies are T1990.
 func (c *Compiler) ownedI8PtrResultDrop(rt types.Type) (*ir.Func, types.Type) {
 	if rt == nil {
 		return nil, nil

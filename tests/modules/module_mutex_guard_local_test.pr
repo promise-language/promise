@@ -17,3 +17,30 @@ module_arc_family_local() `test {
   assert(h.observe() == 7, "the module-side Ref[int] local hands back the start value");
   assert(h.observe() == 7, "a second call builds and drops a fresh Ref/Weak pair");
 }
+
+// T1940: a native handle produced by a failable unwrap is registered as a
+// statement-end temp, which emits a getOrCreate*Drop call at a site the module
+// split has to place correctly. Here the handle type is declared by guardmod and
+// the drop is emitted into user code — the cross-boundary case, and the one that
+// can be green on macOS and red on Windows. Discarded, bound, and iterated, so
+// the drop fires from a temp, from a scope binding, and from the for-in path.
+module_failable_handle_discarded() `test {
+  guardmod.make_channel()?!;
+}
+
+module_failable_handle_bound() `test {
+  channel[int] c = guardmod.make_channel()?!;
+  assert((<-c)! == 5, "the module-side channel carries its buffered value");
+}
+
+_module_failable_handle_forin!() int {
+  int n = 0;
+  for v in guardmod.make_channel()?^ {
+    n += v;
+  }
+  return n;
+}
+
+module_failable_handle_forin() `test {
+  assert(_module_failable_handle_forin()?! == 5, "?^ on a module factory, iterated");
+}

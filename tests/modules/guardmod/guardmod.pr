@@ -29,3 +29,16 @@ type Holder `public `doc("Holds a start value observed through a module-local Re
     return r.borrow;
   }
 }
+
+// T1940: a `public` failable factory whose success value is a native handle.
+// The unwrap — and therefore the statement-temp drop the fix now registers —
+// happens in *user* code, while Channel[int] is instantiated by this module's
+// declaration. That is the split T1929 showed can leave a per-instance drop
+// declared in one IR and defined in none: invisible under --gc-sections on Unix,
+// fatal under lld-link on Windows.
+make_channel!() channel[int] `public `doc("Creates a closed buffered channel holding one value; failable so the caller must unwrap it") {
+  channel[int] c = Channel[int](capacity: 1);
+  c.send(5);
+  c.close();
+  return c;
+}

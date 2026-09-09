@@ -1,0 +1,942 @@
+// T1940: a native handle (Channel/Ref/Weak/Mutex/Task/MutexGuard) produced by a
+// failable unwrap must be registered as a statement-end temp, exactly as the
+// plain call result already was (T0555/T0561/T0653) and the optional-handler
+// result already was (T1085).
+//
+// trackUnwrappedFailableTemp — the single helper behind all three unwrap
+// spellings — dispatched only `string` and `Vector` for an i8* result, so a
+// handle matched neither name and fell out untracked: a discarded or
+// inline-consumed handle leaked its whole heap state (~5 allocations per
+// channel, 3 per mutex, 1 per Ref/Weak/Task). §7.2 of docs/language-design.md
+// gives the bare form in "all expression positions" and makes `?^` equivalent,
+// so all three spellings must account for ownership identically.
+//
+// The zero-leak policy is what makes these discriminating: on a compiler without
+// the fix, 38 of the 59 tests below LEAK — every `?^` and `?!` discard, plus the
+// receiver, call-argument, guard-escape, field-escape, generic-body, failable-
+// method, loop, heap-element, two-in-one-statement and go-argument shapes, and
+// every body and statement position in the second half of the file. The rest of
+// the ~9600-test suite stays green, which is the measurement that made this file
+// necessary: nothing else in the tree reaches this helper's handle branch.
+// `discarded_bare`
+// is the one group that does not: a bare failable call that *is* the whole
+// statement is unwrapped by genAutoPropagate instead of by the helper under test,
+// and that path already dropped five of the six handle kinds (T1976). It is kept
+// so the third spelling is covered in the discard position too.
+//
+// The `bound_*` and `owner_governed_*` tests are the counter-tests — they fail
+// loudly (double free) if the new tracking over-claims a handle some other owner
+// already frees, and so are the claim-site group at the end of the file (return,
+// reassignment, field and constructor arguments, a `move` parameter, container
+// literals), and the borrow-return group that closes the file.
+// `owner_governed_field_escape` is both: it leaks 5 allocations pre-fix and
+// would double-free post-fix if the tracking were too eager, so it is the one
+// test that pins the boundary from both sides.
+//
+// One `use`-binding claim site is missing from that group, and stays missing:
+// `use c := Channel[int](capacity: 1);` panics the compiler outright ("close
+// method not in vtable for Channel") because Channel's shared-receiver `close()`
+// satisfies sema's use-binding lookup but has no vtable slot for codegen to
+// dispatch through. That is T2042 — pre-existing, reproduces at 5cf75ad5 with
+// this item's diff stashed, and unreachable from any failable unwrap. Add the
+// `use c := mk_chan()?!` counter-test when it lands.
+//
+// One over-claim is NOT pinned here, because it is broken and stays broken: a
+// failable factory that hands back a borrowed *argument* rather than a fresh
+// value — `f!(channel[int] c) channel[int] { return c; }` — yields a handle the
+// caller still owns, and the statement-end drop this item adds frees it out from
+// under them. Nothing guards it: emitReturnAliasCheckSubst, the runtime
+// pointer-compare safety net that covers exactly this shape, returns early on
+// `sig.CanError()` and so never runs for any failable call. That is T2005, it
+// predates this item, and string and Vector already abort on the same shape
+// (`fatal: invalid free`) — handles now share their fate rather than leaking.
+// A test belongs there, with the non-failable control that shows the net works.
+// --- Failable factories, one per handle kind ---
+mk_chan!() channel[int] {
+  channel[int] c = Channel[int](capacity: 1);
+  return c;
+}
+
+mk_chan_string!() channel[string] {
+  channel[string] c = Channel[string](capacity: 2);
+  c.send("alpha");
+  c.send("beta");
+  return c;
+}
+
+mk_ref!() Ref[int] {
+  return Ref[int](99);
+}
+
+mk_weak!(Ref[int] a) Weak[int] {
+  return a.downgrade();
+}
+
+mk_mutex!() Mutex[int] {
+  return Mutex[int](7);
+}
+
+mk_guard!(Mutex[int] m) MutexGuard[int] {
+  return m.lock();
+}
+
+worker_t1940() int {
+  return 42;
+}
+
+mk_task!() task[int] {
+  return go worker_t1940();
+}
+
+// Non-failable controls — the shapes the CallExpr arm has always tracked.
+mk_mutex_nf() Mutex[int] {
+  return Mutex[int](7);
+}
+
+take_chan(channel[int] c) int {
+  return 1;
+}
+
+// --- Discarded handle: `?!` (the spelling legal in a non-failable function) ---
+
+discarded_chan_panic() `test {
+  mk_chan()?!;
+}
+
+discarded_chan_string_panic() `test {
+  // The per-element-type Channel[string].drop must also walk the two
+  // un-received buffered strings (T0663) — a generic buffer free would not.
+  mk_chan_string()?!;
+}
+
+discarded_ref_panic() `test {
+  mk_ref()?!;
+}
+
+discarded_weak_panic() `test {
+  a := Ref[int](3);
+  mk_weak(a)?!;
+}
+
+discarded_mutex_panic() `test {
+  mk_mutex()?!;
+}
+
+discarded_guard_panic() `test {
+  m := Mutex[int](5);
+  mk_guard(m)?!;
+}
+
+discarded_task_panic() `test(exclude: wasm) {
+  mk_task()?!;
+}
+
+// --- Discarded handle: `?^` (explicit propagate, inside a failable function) ---
+
+_discard_chan_caret!() int {
+  mk_chan()?^;
+  return 1;
+}
+
+_discard_ref_caret!() int {
+  mk_ref()?^;
+  return 1;
+}
+
+_discard_weak_caret!(Ref[int] a) int {
+  mk_weak(a)?^;
+  return 1;
+}
+
+_discard_mutex_caret!() int {
+  mk_mutex()?^;
+  return 1;
+}
+
+_discard_guard_caret!(Mutex[int] m) int {
+  mk_guard(m)?^;
+  return 1;
+}
+
+_discard_task_caret!() int {
+  mk_task()?^;
+  return 1;
+}
+
+discarded_caret() `test {
+  assert(_discard_chan_caret()?! == 1, "?^ channel");
+  assert(_discard_ref_caret()?! == 1, "?^ ref");
+  a := Ref[int](3);
+  assert(_discard_weak_caret(a)?! == 1, "?^ weak");
+  assert(_discard_mutex_caret()?! == 1, "?^ mutex");
+  m := Mutex[int](5);
+  assert(_discard_guard_caret(m)?! == 1, "?^ guard");
+}
+
+discarded_caret_task() `test(exclude: wasm) {
+  assert(_discard_task_caret()?! == 1, "?^ task");
+}
+
+// --- Discarded handle: bare auto-propagate (inside a failable function) ---
+
+_discard_chan_bare!() int {
+  mk_chan();
+  return 1;
+}
+
+_discard_ref_bare!() int {
+  mk_ref();
+  return 1;
+}
+
+_discard_weak_bare!(Ref[int] a) int {
+  mk_weak(a);
+  return 1;
+}
+
+_discard_mutex_bare!() int {
+  mk_mutex();
+  return 1;
+}
+
+_discard_guard_bare!(Mutex[int] m) int {
+  mk_guard(m);
+  return 1;
+}
+
+discarded_bare() `test {
+  assert(_discard_chan_bare()?! == 1, "bare channel");
+  assert(_discard_ref_bare()?! == 1, "bare ref");
+  a := Ref[int](3);
+  assert(_discard_weak_bare(a)?! == 1, "bare weak");
+  assert(_discard_mutex_bare()?! == 1, "bare mutex");
+  m := Mutex[int](5);
+  assert(_discard_guard_bare(m)?! == 1, "bare guard");
+}
+
+// NOT covered here: a bare-auto-propagated `task[T]` discarded as a statement.
+// That shape does not reach trackUnwrappedFailableTemp at all — an ExprStmt
+// whose whole expression is a bare failable call goes through genAutoPropagate
+// → dropDiscardedAutoPropagate (B0261/B0262), a separate copy of the handle→drop
+// dispatch that emits a direct drop call and is the only copy missing a Task
+// branch. It leaks 2 allocations, for a reason unrelated to this item and in a
+// function this item does not touch (T1976). Add the case to discarded_bare
+// above, and delete this note, when T1976 lands. Every other handle kind's bare
+// discard does drop, so the gap is Task-specific.
+
+// --- Counter-tests: a binding claims the temp, so exactly one drop fires ---
+//
+// The claim sites (stmt_decl.go / stmt_assign.go) already list all six handle
+// types, so a bound unwrap must NOT double-free. These pass before the fix too;
+// they exist to prove the new tracking does not over-claim.
+
+bound_chan_panic() `test {
+  channel[int] c = mk_chan()?!;
+  c.send(4);
+  c.close();
+  assert((<-c)! == 4, "bound channel via ?!");
+}
+
+bound_ref_panic() `test {
+  Ref[int] a = mk_ref()?!;
+  assert(a.borrow == 99, "bound ref via ?!");
+}
+
+bound_mutex_panic() `test {
+  Mutex[int] m = mk_mutex()?!;
+  use g := m.lock();
+  assert(g.borrow == 7, "bound mutex via ?!");
+}
+
+bound_task_panic() `test(exclude: wasm) {
+  task[int] t = mk_task()?!;
+  assert(<-t == 42, "bound task via ?!");
+}
+
+_bound_chan_caret!() int {
+  channel[int] c = mk_chan()?^;
+  c.send(11);
+  c.close();
+  return (<-c)!;
+}
+
+_bound_ref_caret!() int {
+  Ref[int] a = mk_ref()?^;
+  return a.borrow;
+}
+
+_bound_mutex_caret!() int {
+  Mutex[int] m = mk_mutex()?^;
+  use g := m.lock();
+  return g.borrow;
+}
+
+bound_caret() `test {
+  assert(_bound_chan_caret()?! == 11, "bound channel via ?^");
+  assert(_bound_ref_caret()?! == 99, "bound ref via ?^");
+  assert(_bound_mutex_caret()?! == 7, "bound mutex via ?^");
+}
+
+// --- Counter-test: the handle lands in a field whose owner's drop frees it ---
+//
+// The item asks for this shape specifically: the unwrap yields the owner, whose
+// synthesized drop frees the channel field. If the new tracking mistook the
+// owner's field for an owned temp, this double-frees.
+
+type R {
+  channel[int] c;
+  drop(~this) {
+  }
+
+  chan_of!(this) channel[int] {
+    return this.c;
+  }
+}
+
+mk_r!() R {
+  channel[int] ch = Channel[int](capacity: 1);
+  ch.send(21);
+  return R(c: move ch);
+}
+
+owner_governed_field_panic() `test {
+  R r = mk_r()?!;
+  assert((<-r.c)! == 21, "owner-governed channel field via ?!");
+}
+
+_owner_governed_field_caret!() int {
+  R r = mk_r()?^;
+  return (<-r.c)!;
+}
+
+owner_governed_field_caret() `test {
+  assert(_owner_governed_field_caret()?! == 21, "owner-governed channel field via ?^");
+}
+
+// The sharper form of the same counter-test: the unwrap yields the FIELD, not
+// its owner, and the owner is still alive and still owns it. If the new
+// tracking claimed that handle, the statement-end drop would race the owner's
+// own drop — a double free rather than a leak, which is why all three spellings
+// are pinned. (It holds because a channel is refcounted, so the accessor's
+// escape is a refcount bump, not an alias; a `Ref[int]` field cannot even be
+// written this way — ownership rejects moving it out of the owner.)
+_field_escape_caret!(R r) int {
+  r.chan_of()?^;
+  return 1;
+}
+
+_field_escape_bare!(R r) int {
+  r.chan_of();
+  return 1;
+}
+
+owner_governed_field_escape() `test {
+  R r = mk_r()?!;
+  r.chan_of()?!;
+  assert(_field_escape_caret(r)?! == 1, "?^ field escape");
+  assert(_field_escape_bare(r)?! == 1, "bare field escape");
+  assert((<-r.c)! == 21, "the owner still owns the channel after three escapes");
+}
+
+// --- Receiver and call-argument positions ---
+
+// Bare auto-propagate in receiver position: the unwrapped channel is the
+// method's receiver and nothing else owns it. Unlike a bare discard, this site
+// does route through the helper under test.
+_receiver_bare!() int {
+  mk_chan().send(5);
+  return 5;
+}
+
+receiver_position_bare() `test {
+  assert(_receiver_bare()?! == 5, "receiver position");
+}
+
+call_argument_panic() `test {
+  assert(take_chan(mk_chan()?!) == 1, "call-argument position");
+}
+
+// --- Guard escape: a failable mutex factory whose result is locked inline ---
+//
+// The unwrapped mutex is a statement temp, but the guard taken from it is bound
+// to a local that outlives the statement — so the mutex must not be freed at
+// statement end. Both spellings promote it to a scope-lifetime `_handletmp`
+// binding dropped after the guard; this pins the failable one against the
+// non-failable control, which has taken that path since T0555.
+
+guard_escape_parity() `test {
+  MutexGuard[int] g = mk_mutex()?!.lock();
+  assert(g.borrow == 7, "failable mutex receiver then lock");
+}
+
+guard_escape_control() `test {
+  MutexGuard[int] g = mk_mutex_nf().lock();
+  assert(g.borrow == 7, "non-failable control");
+}
+
+// --- Generic context: the unwrap happens under an active `typeSubst` ---------
+//
+// Every case above unwraps in a non-generic body, where sema has already written
+// a concrete success type into `c.info.Types`. Inside a generic body it writes a
+// `TypeParam`, and `resolvedExprType` — the first line of the helper under test —
+// is what turns that into `Ref[int]` / `channel[string]` by applying the active
+// `c.typeSubst`. Two instantiations per shape, and the `Ref[string]` one carries
+// a heap element, so a substitution that resolved to the wrong instantiation
+// would drop the wrong thing rather than silently drop nothing.
+
+mk_ref_of![T](T move v) Ref[T] {
+  return Ref[T](move v);
+}
+
+mk_chan_of![T]() channel[T] {
+  return Channel[T](capacity: 1);
+}
+
+_generic_ref_caret![T](T move v) int {
+  mk_ref_of(move v)?^;
+  return 1;
+}
+
+_generic_chan_caret![T]() int {
+  mk_chan_of[T]()?^;
+  return 1;
+}
+
+generic_body_caret() `test {
+  assert(_generic_ref_caret(5)?! == 1, "?^ Ref[T] in a generic body, T=int");
+  assert(_generic_ref_caret[string]("g".repeat(20))?! == 1, "?^ Ref[T] in a generic body, T=string");
+  assert(_generic_chan_caret[int]()?! == 1, "?^ channel[T] in a generic body, T=int");
+  assert(_generic_chan_caret[string]()?! == 1, "?^ channel[T] in a generic body, T=string");
+}
+
+// A method on a generic owner. The substitution the unwrap site sees is the
+// owner's type-level one, which `defineMonoMethods` installs per instance —
+// a different map from the function-level one the free functions above use, and
+// the one a module split has to place correctly (T1929).
+type Holder[T] {
+  int n;
+
+  mk!(this) channel[T] `doc("Creates a one-slot channel of the owner's element type") {
+    return Channel[T](capacity: 1);
+  }
+}
+
+generic_method_panic() `test {
+  hi := Holder[int](n: 1);
+  hi.mk()?!;
+  hs := Holder[string](n: 1);
+  hs.mk()?!;
+}
+
+// --- A failable method receiver, non-generic --------------------------------
+//
+// Same helper, but the callee is a method rather than a free function, so the
+// unwrap site sits behind `genMethodCall` instead of `genCall`.
+
+type Factory {
+  int seed;
+
+  mk!(this) channel[int] `doc("Creates a one-slot channel; failable so the caller must unwrap it") {
+    return Channel[int](capacity: 1);
+  }
+}
+
+method_receiver_panic() `test {
+  f := Factory(seed: 1);
+  f.mk()?!;
+}
+
+_method_receiver_caret!(Factory f) int {
+  f.mk()?^;
+  return 1;
+}
+
+method_receiver_caret() `test {
+  f := Factory(seed: 1);
+  assert(_method_receiver_caret(f)?! == 1, "?^ on a failable method");
+}
+
+// --- Statement-end, not scope-end -------------------------------------------
+//
+// A statement temp is freed at the end of ITS statement, so a loop body that
+// unwraps a fresh handle per iteration must free five channels, not accumulate
+// five and free one. Registering the temp once per iteration is what makes that
+// true, and a scope-lifetime binding would not: pre-fix this leaked 25
+// allocations, five times the single-statement cases above.
+
+_loop_caret!() int {
+  int n = 0;
+  for i in 0..5 {
+    mk_chan()?^;
+    n += 1;
+  }
+  return n;
+}
+
+loop_iteration_caret() `test {
+  assert(_loop_caret()?! == 5, "one channel freed per iteration");
+}
+
+loop_iteration_panic() `test {
+  for i in 0..5 {
+    mk_chan()?!;
+  }
+}
+
+// --- The handle's own drop must reach a heap element ------------------------
+//
+// `Mutex[string]` and `Ref[string]` hold a heap string behind the handle. The
+// temp records the per-instantiation drop, so freeing the handle must free the
+// inner string too — a generic "free the handle" would leak it and count one
+// allocation short. Both strings are built with `repeat` so they are heap, not
+// bit-63 `.rodata` literals, and the leak gate is live.
+
+mk_mutex_string!() Mutex[string] {
+  return Mutex[string]("m".repeat(20));
+}
+
+mk_ref_string!() Ref[string] {
+  return Ref[string]("r".repeat(20));
+}
+
+droppable_element_panic() `test {
+  mk_mutex_string()?!;
+  mk_ref_string()?!;
+}
+
+_droppable_element_caret!() int {
+  mk_mutex_string()?^;
+  mk_ref_string()?^;
+  return 1;
+}
+
+droppable_element_caret() `test {
+  assert(_droppable_element_caret()?! == 1, "?^ handle carrying a heap element");
+}
+
+// --- Two handles in one statement -------------------------------------------
+//
+// `stmtTempMap` is keyed by SSA value, and `cleanupStmtTemps` walks the whole
+// list at statement end. Two unwraps in one statement must register two entries
+// and free both — one shared entry would leak five allocations.
+
+take_two(channel[int] a, channel[int] b) int {
+  return 2;
+}
+
+two_handles_one_statement() `test {
+  assert(take_two(mk_chan()?!, mk_chan()?!) == 2, "two unwrapped handles, one statement");
+}
+
+// --- `go` spawn argument -----------------------------------------------------
+//
+// The spawning statement ends long before the goroutine reads its arguments, so
+// this is the one position where the statement-end drop this item adds could race
+// a concurrent read of the same handle. The assertion pins both halves of the
+// outcome — the goroutine observes a live channel, and the allocation count comes
+// back to zero — rather than assuming the two orderings cannot overlap. Pre-fix
+// the handle simply leaked, which is the failure this position hides best.
+
+take_chan_go(channel[int] c) int {
+  return 1;
+}
+
+go_spawn_argument() `test(exclude: wasm) {
+  t := go take_chan_go(mk_chan()?!);
+  assert(<-t == 1, "unwrapped handle as a go-call argument");
+}
+
+// --- Bound Weak and MutexGuard (completing the counter-test matrix) ----------
+//
+// `bound_*` above covers Channel/Ref/Mutex/Task. Weak and MutexGuard are the two
+// remaining kinds `ownedI8PtrResultDrop` maps, and MutexGuard is the one whose
+// drop is a single non-per-element-type symbol — so a claim site that missed it
+// would double-free rather than leak.
+
+bound_weak_panic() `test {
+  a := Ref[int](3);
+  Weak[int] w = mk_weak(a)?!;
+  assert(w.upgrade()!.borrow == 3, "bound weak via ?!");
+}
+
+bound_guard_panic() `test {
+  m := Mutex[int](5);
+  use g := mk_guard(m)?!;
+  assert(g.borrow == 5, "bound guard via ?!");
+}
+
+// ============================================================================
+// Contexts other than a plain free-function body.
+// ----------------------------------------------------------------------------
+// Everything above unwraps inside a `test` function or a `_`-prefixed free
+// function, and `tempTrackingEnabled` — the gate trackTempWithDrop checks last —
+// is set independently for each kind of body: `defineFunc` (free functions),
+// `defineMethodFunc` (T0084, methods), `genLambda` (B0259, lambda bodies), and
+// the coroutine entries in sched.go. A body whose gate was never opened would
+// leak with the dispatch fully in place, and no test above would notice.
+//
+// Each of these leaks without the fix, so they measure the same thing the file's
+// first half does — in a body the first half never reaches.
+// ============================================================================
+
+type Ctx {
+  int n;
+
+  spin!(this) int `doc("Discards a freshly unwrapped channel inside a method body, then returns the seed") {
+    mk_chan()?^;
+    return this.n;
+  }
+
+  spin_panic(this) int `doc("Same as spin, with the panic spelling, so the enclosing method need not be failable") {
+    mk_chan()?!;
+    return this.n;
+  }
+}
+
+method_body_caret() `test {
+  c := Ctx(n: 4);
+  assert(c.spin()?! == 4, "?^ inside a method body");
+}
+
+method_body_panic() `test {
+  c := Ctx(n: 4);
+  assert(c.spin_panic() == 4, "?! inside a method body");
+}
+
+// A method on a GENERIC owner: the unwrap sits inside a monomorphized body, so
+// each instantiation gets its own copy of the tracking. `generic_method_panic`
+// above unwraps a generic method's RESULT from a non-generic caller; this
+// unwraps inside the generic body itself, which is where `c.typeSubst` is live.
+type GenCtx[T] {
+  int n;
+
+  spin!(this) int `doc("Discards a freshly unwrapped channel inside a generic method body") {
+    mk_chan()?^;
+    return this.n;
+  }
+}
+
+generic_method_body_caret() `test {
+  gi := GenCtx[int](n: 2);
+  assert(gi.spin()?! == 2, "?^ inside a generic method body, T=int");
+  gs := GenCtx[string](n: 3);
+  assert(gs.spin()?! == 3, "?^ inside a generic method body, T=string");
+}
+
+// A lambda body. Auto-propagation does not cross a lambda boundary (§7.2), so
+// `?!` is the only spelling available here — which is also why this is the one
+// context where the panic spelling is not merely the third alternative.
+lambda_body_panic() `test {
+  f := || -> int {
+    mk_chan()?!;
+    return 6;
+  };
+  assert(f() == 6, "?! inside a lambda body");
+}
+
+// A goroutine body. The temp's two allocas go through `createEntryAlloca`, which
+// on a coroutine must place them before the initial suspend so `coro-split` can
+// spill them into the frame — a different alloca path from every case above.
+_goroutine_body() int {
+  mk_chan()?!;
+  return 8;
+}
+
+goroutine_body_panic() `test(exclude: wasm) {
+  t := go _goroutine_body();
+  assert(<-t == 8, "?! inside a goroutine body");
+}
+
+// The `go { … }` block form: the same coroutine, but the body is generated
+// inline inside the spawning function rather than as its own function.
+goroutine_block_panic() `test(exclude: wasm) {
+  t := go {
+    mk_chan()?!;
+    9
+  };
+  assert(<-t == 9, "?! inside a go block");
+}
+
+// A generator body — also a coroutine, but resumed by the for-in loop rather
+// than by the scheduler, and the unwrap happens before the first yield.
+type GenSrc {
+  int n;
+
+  items(this) stream[int] `doc("Yields 1 then 2, after discarding a freshly unwrapped channel") {
+    mk_chan()?!;
+    yield 1;
+    yield 2;
+  }
+}
+
+generator_body_panic() `test {
+  g := GenSrc(n: 0);
+  int sum = 0;
+  for v in g.items() {
+    sum += v;
+  }
+  assert(sum == 3, "?! inside a generator body");
+}
+
+// ============================================================================
+// Statement positions inside a body: nested scopes, arms, loops, select.
+// ----------------------------------------------------------------------------
+// `cleanupStmtTemps` runs at each statement boundary, and the boundaries are not
+// all the same code: a nested block, a match arm's value expression, a while
+// back-edge and a select case body each reach it differently. All four leak
+// without the fix.
+// ============================================================================
+
+nested_block_panic() `test {
+  if true {
+    mk_chan()?!;
+  }
+}
+
+// The unwrap IS the arm's value, so the temp is created inside the arm and the
+// binding claims the merged phi — a match-expression arm is where over-claiming
+// and under-claiming look most alike.
+match_arm_panic() `test {
+  int k = 1;
+  channel[int] c = match k {
+    1 => mk_chan()?!,
+    _ => Channel[int](capacity: 1),
+  };
+  c.send(31);
+  c.close();
+  assert((<-c)! == 31, "match arm unwrap, claimed by the binding");
+}
+
+// The while form of `loop_iteration_caret` above: three iterations must free
+// three channels, not accumulate three and free one (15 allocations, pre-fix).
+while_body_panic() `test {
+  int i = 0;
+  while i < 3 {
+    mk_chan()?!;
+    i += 1;
+  }
+}
+
+// A select case body. The case arm is generated after the select's own park /
+// resume machinery, which rewrites `c.block` several times — the statement
+// boundary inside the arm has to find the temp registered on the right one.
+select_body_panic() `test(exclude: wasm) {
+  channel[int] ready = Channel[int](capacity: 1);
+  ready.send(1);
+  select {
+    v := <-ready:
+      mk_chan()?!;
+      assert(v! == 1, "select case body unwrap");
+  }
+  ready.close();
+}
+
+// ============================================================================
+// Exit paths other than fall-through.
+// ----------------------------------------------------------------------------
+// The temp is freed at the end of ITS statement, so a later `raise` must not
+// skip it — and must not free it twice on the way out either. Pre-fix the
+// no-raise and raise paths leaked five allocations each.
+// ============================================================================
+
+_raise_after_unwrap!(bool boom) int {
+  mk_chan()?^;
+  if boom {
+    raise error("boom");
+  }
+  return 1;
+}
+
+raise_after_unwrap() `test {
+  assert(_raise_after_unwrap(false)?! == 1, "handle freed on the fall-through path");
+  int recovered = _raise_after_unwrap(true)? e {
+    42
+  };
+  assert(recovered == 42, "handle freed on the raise path too");
+}
+
+// ============================================================================
+// The remaining claim sites — counter-tests.
+// ----------------------------------------------------------------------------
+// `bound_*` above covers the var-decl claim (stmt_decl.go). These are the other
+// places a consumer takes the temp over, and each is a place the statement-end
+// drop this item adds would double-free if the claim did not fire. They pass
+// before the fix as well as after — that is the point: they are the boundary,
+// not the measurement.
+// ============================================================================
+
+mk_chan_full!() channel[int] {
+  channel[int] c = Channel[int](capacity: 1);
+  c.send(3);
+  c.close();
+  return c;
+}
+
+// Returned rather than bound: the handle escapes the statement AND the function.
+_return_unwrapped_caret!() channel[int] {
+  return mk_chan_full()?^;
+}
+
+return_position_caret() `test {
+  channel[int] c = _return_unwrapped_caret()?!;
+  assert((<-c)! == 3, "?^ result returned, claimed by the return");
+}
+
+// Assignment to an existing variable (stmt_assign.go), not a fresh declaration:
+// the old channel must be dropped and the new one claimed, exactly once each.
+reassignment_panic() `test {
+  channel[int] c = Channel[int](capacity: 1);
+  c = mk_chan_full()?!;
+  assert((<-c)! == 3, "?! result assigned over an existing binding");
+}
+
+type ChanField {
+  channel[int] c;
+  drop(~this) {
+  }
+}
+
+// Field assignment: the owner's drop takes over the handle at scope exit.
+field_assignment_panic() `test {
+  ChanField f = ChanField(c: Channel[int](capacity: 1));
+  f.c = mk_chan_full()?!;
+  assert((<-f.c)! == 3, "?! result assigned into a field");
+}
+
+// Constructor argument: the field takes ownership at construction.
+constructor_argument_panic() `test {
+  ChanField f = ChanField(c: mk_chan_full()?!);
+  assert((<-f.c)! == 3, "?! result consumed by a constructor");
+}
+
+// A `move` parameter consumes the handle, so the callee frees it and the
+// caller's statement end must not.
+take_chan_moved(channel[int] move c) int {
+  return (<-c)!;
+}
+
+move_parameter_panic() `test {
+  assert(take_chan_moved(mk_chan_full()?!) == 3, "?! result moved into a parameter");
+}
+
+// Container literals: the element/value slot takes ownership, and the
+// container's own drop frees it.
+vector_element_panic() `test {
+  channel[int][] v = [mk_chan_full()?!];
+  assert((<-v[0])! == 3, "?! result as a vector literal element");
+}
+
+map_value_panic() `test {
+  map[string, Ref[int]] m = {
+    "a": mk_ref()?!
+  };
+  assert(m["a"]!.borrow == 99, "?! result as a map literal value");
+}
+
+// ============================================================================
+// Two more shapes the dispatch has to get right.
+// ============================================================================
+
+// The unwrapped handle is the argument of ANOTHER failable call that is itself
+// unwrapped in the same statement — two unwraps nested, not sequential, so the
+// inner temp must survive until the outer call has run and be freed after it.
+consume_chan!(channel[int] c) int {
+  return (<-c)!;
+}
+
+nested_unwrap_panic() `test {
+  assert(consume_chan(mk_chan_full()?!)?! == 3, "an unwrap feeding an unwrap");
+}
+
+// `droppable_element_*` above uses Mutex[string] / Ref[string], whose element
+// drop is the built-in string drop. A user type with a `drop(~this)` and a heap
+// field goes through the synthesized per-type drop instead — the handle's drop
+// must reach it, or the payload's string leaks and the count comes back short.
+type Payload {
+  string s;
+  drop(~this) {
+  }
+}
+
+mk_ref_payload!() Ref[Payload] {
+  return Ref[Payload](Payload(s: "p".repeat(24)));
+}
+
+user_type_element_panic() `test {
+  mk_ref_payload()?!;
+}
+
+_user_type_element_caret!() int {
+  mk_ref_payload()?^;
+  return 1;
+}
+
+user_type_element_caret() `test {
+  assert(_user_type_element_caret()?! == 1, "?^ Ref of a user type with its own drop");
+}
+
+// ============================================================================
+// Borrow returns — the guard the new dispatch's soundness argument rests on.
+// ----------------------------------------------------------------------------
+// `trackUnwrappedFailableTemp` opens with `if isRefType(exprType) { return }`,
+// and that early return is the whole reason the handle branch needs none of the
+// owner-governed guards the optional-unwrap arms carry: a failable function that
+// hands back something it does not own returns `T&` or `T~`, and never reaches
+// the dispatch at all.
+//
+// Nothing exercised it. `tests/e2e/ref_return_bind_test.pr` (T0649) covers
+// `string&` / `string~` returns thoroughly, but only from NON-failable methods,
+// so it never enters this helper — delete the early return and that whole file
+// stays green while `borrow_return_string` below dies with
+// `fatal: invalid free (bad header magic)`.
+//
+// The two channel cases do not fail loudly today, because the handle half is
+// defended twice: `ownedI8PtrResultDrop` matches on `*types.Instance` and so
+// returns no drop for a `Channel[int]&` even if the early return is gone. They
+// pin the shape the comment in stmt.go names, so that loosening either defence
+// alone cannot go unnoticed.
+// ============================================================================
+
+type BorrowOwner {
+  channel[int] c;
+  string s;
+  drop(~this) {
+  }
+
+  chan_ref!(this) channel[int] & `doc("Borrows the channel this owner owns; failable, so the caller must unwrap it") {
+    return this.c;
+  }
+
+  str_ref!(this) string & `doc("Borrows the string this owner owns; failable, so the caller must unwrap it") {
+    return this.s;
+  }
+}
+
+mk_borrow_owner() BorrowOwner {
+  channel[int] ch = Channel[int](capacity: 2);
+  ch.send(11);
+  return BorrowOwner(c: move ch, s: "s".repeat(20));
+}
+
+borrow_return_chan_panic() `test {
+  BorrowOwner o = mk_borrow_owner();
+  o.chan_ref()?!;
+  assert((<-o.c)! == 11, "the owner still owns the channel after a discarded borrow unwrap");
+}
+
+_borrow_return_chan_caret!(BorrowOwner o) int {
+  o.chan_ref()?^;
+  return 1;
+}
+
+borrow_return_chan_caret() `test {
+  BorrowOwner o = mk_borrow_owner();
+  assert(_borrow_return_chan_caret(o)?! == 1, "?^ on a failable borrow return of a channel");
+  assert((<-o.c)! == 11, "the owner still owns the channel after the ?^ borrow unwrap");
+}
+
+borrow_return_string() `test {
+  BorrowOwner o = mk_borrow_owner();
+  assert(o.str_ref()?!.len == 20, "failable borrow return of a string");
+  assert(o.s.len == 20, "the owner still owns the string");
+}

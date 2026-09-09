@@ -1592,3 +1592,155 @@ func TestT1883AutoPropagateEmitsDropForUnclaimedTemp(t *testing.T) {
 		})
 	}
 }
+
+// T1940: trackUnwrappedFailableTemp — the single helper behind `?^`, `?!` and
+// every bare auto-propagate site — dispatched only string and Vector for an i8*
+// result. A native handle (Channel/Ref/Weak/Mutex/Task/MutexGuard) is a bare i8*
+// too, so it matched neither name and was never registered: the unwrapped handle
+// leaked its whole heap state.
+//
+// TestT1883AutoPropagateMatchesExplicitAtEverySite cannot catch this class — it
+// pins bare ≡ `?^`, and both leaked identically. So the `?!` column matters here:
+// it is the third spelling, and the only one legal in a non-failable function.
+//
+// The bare column uses call-argument position rather than a discarded statement,
+// because the two discard sites — an ExprStmt whose whole expression is a bare
+// failable call (stmt.go, *ast.ExprStmt) and the same shape as the last statement
+// of a match/if block arm — both call genAutoPropagate, which ends in
+// dropDiscardedAutoPropagate and emits a direct drop instead of registering a temp.
+// Neither reaches the helper under test. Every bare site that keeps the value
+// routes through genAutoPropagateTracked, and those are what this column pins.
+func TestT1940FailableUnwrapEmitsDropForNativeHandleTemp(t *testing.T) {
+	const prelude = `
+		mkch!() channel[int] { channel[int] c = Channel[int](capacity: 1); return c; }
+		mkref!() Ref[int] { return Ref[int](99); }
+		mkmx!() Mutex[int] { return Mutex[int](7); }
+		mkwk!(Ref[int] a) Weak[int] { return a.downgrade(); }
+		mkguard!(Mutex[int] m) MutexGuard[int] { return m.lock(); }
+		mktask!() task[int] { return go tworker(); }
+		tworker() int => 42;
+		takech(channel[int] c) int => 1;
+		takeref(Ref[int] a) int => 1;
+		takemx(Mutex[int] m) int => 1;
+	`
+	cases := []struct {
+		name   string
+		body   string
+		dropFn string
+	}{
+		{"chan_caret_discarded", `mkch()?^; return 0;`, `call void @"Channel[int].drop"`},
+		{"chan_panic_discarded", `mkch()?!; return 0;`, `call void @"Channel[int].drop"`},
+		{"chan_bare_call_arg", `return takech(mkch());`, `call void @"Channel[int].drop"`},
+		{"ref_caret_discarded", `mkref()?^; return 0;`, `call void @"Ref[int].drop"`},
+		{"ref_panic_discarded", `mkref()?!; return 0;`, `call void @"Ref[int].drop"`},
+		{"ref_bare_call_arg", `return takeref(mkref());`, `call void @"Ref[int].drop"`},
+		{"mutex_caret_discarded", `mkmx()?^; return 0;`, `call void @"Mutex[int].drop"`},
+		{"mutex_panic_discarded", `mkmx()?!; return 0;`, `call void @"Mutex[int].drop"`},
+		{"mutex_bare_call_arg", `return takemx(mkmx());`, `call void @"Mutex[int].drop"`},
+		// The three remaining kinds ownedI8PtrResultDrop maps. Each has its own
+		// arm in that chain, so one dispatching wrongly is a leak the other six
+		// rows cannot see; MutexGuard is also the only kind whose drop is a
+		// single non-per-element-type symbol.
+		{"weak_caret_discarded", `a := Ref[int](3); mkwk(a)?^; return 0;`, `call void @"Weak[int].drop"`},
+		{"weak_panic_discarded", `a := Ref[int](3); mkwk(a)?!; return 0;`, `call void @"Weak[int].drop"`},
+		{"guard_caret_discarded", `m := Mutex[int](5); mkguard(m)?^; return 0;`, `call void @MutexGuard.drop`},
+		{"guard_panic_discarded", `m := Mutex[int](5); mkguard(m)?!; return 0;`, `call void @MutexGuard.drop`},
+		{"task_caret_discarded", `mktask()?^; return 0;`, `call void @"Task[int].drop"`},
+		{"task_panic_discarded", `mktask()?!; return 0;`, `call void @"Task[int].drop"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := prelude + "\nwork!() int {\n" + tc.body + "\n}\nmain() { }\n"
+			body := codegentest.FuncBody(t, codegentest.GenerateIR(t, src), "work")
+			codegentest.AssertContains(t, body, tc.dropFn)
+		})
+	}
+}
+
+// T1940, second site. The fix replaced the longhand Arc/Weak/Mutex/Task/
+// MutexGuard/Channel chain with a shared trackNativeHandleResult at three
+// places, and the *ast.ErrorHandlerExpr arm of genExpr is one of them. That arm
+// serves two spellings: `o? _ { … }` on an optional and `f()? e { … }` on a
+// failable call. Both are covered at runtime by
+// tests/e2e/optional_handler_unwrap_test.pr — the optional half by T1085's
+// section, the failable half by the T1940 section at the end of that file. This
+// is their IR-level counterpart, and it pins the one branch T1085's note there
+// records as unreachable through an optional: a function returning
+// `MutexGuard[T]?` would have to outlive the guard's borrowed Mutex, but a
+// failable factory can take that Mutex as a borrowed parameter the caller still
+// owns, so `mk!(Mutex[int] m) MutexGuard[int]` is constructible.
+//
+// Every handler here diverges (`? e { raise e }`), so `work` constructs no
+// handle of its own and the only thing that can emit a drop into its body is the
+// arm under test. A non-diverging handler would build its recovery handle inside
+// `work`, and the CallExpr arm's own (claimed, flag-guarded) temp would put the
+// same drop call in the body whether or not this arm tracked anything.
+func TestT1940ErrorHandlerEmitsDropForNativeHandleTemp(t *testing.T) {
+	const prelude = `
+		mkch!(bool ok) channel[int] { if !ok { raise error("boom"); } return Channel[int](capacity: 1); }
+		mkref!(bool ok) Ref[int] { if !ok { raise error("boom"); } return Ref[int](99); }
+		mkmx!(bool ok) Mutex[int] { if !ok { raise error("boom"); } return Mutex[int](7); }
+		mkguard!(Mutex[int] m, bool ok) MutexGuard[int] { if !ok { raise error("boom"); } return m.lock(); }
+		mktask!(bool ok) task[int] { if !ok { raise error("boom"); } return go worker(); }
+		worker() int => 42;
+		takech(channel[int] c) int => 1;
+	`
+	cases := []struct {
+		name   string
+		body   string
+		dropFn string
+	}{
+		{"chan_discarded", `mkch(true)? e { raise e }; return 0;`, `call void @"Channel[int].drop"`},
+		{"chan_inline_argument", `return takech(mkch(true)? e { raise e });`, `call void @"Channel[int].drop"`},
+		{"ref_discarded", `mkref(true)? e { raise e }; return 0;`, `call void @"Ref[int].drop"`},
+		{"mutex_discarded", `mkmx(true)? e { raise e }; return 0;`, `call void @"Mutex[int].drop"`},
+		{"task_discarded", `mktask(true)? e { raise e }; return 0;`, `call void @"Task[int].drop"`},
+		// The branch T1085 could not reach through an optional.
+		{"guard_discarded", `m := Mutex[int](5); mkguard(m, true)? e { raise e }; return 0;`, `call void @MutexGuard.drop`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := prelude + "\nwork!() int {\n" + tc.body + "\n}\nmain() { }\n"
+			body := codegentest.FuncBody(t, codegentest.GenerateIR(t, src), "work")
+			codegentest.AssertContains(t, body, tc.dropFn)
+		})
+	}
+}
+
+// T1940: the helper's first line is resolvedExprType, which applies the active
+// c.typeSubst. Every case in TestT1940FailableUnwrapEmitsDropForNativeHandleTemp
+// unwraps in a non-generic body, where sema has already recorded a concrete
+// success type; inside a generic body it records a TypeParam, and only the
+// substitution turns that into Ref[int] / channel[string]. Two instantiations per
+// shape, so a substitution that resolved to the wrong one is visible as the wrong
+// drop symbol rather than as no drop at all.
+func TestT1940FailableUnwrapTracksHandleUnderTypeSubst(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		mkref![T](T move v) Ref[T] { return Ref[T](move v); }
+		mkch![T]() channel[T] { return Channel[T](capacity: 1); }
+		useref![T](T move v) int { mkref(move v)?^; return 1; }
+		usech![T]() int { mkch[T]()?^; return 1; }
+		main() { }
+		drive!() int {
+			useref(5)?^;
+			useref[string]("x")?^;
+			usech[int]()?^;
+			usech[string]()?^;
+			return 0;
+		}
+	`)
+	for _, tc := range []struct{ fn, dropFn string }{
+		{"useref[int]", `call void @"Ref[int].drop"`},
+		{"useref[string]", `call void @"Ref[string].drop"`},
+		{"usech[int]", `call void @"Channel[int].drop"`},
+		{"usech[string]", `call void @"Channel[string].drop"`},
+	} {
+		t.Run(tc.fn, func(t *testing.T) {
+			body := codegentest.ExtractDefine(ir, tc.fn)
+			if body == "" {
+				t.Fatalf("monomorphized function @%q not found in IR:\n%s", tc.fn, ir)
+			}
+			codegentest.AssertContains(t, body, tc.dropFn)
+		})
+	}
+}

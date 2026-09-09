@@ -1304,6 +1304,29 @@ func (c *Compiler) trackUnwrappedFailableTemp(expr ast.Expr, result value.Value)
 			} else {
 				c.trackVectorTemp(result)
 			}
+		} else {
+			// T1940: a native handle (Channel/Ref/Weak/Mutex/Task/MutexGuard) is a
+			// bare i8* too, so it reached neither branch above and was never
+			// registered — a discarded or inline-consumed `mk()?^` / `mk()?!` /
+			// bare-propagated handle leaked its whole heap state (~5 allocations
+			// per channel, 3 per mutex, 1 per Ref/Weak/Task).
+			//
+			// The owner-governed guards the optional-unwrap arms carry
+			// (isIdentSource, isOwnerGovernedMemberOptionalUnwrapSource) are not
+			// needed here: a failable call's success value is a fresh return, never
+			// an alias of a field the receiver's drop already governs (a borrow
+			// return is `T&`/`T~` and left at the top of this function).
+			//
+			// It CAN alias a caller-owned *argument*, though — `f!(channel[int] c)
+			// channel[int] { return c; }` is legal (T1324) — and nothing here
+			// protects against that, because emitReturnAliasCheckSubst returns early
+			// on `sig.CanError()` and so never runs for any failable call. That hole
+			// is T2005, and it predates this branch: the string and Vector arms above
+			// have had it since B0260/T0350/T1883 and double-free on the same shape.
+			// Handles now inherit it rather than leaking, which is the same trade the
+			// other two kinds already made — but the fix belongs in the alias check,
+			// not in a handles-only exception here.
+			c.trackNativeHandleResult(result, exprType)
 		}
 	} else {
 		c.trackHeapUserTypeResult(expr, result)

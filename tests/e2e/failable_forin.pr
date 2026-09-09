@@ -18,14 +18,9 @@
 // the iterable by consulting `FailableExprs` rather than by inspecting the node
 // kind, and `isRawGeneratorForIn` asks specifically whether it is a call.
 //
-// NOT covered here — three shapes that leak for reasons unrelated to this fix,
+// NOT covered here — two shapes that leak for reasons unrelated to this fix,
 // each already filed:
 //
-//   - a failable factory returning `channel[T]`. It iterates correctly but leaks
-//     ~5 allocations, because trackUnwrappedFailableTemp has no native-handle
-//     dispatch — so the plain `?^` spelling leaks identically, with no `for-in`
-//     involved at all (T1940). The branch is still pinned, at the IR level, by
-//     TestForInBareFailableChannelAutoPropagates.
 //   - an early `return`/`raise` out of a `map[K, V]` iterable. genForInMap never
 //     got the scope-binding promotion the vector/string/channel branches have,
 //     so the map is only freed on the fall-through path. Reproduces with a plain
@@ -66,6 +61,15 @@ _mkarr!() int[3] {
 
 _fail!() u8[] {
   raise error("boom");
+}
+
+_fch!() channel[int] {
+  channel[int] c = Channel[int](capacity: 4);
+  c.send(1);
+  c.send(2);
+  c.send(3);
+  c.close();
+  return c;
 }
 
 // T1417's repro shape: a failable factory returning a duck-typed iterator
@@ -132,6 +136,33 @@ _forin_str_caret!() int {
 forin_string_bare_matches_caret() `test {
   assert(_forin_str()?! == 5, "bare failable string iterable");
   assert(_forin_str_caret()?! == 5, "?^ string iterable");
+}
+
+// --- Channel iterable ---
+//
+// T1940: the unwrapped channel is an owned native handle the statement must
+// free. Until trackUnwrappedFailableTemp gained the native-handle dispatch,
+// both spellings iterated correctly and leaked ~5 allocations.
+
+_forin_ch!() int {
+  int n = 0;
+  for v in _fch() {
+    n += v;
+  }
+  return n;
+}
+
+_forin_ch_caret!() int {
+  int n = 0;
+  for v in _fch()?^ {
+    n += v;
+  }
+  return n;
+}
+
+forin_channel_bare_matches_caret() `test {
+  assert(_forin_ch()?! == 6, "bare failable channel iterable");
+  assert(_forin_ch_caret()?! == 6, "?^ channel iterable");
 }
 
 // --- Map iterable ---

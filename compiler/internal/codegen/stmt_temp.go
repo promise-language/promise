@@ -323,6 +323,60 @@ func (c *Compiler) trackChannelTempWithElemType(val value.Value, elemType types.
 	c.trackTempWithDrop(val, c.getOrCreateChannelDrop(elemType))
 }
 
+// trackNativeHandleResult registers an i8*-backed native handle result
+// (Ref/Weak/Mutex/Task/MutexGuard/Channel) as a statement-end temp, using the
+// handle's per-instantiation drop. T1940 — the shared copy of a dispatch that
+// had drifted between the CallExpr arm (T0555/T0561/T0653), the optional-handler
+// arm (T1085), and trackUnwrappedFailableTemp, which never received it at all.
+//
+// The mapping itself lives in ownedI8PtrResultDrop (T1107) — the same question
+// asked of a match/if merge result. `rt` must already carry the active generic
+// and Self substitutions, as it does at all three call sites.
+//
+// Three sites, not all of them: dropDiscardedAutoPropagate (T1976) and the
+// chains in expr_optional.go / expr_member.go / expr_methodcall.go still spell
+// the dispatch out longhand, and disagree with each other where they do
+// (T1976's copy has no Task branch at all). Folding those onto the same helper
+// is T1990; each needs its own verify run, because several sit behind
+// isIdentSource / owner-governed guards whose shape must survive the move.
+//
+// string and Vector are deliberately NOT handled here: each caller reaches this
+// only after its own string/vector branch, and no two of those branches agree —
+// isTrackedStringCall gates the CallExpr arm's string, the optional-handler arm
+// gates both kinds on isIdentSource, trackUnwrappedFailableTemp gates neither
+// (T1883) — and each threads a Vector's element type into the temp so element
+// strings are dropped. The early return is therefore a fail-closed guard against
+// a future caller arriving here *before* its own branch (worst case a leak, never
+// a double free), not a live path: all three callers already excluded both.
+//
+// The folded chains disagreed with ownedI8PtrResultDrop about the bare-`*Named`
+// (no type args, hence no element type) spelling of two handles, in opposite
+// directions. Both disagreements are inert, because a bare `*types.Named` handle
+// cannot be an expression type at all — reaching one means the source named a
+// generic handle with no type arguments, which sema rejects — and a probe here
+// fired zero times across the whole Promise and Go suites:
+//
+//   - Channel. The CallExpr arm spelled its test `isCh || named ==
+//     types.TypChannel`, but the second half fed trackChannelTempWithElemType a
+//     nil element type, which that function returns on — so it registered
+//     nothing. ownedI8PtrResultDrop's `chElem != nil` is the same behavior, not
+//     a narrowing.
+//   - MutexGuard. ownedI8PtrResultDrop accepts the bare Named, which neither
+//     folded chain did — a widening on paper. MutexGuard.drop is a single symbol
+//     needing no element type, so were it ever to fire it would drop correctly.
+func (c *Compiler) trackNativeHandleResult(result value.Value, rt types.Type) {
+	if result == nil || rt == nil {
+		return
+	}
+	named := extractNamed(rt)
+	if named == types.TypString || named == types.TypVector {
+		return
+	}
+	if dropFn, _ := c.ownedI8PtrResultDrop(rt); dropFn != nil {
+		c.trackTempWithDrop(result, dropFn)
+	}
+}
+
 // trackTempWithDrop registers a heap-allocated temporary (string/vector/channel)
 // for cleanup at statement end using the specified drop function.
 func (c *Compiler) trackTempWithDrop(val value.Value, dropFn *ir.Func) {

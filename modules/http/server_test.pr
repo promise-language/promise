@@ -1470,3 +1470,593 @@ test_read_request_truncated_body() `test(exclude: wasm, timeout: "10s") {
 
   listener.close()?!;
 }
+
+// T1670: a request line the server cannot parse comes from a live client that
+// is waiting on an answer, so it gets 400 Bad Request + Connection: close
+// rather than a bare FIN.
+test_server_malformed_request_line_gets_400() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "unreached");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
+      u8[] bad = "GETHTTP\r\n\r\n".bytes();
+      _RawResponse rr = _exchange(conn, bad, false)?!;
+      assert(rr.status == 400, "400 Bad Request, got " + rr.status.to_string());
+      assert(_response_header(rr, "connection") == "close", "Connection: close");
+      assert(!rr.keep_alive, "not reusable");
+      assert(string.from_bytes(rr.body).contains("malformed HTTP request line"), "diagnosis in body");
+
+      // The server closed after replying.
+      u8[] tail = u8[].filled(0, 64);
+      int n = conn.read(tail)?!;
+      assert(n == 0, "EOF after the 400");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// A well-formed request line naming a method the server does not know is the
+// other unparseable shape; it takes the same 400 (T1670).
+test_server_unknown_method_gets_400() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "unreached");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
+      u8[] bad = "FROB / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+      _RawResponse rr = _exchange(conn, bad, false)?!;
+      assert(rr.status == 400, "400 Bad Request, got " + rr.status.to_string());
+      assert(_response_header(rr, "connection") == "close", "Connection: close");
+      assert(string.from_bytes(rr.body).contains("unknown HTTP method"), "diagnosis in body");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// A client that sends a partial request line and then half-closes never
+// completes a header block, but it did send bytes — so it is answered too
+// (T1670). A raw stream rather than _exchange, because the half-close has to
+// happen before the read.
+test_server_truncated_request_gets_400() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "unreached");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      net.TcpStream sock = net.TcpStream.connect("127.0.0.1", port)?!;
+      u8[] partial = "GET / HT".bytes();
+      int wrote = sock.write(partial)?!;
+      assert(wrote == partial.len, "partial request written");
+      sock.shutdown(write: true)?!;
+
+      _Transport conn = _PlainTransport.create(move sock);
+      string reply = _read_until_eof(conn)?!;
+      assert(reply.starts_with("HTTP/1.1 400"), "400 for a truncated request, got '" + reply + "'");
+      assert(reply.contains("Connection: close"), "Connection: close");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// The other side of the T1670 classification: a peer that goes away without
+// sending a byte is owed nothing, and must get a silent close. This is the
+// same path the shutdown wake connection takes (EOF, nothing buffered), which
+// is why writing here would put noise on that connection too.
+test_server_idle_close_writes_nothing() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "unreached");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      net.TcpStream sock = net.TcpStream.connect("127.0.0.1", port)?!;
+      sock.shutdown(write: true)?!;
+
+      u8[] buf = u8[].filled(0, 256);
+      int n = sock.read(buf)?!;
+      assert(n == 0, "idle close is answered with nothing, got " + n.to_string() + " bytes");
+
+      sock.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// --- T1670 coverage fill: the _BadRequestError classification itself ---
+
+// _parse_outcome reports how _parse_request ends for `header_text`: 0 = it
+// parsed, 1 = it was rejected with _BadRequestError (the marker _serve_requests
+// keys its 400 off), 2 = it raised anything else. A helper rather than an
+// inline handler because an error handler feeding an assignment must diverge,
+// so one test body could otherwise probe only a single input.
+_parse_outcome(string header_text) int {
+  ServerRequest req = _parse_request(header_text, "")? e {
+    if e is _BadRequestError {
+      return 1;
+    }
+    return 2;
+  };
+  return 0;
+}
+
+// _method_outcome is the same probe for _string_to_method, whose raise reaches
+// the request loop through _parse_request.
+_method_outcome(string s) int {
+  Method m = _string_to_method(s)? e {
+    if e is _BadRequestError {
+      return 1;
+    }
+    return 2;
+  };
+  return 0;
+}
+
+// The 400 reply is selected by the error's type, not by its message, so the
+// type is what has to be pinned: every parse rejection carries
+// _BadRequestError, and a well-formed request line raises nothing (T1670).
+test_parse_errors_are_classified_bad_request() `test(exclude: wasm) {
+  assert(_parse_outcome("GETHTTP") == 1, "a request line with no space is a bad request");
+  assert(_parse_outcome("GET /path") == 1, "a request line with no version is a bad request");
+  assert(_parse_outcome("FROB / HTTP/1.1") == 1, "an unknown method is a bad request");
+  assert(_method_outcome("FROB") == 1, "_string_to_method raises _BadRequestError");
+  // A request that opens with "\r\n\r\n" terminates a header block that never
+  // held a request line, so _parse_request is handed the empty string. That is
+  // the emptiest input the framer can deliver: `split` always yields at least
+  // one element, so the `lines.len == 0` guard above the request line cannot
+  // fire and this is the branch that rejects an empty header block (T2007).
+  assert(_parse_outcome("") == 1, "an empty header block is a bad request");
+  // Method matching is exact, per RFC 7230 §3.1.1: a lowercase method is not a
+  // known method, and takes the same 400 as a nonsense one.
+  assert(_parse_outcome("get / HTTP/1.1") == 1, "a lowercase method is a bad request");
+  assert(_method_outcome("") == 1, "an empty method token is a bad request");
+  assert(_parse_outcome("GET / HTTP/1.1") == 0, "a valid request line parses");
+  assert(_method_outcome("GET") == 0, "a known method parses");
+}
+
+// _read_request_outcome frames one request off `conn` and reports how it
+// ended: 0 = a request was framed, 1 = _BadRequestError (bytes arrived that
+// never became a request, so the peer is owed a 400), 2 = any other error —
+// the idle-close and shutdown-wake classification, which is owed silence.
+_read_request_outcome(_Transport ~conn, u8[] ~pending) int {
+  ServerRequest req = _read_request(conn, pending)? e {
+    if e is _BadRequestError {
+      return 1;
+    }
+    return 2;
+  };
+  return 0;
+}
+
+// A peer that connects and closes without sending a byte is the idle
+// keep-alive close — and, byte for byte, the wake connection
+// ServerShutdownHandle.shutdown opens. It must NOT be classified as a bad
+// request: that would put a 400 on the wake connection every time a server
+// shuts down (T1670).
+test_read_request_idle_close_is_not_bad_request() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] client_done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream s = net.TcpStream.connect("127.0.0.1", port)?!;
+    s.close()?!;
+    client_done.send(true);
+  };
+
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
+  u8[] pending = u8[]();
+  int outcome = _read_request_outcome(conn, pending);
+  assert(outcome == 2, "an idle close is owed silence, got outcome " + outcome.to_string());
+
+  conn.close()?!;
+  if d := <-client_done {
+  }
+  listener.close()?!;
+}
+
+// The other side of the same branch: bytes arrived, and the stream ended before
+// they became a request. That peer is alive and waiting, so the failure carries
+// _BadRequestError (T1670).
+test_read_request_partial_headers_is_bad_request() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] client_done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream s = net.TcpStream.connect("127.0.0.1", port)?!;
+    u8[] partial = "GET / HT".bytes();
+    int wrote = s.write(partial)?!;
+    assert(wrote == partial.len, "partial request line written");
+    s.close()?!;
+    client_done.send(true);
+  };
+
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
+  u8[] pending = u8[]();
+  int outcome = _read_request_outcome(conn, pending);
+  assert(outcome == 1, "a half-sent request owes a 400, got outcome " + outcome.to_string());
+
+  conn.close()?!;
+  if d := <-client_done {
+  }
+  listener.close()?!;
+}
+
+// The keep-alive carry-over buffer counts as "the peer sent bytes". Leftovers
+// from an earlier request on a persistent connection are already in `pending`
+// when _read_request starts, so an end-of-stream on the very first read still
+// owes a 400 even though this call read nothing off the socket — the
+// classification reads `raw`, which is seeded from `pending`, not the read
+// count (T1670).
+test_read_request_carry_over_bytes_are_bad_request() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] client_done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream s = net.TcpStream.connect("127.0.0.1", port)?!;
+    s.close()?!;
+    client_done.send(true);
+  };
+
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
+  u8[] pending = "GET / HT".bytes();
+  int outcome = _read_request_outcome(conn, pending);
+  assert(outcome == 1, "carry-over bytes owe a 400, got outcome " + outcome.to_string());
+
+  conn.close()?!;
+  if d := <-client_done {
+  }
+  listener.close()?!;
+}
+
+// The 400 is not confined to the first request on a connection: a client that
+// completes one request and then sends garbage on the same keep-alive socket is
+// still a live client waiting on a diagnosis (T1670).
+test_server_second_request_malformed_gets_400() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "first");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
+      u8[] good = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+      _RawResponse r1 = _exchange(conn, good, false)?!;
+      assert(r1.status == 200, "first request served");
+      assert(r1.keep_alive, "connection reusable after the first response");
+
+      u8[] bad = "OOPS\r\n\r\n".bytes();
+      _RawResponse r2 = _exchange(conn, bad, false)?!;
+      assert(r2.status == 400, "garbage on a live connection gets 400, got " + r2.status.to_string());
+      assert(_response_header(r2, "connection") == "close", "the 400 closes the connection");
+      assert(string.from_bytes(r2.body).contains("malformed HTTP request line"), "diagnosis in body");
+
+      u8[] tail = u8[].filled(0, 64);
+      int n = conn.read(tail)?!;
+      assert(n == 0, "EOF after the 400");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// The 400, 411 and 500 bail-outs all render through _write_final_response, and
+// it is the only place the request loop passes `head` down. A HEAD request that
+// cannot be framed must therefore get a 411 with its Content-Length intact and
+// no body bytes — a body here would desynchronize a client that trusted HEAD.
+// Read to EOF rather than through _exchange: a HEAD-mode _exchange stops at the
+// header terminator by construction, so it cannot see a body that should not
+// have been written.
+test_server_head_transfer_encoding_411_omits_body() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "never");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
+      u8[] req = "HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\n\r\n".bytes();
+      _write_all(conn, req)?!;
+      string reply = _read_until_eof(conn)?!;
+      assert(reply.starts_with("HTTP/1.1 411"), "unframable HEAD gets 411, got '" + reply + "'");
+      assert(reply.contains("Content-Length: 15"), "Content-Length still describes 'Length Required'");
+      assert(reply.contains("Connection: close"), "411 closes the connection");
+      // The status line already says "Length Required"; the body would repeat it
+      // after the terminator, so ending there is what proves it was suppressed.
+      assert(reply.ends_with("\r\n\r\n"), "a HEAD 411 stops at the header terminator, got '" + reply + "'");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// The same pass-through on the handler-error bail-out: a HEAD that raises gets
+// a 500 whose Content-Length describes the message it deliberately withholds.
+test_server_head_handler_error_500_omits_body() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _ErrorHandler handler = _ErrorHandler(error_message: "handler exploded");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      _Transport conn = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
+      u8[] req = "HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+      _write_all(conn, req)?!;
+      string reply = _read_until_eof(conn)?!;
+      assert(reply.starts_with("HTTP/1.1 500"), "HEAD handler error status, got '" + reply + "'");
+      assert(reply.contains("Content-Length: 16"), "Content-Length still describes 'handler exploded'");
+      assert(reply.contains("Connection: close"), "500 closes the connection");
+      assert(!reply.contains("handler exploded"), "a HEAD 500 withholds the message it measured");
+      assert(reply.ends_with("\r\n\r\n"), "a HEAD 500 stops at the header terminator, got '" + reply + "'");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// _malformed_request_status sends one unparseable request and reports the
+// status the server answered with, or -1 when it answered nothing at all. It
+// reports rather than panicking so that a regression to the silent close shows
+// up as a named assertion: a client goroutine that died instead of sending
+// would leave the test waiting on a channel forever and fail as a bare timeout.
+_malformed_request_status(int port) int {
+  _Transport c = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
+  u8[] bad = "GETHTTP\r\n\r\n".bytes();
+  _RawResponse rr = _exchange(c, bad, false)? e {
+    // `c` is still borrowed by the failed _exchange, so it cannot be closed
+    // here; TcpStream closes itself on drop.
+    return -1;
+  };
+  int status = rr.status;
+  c.close()? ce {
+  };
+  return status;
+}
+
+// The 400 path leaves _serve_requests through a write, and the connection
+// goroutine must still release its accept-semaphore slot on the way out. Four
+// malformed clients against a two-slot server force the slots to recycle; a
+// healthy client afterwards proves none of them leaked, and the shutdown that
+// follows proves _drain_slots can still reclaim all of them.
+test_server_concurrent_malformed_then_healthy() `test(exclude: wasm, timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+  channel[int] client_status = channel[int](capacity: 4);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0, max_connections: 2)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _OkHandler handler = _OkHandler(response_body: "healthy");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      int spawned = 0;
+      while spawned < 4 {
+        go {
+          client_status.send(_malformed_request_status(port));
+        };
+        spawned = spawned + 1;
+      }
+
+      int answered = 0;
+      while answered < 4 {
+        if st := <-client_status {
+          assert(st == 400, "every malformed client got a 400, got " + st.to_string());
+        }
+        answered = answered + 1;
+      }
+
+      _Transport good = _PlainTransport.create(net.TcpStream.connect("127.0.0.1", port)?!);
+      u8[] req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".bytes();
+      _RawResponse gr = _exchange(good, req, false)?!;
+      assert(gr.status == 200, "a healthy client is still served after the burst");
+      assert(string.from_bytes(gr.body) == "healthy", "healthy body");
+      good.close()?!;
+
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// A transport error takes the silent path even when the peer did send bytes: a
+// broken transport cannot carry a 400 back, so classifying it as a bad request
+// would buy nothing but a failing write (T1670). Closing this side of the
+// connection before the read is the deterministic way to break it, and the
+// carry-over bytes rule out the "nothing was sent" classification, leaving the
+// transport error as the only thing that can account for the silence.
+test_read_request_transport_error_is_not_bad_request() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] client_done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream s = net.TcpStream.connect("127.0.0.1", port)?!;
+    s.close()?!;
+    client_done.send(true);
+  };
+
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
+  conn.close()?!;
+  u8[] pending = "GET / HT".bytes();
+  int outcome = _read_request_outcome(conn, pending);
+  assert(outcome == 2, "a broken transport is owed silence, got outcome " + outcome.to_string());
+
+  if d := <-client_done {
+  }
+  listener.close()?!;
+}
+
+// The framing helper's remaining outcome. Without it every classification test
+// above would still pass against a _read_request that rejected everything.
+test_read_request_complete_request_is_framed() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[bool] client_done = channel[bool](capacity: 1);
+
+  go {
+    net.TcpStream s = net.TcpStream.connect("127.0.0.1", port)?!;
+    u8[] req = "GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".bytes();
+    int wrote = s.write(req)?!;
+    assert(wrote == req.len, "request written");
+    s.close()?!;
+    client_done.send(true);
+  };
+
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
+  u8[] pending = u8[]();
+  int outcome = _read_request_outcome(conn, pending);
+  assert(outcome == 0, "a complete request frames cleanly, got outcome " + outcome.to_string());
+
+  conn.close()?!;
+  if d := <-client_done {
+  }
+  listener.close()?!;
+}
+
+// --- T1670 coverage fill: the give-up path in _write_final_response ---
+
+// _write_final_response renders every response the request loop bails out with
+// — the 400, the 411 and the 500 — and swallows its write error by design: each
+// one is followed by the close, so a failed write has nowhere left to be
+// reported and the helper is deliberately not failable. Closing this side of
+// the transport before the call is the deterministic way to make that write
+// fail. The peer then reads a clean end-of-stream, which is what proves the
+// give-up put nothing on the wire rather than a truncated response; that the
+// test reaches the assert at all is what proves the failure was swallowed
+// rather than propagated.
+test_write_final_response_gives_up_on_a_broken_transport() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  channel[int] client_read = channel[int](capacity: 1);
+
+  go {
+    net.TcpStream s = net.TcpStream.connect("127.0.0.1", port)?!;
+    u8[] buf = u8[].filled(0, 256);
+    int n = s.read(buf)? e {
+      // Reported rather than panicked: a client goroutine that died here would
+      // leave the test waiting on client_read until the timeout, which says
+      // nothing about what went wrong.
+      client_read.send(-1);
+      return;
+    };
+    client_read.send(n);
+  };
+
+  _Transport conn = _PlainTransport.create(listener.accept()?!);
+  conn.close()?!;
+  ServerResponse bad = ServerResponse.with_status(400, "malformed HTTP request line");
+  _write_final_response(conn, bad, false);
+
+  if n := <-client_read {
+    assert(n == 0, "a failed write leaves the wire empty, got " + n.to_string() + " bytes");
+  }
+  listener.close()?!;
+}

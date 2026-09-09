@@ -1379,3 +1379,88 @@ _bind_tls_failure_message!(string move address) string {
 test_bind_tls_releases_credentials_when_the_socket_bind_fails() `test(exclude: wasm) {
   assert(_bind_tls_failure_message("example")?!.len > 0, "bind_tls fails when the socket cannot be bound");
 }
+
+// --- malformed requests over TLS --------------------------------------------
+
+// The 400 for a request the server cannot parse (T1670) is written through the
+// connection's _Transport, and the request loop never learns which transport it
+// is holding — so a TLS client must get the same diagnosis a plaintext one
+// does. A raw _TlsTransport rather than a Client, because a Client cannot be
+// made to send an unparseable request line.
+test_https_malformed_request_gets_400() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key())?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "unreached");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      TlsConfig cfg = TlsConfig.insecure();
+      _Transport conn = _TlsTransport.create(TlsStream.connect(net.TcpStream.connect("127.0.0.1", port)?!, "127.0.0.1", cfg)?!);
+      u8[] bad = "GETHTTP\r\n\r\n".bytes();
+      _RawResponse rr = _exchange(conn, bad, false)?!;
+      assert(rr.status == 400, "400 Bad Request over TLS, got " + rr.status.to_string());
+      assert(!rr.keep_alive, "the 400 closes a TLS connection too");
+      assert(string.from_bytes(rr.body).contains("malformed HTTP request line"), "the diagnosis reaches the TLS client");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}
+
+// The other half of the classification over TLS: a peer that completes the
+// handshake and then goes away without sending a request is owed silence, and
+// its connection must be torn down cleanly rather than answered (T1670). The
+// server is bound with a single connection slot, so the next client can only be
+// served once that teardown has released it — which is the observable form of
+// "the idle connection was disposed of, not answered". A TLS client cannot
+// half-close its write side and then read, the way the plaintext test does, so
+// the slot is what there is to assert on.
+test_https_idle_close_is_torn_down_silently() `test(exclude: wasm, timeout: "20s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+  channel[bool] serve_done = channel[bool](capacity: 1);
+
+  go {
+    Server server = Server.bind_tls("127.0.0.1", 0, _test_cert(), _test_key(), 1)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle sh = server.create_shutdown_handle();
+    handle_ch.send(move sh);
+    _SecureEchoHandler handler = _SecureEchoHandler(tag: "after");
+    server.serve(move handler)?!;
+    serve_done.send(true);
+    return;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      TlsConfig cfg = TlsConfig.insecure();
+      TlsStream idle = TlsStream.connect(net.TcpStream.connect("127.0.0.1", port)?!, "127.0.0.1", cfg)?!;
+      idle.close_gracefully();
+
+      _Transport conn = _TlsTransport.create(TlsStream.connect(net.TcpStream.connect("127.0.0.1", port)?!, "127.0.0.1", cfg)?!);
+      u8[] req = "GET /after HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".bytes();
+      _RawResponse rr = _exchange(conn, req, false)?!;
+      assert(rr.status == 200, "the only connection slot was released by the silent teardown");
+      assert(string.from_bytes(rr.body) == "after:GET:/after", "the next client is served normally");
+
+      conn.close()?!;
+      handle.shutdown()?!;
+      if s := <-serve_done {
+      }
+    }
+  }
+}

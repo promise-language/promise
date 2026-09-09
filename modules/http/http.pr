@@ -1288,7 +1288,10 @@ _string_to_method!(string s) Method {
   if s == "OPTIONS" {
     return Method.Options;
   }
-  raise HttpError(code: 0, message: "unknown HTTP method: " + s);
+  // A well-formed but unrecognized method deserves 501 Not Implemented rather
+  // than the 400 the server answers today for every unparseable request line
+  // (T1995).
+  raise _BadRequestError(message: "unknown HTTP method: " + s);
 }
 
 _status_text(int code) string {
@@ -1357,12 +1360,25 @@ _find_content_length(string ~header_text) int {
   return 0;
 }
 
+// _BadRequestError marks a framing failure where a live peer sent bytes that
+// do not form a valid HTTP request — the one _read_request failure that is
+// owed a response (400 Bad Request). Every other failure (an idle keep-alive
+// close, the shutdown wake connection, a transport error) leaves no peer to
+// read a reply and keeps its existing error type.
+type _BadRequestError is error {
+}
+
 // _read_request frames exactly one request off the connection. `pending` is the
 // keep-alive carry-over buffer: on entry it holds bytes already read past the
 // previous request's body, and on return it holds the bytes read past this
 // request's body. Without it a second request on a persistent connection could
 // not be framed, because a single read can straddle the boundary between two
 // pipelined requests.
+//
+// A failure is classified by whether the peer sent anything: an end-of-stream
+// with nothing buffered is an idle close and raises HttpError, while bytes
+// that never became a request raise _BadRequestError, which the caller answers
+// with 400 Bad Request.
 _read_request!(_Transport ~conn, u8[] ~pending) ServerRequest {
   u8[] raw = u8[]();
   int carried = 0;
@@ -1391,7 +1407,14 @@ _read_request!(_Transport ~conn, u8[] ~pending) ServerRequest {
     }
     int n = conn.read(read_buf)?^;
     if n == 0 {
-      raise HttpError(code: 0, message: "connection closed before headers complete");
+      if raw.len == 0 {
+        // Nothing was ever sent: an idle keep-alive connection the client
+        // dropped, or the shutdown wake connection. Nobody is owed a reply.
+        raise HttpError(code: 0, message: "connection closed before any request was sent");
+      }
+      // The peer sent bytes that never completed a request line and header
+      // block; RFC 7230 §3.4 permits answering before the close.
+      raise _BadRequestError(message: "connection closed before headers complete");
     }
     int i = 0;
     while i < n {
@@ -1445,7 +1468,7 @@ _read_request!(_Transport ~conn, u8[] ~pending) ServerRequest {
 _parse_request!(string header_text, string move body_str) ServerRequest {
   string[] lines = header_text.split("\r\n");
   if lines.len == 0 {
-    raise HttpError(code: 0, message: "empty HTTP request");
+    raise _BadRequestError(message: "empty HTTP request");
   }
 
   // Parse request line: "GET /path?query HTTP/1.1"
@@ -1455,7 +1478,7 @@ _parse_request!(string header_text, string move body_str) ServerRequest {
     sp1 = s;
   }
   if sp1 < 0 {
-    raise HttpError(code: 0, message: "malformed HTTP request line");
+    raise _BadRequestError(message: "malformed HTTP request line");
   }
   string method_str = request_line[0:sp1];
   string after_method = request_line[sp1 + 1:];
@@ -1465,7 +1488,7 @@ _parse_request!(string header_text, string move body_str) ServerRequest {
     sp2 = s;
   }
   if sp2 < 0 {
-    raise HttpError(code: 0, message: "malformed HTTP request line");
+    raise _BadRequestError(message: "malformed HTTP request line");
   }
   string uri = after_method[0:sp2];
   bool http11 = after_method[sp2 + 1:].trim().starts_with("HTTP/1.1");
@@ -1583,6 +1606,17 @@ _drain_slots(channel[bool] sem, int limit) {
   }
 }
 
+// _write_final_response renders the last response a connection will carry —
+// the 400, 411 and 500 the request loop bails out with — and gives up on a
+// write failure. Every one of them is followed by the close, so a failed write
+// has nowhere left to be reported; the caller returns either way.
+_write_final_response(_Transport ~conn, ServerResponse ~resp, bool head_request) {
+  string text = _serialize_response(resp, false, head_request);
+  u8[] data = text.bytes();
+  _write_all(conn, data)? we {
+  };
+}
+
 // _serve_connection serves every request on one accepted connection, keeping
 // the socket open between requests for as long as keep-alive semantics and
 // max_requests allow, then closes it exactly once. It runs on its own goroutine
@@ -1601,9 +1635,16 @@ _serve_requests[H: Handler](_Transport ~conn, Ref[H] handler, int max_requests) 
   int served = 0;
   while served < max_requests {
     ServerRequest request = _read_request(conn, pending)? e {
-      // An idle keep-alive close or the shutdown wake connection: no response
-      // is owed. T1670: a malformed request lands here too and should get a
-      // 400 rather than a silent close.
+      // An idle keep-alive close, the shutdown wake connection or a transport
+      // error is owed nothing — there is no peer left to read a reply. Bytes
+      // that fail to parse as a request, though, come from a live client
+      // waiting on a diagnosis: it gets 400 Bad Request before the close.
+      if e is _BadRequestError {
+        // head_request is false: the request line never parsed, so the method
+        // is unknown and a body is the safe assumption.
+        ServerResponse bad = ServerResponse.with_status(400, move e.message);
+        _write_final_response(conn, bad, false);
+      }
       return;
     };
     served = served + 1;
@@ -1612,12 +1653,7 @@ _serve_requests[H: Handler](_Transport ~conn, Ref[H] handler, int max_requests) 
     if _has_transfer_encoding(request) {
       // The body cannot be framed, so nothing after it can be trusted.
       ServerResponse len_required = ServerResponse.with_status(411, "Length Required");
-      string len_str = _serialize_response(len_required, false, head);
-      u8[] len_data = len_str.bytes();
-      _write_all(conn, len_data)? we {
-        // Best effort: the connection is being closed either way, so a failed
-        // write has nowhere left to be reported.
-      };
+      _write_final_response(conn, len_required, head);
       return;
     }
 
@@ -1626,12 +1662,7 @@ _serve_requests[H: Handler](_Transport ~conn, Ref[H] handler, int max_requests) 
 
     ServerResponse resp = handler.borrow.handle(request)? e {
       ServerResponse err_resp = ServerResponse.internal_error(move e.message);
-      string err_str = _serialize_response(err_resp, false, head);
-      u8[] err_data = err_str.bytes();
-      _write_all(conn, err_data)? we {
-        // Best effort: the connection is being closed either way, so a failed
-        // write has nowhere left to be reported.
-      };
+      _write_final_response(conn, err_resp, head);
       return;
     };
 

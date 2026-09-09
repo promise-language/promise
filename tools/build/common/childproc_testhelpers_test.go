@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"strconv"
 	"time"
 )
 
@@ -58,4 +59,32 @@ func waitGone(pid int, d time.Duration) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return !processAlive(pid)
+}
+
+// resetKilling clears the shutdown latch. Production never clears it — every
+// caller exits the process right after — but a test process outlives its
+// KillChildren call, and would otherwise refuse to spawn anything for every
+// test that follows.
+func resetKilling() {
+	childMu.Lock()
+	defer childMu.Unlock()
+	killing = false
+}
+
+// exitCmd/exitArgs give a "fail immediately with this status" command on every
+// platform, for the paths that must clean up after a command that ran and
+// failed rather than one that was killed.
+func exitCmd() string {
+	if runtime.GOOS == "windows" {
+		return "cmd"
+	}
+	return "sh"
+}
+
+func exitArgs(code int) []string {
+	flag := "-c"
+	if runtime.GOOS == "windows" {
+		flag = "/c"
+	}
+	return []string{flag, "exit " + strconv.Itoa(code)}
 }

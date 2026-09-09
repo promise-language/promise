@@ -34,14 +34,7 @@ func init() {
 // interruptChildren SIGINTs each running subprocess tree, so the step in flight
 // ends promptly and Interrupted() is seen at the next checkpoint.
 func interruptChildren() {
-	childMu.Lock()
-	pids := make([]int, 0, len(children))
-	for pid := range children {
-		pids = append(pids, pid)
-	}
-	childMu.Unlock()
-
-	for _, pid := range pids {
+	for _, pid := range trackedPIDs() {
 		signalTree(pid, syscall.SIGINT)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // writeRunSource writes the given source to <dir>/main.pr and returns the path.
@@ -48,6 +49,62 @@ func TestComputeRunBinaryCacheKeySourceChange(t *testing.T) {
 
 	if key1 == key2 {
 		t.Error("source change should produce a different cache key")
+	}
+}
+
+// T1521: the source directory is baked into the binary as os.src_dir, so
+// byte-identical sources in two directories must not share a cache entry —
+// otherwise the second invocation execs a binary carrying the first one's path.
+func TestComputeRunBinaryCacheKeySourceDirChange(t *testing.T) {
+	srcA := writeRunSource(t, t.TempDir(), "main() { }\n")
+	srcB := writeRunSource(t, t.TempDir(), "main() { }\n")
+
+	keyA, ok := computeRunBinaryCacheKey(srcA, "x86_64-unknown-linux-gnu", false)
+	if !ok {
+		t.Skipf("cache key computation not available (missing std hash)")
+	}
+	keyB, _ := computeRunBinaryCacheKey(srcB, "x86_64-unknown-linux-gnu", false)
+
+	if keyA == keyB {
+		t.Error("identical sources in different directories should produce different cache keys")
+	}
+}
+
+func TestComputeTestFileCacheKeySourceDirChange(t *testing.T) {
+	srcA := writeRunSource(t, t.TempDir(), "t() `test { }\n")
+	srcB := writeRunSource(t, t.TempDir(), "t() `test { }\n")
+	cfg := testTimeoutConfig{defaultTimeout: 60 * time.Second}
+
+	keyA, ok := computeTestFileCacheKey(srcA, "x86_64-unknown-linux-gnu", cfg)
+	if !ok {
+		t.Skipf("cache key computation not available (missing std hash)")
+	}
+	keyB, _ := computeTestFileCacheKey(srcB, "x86_64-unknown-linux-gnu", cfg)
+
+	if keyA == keyB {
+		t.Error("identical test files in different directories should produce different cache keys")
+	}
+}
+
+func TestComputeProjectBinaryCacheKeySourceDirChange(t *testing.T) {
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	for _, dir := range []string{dirA, dirB} {
+		writeRunSource(t, dir, "main() { }\n")
+		if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
+			[]byte("[module]\nname = \"app\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	keyA, ok := computeProjectBinaryCacheKey(dirA, "x86_64-unknown-linux-gnu", false)
+	if !ok {
+		t.Skipf("cache key computation not available (missing std hash)")
+	}
+	keyB, _ := computeProjectBinaryCacheKey(dirB, "x86_64-unknown-linux-gnu", false)
+
+	if keyA == keyB {
+		t.Error("identical projects in different directories should produce different cache keys")
 	}
 }
 

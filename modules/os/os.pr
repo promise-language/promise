@@ -15,6 +15,11 @@ _os_args() string[] `extern("promise_os_get_args");
 // Returns the path to the running executable (argv[0]).
 _os_executable_path() string `extern("promise_os_get_executable");
 
+// Returns the directory holding the program's own source, or none when the
+// program has no source directory (`promise exec`). Compile-time constant —
+// no PAL call; codegen fills the body in os_bridges.go (T1521).
+_os_src_dir() string? `extern("promise_os_get_src_dir");
+
 // Sets an environment variable (overwrite=1). Non-failable.
 _os_set_env(string name, string value) `extern("promise_os_set_env");
 
@@ -447,6 +452,10 @@ get args string[] `public `doc("Returns the command-line arguments passed to the
 
 get executable_path string `public `doc("Returns the path to the running executable as provided by the operating system (argv[0]). Returns an empty string on platforms without command-line arguments.") {
   return _os_executable_path();
+}
+
+get src_dir string? `public `doc("Returns the absolute path of the directory holding this program's own source — the project directory for a project, the source file's directory for a single-file program — without a trailing separator. The value is fixed when the program is compiled, so it identifies where the program lives regardless of where it was invoked; use os.working_dir for the directory it was invoked from. Returns none for a program that has no source directory, such as one run with promise exec.") {
+  return _os_src_dir();
 }
 
 set_env_var(string name, string? move value) `public `doc("Sets or removes the named environment variable. When value is present, the variable is set to that value (creating it if needed, overwriting if it exists). When value is absent, the variable is removed from the environment.") {

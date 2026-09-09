@@ -1405,9 +1405,12 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 	}
 	compilerHash := module.CompilerIdentity()
 	// Include timeout config in the cache key since per-test timeouts are
-	// baked into the test binary at compile time (B0132).
+	// baked into the test binary at compile time (B0132). T1521: so is the
+	// module directory, as os.src_dir — two byte-identical module trees in
+	// different directories are NOT interchangeable.
+	absModDir, _ := filepath.Abs(modDir)
 	th := fnv.New128a()
-	fmt.Fprintf(th, "%s\n%s", implHash, cfg.cacheString())
+	fmt.Fprintf(th, "%s\n%s\nsource-dir:%s", implHash, cfg.cacheString(), absModDir)
 	implHashWithTimeout := hex.EncodeToString(th.Sum(nil))
 
 	// T0181: Include dependency hashes in cache key so that changes to
@@ -6466,6 +6469,17 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 	return compileFrontendForTarget(filename, "")
 }
 
+// setProgramSourceDir records dir as the program's own source directory — the
+// value codegen bakes into os.src_dir (T1521). A dir that did not resolve to an
+// absolute path (filepath.Abs fails only when the working directory is gone)
+// leaves it unset: os.src_dir must be absent when there is no truthful answer,
+// never a relative or otherwise fabricated path.
+func setProgramSourceDir(info *sema.Info, dir string) {
+	if filepath.IsAbs(dir) {
+		info.SourceDir = dir
+	}
+}
+
 // compileProjectFrontend runs the full frontend pipeline on every non-test
 // .pr file in a project directory, merging them into a single AST so symbols
 // defined in one file are visible to the others. The project is anchored at
@@ -6548,6 +6562,7 @@ func compileProjectFrontend(projectDir string, files []string, triple string) (*
 	}
 
 	absProjectDir, _ := filepath.Abs(projectDir)
+	setProgramSourceDir(info, absProjectDir) // T1521: os.src_dir — same directory `embed resolves against
 	embedErrs := sema.ResolveEmbeds(info, absProjectDir)
 	timePhase("sema", time.Since(tSema), "")
 	if timePhases {
@@ -6654,7 +6669,9 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 
 	// Resolve embed annotations: read files, validate contents
 	absFilename, _ := filepath.Abs(filename)
-	embedErrs := sema.ResolveEmbeds(info, filepath.Dir(absFilename))
+	sourceDir := filepath.Dir(absFilename)
+	setProgramSourceDir(info, sourceDir) // T1521: os.src_dir — same directory `embed resolves against
+	embedErrs := sema.ResolveEmbeds(info, sourceDir)
 	timePhase("sema", time.Since(tSema), "")
 	if timePhases {
 		if modTiming != nil {
@@ -6738,6 +6755,9 @@ func computeTestFileCacheKey(filename, target string, cfg testTimeoutConfig) (st
 
 	abs, _ := filepath.Abs(filename)
 	dir := filepath.Dir(abs)
+	// T1521: the source directory is baked into the binary as os.src_dir, so
+	// two byte-identical files in different directories are NOT interchangeable.
+	fmt.Fprintf(h, "source-dir:%s\n", dir)
 
 	// Hash embedded file contents — if any `embed("path") annotation references
 	// an external file, its content must be part of the cache key so that changes
@@ -6802,6 +6822,7 @@ func computeTestFileCacheInputs(filename, target string, cfg testTimeoutConfig) 
 
 	abs, _ := filepath.Abs(filename)
 	dir := filepath.Dir(abs)
+	inputs = append(inputs, module.CacheKeyInput{Label: "source-dir", Value: dir})
 
 	inputs = append(inputs, module.HashEmbedFilesForInputs(content, dir)...)
 
@@ -6850,6 +6871,9 @@ func computeRunBinaryCacheKey(filename, target string, releaseMode bool) (string
 
 	abs, _ := filepath.Abs(filename)
 	dir := filepath.Dir(abs)
+	// T1521: the source directory is baked into the binary as os.src_dir, so
+	// two byte-identical files in different directories are NOT interchangeable.
+	fmt.Fprintf(h, "source-dir:%s\n", dir)
 
 	// Hash embedded file contents — if any `embed("path") annotation references
 	// an external file, its content must be part of the cache key so that changes
@@ -6914,6 +6938,7 @@ func computeRunBinaryCacheInputs(filename, target string, releaseMode bool) []mo
 
 	abs, _ := filepath.Abs(filename)
 	dir := filepath.Dir(abs)
+	inputs = append(inputs, module.CacheKeyInput{Label: "source-dir", Value: dir})
 
 	inputs = append(inputs, module.HashEmbedFilesForInputs(content, dir)...)
 
@@ -7071,6 +7096,10 @@ func computeProjectBinaryCacheKey(projectDir, target string, releaseMode bool) (
 	fmt.Fprintf(h, "std:%s\n", sHash)
 	fmt.Fprintf(h, "target:%s\n", target)
 	fmt.Fprintf(h, "mode:%s\n", buildModeStr(releaseMode))
+	// T1521: the project directory is baked into the binary as os.src_dir, so
+	// two byte-identical trees in different directories are NOT interchangeable.
+	absProjectDir, _ := filepath.Abs(projectDir)
+	fmt.Fprintf(h, "source-dir:%s\n", absProjectDir)
 
 	if embedHash := module.HashModuleEmbeds(projectDir, false); embedHash != "" {
 		fmt.Fprintf(h, "embed:%s\n", embedHash)
@@ -7097,6 +7126,10 @@ func computeProjectBinaryCacheInputs(projectDir, target string, releaseMode bool
 		{Label: "target", Value: target},
 		{Label: "mode", Value: buildModeStr(releaseMode)},
 	}
+	// Mirrors the unconditional "source-dir:" line in the key above — an Abs
+	// that failed contributes an empty value there, so it must here too.
+	absProjectDir, _ := filepath.Abs(projectDir)
+	inputs = append(inputs, module.CacheKeyInput{Label: "source-dir", Value: absProjectDir})
 	if embedHash := module.HashModuleEmbeds(projectDir, false); embedHash != "" {
 		inputs = append(inputs, module.CacheKeyInput{Label: "embed", Value: embedHash})
 	}
@@ -7265,6 +7298,7 @@ func compileModuleTestFrontend(modDir, triple string) (*ast.File, *sema.Info) {
 
 	// Resolve embed annotations for module test files
 	absModDir, _ := filepath.Abs(modDir)
+	setProgramSourceDir(info, absModDir) // T1521: os.src_dir — same directory `embed resolves against
 	embedErrs := sema.ResolveEmbeds(info, absModDir)
 	if len(embedErrs) > 0 {
 		printFileErrors(modDir, embedErrs)
@@ -7721,7 +7755,10 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 		}
 	}
 
-	// Resolve embed annotations for module implementation files (B0145)
+	// Resolve embed annotations for module implementation files (B0145).
+	// SourceDir is deliberately left unset here: this Info belongs to an
+	// imported module, not to the program, and os.src_dir answers "where
+	// does the *program* live" (T1521).
 	embedErrs := sema.ResolveEmbeds(semaInfo, absDir)
 	if len(embedErrs) > 0 {
 		return nil, fmt.Errorf("errors in module '%s': %v", modPath, embedErrs[0])
@@ -8585,6 +8622,10 @@ func runExec(args []string) {
 		printInlineErrors(source, ownerErrs, wrapOffset)
 		os.Exit(1)
 	}
+
+	// info.SourceDir is deliberately left unset: an inline program does not live
+	// anywhere, so os.src_dir must be absent rather than a fabricated path
+	// (T1521) — neither the cwd nor the temp binary's directory would be true.
 
 	// Code generation
 	tCodegen := time.Now()

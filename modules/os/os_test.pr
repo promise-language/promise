@@ -187,6 +187,91 @@ test_executable_path_is_stable() `test(exclude: wasm) {
   assert(exe1 == exe2, "reading executable_path twice should return the same value");
 }
 
+// T1521: src_dir answers "where do I live", baked in at compile time. It is
+// a compile-time constant, so it needs no OS support and is not wasm-excluded.
+// Deliberately not compared against working_dir here — the suite may legitimately
+// be run from modules/os; the CLI test owns the "distinct from cwd" guarantee.
+test_src_dir_is_module_dir() `test {
+  if dir := src_dir {
+    assert(dir.len > 0, "src_dir should be non-empty");
+    assert(dir.ends_with("/os") || dir.ends_with("\\os"), "src_dir should be the os module directory, got " + dir);
+    assert(!dir.ends_with("/") && !dir.ends_with("\\"), "src_dir should have no trailing separator");
+  } else {
+    assert(false, "src_dir should be present for a compiled module test");
+  }
+}
+
+test_src_dir_is_absolute() `test {
+  if dir := src_dir {
+    // POSIX: starts with "/". Windows: a drive letter like "C:\".
+    bool is_abs = dir.starts_with("/") || (dir.len >= 3 && dir[1] == ':');
+    assert(is_abs, "src_dir should be an absolute path, got " + dir);
+  } else {
+    assert(false, "src_dir should be present for a compiled module test");
+  }
+}
+
+test_src_dir_is_stable() `test {
+  string d1 = "";
+  string d2 = "";
+  if a := src_dir {
+    d1 = a;
+  }
+  if b := src_dir {
+    d2 = b;
+  }
+  assert(d1.len > 0, "src_dir should be present");
+  assert(d1 == d2, "reading src_dir twice should return the same value");
+}
+
+test_src_dir_is_not_the_executable_path() `test(exclude: wasm) {
+  // The two accessors answer different questions, and conflating them is the
+  // failure T1521 exists to prevent: under `promise test` the binary lives in
+  // the build cache while the source lives here, so the paths cannot coincide
+  // and neither may contain the other.
+  if dir := src_dir {
+    string exe = executable_path;
+    assert(exe != dir, "executable_path and src_dir must not be the same path");
+    assert(!exe.starts_with(dir + "/") && !exe.starts_with(dir + "\\"),
+    "the test binary lives in the build cache, not under the source directory " + dir);
+  } else {
+    assert(false, "src_dir should be present for a compiled module test");
+  }
+}
+
+// T1521: every src_dir read copies the baked path out of .rodata into a fresh
+// heap string (promise_string_new), so each call hands the caller a value it
+// owns. These loop so that a per-call leak of one string is unmistakable in the
+// alloc-count delta rather than a single stray allocation, and they cover both
+// shapes an owned optional reaches its drop through: unwrapped into a binding,
+// and stored still-wrapped in a container.
+test_src_dir_repeated_reads_do_not_leak() `test {
+  int i = 0;
+  while i < 200 {
+    if dir := src_dir {
+      assert(dir.len > 0, "src_dir should be non-empty on every read");
+    }
+    i = i + 1;
+  }
+}
+
+test_src_dir_stored_optionals_are_dropped() `test {
+  string?[] dirs = [];
+  int i = 0;
+  while i < 50 {
+    // Through a binding rather than `dirs.push(move src_dir)`: that spelling
+    // leaks the payload of every element (T2049), and it is the getter place
+    // expression that goes wrong, not the optional or the vector. Tighten this
+    // back to the direct form once T2049 is fixed.
+    string? dir = src_dir;
+    dirs.push(move dir);
+    i = i + 1;
+  }
+  assert(dirs.len == 50, "every read should have been stored");
+  // The 50 optionals still hold their heap strings here: the vector's drop at
+  // scope exit is what has to reach through the optional to free each one.
+}
+
 test_execute_echo() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("echo", ["hello"])?!;
   assert(result.exit_code == 0, "echo should exit with 0");

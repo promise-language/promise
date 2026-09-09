@@ -38,6 +38,9 @@ func (c *Compiler) defineOSBodies() {
 	if fn, ok := irFuncByName["promise_os_get_executable"]; ok {
 		c.defineExecutableBody(fn)
 	}
+	if fn, ok := irFuncByName["promise_os_get_src_dir"]; ok {
+		c.defineSrcDirBody(fn)
+	}
 	if fn, ok := irFuncByName["promise_os_spawn"]; ok {
 		c.defineSpawnBody(fn)
 	}
@@ -352,6 +355,49 @@ func (c *Compiler) defineExecutableBody(fn *ir.Func) {
 		constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0))
 	c.storeStringResult(noArgv, sret, emptyStr)
 	noArgv.NewRet(nil)
+}
+
+// defineSrcDirBody: void @promise_os_get_src_dir(i8* sret)
+// Returns string? — the directory holding the program's own source, or none
+// when the program has no source directory (`promise exec`).
+//
+// This is the one body in this file that calls no PAL function: the value is a
+// compile-time constant (sema.Info.SourceDir, the same directory `embed paths
+// resolve against), so there is no syscall to enter or exit and nothing to
+// account for. It answers "where do I live", which `promise run` must not
+// conflate with os.working_dir ("where was I invoked") or os.executable_path
+// (a build-cache path under `promise run`) — T1521.
+//
+// The path is emitted as a .rodata C string and copied into a fresh heap string
+// by promise_string_new, exactly as get_env_var/home_dir do, so the caller's
+// drop path is unchanged.
+func (c *Compiler) defineSrcDirBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	// Resolve the optional type: {i1, i8*} for string?
+	optType := c.resolveType(types.NewOptional(types.TypString)).(*irtypes.StructType)
+
+	// rootInfo is the program's own sema info — c.info may be a module's while
+	// module bodies are being synthesised, and a module has no SourceDir.
+	info := c.rootInfo
+	if info == nil {
+		info = c.info
+	}
+	if info == nil || info.SourceDir == "" {
+		c.storeOptionalNone(entry, sret, optType)
+		entry.NewRet(nil)
+		return
+	}
+
+	dir := info.SourceDir
+	global := c.getCStrGlobal(dir)
+	dirPtr := entry.NewGetElementPtr(global.ContentType, global,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	dirStr := entry.NewCall(c.funcs["promise_string_new"],
+		dirPtr, constant.NewInt(irtypes.I64, int64(len(dir))))
+	c.storeOptionalSome(entry, sret, dirStr, optType)
+	entry.NewRet(nil)
 }
 
 // defineSpawnBody: void @promise_os_spawn(i8* sret, i8* program, i8* arguments)

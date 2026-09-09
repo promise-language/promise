@@ -58,7 +58,7 @@ The stdlib provides:
 | `strings` | `modules/strings/strings.pr` | 65 | `join`, `spaces`, `reverse`, `is_blank`, `repeat_join`. 15 tests. |
 | `math` | `modules/math/math.pr` | 67 | `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 8 tests. |
 | `json` | `modules/json/json.pr` | 1005 | `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), generic `encode_string[T]`/`decode_string[T]`/`encode_string_pretty[T]`, `JsonValue` enum with methods (`is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format` (writes into a `Writer`, conforming to `Format`), `format_pretty`), module-level `format_value`/`format_value_pretty` for the string-shaped form, `parse_value`. 167 tests. |
-| `os` | `modules/os/os.pr` | 511 | get_env_var, working_dir, exit_process, args, executable_path, execute, set_env_var, set_working_dir, Process/ProcessInput/ProcessOutput (streaming), env (map), user_name, user_id, group_id, home_dir, hostname, process_id, Signal enum, setup_signal_handling, receive_signal. 147 tests. |
+| `os` | `modules/os/os.pr` | 597 | get_env_var, working_dir, src_dir, exit_process, args, executable_path, execute, set_env_var, set_working_dir, Process/ProcessInput/ProcessOutput (streaming), env (map), user_name, user_id, group_id, home_dir, hostname, process_id, Signal enum, setup_signal_handling, receive_signal. 163 tests. |
 | `net` | `modules/net/net.pr` | 398 | `TcpListener` (`bind`, `accept`, `close`, `local_port`), `TcpStream` (`connect`, `read`, `write`, `close`, `shutdown`), `resolve!`, `NetError`, `ResolveError`/`ResolveErrorKind`. Reactor-based non-blocking I/O: sockets are non-blocking and goroutines park on the netpoll reactor rather than blocking an M. `TcpStream.connect` takes a host name or an IPv4/IPv6 literal (T1518); resolution uses the platform resolver behind the scheduler's syscall handoff, not the reactor; an empty host is rejected below the bridge so it fails identically on every target with a resolver (T1726). 41 tests. |
 | `time` | `modules/time/time.pr` | 406 | wall-clock `DateTime` (`now`, Unix-epoch conversions, component accessors, `Duration` arithmetic, comparison, UTC offsets, ISO-8601 `to_string`/`format_rfc3339`, and `parse!(Reader ~r)` conforming to `Parse` — use `scan[DateTime](s)` to parse from a string), `Date` (`today`, `add_days`, `at`), `Time` (`midnight`/`noon`, wrapping arithmetic). All three declare `is Ordered, Format, Parse`. Native `promise_wallclock` (CLOCK_REALTIME / GetSystemTimePreciseAsFileTime); calendar math in Promise. 56 tests. |
 | `http` | `modules/http/http.pr` | 1678 | client + server, http and https — `Request`/`Response`, `Method`, headers, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following with 301/302/303/307/308 method-rewrite policy, keep-alive connection pooling with stale-connection retry, automatic gzip response decoding via the `gzip` module (sends `Accept-Encoding: gzip`, honors `Content-Encoding: gzip`), cross-origin credential stripping, `set_tls_config` for custom CAs / mutual TLS); `Server.bind` (HTTP) and `Server.bind_tls` (HTTPS) with `Handler`, `ServerRequest`, `ServerResponse`, per-connection goroutines with keep-alive and bounded concurrency (`max_connections`, `max_keep_alive_requests`), and draining graceful shutdown. https support (T0079) is a private `_Transport` interface with a plaintext and a TLS implementation, so client framing and the server's keep-alive loop have exactly one implementation; each connection's TLS handshake runs on that connection's own goroutine. Importing `http` links a TLS backend (the vendored static OpenSSL on Linux) even for a program that only speaks http://. A request the server cannot parse is answered with `400 Bad Request` + `Connection: close` before the close; an idle keep-alive close and the shutdown wake connection are closed silently. 172 tests. |
@@ -460,6 +460,8 @@ EmitChdir(module *ir.Module) *ir.Func       // i8* path → i32 (0 or -1)
 ```
 
 Command-line arguments: captured in `main()` prologue from `argc`/`argv` and stored in a global `string[]`. Exposed via `os.args` (module-level getter).
+
+Source directory: no PAL extension needed. `os.src_dir` is a compile-time constant baked into the binary by codegen (the directory `` `embed `` paths resolve against), so it costs no syscall and is `none` for a program with no source directory — see [platform-modules.md](platform-modules.md) §8.
 
 ### 3.3 Time
 
@@ -909,6 +911,7 @@ get working_dir! string ;
 exit_process(int code);
 get args string[];
 executable_path() string;
+get src_dir string?;                  // directory of this program's own source; none under `promise exec`
 execute!(string program, ...string arguments) ProcessResult ;
 set_env_var(string name, string? move value);
 set_working_dir(string path) !;

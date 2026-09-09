@@ -1,0 +1,66 @@
+use io;
+use os;
+
+// T1521: os.src_dir answers "where do I live" — the directory holding the
+// program's own source — as distinct from os.working_dir ("where was I
+// invoked") and os.executable_path (a build-cache path under `promise run`).
+// This file exercises the single-file frontend; modules/os/os_test.pr covers
+// the module-test frontend, and the buildrun CLI tests cover the cwd-independence
+// and `promise exec`-has-none cases end to end.
+//
+// The value is a compile-time constant, so it is target-independent — no
+// `exclude: wasm` needed. The literal T1521_SELF_MARKER below is what the
+// self-read test greps for once it has opened this file through src_dir.
+
+test_src_dir_present() `test {
+  if dir := os.src_dir {
+    assert(dir.len > 0, "src_dir should be non-empty");
+    assert(dir.ends_with("/catalog") || dir.ends_with("\\catalog"), "src_dir should be this file's directory, got " + dir);
+  } else {
+    assert(false, "src_dir should be present for a compiled source file");
+  }
+}
+
+test_src_dir_absolute_no_trailing_separator() `test {
+  if dir := os.src_dir {
+    // POSIX: starts with "/". Windows: a drive letter like "C:\".
+    bool is_abs = dir.starts_with("/") || (dir.len >= 3 && dir[1] == ':');
+    assert(is_abs, "src_dir should be an absolute path, got " + dir);
+    assert(!dir.ends_with("/") && !dir.ends_with("\\"), "src_dir should have no trailing separator");
+  } else {
+    assert(false, "src_dir should be present for a compiled source file");
+  }
+}
+
+// The load-bearing use of the accessor: a tool locating a file committed beside
+// its own source, no matter where it was invoked from. `promise test` runs this
+// binary with the repo root as the cwd, so a value that tracked the cwd — or the
+// build cache the binary is actually executed from — cannot open this file.
+// Excluded on wasm, where the sandbox's preopened directories, not the path,
+// decide what is reachable.
+test_src_dir_locates_a_file_beside_the_source() `test(exclude: wasm) {
+  if dir := os.src_dir {
+    string self = dir + "/os_src_dir_test.pr";
+    assert(io.File.exists(self), "src_dir should locate this test's own source, looked for " + self);
+    string content = io.File.read_content(self)?!;
+    assert(content.contains("T1521_SELF_MARKER"), "the file found via src_dir should be this one");
+  } else {
+    assert(false, "src_dir should be present for a compiled source file");
+  }
+}
+
+// os.src_dir is documented as the same directory `embed resolves its paths
+// against — one notion of "where the program's source lives", reached two ways.
+// Nothing else pins them together, so a future change that resolved one of them
+// differently would go unnoticed until a tool read the wrong file.
+get _self_embedded string `embed("os_src_dir_test.pr");
+
+test_src_dir_agrees_with_embed_resolution() `test(exclude: wasm) {
+  if dir := os.src_dir {
+    string read_back = io.File.read_content(dir + "/os_src_dir_test.pr")?!;
+    assert(read_back == _self_embedded,
+    "the file `embed resolved and the file src_dir located must be the same one");
+  } else {
+    assert(false, "src_dir should be present for a compiled source file");
+  }
+}

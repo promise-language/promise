@@ -396,7 +396,7 @@ Platform.path_separator     // global getter — no () — cleaner, reads like a
   zero-arg functions and setters as one-arg void functions (with `$set` suffix). Codegen emits
   calls on property access and assignment.
 
-`os.args`, `os.executable_path`, and `os.working_dir` are now module-level getters.
+`os.args`, `os.executable_path`, `os.src_dir`, and `os.working_dir` are now module-level getters.
 Failable getters like `working_dir` use `!` unwrap at the call site (`os.working_dir!`).
 `get_env_var(name)` remains a function because it takes a parameter.
 
@@ -712,10 +712,10 @@ to the browser event loop, and JS callbacks re-enqueue goroutines when IO comple
 
 ## 8. `modules/os` — Operating System Interface
 
-Applying §6 principles: `args`, `executable_path`, and `working_dir` are module-level
-getters (accessed as `os.args`, `os.executable_path`, `os.working_dir!`). `exit_process`
-and `execute` stay as functions (they perform actions). `get_env_var` stays as a function
-because it takes a parameter.
+Applying §6 principles: `args`, `executable_path`, `src_dir`, and `working_dir` are
+module-level getters (accessed as `os.args`, `os.executable_path`, `os.src_dir`,
+`os.working_dir!`). `exit_process` and `execute` stay as functions (they perform actions).
+`get_env_var` stays as a function because it takes a parameter.
 
 Note: `exit_process` instead of `exit` because the bare name collides with libc's `@exit` symbol
 when the module is compiled inline (e.g., module tests). The qualified form `os.exit_process(code)`
@@ -746,6 +746,13 @@ get args string[] `public
 get executable_path string `public
     `doc("Returns the path to the running executable as provided by the
           operating system (argv[0]).");
+
+get src_dir string? `public
+    `doc("Returns the absolute path of the directory holding this program's own
+          source — the project directory for a project, the source file's
+          directory for a single-file program — without a trailing separator.
+          Returns none for a program that has no source directory, such as one
+          run with promise exec.");
 
 // --- Subprocess execution (implemented) ---
 
@@ -818,6 +825,27 @@ infrastructure patterns were introduced:
   detects `*types.Optional` return types and loads directly. Used by `get_env_var`.
 - **Error construction** (`constructErrorFromCStr`/`constructErrorFromGlobalStr`): Allocates
   error instances with RTTI and message fields in LLVM IR, for use in bridge error paths.
+
+**`src_dir` implementation**: `src_dir` is a compile-time constant, not a syscall —
+the compiler already knows the program's source directory (it is the directory `` `embed ``
+paths resolve against), and `defineSrcDirBody` bakes it into the binary as a `.rodata`
+string. It therefore needs no PAL method and does no syscall enter/exit accounting. Three
+consequences follow from it being a property of the binary rather than of the invocation:
+
+- It is baked identically by `promise build`, `promise run` and `promise test` — a program
+  must not answer "where do I live" differently depending on which command compiled it.
+- The value is the build machine's absolute path. A binary copied elsewhere still reports
+  where it was built, in the same way Rust's `CARGO_MANIFEST_DIR` does.
+- `promise exec` has no source directory — an inline program does not live anywhere — so
+  `src_dir` is `none` there rather than a fabricated path.
+
+It is deliberately distinct from `working_dir`: `src_dir` answers "where do I live"
+(locate the repo root, sibling tools, committed data files), `working_dir` answers "where was
+I invoked" (resolve the user's relative paths). Conflating the two is what makes `go run`
+unable to locate a tool's own source, since `os.Args[0]` there points into a temp build cache
+— and `os.executable_path` has exactly that property under `promise run` (T1521). Because the
+path is baked in, it is part of the run/test/project build-cache keys: two byte-identical
+programs in different directories are not interchangeable.
 
 **`args`/`executable_path` implementation**: The C `main(argc, argv)` stores both values into
 globals (`@__promise_argc`, `@__promise_argv`) at the start of the entry point, before scheduler
@@ -924,7 +952,7 @@ modules/
   math/           — lerp, map_range, deg_to_rad, sign_f64
   strings/        — join, spaces, reverse, ...
   io/             — File, Dir, IoError, read_line, read_stdin
-  os/             — args, get_env_var, working_dir, execute, Process
+  os/             — args, get_env_var, working_dir, src_dir, execute, Process
   time/           — DateTime, Date, Time; now, from_unix_*, parse
   json/           — JsonEncoder, JsonDecoder, JsonValue
   net/            — TcpListener, TcpStream, NetError

@@ -353,6 +353,14 @@ type Info struct {
 	// that return the embedded file contents.
 	Embeds map[*ast.FuncDecl]*EmbedInfo
 
+	// SourceDir is the absolute path of the directory holding the *program's*
+	// own source: the project directory for a project build, the file's
+	// directory for a single-file build. It is the same directory `embed paths
+	// resolve against, and codegen bakes it into os.src_dir (T1521). Empty
+	// when the program has no source directory (`promise exec`), which is what
+	// makes os.src_dir absent there rather than a fabricated path.
+	SourceDir string
+
 	// EarlyDrops maps statement AST nodes to variables that should be dropped
 	// immediately after that statement executes, rather than at scope exit.
 	// Populated by NLL last-use analysis in ownership.AnalyzeLastUses (B0035).

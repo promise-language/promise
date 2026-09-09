@@ -21489,3 +21489,99 @@ func TestT1413_TaskSendableChannelAccepts(t *testing.T) {
 		}
 	`)
 }
+
+// T1420: the for-in iterable is a value position, so a handler there is subject
+// to the same recovery rule as an assignment. A valueless arm used to reach
+// codegen and produce either a null coroutine handle (a `stream[T]` iterable the
+// loop then drives → segfault) or a phi missing a predecessor outright, which
+// `opt` rejects.
+func TestT1420ForInIterableHandlerMustRecover(t *testing.T) {
+	// Valueless handler arm over a generator iterable.
+	errs := checkErrs(t, `
+		gen!(bool f) stream[int] { if f { raise error(message: "boom"); } yield 1; }
+		main!() {
+			for x in gen(true) ? e { print_line(e.message); } { }
+		}
+	`)
+	expectError(t, errs, "error handler must produce a recovery value or diverge")
+
+	// Valueless handler arm over an ordinary (non-generator) iterable.
+	errs = checkErrs(t, `
+		make!(bool f) int[] { if f { raise error(message: "boom"); } return [1]; }
+		main!() {
+			for x in make(true) ? e { print_line(e.message); } { }
+		}
+	`)
+	expectError(t, errs, "error handler must produce a recovery value or diverge")
+
+	// Typed handler whose ELSE arm is valueless — the arm that used to leave the
+	// merge phi one incoming short.
+	errs = checkErrs(t, `
+		type E is error { }
+		gen!(bool f) stream[int] { if f { raise E(message: "boom"); } yield 1; }
+		alt() stream[int] { yield 9; }
+		main!() {
+			for x in gen(true) ? e is E { alt() } else { print_line("no"); } { }
+		}
+	`)
+	expectError(t, errs, "error handler must produce a recovery value or diverge")
+}
+
+// T1420: the recovering spellings stay accepted — a value-producing arm, a
+// diverging arm, and a typed handler whose both arms recover.
+func TestT1420ForInIterableHandlerRecoveringFormsOK(t *testing.T) {
+	checkOK(t, `
+		type E is error { }
+		gen!(bool f) stream[int] { if f { raise E(message: "boom"); } yield 1; }
+		alt() stream[int] { yield 9; }
+		other() stream[int] { yield 7; }
+		value_arm!() { for x in gen(true) ? e { alt() } { } }
+		diverging_arm!() { for x in gen(true) ? e { return; } { } }
+		typed_arms!() { for x in gen(true) ? e is E { alt() } else { other() } { } }
+	`)
+}
+
+// T1420: the recovery rule reaches the for-in iterable through every shape of
+// typed handler, not just the one with an explicit `else`. A `!` suffix makes a
+// non-matching error panic, and a typed handler with neither `!` nor `else` in a
+// failable function auto-propagates a non-match — in both, the match arm is the
+// only path that can supply the iterable, so a valueless match arm is what leaves
+// the loop with no stream at all.
+func TestT1420ForInIterableTypedHandlerShapes(t *testing.T) {
+	const decls = `
+		type E is error { }
+		gen!(bool f) stream[int] { if f { raise E(message: "boom"); } yield 1; }
+		alt() stream[int] { yield 9; }
+	`
+	// Panic on non-match (`!`): a valueless match arm is rejected...
+	errs := checkErrs(t, decls+`
+		main!() { for x in gen(true)? e is E { print_line(e.message); } ! { } }
+	`)
+	expectError(t, errs, "error handler must produce a recovery value or diverge")
+
+	// ...and no `else` in a failable function (non-match auto-propagates) likewise.
+	errs = checkErrs(t, decls+`
+		main!() { for x in gen(true)? e is E { print_line(e.message); } { } }
+	`)
+	expectError(t, errs, "error handler must produce a recovery value or diverge")
+
+	// Both shapes are accepted once the match arm produces a stream.
+	checkOK(t, decls+`
+		bang!() { for x in gen(true)? e is E { alt() } ! { } }
+		no_else!() { for x in gen(true)? e is E { alt() } { } }
+	`)
+}
+
+// T1420: when the iterable itself fails to type-check there is no iterable type to
+// judge the handler against, and the check is skipped. It must stay skipped: with a
+// nil type the handler would be silently recorded as an optional-recovery handler
+// instead of being diagnosed, and the reader would get a recovery complaint stacked
+// on top of the real error.
+func TestT1420ForInIterableHandlerSkippedWhenIterableUntyped(t *testing.T) {
+	errs := checkErrs(t, `
+		gen!(bool f) stream[int] { if f { raise error(message: "boom"); } yield 1; }
+		main!() { for x in undefined_thing()? e { gen(false) } { } }
+	`)
+	expectError(t, errs, "undefined: undefined_thing")
+	expectNoErrorContaining(t, errs, "error handler must produce a recovery value")
+}

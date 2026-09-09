@@ -1,0 +1,685 @@
+// T1420: an inline error handler (`? e { ... }`) on a for-in iterable that
+// evaluates to a `stream[T]`.
+//
+// Two independent codegen defects met at the handler merge:
+//   RC1 — genBlockValue discarded a trailing bare failable call's success value,
+//         so the handler arm contributed nothing and the merge phi'd in a zero.
+//         The loop then drove a null coroutine handle.
+//   RC2 — a failable generator value is 3-field {handle, slot, error_slot} and a
+//         non-failable one is 2-field {handle, slot}. Both spell the same source
+//         type `stream[T]`, so the arms met in a phi with no layout adaptation and
+//         `opt` rejected the module.
+//
+// Semantics under test (docs/language-design.md, the failable-scope escape list):
+// under B0023's eager-start protocol a failable generator factory runs the body to
+// the first `yield` OR the first `raise`, so a raise BEFORE the first yield is a
+// *factory-call* error — the half the iterable's `? e { }` handles. A raise AFTER
+// the first yield is a *mid-stream* error and still propagates to the enclosing
+// sink even though an error operator on the iterable handled the factory call.
+type ForInHandlerError is error {
+}
+
+// Raises before the first yield when `f` — a factory-call error.
+factory_raiser!(bool f) stream[int] {
+  if f {
+    raise error(message: "factory boom");
+  }
+  yield 1;
+  yield 2;
+}
+
+// Raises before the first yield with a *typed* error, for the `? e is T` arms.
+typed_factory_raiser!(bool f) stream[int] {
+  if f {
+    raise ForInHandlerError(message: "typed boom");
+  }
+  yield 1;
+}
+
+// Raises AFTER the first yield — a mid-stream error.
+mid_stream_raiser!(bool f) stream[int] {
+  yield 1;
+  if f {
+    raise error(message: "mid boom");
+  }
+  yield 2;
+}
+
+// Recovery streams. `plain_alt` is NON-failable (2-field layout — symptom 1);
+// `failable_alt` is failable (3-field layout — symptom 2).
+plain_alt() stream[int] {
+  yield 10;
+  yield 20;
+}
+
+failable_alt!() stream[int] {
+  yield 30;
+  yield 40;
+}
+
+second_alt() stream[int] {
+  yield 7;
+}
+
+// ---- Symptom 1: factory error, NON-failable recovery stream ----
+// The arms' layouts differ (3-field ok vs 2-field recovery); before the fix the
+// module was rejected by `opt` with a malformed phi.
+sum_plain_recovery!(bool f) int {
+  int q = 0;
+  for x in factory_raiser(f)? e {
+    plain_alt()
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+// ---- Symptom 2: factory error, FAILABLE recovery stream ----
+// Layouts match, so the module compiled — but the arm value was discarded and the
+// loop drove a null handle.
+sum_failable_recovery!(bool f) int {
+  int q = 0;
+  for x in factory_raiser(f)? e {
+    failable_alt()
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+// ---- Mid-stream error: the handler must NOT run; the error reaches the sink ----
+sum_mid_stream!(bool f, int[] ~trace) int {
+  int q = 0;
+  for x in mid_stream_raiser(f)? e {
+    trace.push(1);
+    plain_alt()
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+// A recovery stream that may yield NOTHING — the promoted generator is resumed
+// straight to its final suspend, so the loop must exit on the very first check
+// and still free the handle, the yield slot and the synthesized error slot.
+maybe_alt(bool yield_one) stream[int] {
+  if yield_one {
+    yield 5;
+  }
+}
+
+sum_empty_recovery!(bool yield_one) int {
+  int q = 0;
+  for x in factory_raiser(true)? e {
+    maybe_alt(yield_one)
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+// ---- Early exits out of a loop over the WIDENED stream ----
+// `break` and `return` leave through emitGeneratorCleanup rather than the loop's
+// own exit block, so they are the paths that must also free the synthesized error
+// slot. Leak enforcement is the assertion.
+sum_break!(bool f) int {
+  int q = 0;
+  for x in factory_raiser(f)? e {
+    plain_alt()
+  }
+  {
+    q = q + x;
+    if q >= 10 {
+      break;
+    }
+  }
+  return q;
+}
+
+first_or!(bool f) int {
+  for x in factory_raiser(f)? e {
+    plain_alt()
+  }
+  {
+    return x;
+  }
+  return -1;
+}
+
+// ---- Diverging handler arm (regression guard for the path that already worked) ----
+sum_diverging!(bool f) int {
+  int q = 0;
+  for x in factory_raiser(f)? e {
+    return 77;
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+// ---- Typed handler with an `else` arm (the noMatchVal merge incoming) ----
+sum_typed!(bool f) int {
+  int q = 0;
+  for x in typed_factory_raiser(f)? e is ForInHandlerError {
+    plain_alt()
+  } else {
+    second_alt()
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+// A plain (untyped) error so the typed handler's `is` test FAILS and the `else`
+// arm is the live recovery.
+sum_typed_no_match!() int {
+  int q = 0;
+  for x in factory_raiser(true)? e is ForInHandlerError {
+    plain_alt()
+  } else {
+    second_alt()
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+// ---- `yield*` delegation over a handled iterable ----
+delegating!() stream[int] {
+  yield * (factory_raiser(true)? e {
+    plain_alt()
+  });
+}
+
+// ---------------------------------------------------------------------------
+
+forin_handler_plain_recovery() `test {
+  // Factory raised: the handler recovers and the loop runs over the NON-failable
+  // recovery stream (10 + 20).
+  assert(sum_plain_recovery(true)?! == 30, "non-failable recovery stream must be iterated");
+}
+
+forin_handler_failable_recovery() `test {
+  // Factory raised: the handler recovers and the loop runs over the FAILABLE
+  // recovery stream (30 + 40).
+  assert(sum_failable_recovery(true)?! == 70, "failable recovery stream must be iterated");
+}
+
+forin_handler_not_run_on_success() `test {
+  // No factory error: the ORIGINAL stream is iterated and the handler never runs.
+  assert(sum_plain_recovery(false)?! == 3, "handler must not run when the factory succeeds");
+  assert(sum_failable_recovery(false)?! == 3, "handler must not run when the factory succeeds");
+}
+
+forin_handler_mid_stream_reaches_sink() `test {
+  // A raise AFTER the first yield is mid-stream: the iterable's handler does not
+  // run and the error propagates past the loop to the enclosing failable sink.
+  int[] trace = [];
+  bool caught = false;
+  sum_mid_stream(true, trace)? e {
+    caught = true;
+  };
+  assert(caught, "mid-stream error must reach the enclosing sink");
+  assert(trace.len == 0, "the iterable's handler must not run for a mid-stream error");
+
+  // Same generator without the mid-stream raise: both elements are iterated.
+  int[] trace2 = [];
+  assert(sum_mid_stream(false, trace2)?! == 3, "mid-stream generator yields both elements");
+  assert(trace2.len == 0, "handler must not run when nothing raises");
+}
+
+forin_handler_empty_recovery() `test {
+  assert(sum_empty_recovery(true)?! == 5, "recovery stream yielding once");
+  assert(sum_empty_recovery(false)?! == 0, "recovery stream yielding nothing");
+}
+
+forin_handler_early_exit() `test {
+  // Recovery stream (10, 20, ...): `break` fires after the first element.
+  assert(sum_break(true)?! == 10, "break out of the widened stream");
+  assert(sum_break(false)?! == 3, "break not reached on the original stream");
+  assert(first_or(true)?! == 10, "return out of the widened stream");
+  assert(first_or(false)?! == 1, "return out of the original stream");
+}
+
+forin_handler_diverging_arm() `test {
+  // The handler arm returns instead of producing a stream — it never reaches the
+  // merge, so no promotion happens and the enclosing function returns 77.
+  assert(sum_diverging(true)?! == 77, "diverging handler arm returns from the function");
+  assert(sum_diverging(false)?! == 3, "diverging handler is not taken on success");
+}
+
+forin_handler_typed_match() `test {
+  // The raised error IS a ForInHandlerError → the typed arm's recovery is used.
+  assert(sum_typed(true)?! == 30, "matching typed handler arm iterates its recovery");
+  assert(sum_typed(false)?! == 1, "typed handler not run when the factory succeeds");
+}
+
+forin_handler_typed_else_arm() `test {
+  // The raised error is NOT a ForInHandlerError → the `else` arm is the recovery.
+  assert(sum_typed_no_match()?! == 7, "non-matching typed handler falls to the else arm");
+}
+
+forin_handler_yield_delegation() `test {
+  // `yield*` over a handled iterable delegates to the recovery stream.
+  int q = 0;
+  for x in delegating()?! {
+    q = q + x;
+  }
+  assert(q == 30, "yield* delegates over the recovered stream");
+}
+
+forin_handler_inside_go_block() `test {
+  // T1386 made this reachable: sema peels the iterable's error operator before
+  // asking whether the generator is failable, so the same codegen fires in a
+  // `go!` body.
+  t := go! {
+    int s = 0;
+    for x in factory_raiser(true)? e {
+      plain_alt()
+    }
+    {
+      s = s + x;
+    }
+    return s;
+  };
+  assert((<-t)?! == 30, "handled iterable works inside a go! body");
+}
+
+forin_handler_binding_is_the_raised_error() `test {
+  // The handler binding sees the factory's error, not a synthesized one.
+  string seen = "";
+  int q = 0;
+  for x in factory_raiser(true)? e {
+    seen = e.message;
+    plain_alt()
+  }
+  {
+    q = q + x;
+  }
+  assert(seen == "factory boom", "handler binding carries the factory's error");
+  assert(q == 30, "recovery stream iterated after reading the binding");
+}
+
+// ---------------------------------------------------------------------------
+// Additional coverage (T1420)
+// ---------------------------------------------------------------------------
+
+// Raises a ForInHandlerError or a plain error before the first yield, so a typed
+// handler's match arm and its `else` arm can each be driven independently. The
+// `raise_it` flag keeps the `yield` reachable — a `stream[T]` function with no
+// reachable yield is not a generator.
+dual_raiser!(bool typed, bool raise_it) stream[int] {
+  if raise_it {
+    if typed {
+      raise ForInHandlerError(message: "typed boom");
+    }
+    raise error(message: "plain boom");
+  }
+  yield 1;
+}
+
+// ---- MIXED-failability typed handler arms ----
+// One arm is a 2-field non-failable generator and the other a 3-field failable
+// one, so a single merge phi has one incoming that must be widened and one that
+// must be left alone. Whole-arm widening (or none) would compile either way with
+// both arms alike; only the mixed shape catches a promotion applied to the wrong
+// incoming.
+mixed_nonfailable_match!(bool typed, bool raise_it) int {
+  int q = 0;
+  for x in dual_raiser(typed, raise_it)? e is ForInHandlerError {
+    plain_alt()
+  } else {
+    failable_alt()
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+mixed_failable_match!(bool typed, bool raise_it) int {
+  int q = 0;
+  for x in dual_raiser(typed, raise_it)? e is ForInHandlerError {
+    failable_alt()
+  } else {
+    plain_alt()
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+// ---- Discarded handled stream ----
+// Nothing consumes the merge result, so it goes to the discard path, which must
+// recognise the widened value by layout and free the synthesized error slot too.
+// Zero-leak enforcement is the assertion.
+discard_handled_stream!(bool f) {
+  factory_raiser(f)? e {
+    plain_alt()
+  };
+}
+
+// ---- Heap ELEMENT type through the widened stream ----
+// The promoted coroutine yields owned strings, so the loop's per-element drop
+// runs over a widened generator — a different drop path than `stream[int]`.
+string_factory_raiser!(bool f) stream[string] {
+  if f {
+    raise error(message: "factory boom");
+  }
+  string p = "o";
+  yield p + "ne";
+}
+
+string_alt() stream[string] {
+  string p = "t";
+  yield p + "wo";
+  yield p + "hree";
+}
+
+sum_string_lengths!(bool f) int {
+  int n = 0;
+  for s in string_factory_raiser(f)? e {
+    string_alt()
+  }
+  {
+    n = n + s.len;
+  }
+  return n;
+}
+
+// ---- Generator METHOD as the iterable ----
+type StreamSource {
+  int base;
+  emit!(this, bool f) stream[int] {
+    if f {
+      raise error(message: "source boom");
+    }
+    yield this.base;
+  }
+  fallback(this) stream[int] {
+    yield 10;
+    yield 20;
+  }
+}
+
+sum_method_source!(bool f) int {
+  StreamSource src = StreamSource(base: 1);
+  int q = 0;
+  for x in src.emit(f)? e {
+    src.fallback()
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+// ---- `continue` inside the loop over a widened stream ----
+// `continue` re-enters the loop through the resume block rather than the exit
+// block, so it is a third way out of the body next to `break` and `return`.
+sum_continue!(bool f) int {
+  int q = 0;
+  for x in factory_raiser(f)? e {
+    plain_alt()
+  }
+  {
+    if x == 10 {
+      continue;
+    }
+    q = q + x;
+  }
+  return q;
+}
+
+// ---- Handler arm that is itself a handled iterable ----
+// The inner merge's value (possibly widened) becomes the outer arm's value, so
+// the outer promotion must see an already-failable incoming and leave it alone.
+sum_nested_handler!(bool outer, bool inner) int {
+  int q = 0;
+  for x in factory_raiser(outer)? e {
+    second_factory_raiser(inner)? e2 {
+      plain_alt()
+    }
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+second_factory_raiser!(bool f) stream[int] {
+  if f {
+    raise error(message: "second boom");
+  }
+  yield 2;
+}
+
+// ---------------------------------------------------------------------------
+
+forin_handler_mixed_arm_failability() `test {
+  // Non-failable match arm (widened) / failable else arm (untouched).
+  assert(mixed_nonfailable_match(true, true)?! == 30, "widened match arm");
+  assert(mixed_nonfailable_match(false, true)?! == 70, "untouched else arm");
+
+  // Failable match arm (untouched) / non-failable else arm (widened).
+  assert(mixed_failable_match(true, true)?! == 70, "untouched match arm");
+  assert(mixed_failable_match(false, true)?! == 30, "widened else arm");
+
+  // No error at all: neither arm runs and the original stream is iterated.
+  assert(mixed_nonfailable_match(true, false)?! == 1, "no error, original stream");
+  assert(mixed_failable_match(true, false)?! == 1, "no error, original stream");
+}
+
+forin_handler_discarded_stream() `test {
+  // No consumer: the widened stream is destroyed and all three of its
+  // allocations freed. The leak check is the assertion.
+  discard_handled_stream(true)?!;
+  discard_handled_stream(false)?!;
+}
+
+forin_handler_heap_elements() `test {
+  assert(sum_string_lengths(true)?! == 8, "owned string elements over the widened stream");
+  assert(sum_string_lengths(false)?! == 3, "owned string elements over the original stream");
+}
+
+forin_handler_method_iterable() `test {
+  assert(sum_method_source(true)?! == 30, "generator method recovers to the fallback stream");
+  assert(sum_method_source(false)?! == 1, "generator method not recovered on success");
+}
+
+forin_handler_continue() `test {
+  assert(sum_continue(true)?! == 20, "continue skips the first element of the widened stream");
+  assert(sum_continue(false)?! == 3, "continue not taken on the original stream");
+}
+
+forin_handler_nested_handler_arm() `test {
+  assert(sum_nested_handler(true, true)?! == 30, "inner handler recovers inside the outer arm");
+  assert(sum_nested_handler(true, false)?! == 2, "inner stream succeeds inside the outer arm");
+  assert(sum_nested_handler(false, true)?! == 3, "outer stream succeeds, arm never evaluated");
+}
+
+// ---- A raise from INSIDE the loop body over a widened stream ----
+// This exits the loop through the enclosing function's error path rather than
+// through the loop's own exit or a break/return, so it is a fourth place the
+// synthesized error slot has to be freed. Leak enforcement is the assertion.
+element_guard!(int x) int {
+  if x == 20 {
+    raise error(message: "body boom");
+  }
+  return x;
+}
+
+raise_in_body!(bool f) int {
+  int q = 0;
+  for x in factory_raiser(f)? e {
+    plain_alt()
+  }
+  {
+    q = q + element_guard(x);
+  }
+  return q;
+}
+
+// The same inside a `go!` body, where the error leaves through the task result.
+go_raise_in_body(bool f) int {
+  t := go! {
+    int s = 0;
+    for x in factory_raiser(f)? e {
+      plain_alt()
+    }
+    {
+      s = s + element_guard(x);
+    }
+    return s;
+  };
+  return (<-t)? e {
+    -1
+  };
+}
+
+forin_handler_raise_from_loop_body() `test {
+  // The widened stream yields 10 then 20; the guard raises on 20, so the loop is
+  // abandoned mid-iteration and the enclosing function propagates.
+  bool caught = false;
+  raise_in_body(true)? e {
+    caught = true;
+  };
+  assert(caught, "a raise from the loop body reaches the enclosing sink");
+
+  // The original stream (1, 2) never trips the guard.
+  assert(raise_in_body(false)?! == 3, "original stream completes");
+
+  // Same abandonment inside a `go!` body — the error arrives as the task result.
+  assert(go_raise_in_body(true) == -1, "go! body raise reaches the task result");
+  assert(go_raise_in_body(false) == 3, "go! body completes over the original stream");
+}
+
+// ---- Negatives: constructs the widening must NOT touch ----
+//
+// The promotion is gated on the handler's sema type being a stream AND on the ok
+// value carrying the failable generator layout. Both halves matter: a closure is a
+// `{fn, env}` fat pointer with exactly the layout of a NON-failable generator
+// value, so a shape-only gate would "widen" it — allocating an error slot and
+// resuming a function pointer as if it were a coroutine.
+
+maybe_fn!(bool b)() -> int {
+  if b {
+    raise error(message: "bang");
+  }
+  return || -> 3;
+}
+
+closure_handler!(bool b) int {
+  () -> int f = maybe_fn(b)? e {
+    || -> 7
+  };
+  return f();
+}
+
+// A handled iterable that is a plain `next()`-shaped user type rather than a
+// generator: for-in drives it structurally, and the handler merge sees no
+// generator layout on either side.
+type HandlerCounter {
+  int n;
+  int limit;
+  next(~this) int? {
+    if this.n >= this.limit {
+      return none;
+    }
+    this.n = this.n + 1;
+    return this.n;
+  }
+}
+
+make_counter!(bool b) HandlerCounter {
+  if b {
+    raise error(message: "bang");
+  }
+  return HandlerCounter(n: 0, limit: 2);
+}
+
+alt_counter() HandlerCounter {
+  return HandlerCounter(n: 10, limit: 12);
+}
+
+sum_counter!(bool b) int {
+  int q = 0;
+  for x in make_counter(b)? e {
+    alt_counter()
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+forin_handler_gate_negatives() `test {
+  // Closure-valued handler: both arms are fat pointers, untouched by the widening.
+  assert(closure_handler(true)?! == 7, "closure recovery arm is callable");
+  assert(closure_handler(false)?! == 3, "closure ok path is callable");
+
+  // Structural (non-generator) iterable: recovery counter yields 11 + 12.
+  assert(sum_counter(true)?! == 23, "structural iterable recovers to the alternate");
+  assert(sum_counter(false)?! == 3, "structural iterable iterated on success");
+}
+
+// ---- Typed handler shapes with no `else` arm ----
+// `! ` panics on a non-matching error, and a bare typed handler in a failable
+// function auto-propagates one; in both, the match arm is the sole recovery and
+// the merge has a single non-ok incoming rather than two.
+sum_typed_panic!(bool f) int {
+  int q = 0;
+  for x in typed_factory_raiser(f)? e is ForInHandlerError {
+    plain_alt()
+  }! {
+    q = q + x;
+  }
+  return q;
+}
+
+sum_typed_no_else!(bool f) int {
+  int q = 0;
+  for x in typed_factory_raiser(f)? e is ForInHandlerError {
+    plain_alt()
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+// The same shape when the raised error does NOT match: with no `else` and no `!`,
+// the non-match auto-propagates to the enclosing sink.
+sum_typed_no_else_nomatch!() int {
+  int q = 0;
+  for x in factory_raiser(true)? e is ForInHandlerError {
+    plain_alt()
+  }
+  {
+    q = q + x;
+  }
+  return q;
+}
+
+forin_handler_typed_without_else() `test {
+  assert(sum_typed_panic(true)?! == 30, "panic-on-nomatch typed arm recovers");
+  assert(sum_typed_panic(false)?! == 1, "panic-on-nomatch not taken on success");
+
+  assert(sum_typed_no_else(true)?! == 30, "no-else typed arm recovers");
+  assert(sum_typed_no_else(false)?! == 1, "no-else not taken on success");
+
+  // A plain error does not match ForInHandlerError, so it propagates.
+  bool caught = false;
+  sum_typed_no_else_nomatch()? e {
+    caught = true;
+  };
+  assert(caught, "a non-matching error propagates when there is no else arm");
+}

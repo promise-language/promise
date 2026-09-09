@@ -1,6 +1,7 @@
 package error1
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/promise-language/promise/compiler/internal/codegen/codegentest"
@@ -1016,4 +1017,58 @@ func TestFailableDestructure(t *testing.T) {
 	// Should alloca both bindings
 	codegentest.AssertContains(t, ir, "%val")
 	codegentest.AssertContains(t, ir, "%err")
+}
+
+// T1420 (RC1): a block-value arm ending in a BARE failable call must contribute
+// that call's auto-propagated success value to the merge phi. genBlockValue used
+// to discard it ("block arms don't contribute typed results to match phis"), so
+// the merge fell through to genErrorHandlerExpr's zeroValue fallback and phi'd in
+// a `0` — silently wrong for an int, a null dereference for anything heap. The
+// bare spelling must emit exactly what the explicit `?^` spelling emits (§7.2:
+// auto-propagation applies in all expression positions).
+func TestT1420_BlockArmBareFailableCallPhisItsValue(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		f!(bool b) int { if b { raise error(message: "e"); } return 1; }
+		g!() int { return 42; }
+		m!() int {
+			return f(true) ? e { g() };
+		}
+		main!() { int r = m()?^; }
+	`)
+	// The handler arm branches on g()'s ok flag (auto.propagate / auto.ok) and the
+	// merge phi takes the extracted ok value — not a zero.
+	codegentest.AssertContains(t, ir, "auto.ok")
+	// The zero-fallback shape genErrorHandlerExpr uses when an arm contributes no
+	// value. Matched by shape, not by register number, so renumbering cannot make
+	// this negative silently vacuous.
+	if regexp.MustCompile(`phi i64 \[ %\d+, %error\.ok[\w.]* \], \[ i64 0,`).MatchString(ir) {
+		t.Fatalf("the handler merge phi took a zero constant — the arm's value was discarded.\nIR:\n%s", ir)
+	}
+	if !regexp.MustCompile(`error\.merge[\s\S]{0,80}?phi i64 \[ %\d+, %error\.ok[\w.]* \], \[ %\d+,`).MatchString(ir) {
+		t.Fatalf("expected the handler merge phi to take the arm's auto-propagated value, "+
+			"not a zero constant.\nIR:\n%s", ir)
+	}
+}
+
+// T1420 (RC1): the same for a HEAP arm value — the merged string must be the
+// call's real result, and it must be tracked as a temp so the merge owns it
+// (a zero there was a null pointer the caller then dereferenced).
+func TestT1420_BlockArmBareFailableHeapCallIsTracked(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		f!(bool b) string { if b { raise error(message: "e"); } return "kept"; }
+		g!() string { return "recovered"; }
+		m!() string {
+			return f(true) ? e { g() };
+		}
+		main!() { string r = m()?^; }
+	`)
+	codegentest.AssertContains(t, ir, "auto.ok")
+	if !regexp.MustCompile(`error\.merge[\s\S]{0,80}?phi i8\* \[ %\d+, %error\.ok[\w.]* \], \[ %\d+,`).MatchString(ir) {
+		t.Fatalf("expected the handler merge phi to take the arm's auto-propagated string, "+
+			"not a null constant.\nIR:\n%s", ir)
+	}
+	if regexp.MustCompile(`phi i8\* \[ %\d+, %error\.ok[\w.]* \], \[ i8\* null,`).MatchString(ir) {
+		t.Fatalf("the handler merge phi took a null constant — the arm's string was discarded, "+
+			"and the caller would dereference it.\nIR:\n%s", ir)
+	}
 }

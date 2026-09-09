@@ -662,11 +662,53 @@ func isStringBorrowExpr(expr ast.Expr) bool {
 	}
 }
 
+// blockResultOwnership classifies the value a block-value arm yields: whether the
+// block's caller now owns it, and — when the ownership is per-path rather than
+// whole-arm — the live i1 flag the enclosing merge phi must thread. Emits at most
+// one load, so it MUST be called before claimStringTemp zeroes the temp's flag.
+//
+// The single implementation for every arm-result classification: genBlockValue's
+// normal-result path, its trailing bare-failable-call path (so `{ g() }` and
+// `{ g()?^ }` transfer ownership identically — T1420) and its trailing-if path, and
+// genIfStmtValue's recursive else-if arm.
+func (c *Compiler) blockResultOwnership(result value.Value) (bool, value.Value) {
+	if result == nil {
+		return false, nil
+	}
+	// T1107: a live tracked stmt temp (clone()/call result, or a nested if/match
+	// phi tracked by trackMergeResultTemp) as the block result is an owned heap
+	// value the caller now owns.
+	if idx, ok := c.stmtTempMap[result]; ok && idx >= 0 {
+		// T1208: capture the temp's live per-path flag before claimStringTemp
+		// zeroes it, so a nested mixed owned/borrowed conditional threads the real
+		// per-path bit to the enclosing phi.
+		return true, c.captureLiveTempFlag(result)
+	}
+	// T1211: a fresh owned heap value struct (heap-user-type / Map constructor or
+	// clone) moved out of the block transfers ownership to the block's caller, but
+	// is tracked as a heapTemp (not a stmtTemp) so the stmtTempMap check misses it.
+	if c.resultIsFreshOwnedHeapTemp(result) {
+		return true, nil
+	}
+	// T1211: a nested value-struct merge result carries its per-path ownership
+	// flag in mergeBoundStructFlag — thread it up.
+	flag := c.captureLiveTempFlag(result)
+	return flag != nil, flag
+}
+
 // genBlockValue generates a block like genBlock, but returns the value of the
 // last expression statement (if any). Avoids the double-generation that would
 // occur if genBlock + separate genExpr on the last statement were used.
 
 func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
+	// T1420: read-and-clear the one-shot no-consumer flag (a `? e { }` recovery body
+	// over a VOID subject). The trailing statement then stays an ordinary statement,
+	// so its heap temps are freed at that statement's own boundary instead of being
+	// claimed for a transfer no consumer performs. Consumed ABOVE the nil guard: a
+	// one-shot that survived a nil block would silently discard the value of the next
+	// (unrelated) block instead.
+	discardValue := c.discardBlockValue
+	c.discardBlockValue = false
 	if block == nil {
 		c.blockValueOwnedResult = false // T1107
 		return nil
@@ -762,7 +804,7 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 		if c.block == nil || c.block.Term != nil {
 			break
 		}
-		if i == n-1 {
+		if i == n-1 && !discardValue {
 			if es, ok := stmt.(*ast.ExprStmt); ok {
 				// T1326: snapshot the enum-ctor temp count before evaluating the arm
 				// tail so drainNestedArmEnumCtorTemps can drop any by-value call-arg
@@ -784,10 +826,23 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 							c.claimStringTemp(result)
 						}
 					} else {
-						// Failable call: auto-propagate error, discard success value.
-						// Block arms don't contribute typed results to match phis;
-						// only expression arms (arm.Body) produce match result values.
-						c.genAutoPropagate(es.Expr)
+						// T1420: a trailing bare failable call IS the block's value —
+						// §7.2 gives auto-propagation in "all expression positions", so
+						// `{ g() }` must yield exactly what `{ g()?^ }` yields, tracked
+						// identically (genAutoPropagateTracked, T1883). Discarding it
+						// left every block-value arm (an `if`/`match` arm, a `? e {}`
+						// recovery, a `? {}` optional recovery) with no incoming value,
+						// so the merge phi'd in a zero — reading `0` for an int, and
+						// dereferencing null for a string / generator.
+						result = c.genAutoPropagateTracked(es.Expr, c.genExpr(es.Expr))
+						owned, ownedFlag := c.blockResultOwnership(result)
+						if owned {
+							blockOwned = true
+						}
+						if ownedFlag != nil {
+							blockOwnedFlag = ownedFlag
+						}
+						c.claimStringTemp(result)
 					}
 				} else if c.borrowBlockResult {
 					// T0792: result consumed as a borrow (`T&`/`T~`) — the last expr
@@ -825,30 +880,12 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 						}
 						c.clearDropFlag(ident.Name)
 					}
-					// T1107: a live tracked stmt temp (clone()/call result, or a
-					// nested if/match phi tracked by trackMergeResultTemp) as the block
-					// result is an owned heap value the caller now owns.
-					if result != nil {
-						if idx, ok := c.stmtTempMap[result]; ok && idx >= 0 {
-							blockOwned = true
-							// T1208: capture the temp's live per-path flag before
-							// claimStringTemp zeroes it, so a nested mixed owned/borrowed
-							// conditional threads the real per-path bit to the enclosing phi.
-							blockOwnedFlag = c.captureLiveTempFlag(result)
-						} else if c.resultIsFreshOwnedHeapTemp(result) {
-							// T1211: a fresh owned heap value struct (heap-user-type / Map
-							// constructor or clone) moved out of the block transfers
-							// ownership to the block's caller, but is tracked as a heapTemp
-							// (not a stmtTemp) so the stmtTempMap check above misses it.
-							blockOwned = true
-						} else {
-							// T1211: a nested value-struct merge result carries its per-path
-							// ownership flag in mergeBoundStructFlag — thread it up.
-							blockOwnedFlag = c.captureLiveTempFlag(result)
-							if blockOwnedFlag != nil {
-								blockOwned = true
-							}
-						}
+					owned, ownedFlag := c.blockResultOwnership(result)
+					if owned {
+						blockOwned = true
+					}
+					if ownedFlag != nil {
+						blockOwnedFlag = ownedFlag
 					}
 					// T0095: Claim string dup temps from block result expressions.
 					// Without this, a dup from e.g. `e.message` would be freed at
@@ -883,25 +920,16 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 				// T1206: a value-producing if in statement position registers its owned
 				// i8* phi as a tracked temp (genIfStmtValue → trackMergeResultTemp). When
 				// it does, the block yields an owned heap value moved out to the block's
-				// caller — mirror the ExprStmt path's blockOwned handling so genIfExpr /
-				// genMatchArmValue register the enclosing merge phi as owned too.
-				if result != nil {
-					if idx, ok := c.stmtTempMap[result]; ok && idx >= 0 {
-						blockOwned = true
-						// T1208: no claimStringTemp on this path, so the temp's per-path
-						// flag is still live — capture it for the enclosing merge phi.
-						blockOwnedFlag = c.captureLiveTempFlag(result)
-					} else if c.resultIsFreshOwnedHeapTemp(result) {
-						// T1211: fresh owned heap value struct (heap-user-type / Map)
-						// moved out of a value-producing if in statement position.
-						blockOwned = true
-					} else {
-						// T1211: nested value-struct merge result — thread its per-path flag.
-						blockOwnedFlag = c.captureLiveTempFlag(result)
-						if blockOwnedFlag != nil {
-							blockOwned = true
-						}
-					}
+				// caller — same classification as the ExprStmt path, so genIfExpr /
+				// genMatchArmValue register the enclosing merge phi as owned too. No
+				// claimStringTemp runs on this path, so the temp's per-path flag is still
+				// live when blockResultOwnership reads it.
+				owned, ownedFlag := c.blockResultOwnership(result)
+				if owned {
+					blockOwned = true
+				}
+				if ownedFlag != nil {
+					blockOwnedFlag = ownedFlag
 				}
 				break
 			}

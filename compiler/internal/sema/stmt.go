@@ -259,7 +259,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		c.checkFailableEscape(s.Value)
 
 		// Error handler in value context must produce recovery value or diverge.
-		c.checkErrorHandlerRecovery(s.Value, declType)
+		c.checkErrorHandlerRecovery(s.Value, declType, "in an assignment")
 		// Update recorded type for optional recovery handlers
 		if c.info.OptionalRecoveryHandlers[s.Value] {
 			c.recordType(s.Value, declType)
@@ -360,7 +360,7 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	}
 
 	// Error handler in value context must produce recovery value or diverge.
-	c.checkErrorHandlerRecovery(s.Value, nil)
+	c.checkErrorHandlerRecovery(s.Value, nil, "in an assignment")
 
 	// Non-recovering error handler in inferred decl: wrap type as optional
 	if c.info.OptionalRecoveryHandlers[s.Value] {
@@ -396,14 +396,18 @@ func (c *Checker) checkFailableEscape(expr ast.Expr) {
 }
 
 // checkErrorHandlerRecovery validates that an error handler used in a value
-// context (variable declaration) either produces a recovery value or diverges.
-// Without this, the variable would get a zero-initialized value, which is
-// unsafe for types with drop methods (e.g., File with _fd=0 → closes stdin).
+// context (a variable declaration, or a for-in iterable) either produces a
+// recovery value or diverges. Without this, the consumer would get a
+// zero-initialized value, which is unsafe for types with drop methods (e.g.,
+// File with _fd=0 → closes stdin) and outright fatal for a `stream[T]` (a null
+// coroutine handle the loop then drives — T1420).
 //
-// declType is the declared type for typed declarations, or nil for inferred.
-// When the handler doesn't recover, optional-typed or inferred declarations
-// are allowed (variable becomes T?); non-optional typed declarations error.
-func (c *Checker) checkErrorHandlerRecovery(expr ast.Expr, declType types.Type) {
+// declType is the declared type for typed declarations, the iterable's type for
+// a for-in, or nil for inferred declarations. When the handler doesn't recover,
+// optional-typed or inferred declarations are allowed (variable becomes T?);
+// non-optional typed declarations error. `usage` names the position for the
+// diagnostic ("in an assignment", "as a for-in iterable").
+func (c *Checker) checkErrorHandlerRecovery(expr ast.Expr, declType types.Type, usage string) {
 	handler, ok := expr.(*ast.ErrorHandlerExpr)
 	if !ok {
 		return
@@ -459,7 +463,7 @@ func (c *Checker) checkErrorHandlerRecovery(expr ast.Expr, declType types.Type) 
 		c.info.OptionalRecoveryHandlers[expr] = true
 		return
 	}
-	c.errorf(handler.Pos(), "error handler must produce a recovery value or diverge (return/raise) when used in an assignment")
+	c.errorf(handler.Pos(), "error handler must produce a recovery value or diverge (return/raise) when used %s", usage)
 }
 
 func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {
@@ -1973,6 +1977,16 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	rawGenerator := c.isRawGeneratorForIn(iterType, s.Iterable)
 	if !rawGenerator {
 		c.checkFailableEscape(s.Iterable)
+	}
+	// T1420: the iterable is a value position too, so a handler there is subject
+	// to the same recovery rule as an assignment. A valueless arm leaves codegen
+	// with no incoming for the handler merge: a `stream[T]` iterable then drives a
+	// null coroutine handle, and a typed handler whose `else` arm is valueless
+	// builds a phi missing a predecessor outright, which `opt` rejects. Skipped
+	// when the iterable failed to type-check — declType nil there would silently
+	// mark it an optional-recovery handler instead of diagnosing anything.
+	if iterType != nil {
+		c.checkErrorHandlerRecovery(s.Iterable, iterType, "as a for-in iterable")
 	}
 
 	c.inLoop++

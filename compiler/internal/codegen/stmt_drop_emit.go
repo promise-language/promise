@@ -749,8 +749,11 @@ func (c *Compiler) dropDiscardedGenerator(expr ast.Expr, result value.Value) {
 	if _, ok := types.AsStream(exprType); !ok {
 		return
 	}
-	st, ok := result.Type().(*irtypes.StructType)
-	if !ok || (len(st.Fields) != 2 && len(st.Fields) != 3) {
+	// Discriminate by LAYOUT through the shared predicates, exactly as the for-in
+	// and yield* consumers do (T1420) — a widened recovery arm must be recognised
+	// here too, and its error slot freed.
+	isFailable := isFailableGeneratorValue(result)
+	if !isFailable && !isNonFailableGeneratorValue(result) {
 		return
 	}
 	handle := c.block.NewExtractValue(result, 0)
@@ -763,7 +766,7 @@ func (c *Compiler) dropDiscardedGenerator(expr ast.Expr, result value.Value) {
 	c.block = cleanBlk
 	c.block.NewCall(c.genDestroy, handle)
 	c.block.NewCall(c.palFree, slot)
-	if len(st.Fields) == 3 { // failable generator: also free the error slot (B0023)
+	if isFailable { // failable generator: also free the error slot (B0023)
 		errSlot := c.block.NewExtractValue(result, 2)
 		c.block.NewCall(c.palFree, errSlot)
 	}

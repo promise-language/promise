@@ -980,3 +980,174 @@ func TestT0436BorrowedGeneratorThisAfterOwnedDups(t *testing.T) {
 	// With the fix, the borrowed receiver dups the heap value via memcpy.
 	codegentest.AssertContains(t, body, "call void @llvm.memcpy")
 }
+
+// T1420: an inline error handler on a for-in iterable that yields a stream.
+// The ok path is a FAILABLE generator value ({handle, slot, error_slot}); a
+// recovery arm calling a NON-failable generator produces {handle, slot}. The two
+// spell the same source type, so codegen must widen the recovery arm before the
+// merge phi — otherwise the phi joins a 2-field with a 3-field struct and `opt`
+// rejects the module.
+func TestT1420_ForInHandlerWidensNonFailableGeneratorArm(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		gen!(bool f) stream[int] { if f { raise error(message: "boom"); } yield 1; }
+		alt() stream[int] { yield 9; }
+		m!() int {
+			int q = 0;
+			for x in gen(true) ? e { alt() } { q = q + x; }
+			return q;
+		}
+		main!() { int r = m()?^; }
+	`)
+	// The merge phi must be the FAILABLE layout — the loop's error routing reads
+	// the error slot, so the ok path is never narrowed to the 2-field shape.
+	codegentest.AssertContains(t, ir, "phi { i8*, i8*, i8* }")
+	// The recovery arm must carry the widening — see t1420GeneratorArmPromotion
+	// below for the shape and why each part of it is load-bearing.
+	if !t1420GeneratorArmPromotion.MatchString(ir) {
+		t.Fatalf("expected the non-failable arm to be widened (null-initialized error slot + "+
+			"gen_resume + 3 insertvalues) at the end of its block, before br to error.merge.\nIR:\n%s", ir)
+	}
+}
+
+// T1420: a FAILABLE recovery arm already has the 3-field layout, so no widening
+// is emitted — the arms meet as-is. Guards against promoting an already-failable
+// value (which would allocate a second error slot and double-resume the
+// coroutine, losing its first element).
+func TestT1420_ForInHandlerFailableArmNotWidened(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		gen!(bool f) stream[int] { if f { raise error(message: "boom"); } yield 1; }
+		alt!() stream[int] { yield 9; }
+		m!() int {
+			int q = 0;
+			for x in gen(true) ? e { alt() } { q = q + x; }
+			return q;
+		}
+		main!() { int r = m()?^; }
+	`)
+	codegentest.AssertContains(t, ir, "phi { i8*, i8*, i8* }")
+	// No widening: the same shape the positive test above pins must be absent.
+	// Asserted by shape rather than by a global __promise_gen_resume tally — a
+	// count over the whole module silently changes the day std grows a generator,
+	// and the property under test is "promoteGeneratorToFailable did not run",
+	// which is exactly this regex.
+	if t1420GeneratorArmPromotion.MatchString(ir) {
+		t.Fatalf("an already-failable recovery arm was widened — the extra error slot "+
+			"leaks and the second gen_resume eats the arm's first element.\nIR:\n%s", ir)
+	}
+}
+
+// t1420ArmPromotion builds the regex matching the widening promoteGeneratorToFailable
+// emits for a non-failable generator arm: an error slot allocated and freshly nulled,
+// the eager resume the failable for-in protocol relies on (the factory already did it
+// for a real failable generator, so the loop skips it), the three-field rebuild, and —
+// the load-bearing part — all of it at the END of the arm's block, immediately before
+// the branch to the merge, so the promoted value dominates the phi.
+//
+// allocBytes pins the error slot's size, which is one POINTER wide and therefore
+// target-dependent; pass t1420AnyAllocWidth to ignore it. The alloc is part of the pattern
+// rather than a separate assertion because a real failable factory ramp allocates its
+// error slot with the identical three instructions — only being followed by the resume
+// and the rebuild, in the arm's own block, makes a match specific to the promotion.
+func t1420ArmPromotion(allocBytes string) *regexp.Regexp {
+	return regexp.MustCompile(
+		`%\d+ = call i8\* @pal_alloc\(i64 ` + allocBytes + `\)\n` +
+			`\s*%\d+ = bitcast i8\* %\d+ to i8\*\*\n` +
+			`\s*store i8\* null, i8\*\* %\d+\n` +
+			`(?:\s*%\d+ = extractvalue \{ i8\*, i8\* \} %\d+, \d\n)+` +
+			`\s*call void @__promise_gen_resume\(i8\* %\d+\)\n` +
+			`(?:\s*%\d+ = insertvalue \{ i8\*, i8\*, i8\* \}[^\n]*\n){3}` +
+			`\s*br label %error\.merge`)
+}
+
+// t1420AnyAllocWidth makes t1420ArmPromotion target-neutral — the two tests above assert
+// only that the widening did or did not run, never how wide its slot is.
+const t1420AnyAllocWidth = `\d+`
+
+// t1420GeneratorArmPromotion is the target-neutral promotion shape, shared by the
+// positive and negative T1420 tests so both pin one definition of it.
+var t1420GeneratorArmPromotion = t1420ArmPromotion(t1420AnyAllocWidth)
+
+// T1420: the synthesized error slot holds one pointer, so promoteGeneratorToFailable
+// sizes it by the target's pointer width — 4 bytes on wasm32, 8 on a 64-bit target.
+// That is the one branch in the promotion a native-only run never reaches, and getting
+// it wrong ships a 64-bit allocation into a 32-bit address space, so pin both sides.
+func TestT1420_GeneratorArmPromotionErrorSlotIsPointerWidth(t *testing.T) {
+	const src = `
+		gen!(bool f) stream[int] { if f { raise error(message: "boom"); } yield 1; }
+		alt() stream[int] { yield 9; }
+		m!() int {
+			int q = 0;
+			for x in gen(true) ? e { alt() } { q = q + x; }
+			return q;
+		}
+		main!() { int r = m()?^; }
+	`
+	native := codegentest.GenerateIRForTarget(t, src, "x86_64-unknown-linux-gnu")
+	if !t1420ArmPromotion("8").MatchString(native) {
+		t.Fatalf("expected an 8-byte error slot in the widening on a 64-bit target.\nIR:\n%s", native)
+	}
+
+	wasm := codegentest.GenerateIRForTarget(t, src, "wasm32-wasi")
+	if !t1420ArmPromotion("4").MatchString(wasm) {
+		t.Fatalf("expected a 4-byte error slot in the widening on wasm32.\nIR:\n%s", wasm)
+	}
+	if t1420ArmPromotion("8").MatchString(wasm) {
+		t.Fatalf("the widening allocated a 64-bit error slot on wasm32.\nIR:\n%s", wasm)
+	}
+}
+
+// T1420: a handled stream in STATEMENT position — nothing consumes the merge result,
+// so dropDiscardedGenerator disposes of it. It must recognise the widened value by
+// layout and free all three of handle, yield slot and the synthesized error slot;
+// discriminating on "3 fields" alone was what the layout predicates replaced.
+func TestT1420_DiscardedHandledStreamFreesErrorSlot(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		gen!(bool f) stream[int] { if f { raise error(message: "boom"); } yield 1; }
+		alt() stream[int] { yield 9; }
+		m!(bool f) { gen(f) ? e { alt() }; }
+		main!() { m(true)?^; }
+	`)
+	// The discard path destroys the coroutine, then frees BOTH slots: the yield slot
+	// (extract 1) and the error slot (extract 2). Extract 2 exists only if the value
+	// was classified failable, which is the property under test.
+	if !regexp.MustCompile(
+		`call void @__promise_gen_destroy\(i8\* %\d+\)\n` +
+			`\s*call void @pal_free\(i8\* %\d+\)\n` +
+			`\s*%\d+ = extractvalue \{ i8\*, i8\*, i8\* \} %\d+, 2\n` +
+			`\s*call void @pal_free\(i8\* %\d+\)\n` +
+			`\s*br label %discard\.gen\.done`).MatchString(ir) {
+		t.Fatalf("expected the discarded handled stream to free its error slot too.\nIR:\n%s", ir)
+	}
+}
+
+// T1420: the promotion is gated on the handler's SEMA type being a stream and on
+// the ok value having the failable generator layout — not on the LLVM shape alone.
+// A closure is a `{i8*, i8*}` fat pointer, byte-identical to a non-failable
+// generator value, so a handler over function values is the near-miss that a
+// shape-only gate would widen: it would allocate an error slot and call
+// __promise_gen_resume on a function pointer.
+func TestT1420_NonGeneratorTwoFieldArmNotPromoted(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		maybe_fn!(bool b) () -> int {
+			if b { raise error(message: "bang"); }
+			return || -> 3;
+		}
+		m!(bool b) int {
+			() -> int f = maybe_fn(b)? e {
+				|| -> 7
+			};
+			return f();
+		}
+		main!() { int r = m(true)?^; }
+	`)
+	// The arms meet as plain fat pointers — no widening anywhere in the module.
+	if t1420GeneratorArmPromotion.MatchString(ir) {
+		t.Fatalf("a closure-valued handler was treated as a generator arm and widened.\nIR:\n%s", ir)
+	}
+	// The handler merge itself stays two-field. Anchored on error.merge because a
+	// bare `phi { i8*, i8* }` also matches std's heapdup merges, which would make
+	// this assertion pass no matter what the handler emitted.
+	if !regexp.MustCompile(`error\.merge[\w.]*:\n\s*%\d+ = phi \{ i8\*, i8\* \}`).MatchString(ir) {
+		t.Fatalf("expected the handler merge to stay a two-field fat-pointer phi.\nIR:\n%s", ir)
+	}
+}

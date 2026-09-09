@@ -16,8 +16,12 @@ boom_str!() string {
 ok_val!() int {
   return 42;
 }
+// Deliberately built by concatenation, not returned as a literal: a `.rodata`
+// string literal is never allocated and never freed (T0060), so every row below
+// that calls itself a leak guard would be vacuous if this returned one.
 ok_str!() string {
-  return "ok";
+  string prefix = "o";
+  return prefix + "k";
 }
 
 // ---- Void position (manifestation A) ----
@@ -234,4 +238,638 @@ enum_subject_arm() `test {
 
   int b = enum_arm(Color.Blue)?!;
   assert(b == 0, "enum arm default value");
+}
+
+// ---- Block-arm VALUE rows (T1420) ----
+//
+// T1267 above covers the EXPRESSION-arm form (`"a" => g()`). The BLOCK-arm form
+// (`"a" => { g() }`) was never covered, and genBlockValue discarded the trailing
+// bare failable call's success value — so every block-value arm merged a zero:
+// `0` for an int, a null pointer for a string, an unusable value for anything
+// heap. These rows pin the block arm to the same result as the expression arm.
+
+// int through a `match` block arm.
+val_block_arm!(string c) int {
+  return match c {
+    "a" => {
+      ok_val()
+    },
+    _ => 7,
+  };
+}
+
+// string (heap) through a `match` block arm — the leak guard, since the merged
+// value is now an owned temp claimed out of statement-end cleanup.
+str_block_arm!(string c) string {
+  return match c {
+    "a" => {
+      ok_str()
+    },
+    _ => "default",
+  };
+}
+
+// T1898's exact repro shape: the block-arm value consumed by a TYPED VAR DECL.
+// This is where the discarded arm value surfaced as a codegen panic ("nil value
+// for typed var decl") rather than a silently wrong merge, so keep both shapes.
+val_block_decl!(string c) int {
+  int v = match c {
+    "a" => {
+      ok_val()
+    },
+    _ => 7,
+  };
+  return v;
+}
+
+str_block_decl!(bool b) int {
+  string s = if b {
+    ok_str()
+  } else {
+    ok_str()
+  };
+  return s.len;
+}
+
+// int through an `if` block arm.
+val_block_if!(bool b) int {
+  return if b {
+    ok_val()
+  } else {
+    7
+  };
+}
+
+// string through an `if` block arm.
+str_block_if!(bool b) string {
+  return if b {
+    ok_str()
+  } else {
+    "default"
+  };
+}
+
+// int through an error-handler recovery arm (`? e { }`).
+val_block_handler!(bool b) int {
+  return boom_val_or(b)? e {
+    ok_val()
+  };
+}
+
+boom_val_or!(bool b) int {
+  if b {
+    raise error(message: "bang");
+  }
+  return 1;
+}
+
+// string through an error-handler recovery arm — heap leak guard.
+str_block_handler!(bool b) string {
+  return boom_str_or(b)? e {
+    ok_str()
+  };
+}
+
+boom_str_or!(bool b) string {
+  if b {
+    raise error(message: "bang");
+  }
+  string head = "kep";
+  return head + "t"; // heap, not a literal — see ok_str
+}
+
+// int through an optional-recovery arm (`? { }`).
+val_block_elvis!(int? o) int {
+  return o? {
+    ok_val()
+  };
+}
+
+// string through an optional-recovery arm — heap leak guard.
+str_block_elvis!(string? o) string {
+  return o? {
+    ok_str()
+  };
+}
+
+// Enum subject through a block arm.
+enum_block_arm!(Color c) int {
+  return match c {
+    Color.Red => {
+      ok_val()
+    },
+    _ => 7,
+  };
+}
+
+// A block arm whose trailing bare failable call RAISES still propagates.
+val_block_arm_raises!(string c) int {
+  return match c {
+    "a" => {
+      boom_val()
+    },
+    _ => 7,
+  };
+}
+
+// A DISCARDED match-STATEMENT arm whose tail is a bare failable heap call. The
+// value is now produced rather than dropped inline, so it must be claimed and
+// freed as an ordinary statement temp — this row is the zero-leak guard for that
+// path.
+discard_heap_arm!(string c) {
+  match c {
+    "a" => {
+      ok_str()
+    },
+    _ => {
+    },
+  }
+}
+
+// ---- Block-arm tests ----
+
+block_arm_value_match() `test {
+  assert(val_block_arm("a")?! == 42, "match block arm yields the auto-propagated value");
+  assert(val_block_arm("z")?! == 7, "match block arm default");
+
+  assert(enum_block_arm(Color.Red)?! == 42, "enum match block arm yields the value");
+  assert(enum_block_arm(Color.Blue)?! == 7, "enum match block arm default");
+
+  bool caught = false;
+  val_block_arm_raises("a")? e {
+    caught = true;
+  };
+  assert(caught, "a raising block arm still propagates");
+}
+
+block_arm_value_if() `test {
+  assert(val_block_if(true)?! == 42, "if block arm yields the auto-propagated value");
+  assert(val_block_if(false)?! == 7, "if block arm else branch");
+}
+
+block_arm_value_decl() `test {
+  assert(val_block_decl("a")?! == 42, "typed var decl consumes the match block arm value");
+  assert(val_block_decl("z")?! == 7, "typed var decl, default arm");
+  assert(str_block_decl(true)?! == 2, "typed var decl consumes the if block arm string");
+  assert(str_block_decl(false)?! == 2, "typed var decl, else branch string");
+}
+
+block_arm_value_handler() `test {
+  assert(val_block_handler(true)?! == 42, "error-handler block arm yields the recovery value");
+  assert(val_block_handler(false)?! == 1, "error-handler not taken on success");
+}
+
+block_arm_value_elvis() `test {
+  int? absent = none;
+  assert(val_block_elvis(absent)?! == 42, "optional-recovery block arm yields the value");
+  int? present = 5;
+  assert(val_block_elvis(present)?! == 5, "optional-recovery not taken when present");
+}
+
+block_arm_heap_leak_free() `test {
+  // Every heap row: the merged string must be the real value (not a null read)
+  // and must be freed exactly once — the zero-leak policy is the assertion here.
+  assert(str_block_arm("a")?! == "ok", "match block arm yields the owned string");
+  assert(str_block_arm("z")?! == "default", "match block arm default string");
+
+  assert(str_block_if(true)?! == "ok", "if block arm yields the owned string");
+  assert(str_block_if(false)?! == "default", "if block arm else string");
+
+  assert(str_block_handler(true)?! == "ok", "handler block arm yields the owned string");
+  assert(str_block_handler(false)?! == "kept", "handler not taken on success");
+
+  string? absent = none;
+  assert(str_block_elvis(absent)?! == "ok", "optional-recovery block arm yields the owned string");
+  string? present = "here";
+  assert(str_block_elvis(present)?! == "here", "optional-recovery not taken when present");
+
+  // Discarded statement-arm result: produced, then dropped as a statement temp.
+  discard_heap_arm("a")?!;
+  discard_heap_arm("z")?!;
+}
+
+// ---- DISCARDED block-value results (T1420 leak guard) ----
+//
+// In statement position the block's value has no owner. Before T1420 the arm's
+// trailing bare failable call was dropped inline (dropDiscardedAutoPropagate);
+// now it is produced and handed to the merge, so it must instead be claimed and
+// freed as an ordinary statement temp. Zero-leak enforcement is the assertion.
+
+boom_vec_or!(bool b) int[] {
+  if b {
+    raise error(message: "bang");
+  }
+  int[] v = [];
+  v.push(9); // built, not a literal — an all-constant literal is static (T0062)
+  return v;
+}
+
+ok_vec!() int[] {
+  int[] v = [];
+  v.push(1);
+  v.push(2);
+  v.push(3);
+  return v;
+}
+
+// Discarded error-handler statement, heap arm tail.
+discard_handler_stmt!(bool b) {
+  boom_str_or(b)? e {
+    ok_str()
+  };
+}
+
+// Same for a vector — a different drop path than string.
+discard_handler_vec_stmt!(bool b) {
+  boom_vec_or(b)? e {
+    ok_vec()
+  };
+}
+
+// Discarded if-statement whose taken arm's tail is a bare failable heap call.
+discard_if_stmt!(bool b) {
+  if b {
+    ok_str()
+  } else {
+    "x"
+  };
+}
+
+// Discarded optional-recovery statement.
+discard_elvis_stmt!(string? o) {
+  o? {
+    ok_str()
+  };
+}
+
+discarded_block_results_leak_free() `test {
+  // Both the recovering and the non-recovering path of every form.
+  discard_handler_stmt(true)?!;
+  discard_handler_stmt(false)?!;
+
+  discard_handler_vec_stmt(true)?!;
+  discard_handler_vec_stmt(false)?!;
+
+  discard_if_stmt(true)?!;
+  discard_if_stmt(false)?!;
+
+  string? absent = none;
+  discard_elvis_stmt(absent)?!;
+  string? present = "here";
+  discard_elvis_stmt(present)?!;
+}
+
+// ---- VOID-subject handler arms (T1420 leak guard) ----
+//
+// A void failable subject has no ok value, so the handler merge has nothing for
+// a value-producing recovery arm to join — the arm's value has no consumer at
+// all. genBlockValue must therefore NOT claim it out of statement-end cleanup:
+// claiming hands ownership to a caller that does not exist. Every spelling of a
+// value-producing tail (bare failable call, `?^`, `?!`, a non-failable call, an
+// owned local) must free its value here. Zero-leak enforcement is the assertion.
+
+boom_void!(bool b) {
+  if b {
+    raise error(message: "bang");
+  }
+}
+
+nf_str() string {
+  string prefix = "o";
+  return prefix + "k";
+}
+
+void_arm_bare!(bool b) {
+  boom_void(b)? e {
+    ok_str()
+  };
+}
+
+void_arm_propagate!(bool b) {
+  boom_void(b)? e {
+    ok_str()?^
+  };
+}
+
+void_arm_panic!(bool b) {
+  boom_void(b)? e {
+    ok_str()?!
+  };
+}
+
+void_arm_non_failable!(bool b) {
+  boom_void(b)? e {
+    nf_str()
+  };
+}
+
+void_arm_vector!(bool b) {
+  boom_void(b)? e {
+    ok_vec()
+  };
+}
+
+void_arm_owned_local!(bool b) {
+  boom_void(b)? e {
+    string s = ok_str()?^;
+    s
+  };
+}
+
+// A typed handler over a void subject: both the matching arm and the `else` arm
+// are value-producing, and neither has a consumer.
+void_arm_typed!(bool b) {
+  boom_void(b)? e is DecodeError {
+    ok_str()
+  } else {
+    ok_vec()
+  };
+}
+
+void_handler_arms_leak_free() `test {
+  // Both the recovering and the non-recovering path of every spelling.
+  void_arm_bare(true)?!;
+  void_arm_bare(false)?!;
+
+  void_arm_propagate(true)?!;
+  void_arm_propagate(false)?!;
+
+  void_arm_panic(true)?!;
+  void_arm_panic(false)?!;
+
+  void_arm_non_failable(true)?!;
+  void_arm_non_failable(false)?!;
+
+  void_arm_vector(true)?!;
+  void_arm_vector(false)?!;
+
+  void_arm_owned_local(true)?!;
+  void_arm_owned_local(false)?!;
+
+  void_arm_typed(true)?!;
+  void_arm_typed(false)?!;
+}
+
+// ---- HEAP USER TYPE and MAP through a block arm (T1420) ----
+//
+// blockResultOwnership classifies a block arm's value three ways. The rows above
+// cover the tracked-stmt-temp case (string) and the vector case; a heap user type
+// and a `map[K,V]` take the third — resultIsFreshOwnedHeapTemp, which the
+// stmtTempMap lookup misses because they are tracked as heapTemps. Getting that
+// classification wrong on the new bare-failable path leaks (never dropped) or
+// double-frees (dropped by the arm AND by the caller), so every row here is a
+// zero-leak guard as much as a value check.
+
+type ArmNode {
+  int v;
+  string tag;
+}
+
+boom_node!(bool b) ArmNode {
+  if b {
+    raise error(message: "bang");
+  }
+  return ArmNode(v: 1, tag: "orig");
+}
+
+ok_node!() ArmNode {
+  return ArmNode(v: 42, tag: "recovered");
+}
+
+boom_map!(bool b) map[string, int] {
+  if b {
+    raise error(message: "bang");
+  }
+  map[string, int] m = {:};
+  m["kept"] = 1;
+  return m;
+}
+
+ok_map!() map[string, int] {
+  map[string, int] m = {:};
+  m["a"] = 1;
+  m["b"] = 2;
+  return m;
+}
+
+node_block_handler!(bool b) int {
+  ArmNode n = boom_node(b)? e {
+    ok_node()
+  };
+  return n.v;
+}
+
+node_block_match!(string c) int {
+  ArmNode n = match c {
+    "a" => {
+      ok_node()
+    },
+    _ => ArmNode(v: 7, tag: "default"),
+  };
+  return n.v;
+}
+
+node_block_if!(bool b) int {
+  ArmNode n = if b {
+    ok_node()
+  } else {
+    ArmNode(v: 7, tag: "default")
+  };
+  return n.v;
+}
+
+map_block_handler!(bool b) int {
+  map[string, int] m = boom_map(b)? e {
+    ok_map()
+  };
+  return m.len;
+}
+
+// Discarded: the arm's heap value has no consumer at all.
+discard_node_stmt!(bool b) {
+  boom_node(b)? e {
+    ok_node()
+  };
+}
+
+discard_map_stmt!(bool b) {
+  boom_map(b)? e {
+    ok_map()
+  };
+}
+
+// Void subject: the merge has no ok incoming, so the arm's value is dropped at
+// the arm's own statement boundary rather than claimed for a transfer.
+void_arm_node!(bool b) {
+  boom_void(b)? e {
+    ok_node()
+  };
+}
+
+void_arm_map!(bool b) {
+  boom_void(b)? e {
+    ok_map()
+  };
+}
+
+block_arm_heap_user_type_and_map() `test {
+  assert(node_block_handler(true)?! == 42, "handler block arm yields the owned user type");
+  assert(node_block_handler(false)?! == 1, "handler not taken on success");
+  assert(node_block_match("a")?! == 42, "match block arm yields the owned user type");
+  assert(node_block_match("z")?! == 7, "match block arm default user type");
+  assert(node_block_if(true)?! == 42, "if block arm yields the owned user type");
+  assert(node_block_if(false)?! == 7, "if block arm else user type");
+
+  assert(map_block_handler(true)?! == 2, "handler block arm yields the owned map");
+  assert(map_block_handler(false)?! == 1, "handler not taken on success");
+
+  discard_node_stmt(true)?!;
+  discard_node_stmt(false)?!;
+  discard_map_stmt(true)?!;
+  discard_map_stmt(false)?!;
+
+  void_arm_node(true)?!;
+  void_arm_node(false)?!;
+  void_arm_map(true)?!;
+  void_arm_map(false)?!;
+}
+
+// ---- NESTED value blocks inside a void-subject arm (T1420) ----
+//
+// The no-consumer flag is a ONE-SHOT, read and cleared at genBlockValue entry, so
+// it must suppress the value of the arm body itself and nothing deeper: an `if`,
+// a `match` or another handler nested inside that arm still needs ordinary value
+// semantics, or its own merge loses its incoming. If the one-shot leaked into the
+// nested block the inner merge would phi in a zero — a null string here — and if
+// it were never consumed at all the arm's value would be claimed for a transfer
+// no one performs, which leaks.
+
+// Each nested block's value is pushed to a caller-owned sink so the assertions
+// below read it back — a lost nested value would be a zero (an empty string here),
+// not merely a leak. The arm's own tail stays an unconsumed heap value, which is
+// the disposition under test.
+nested_if_in_void_arm!(bool b, bool c, string[] ~sink) {
+  boom_void(b)? e {
+    string s = if c {
+      ok_str()
+    } else {
+      "fallback"
+    };
+    sink.push(move s);
+    ok_vec()
+  };
+}
+
+nested_match_in_void_arm!(bool b, string k, string[] ~sink) {
+  boom_void(b)? e {
+    string s = match k {
+      "a" => {
+        ok_str()
+      },
+      _ => "fallback",
+    };
+    sink.push(move s);
+    ok_vec()
+  };
+}
+
+nested_handler_in_void_arm!(bool b, bool c, string[] ~sink) {
+  boom_void(b)? e {
+    string s = boom_str_or(c)? e2 {
+      ok_str()
+    };
+    sink.push(move s);
+    ok_vec()
+  };
+}
+
+void_arm_nested_blocks_leak_free() `test {
+  // Recovering path: the arm runs, so the nested block's value must arrive intact
+  // in the sink and the arm's own tail value must still be freed.
+  string[] sink = [];
+  nested_if_in_void_arm(true, true, sink)?!;
+  nested_if_in_void_arm(true, false, sink)?!;
+  assert(sink.len == 2, "both if-arm values recorded");
+  assert(sink[0] == "ok", "nested if kept its then-branch value");
+  assert(sink[1] == "fallback", "nested if kept its else-branch value");
+
+  string[] msink = [];
+  nested_match_in_void_arm(true, "a", msink)?!;
+  nested_match_in_void_arm(true, "z", msink)?!;
+  assert(msink.len == 2, "both match-arm values recorded");
+  assert(msink[0] == "ok", "nested match kept its block-arm value");
+  assert(msink[1] == "fallback", "nested match kept its default-arm value");
+
+  string[] hsink = [];
+  nested_handler_in_void_arm(true, true, hsink)?!;
+  nested_handler_in_void_arm(true, false, hsink)?!;
+  assert(hsink.len == 2, "both nested-handler values recorded");
+  assert(hsink[0] == "ok", "nested handler kept its recovery value");
+  assert(hsink[1] == "kept", "nested handler kept its ok value");
+
+  // Non-recovering path: the arm never runs, so nothing is recorded and nothing
+  // is allocated.
+  string[] skipped = [];
+  nested_if_in_void_arm(false, true, skipped)?!;
+  nested_match_in_void_arm(false, "a", skipped)?!;
+  nested_handler_in_void_arm(false, true, skipped)?!;
+  assert(skipped.len == 0, "the arm does not run when the subject succeeds");
+}
+
+// ---- PURE VALUE TYPE through a block arm (T1420) ----
+//
+// A pure value type is a struct passed by value with no heap allocation and no
+// drop, so blockResultOwnership must classify it as unowned — claiming it would
+// hand a non-existent allocation to the caller's cleanup. It is the third answer
+// that classification can give, next to the tracked temps and the fresh owned heap
+// structs above, and the new bare-failable path has to get it right too.
+
+type ArmPoint {
+  int x `value;
+  int y `value;
+}
+
+boom_point!(bool b) ArmPoint {
+  if b {
+    raise error(message: "bang");
+  }
+  return ArmPoint(x: 1, y: 2);
+}
+
+ok_point!() ArmPoint {
+  return ArmPoint(x: 40, y: 2);
+}
+
+point_block_handler!(bool b) int {
+  ArmPoint p = boom_point(b)? e {
+    ok_point()
+  };
+  return p.x + p.y;
+}
+
+point_block_match!(string c) int {
+  ArmPoint p = match c {
+    "a" => {
+      ok_point()
+    },
+    _ => ArmPoint(x: 7, y: 0),
+  };
+  return p.x + p.y;
+}
+
+void_arm_point!(bool b) {
+  boom_void(b)? e {
+    ok_point()
+  };
+}
+
+block_arm_value_type() `test {
+  assert(point_block_handler(true)?! == 42, "handler block arm yields the value type");
+  assert(point_block_handler(false)?! == 3, "handler not taken on success");
+  assert(point_block_match("a")?! == 42, "match block arm yields the value type");
+  assert(point_block_match("z")?! == 7, "match block arm default value type");
+
+  // No consumer: nothing to claim and nothing to free.
+  void_arm_point(true)?!;
+  void_arm_point(false)?!;
 }

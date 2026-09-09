@@ -263,6 +263,11 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 
 	result := c.genExpr(e.Expr)
 	resultType := result.Type().(*irtypes.StructType)
+	// T1420: a void subject has no ok value, so the merge below has nothing for a
+	// recovery/else arm's value to join — it would be orphaned. Tell genBlockValue
+	// to keep each arm's trailing statement an ordinary statement, so its heap temps
+	// are dropped there rather than claimed for a transfer that never happens.
+	voidSubject := isVoidResult(resultType)
 
 	tag := c.block.NewExtractValue(result, 0)
 
@@ -417,6 +422,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 			}
 			savedBorrow := c.borrowBlockResult
 			c.borrowBlockResult = borrowRecovery
+			c.discardBlockValue = voidSubject // T1420
 			noMatchVal = c.genBlockValue(e.ElseBody)
 			c.borrowBlockResult = savedBorrow
 			c.targetType = savedTarget
@@ -509,6 +515,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	}
 	savedHandlerBorrow := c.borrowBlockResult
 	c.borrowBlockResult = borrowRecovery
+	c.discardBlockValue = voidSubject // T1420
 	handlerVal := c.genBlockValue(e.Body)
 	c.borrowBlockResult = savedHandlerBorrow
 	c.targetType = savedHandlerTarget
@@ -626,6 +633,20 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 			noMatchVal = nil
 		}
 	}
+	// T1420: a `stream[T]`-valued handler joins a failable generator (3-field
+	// {handle, slot, error_slot}) on the ok path with whatever the recovery arm
+	// produced, which is 2-field {handle, slot} when that arm calls a NON-failable
+	// generator. Both arms have the same source type — failability is not in the
+	// type system for generators — so the layouts must be reconciled here or the
+	// phi is malformed. Widen the recovery arms rather than narrowing the ok path:
+	// the loop's error routing must survive. The sema-type gate is load-bearing:
+	// a pure value type with three pointer fields also lowers to {i8*, i8*, i8*},
+	// so the LLVM shape alone is not a safe discriminator.
+	if _, isStream := types.AsStream(c.resolvedExprType(e)); isStream &&
+		okVal != nil && isFailableGeneratorValue(okVal) {
+		handlerVal = c.promoteGeneratorArm(handlerVal, handlerEnd, mergeBlock)
+		noMatchVal = c.promoteGeneratorArm(noMatchVal, noMatchEnd, mergeBlock)
+	}
 	if okVal != nil && handlerVal != nil {
 		incomings := []*ir.Incoming{
 			{X: okVal, Pred: okEnd},
@@ -655,6 +676,30 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		}
 	}
 	return okVal
+}
+
+// promoteGeneratorArm widens a recovery arm's non-failable generator value to the
+// failable layout so it can meet a failable generator on the ok path in the merge
+// phi (T1420). The widening is emitted at the END of the arm's own block, before
+// its existing branch, so the promoted value dominates the phi — the same technique
+// the optional-recovery path uses to wrap an arm value in `some(T)`. Arms that are
+// already failable, or that never reach mergeBlock (a `return` inside the handler),
+// are returned untouched.
+func (c *Compiler) promoteGeneratorArm(armVal value.Value, armEnd *ir.Block, mergeBlock *ir.Block) value.Value {
+	if armVal == nil || armEnd == nil || !isNonFailableGeneratorValue(armVal) {
+		return armVal
+	}
+	br, isBr := armEnd.Term.(*ir.TermBr)
+	if !isBr || br.Target != mergeBlock {
+		return armVal
+	}
+	savedBlock := c.block
+	c.block = armEnd
+	armEnd.Term = nil // remove br temporarily
+	promoted := c.promoteGeneratorToFailable(armVal)
+	c.block.NewBr(mergeBlock) // re-add br
+	c.block = savedBlock
+	return promoted
 }
 
 // reconstructErrorValue builds a value struct {vtable_ptr, instance_ptr} from a raw i8* error pointer.

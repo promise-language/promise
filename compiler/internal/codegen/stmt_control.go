@@ -1445,26 +1445,11 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 	case *ast.IfStmt:
 		elseVal = c.genIfStmtValue(e)
 		// A recursive else-if returns a tracked owned temp when it transfers
-		// ownership; detect it before claimStringTemp neutralizes the flag.
-		if elseVal != nil {
-			if idx, ok := c.stmtTempMap[elseVal]; ok && idx >= 0 {
-				elseOwned = true
-				elseOwnedFlag = c.captureLiveTempFlag(elseVal) // T1208
-			} else if c.resultIsFreshOwnedHeapTemp(elseVal) {
-				// T1211: a recursive else-if whose selected arm is a fresh owned heap
-				// value struct (heap-user-type / Map) transfers ownership up — tracked
-				// as a heapTemp, so the stmtTempMap check above misses it.
-				elseOwned = true
-			} else if flag := c.captureLiveTempFlag(elseVal); flag != nil {
-				// T1211: a recursive else-if that is itself a mixed owned/borrowed
-				// value-struct merge carries its per-path flag in mergeBoundStructFlag;
-				// thread it up so the enclosing merge's flag phi (and thus the bound
-				// local's drop flag) stays conditional — otherwise the owned inner arm
-				// leaks (constant 0) or a borrowed inner arm double-frees (constant 1).
-				elseOwned = true
-				elseOwnedFlag = flag
-			}
-		}
+		// ownership; classify it before claimStringTemp neutralizes the flag. Same
+		// three cases as a block arm (T1208 tracked temp, T1211 fresh owned heap
+		// struct, T1211 mixed owned/borrowed value-struct merge whose per-path flag
+		// must be threaded up), so it shares blockResultOwnership.
+		elseOwned, elseOwnedFlag = c.blockResultOwnership(elseVal)
 	default:
 		c.genStmt(s.Else)
 	}

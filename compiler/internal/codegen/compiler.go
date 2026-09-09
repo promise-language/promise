@@ -594,6 +594,17 @@ type Compiler struct {
 	// only the outermost block (the go! body) sees it — nested arm blocks don't.
 	goBlockTrailingWantValue bool
 
+	// One-shot: set by genErrorHandlerExpr before evaluating a recovery/else body
+	// whose subject is VOID. Such a body has no consumable value — the merge has no
+	// ok incoming to join, so an arm that still ends in a value expression
+	// (`work()? e { make_string() }`) would hand genBlockValue a result it claims out
+	// of statement-end cleanup for an ownership transfer that never happens → leak.
+	// With this set, genBlockValue treats the trailing statement as an ordinary
+	// statement, so its temps are dropped at that statement's own boundary. Read-and-
+	// cleared at genBlockValue entry so only the arm body sees it — nested value
+	// blocks inside it keep their normal value semantics (T1420).
+	discardBlockValue bool
+
 	// T1427: on a `go! {}` value exit the computed heap success value is claimed away
 	// from temp cleanup for the store into G.result_ptr. A failing use-binding close()
 	// diverts that exit (emitCloseErrCheck → emitFailableGoBlockError), skipping the

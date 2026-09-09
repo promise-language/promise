@@ -25,6 +25,52 @@ func failableGeneratorValueType() *irtypes.StructType {
 	return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr)
 }
 
+// isNonFailableGeneratorValue and isFailableGeneratorValue report which of the two
+// runtime layouts a generator value has. Failability is not part of the source type
+// — a `stream[T]` produced by a failable factory and one produced by a non-failable
+// factory are the same type — so every consumer discriminates by layout, exactly as
+// genForInGenerator does.
+func isNonFailableGeneratorValue(v value.Value) bool {
+	st, ok := v.Type().(*irtypes.StructType)
+	return ok && st.Equal(generatorValueType())
+}
+
+func isFailableGeneratorValue(v value.Value) bool {
+	st, ok := v.Type().(*irtypes.StructType)
+	return ok && st.Equal(failableGeneratorValueType())
+}
+
+// promoteGeneratorToFailable widens a non-failable generator value {handle, slot}
+// to the failable layout {handle, slot, error_slot}, so the two can meet in a phi
+// (T1420: `for x in gen!() ? e { alt() }`, whose ok path yields a failable generator
+// and whose recovery arm yields a non-failable one).
+//
+// It emits exactly what a failable factory ramp emits (buildGeneratorCoroutine's
+// isFailable branch): allocate an error slot, initialize it to null, and eagerly
+// resume the coroutine — the failable for-in protocol skips the initial resume
+// because the factory already did it, so a promoted value must be started the same
+// way or its first yielded element is lost. The slot stays null for the coroutine's
+// whole life (a non-failable body has no `raise`), so the loop's exit check always
+// takes gen.forin.clean, which frees the slot like any other — no null guard needed
+// at any consumer, and no leak.
+func (c *Compiler) promoteGeneratorToFailable(genVal value.Value) value.Value {
+	ptrSize := int64(8)
+	if c.isWasm {
+		ptrSize = 4
+	}
+	errSlot := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, ptrSize))
+	errSlotTyped := c.block.NewBitCast(errSlot, irtypes.NewPointer(irtypes.I8Ptr))
+	c.block.NewStore(constant.NewNull(irtypes.I8Ptr), errSlotTyped)
+
+	handle := c.block.NewExtractValue(genVal, 0)
+	slot := c.block.NewExtractValue(genVal, 1)
+	c.block.NewCall(c.genResume, handle)
+
+	promoted := c.block.NewInsertValue(constant.NewUndef(failableGeneratorValueType()), handle, 0)
+	promoted = c.block.NewInsertValue(promoted, slot, 1)
+	return c.block.NewInsertValue(promoted, errSlot, 2)
+}
+
 // defineGeneratorFunc compiles a top-level generator function.
 func (c *Compiler) defineGeneratorFunc(fd *ast.FuncDecl, fn *ir.Func, elemType types.Type) {
 	obj := c.lookupFunc(fd.Name)
@@ -489,9 +535,11 @@ func (c *Compiler) genYieldStmt(s *ast.YieldStmt) {
 func (c *Compiler) genForInGenerator(s *ast.ForInStmt, genVal value.Value, elemType types.Type) {
 	elemLLVM := c.resolveType(elemType)
 
-	// Detect failable generator by struct field count (3 = failable, 2 = non-failable)
-	genStruct := genVal.Type().(*irtypes.StructType)
-	isFailable := len(genStruct.Fields) == 3
+	// Detect a failable generator by LAYOUT, not by type: a `stream[T]` from a
+	// failable factory and one from a non-failable factory are the same source
+	// type, and only the struct shape tells them apart (T1420's
+	// promoteGeneratorToFailable widens the narrow one into the wide one).
+	isFailable := isFailableGeneratorValue(genVal)
 
 	// Extract handle and yield_slot from generator value struct
 	handle := c.block.NewExtractValue(genVal, 0)
@@ -832,9 +880,9 @@ func (c *Compiler) genYieldDelegateStmt(s *ast.YieldDelegateStmt) {
 func (c *Compiler) genYieldDelegateGenerator(genVal value.Value, elemType types.Type, pos ast.Pos) {
 	elemLLVM := c.resolveType(elemType)
 
-	// Detect failable sub-generator by struct field count
-	genStruct := genVal.Type().(*irtypes.StructType)
-	isFailable := len(genStruct.Fields) == 3
+	// Detect a failable sub-generator by LAYOUT, through the same predicate the
+	// for-in consumer uses (T1420) — a widened arm value must be recognised here too.
+	isFailable := isFailableGeneratorValue(genVal)
 
 	handle := c.block.NewExtractValue(genVal, 0)
 	yieldSlot := c.block.NewExtractValue(genVal, 1)

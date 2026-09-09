@@ -1,6 +1,30 @@
 // Test the io module (compiled as part of the module).
 use os;
 
+// T1963: every scratch path in this file hangs off one per-process directory, so
+// two concurrent runs on one machine never share a name. Creating the directory
+// is idempotent, so every call can do it rather than depending on an ordered
+// setup step. Each call returns a fresh owned string, which is also what the
+// io APIs want — they consume the path they are handed.
+_scratch_dir() string {
+  string root = os.temp_dir + "/pr_iot_" + os.process_id.to_string();
+  Dir.make_all(root[0:root.len])?!;
+  return root;
+}
+
+_scratch(string name) string => _scratch_dir() + "/" + name;
+
+// T1963: the uniqueness is by construction, so assert the construction. The
+// pre-commit guard (CheckTestTempPaths) only checks that the line naming
+// temp_dir also names process_id — it cannot see that the pid actually reaches
+// the path, nor that _scratch hangs off the root rather than off temp_dir.
+scratch_dir_is_per_process() `test(exclude: wasm) {
+  string root = _scratch_dir();
+  assert(root.ends_with("/pr_iot_" + os.process_id.to_string()), "scratch root names this pid");
+  assert(_scratch("sdpp") == root + "/sdpp", "scratch files hang off the per-process root");
+  assert(Dir.exists(root), "_scratch_dir creates the root it returns");
+}
+
 // flaky leak — sometimes leaks depending on timing
 strerror_known_codes() `test {
   assert(_io_strerror(1) == "operation not permitted", "errno 1");
@@ -21,14 +45,14 @@ make_io_error_test() `test {
 }
 
 file_create_exists_remove() `test(exclude: wasm) {
-  if File.exists(os.temp_dir + "/pr_iot_cer") {
-    File.remove(os.temp_dir + "/pr_iot_cer")?!;
+  if File.exists(_scratch("cer")) {
+    File.remove(_scratch("cer"))?!;
   }
-  File f = File.create(os.temp_dir + "/pr_iot_cer")?!;
+  File f = File.create(_scratch("cer"))?!;
   f.close()?!;
-  assert(File.exists(os.temp_dir + "/pr_iot_cer"), "file exists after create");
-  File.remove(os.temp_dir + "/pr_iot_cer")?!;
-  assert(!File.exists(os.temp_dir + "/pr_iot_cer"), "file gone after remove");
+  assert(File.exists(_scratch("cer")), "file exists after create");
+  File.remove(_scratch("cer"))?!;
+  assert(!File.exists(_scratch("cer")), "file gone after remove");
 }
 
 // T1742: a file that is open must still be removable — on Windows that needs
@@ -38,7 +62,7 @@ file_create_exists_remove() `test(exclude: wasm) {
 // Windows deletes are delete-pending: the name stays visible until the last
 // handle goes away (docs/io.md 6.2 states that difference rather than hiding it).
 file_remove_while_open() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_rwo";
+  string p = _scratch("rwo");
   if File.exists(p) {
     File.remove(p)?!;
   }
@@ -52,33 +76,33 @@ file_remove_while_open() `test(exclude: wasm) {
 }
 
 file_write_read() `test(exclude: wasm) {
-  File fw = File.create(os.temp_dir + "/pr_iot_wr")?!;
+  File fw = File.create(_scratch("wr"))?!;
   fw.write_string("hello world")?!;
   fw.close()?!;
-  File fr = File.open_read(os.temp_dir + "/pr_iot_wr")?!;
+  File fr = File.open_read(_scratch("wr"))?!;
   string data = fr.read_all()?!;
   fr.close()?!;
   assert(data == "hello world", "read back what was written");
-  File.remove(os.temp_dir + "/pr_iot_wr")?!;
+  File.remove(_scratch("wr"))?!;
 }
 
 file_content_oneshot() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_rwc", "one-shot")?!;
-  string d = File.read_content(os.temp_dir + "/pr_iot_rwc")?!;
+  File.write_content(_scratch("rwc"), "one-shot")?!;
+  string d = File.read_content(_scratch("rwc"))?!;
   assert(d == "one-shot", "read_content matches write_content");
-  File.remove(os.temp_dir + "/pr_iot_rwc")?!;
+  File.remove(_scratch("rwc"))?!;
 }
 
 file_size_test() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_sz", "12345")?!;
-  int sz = File.size(os.temp_dir + "/pr_iot_sz")?!;
+  File.write_content(_scratch("sz"), "12345")?!;
+  int sz = File.size(_scratch("sz"))?!;
   assert(sz == 5, "size matches content length");
-  File.remove(os.temp_dir + "/pr_iot_sz")?!;
+  File.remove(_scratch("sz"))?!;
 }
 
 file_seek_test() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_seek", "abcdef")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_seek")?!;
+  File.write_content(_scratch("seek"), "abcdef")?!;
+  File f = File.open(_scratch("seek"))?!;
   int pos0 = f.position?!;
   assert(pos0 == 0, "initial position is 0");
   f.seek(3)?!;
@@ -87,50 +111,50 @@ file_seek_test() `test(exclude: wasm) {
   string rest = f.read_all()?!;
   assert(rest == "def", "read after seek");
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_seek")?!;
+  File.remove(_scratch("seek"))?!;
 }
 
 file_append_test() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_app", "first")?!;
-  File fa = File.append(os.temp_dir + "/pr_iot_app")?!;
+  File.write_content(_scratch("app"), "first")?!;
+  File fa = File.append(_scratch("app"))?!;
   fa.write_string(" second")?!;
   fa.close()?!;
-  string d = File.read_content(os.temp_dir + "/pr_iot_app")?!;
+  string d = File.read_content(_scratch("app"))?!;
   assert(d == "first second", "append adds to existing content");
-  File.remove(os.temp_dir + "/pr_iot_app")?!;
+  File.remove(_scratch("app"))?!;
 }
 
 file_truncate_test() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_trunc", "long content here")?!;
-  File.write_content(os.temp_dir + "/pr_iot_trunc", "short")?!;
-  string d = File.read_content(os.temp_dir + "/pr_iot_trunc")?!;
+  File.write_content(_scratch("trunc"), "long content here")?!;
+  File.write_content(_scratch("trunc"), "short")?!;
+  string d = File.read_content(_scratch("trunc"))?!;
   assert(d == "short", "write_content truncates");
-  File.remove(os.temp_dir + "/pr_iot_trunc")?!;
+  File.remove(_scratch("trunc"))?!;
 }
 
 file_multi_write() `test(exclude: wasm) {
-  File f = File.create(os.temp_dir + "/pr_iot_multi")?!;
+  File f = File.create(_scratch("multi"))?!;
   f.write_string("aaa")?!;
   f.write_string("bbb")?!;
   f.write_string("ccc")?!;
   f.close()?!;
-  string d = File.read_content(os.temp_dir + "/pr_iot_multi")?!;
+  string d = File.read_content(_scratch("multi"))?!;
   assert(d == "aaabbbccc", "multiple writes concatenate");
-  File.remove(os.temp_dir + "/pr_iot_multi")?!;
+  File.remove(_scratch("multi"))?!;
 }
 
 file_empty_test() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_empty", "")?!;
-  string d = File.read_content(os.temp_dir + "/pr_iot_empty")?!;
+  File.write_content(_scratch("empty"), "")?!;
+  string d = File.read_content(_scratch("empty"))?!;
   assert(d == "", "empty file reads as empty string");
-  int sz = File.size(os.temp_dir + "/pr_iot_empty")?!;
+  int sz = File.size(_scratch("empty"))?!;
   assert(sz == 0, "empty file has size 0");
-  File.remove(os.temp_dir + "/pr_iot_empty")?!;
+  File.remove(_scratch("empty"))?!;
 }
 
 file_open_nonexistent() `test(exclude: wasm) {
   bool caught = false;
-  File.open(os.temp_dir + "/pr_iot_noexist_xyz")? e {
+  File.open(_scratch("noexist_xyz"))? e {
     caught = true;
   };
   assert(caught, "opening nonexistent file raises error");
@@ -138,7 +162,7 @@ file_open_nonexistent() `test(exclude: wasm) {
 
 file_read_content_nonexistent() `test(exclude: wasm) {
   bool caught = false;
-  File.read_content(os.temp_dir + "/pr_iot_noexist_abc")? e {
+  File.read_content(_scratch("noexist_abc"))? e {
     caught = true;
   };
   assert(caught, "read_content on nonexistent raises error");
@@ -146,85 +170,85 @@ file_read_content_nonexistent() `test(exclude: wasm) {
 
 file_remove_nonexistent() `test(exclude: wasm) {
   bool caught = false;
-  File.remove(os.temp_dir + "/pr_iot_rm_nofile")? e {
+  File.remove(_scratch("rm_nofile"))? e {
     caught = true;
   };
   assert(caught, "remove nonexistent raises error");
 }
 
 file_double_close() `test(exclude: wasm) {
-  File f = File.create(os.temp_dir + "/pr_iot_dblc")?!;
+  File f = File.create(_scratch("dblc"))?!;
   f.close()?!;
   bool caught = false;
   f.close()? e {
     caught = true;
   };
   assert(caught, "double close raises error");
-  File.remove(os.temp_dir + "/pr_iot_dblc")?!;
+  File.remove(_scratch("dblc"))?!;
 }
 
 dir_make_exists_remove() `test(exclude: wasm) {
-  if Dir.exists(os.temp_dir + "/pr_iot_dir") {
-    Dir.remove(os.temp_dir + "/pr_iot_dir")?!;
+  if Dir.exists(_scratch("dir")) {
+    Dir.remove(_scratch("dir"))?!;
   }
-  Dir.make(os.temp_dir + "/pr_iot_dir")?!;
-  assert(Dir.exists(os.temp_dir + "/pr_iot_dir"), "dir exists after make");
-  Dir.remove(os.temp_dir + "/pr_iot_dir")?!;
-  assert(!Dir.exists(os.temp_dir + "/pr_iot_dir"), "dir gone after remove");
+  Dir.make(_scratch("dir"))?!;
+  assert(Dir.exists(_scratch("dir")), "dir exists after make");
+  Dir.remove(_scratch("dir"))?!;
+  assert(!Dir.exists(_scratch("dir")), "dir gone after remove");
 }
 
 dir_exists_on_file() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_df", "x")?!;
-  assert(!Dir.exists(os.temp_dir + "/pr_iot_df"), "Dir.exists returns false for a file");
-  File.remove(os.temp_dir + "/pr_iot_df")?!;
+  File.write_content(_scratch("df"), "x")?!;
+  assert(!Dir.exists(_scratch("df")), "Dir.exists returns false for a file");
+  File.remove(_scratch("df"))?!;
 }
 
 dir_make_all_nested() `test(exclude: wasm) {
   // Clean up first
-  if Dir.exists(os.temp_dir + "/pr_iot_mkall/a/b") {
-    Dir.remove(os.temp_dir + "/pr_iot_mkall/a/b")?!;
+  if Dir.exists(_scratch("mkall/a/b")) {
+    Dir.remove(_scratch("mkall/a/b"))?!;
   }
-  if Dir.exists(os.temp_dir + "/pr_iot_mkall/a") {
-    Dir.remove(os.temp_dir + "/pr_iot_mkall/a")?!;
+  if Dir.exists(_scratch("mkall/a")) {
+    Dir.remove(_scratch("mkall/a"))?!;
   }
-  if Dir.exists(os.temp_dir + "/pr_iot_mkall") {
-    Dir.remove(os.temp_dir + "/pr_iot_mkall")?!;
+  if Dir.exists(_scratch("mkall")) {
+    Dir.remove(_scratch("mkall"))?!;
   }
 
-  Dir.make_all(os.temp_dir + "/pr_iot_mkall/a/b")?!;
-  assert(Dir.exists(os.temp_dir + "/pr_iot_mkall"), "top dir exists");
-  assert(Dir.exists(os.temp_dir + "/pr_iot_mkall/a"), "middle dir exists");
-  assert(Dir.exists(os.temp_dir + "/pr_iot_mkall/a/b"), "leaf dir exists");
+  Dir.make_all(_scratch("mkall/a/b"))?!;
+  assert(Dir.exists(_scratch("mkall")), "top dir exists");
+  assert(Dir.exists(_scratch("mkall/a")), "middle dir exists");
+  assert(Dir.exists(_scratch("mkall/a/b")), "leaf dir exists");
 
   // Clean up
-  Dir.remove(os.temp_dir + "/pr_iot_mkall/a/b")?!;
-  Dir.remove(os.temp_dir + "/pr_iot_mkall/a")?!;
-  Dir.remove(os.temp_dir + "/pr_iot_mkall")?!;
+  Dir.remove(_scratch("mkall/a/b"))?!;
+  Dir.remove(_scratch("mkall/a"))?!;
+  Dir.remove(_scratch("mkall"))?!;
 }
 
 dir_make_all_existing() `test(exclude: wasm) {
-  if !Dir.exists(os.temp_dir + "/pr_iot_mkall2") {
-    Dir.make(os.temp_dir + "/pr_iot_mkall2")?!;
+  if !Dir.exists(_scratch("mkall2")) {
+    Dir.make(_scratch("mkall2"))?!;
   }
   // Should not error on existing directory
-  Dir.make_all(os.temp_dir + "/pr_iot_mkall2")?!;
-  assert(Dir.exists(os.temp_dir + "/pr_iot_mkall2"), "still exists after make_all on existing");
-  Dir.remove(os.temp_dir + "/pr_iot_mkall2")?!;
+  Dir.make_all(_scratch("mkall2"))?!;
+  assert(Dir.exists(_scratch("mkall2")), "still exists after make_all on existing");
+  Dir.remove(_scratch("mkall2"))?!;
 }
 
 dir_list_basic() `test(exclude: wasm) {
   // Clean up any leftovers from a previous run.
-  if Dir.exists(os.temp_dir + "/pr_iot_list") {
-    File.remove(os.temp_dir + "/pr_iot_list/aaa.txt")? e {
+  if Dir.exists(_scratch("list")) {
+    File.remove(_scratch("list/aaa.txt"))? e {
     };
-    File.remove(os.temp_dir + "/pr_iot_list/bbb.txt")? e {
+    File.remove(_scratch("list/bbb.txt"))? e {
     };
-    Dir.remove(os.temp_dir + "/pr_iot_list")?!;
+    Dir.remove(_scratch("list"))?!;
   }
-  Dir.make(os.temp_dir + "/pr_iot_list")?!;
-  File.write_content(os.temp_dir + "/pr_iot_list/aaa.txt", "a")?!;
-  File.write_content(os.temp_dir + "/pr_iot_list/bbb.txt", "b")?!;
-  string[] entries = Dir.list(os.temp_dir + "/pr_iot_list")?!;
+  Dir.make(_scratch("list"))?!;
+  File.write_content(_scratch("list/aaa.txt"), "a")?!;
+  File.write_content(_scratch("list/bbb.txt"), "b")?!;
+  string[] entries = Dir.list(_scratch("list"))?!;
   assert(entries.len == 2, "exactly 2 entries");
   bool found_a = false;
   bool found_b = false;
@@ -246,33 +270,33 @@ dir_list_basic() `test(exclude: wasm) {
     assert(entries[i] != "..", "no dotdot entry");
     i += 1;
   }
-  File.remove(os.temp_dir + "/pr_iot_list/aaa.txt")?!;
-  File.remove(os.temp_dir + "/pr_iot_list/bbb.txt")?!;
-  Dir.remove(os.temp_dir + "/pr_iot_list")?!;
+  File.remove(_scratch("list/aaa.txt"))?!;
+  File.remove(_scratch("list/bbb.txt"))?!;
+  Dir.remove(_scratch("list"))?!;
 }
 
 dir_list_empty() `test(exclude: wasm) {
   // Clean up any leftovers from a previous run, then start fresh.
-  if Dir.exists(os.temp_dir + "/pr_iot_list_e") {
-    Dir.remove(os.temp_dir + "/pr_iot_list_e")?!;
+  if Dir.exists(_scratch("list_e")) {
+    Dir.remove(_scratch("list_e"))?!;
   }
-  Dir.make(os.temp_dir + "/pr_iot_list_e")?!;
-  string[] entries = Dir.list(os.temp_dir + "/pr_iot_list_e")?!;
+  Dir.make(_scratch("list_e"))?!;
+  string[] entries = Dir.list(_scratch("list_e"))?!;
   assert(entries.len == 0, "empty dir has no entries");
-  Dir.remove(os.temp_dir + "/pr_iot_list_e")?!;
+  Dir.remove(_scratch("list_e"))?!;
 }
 
 dir_list_nonexistent() `test(exclude: wasm) {
   bool caught = false;
-  Dir.list(os.temp_dir + "/pr_iot_list_noexist")? e {
+  Dir.list(_scratch("list_noexist"))? e {
     caught = true;
   };
   assert(caught, "listing nonexistent dir raises error");
 }
 
 read_line_from_file() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_readline", "line1\nline2\nline3")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_readline")?!;
+  File.write_content(_scratch("readline"), "line1\nline2\nline3")?!;
+  File f = File.open_read(_scratch("readline"))?!;
 
   string line1 = _io_file_read_line(f._fd);
   int rc1 = _io_errno();
@@ -295,12 +319,12 @@ read_line_from_file() `test(exclude: wasm) {
   assert(rc4 == _io_eof_sentinel(), "EOF sentinel after last line");
 
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_readline")?!;
+  File.remove(_scratch("readline"))?!;
 }
 
 read_line_crlf() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_rlcrlf", "hello\r\nworld\r\n")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_rlcrlf")?!;
+  File.write_content(_scratch("rlcrlf"), "hello\r\nworld\r\n")?!;
+  File f = File.open_read(_scratch("rlcrlf"))?!;
 
   string line1 = _io_file_read_line(f._fd);
   int rc1 = _io_errno();
@@ -313,12 +337,12 @@ read_line_crlf() `test(exclude: wasm) {
   assert(line2 == "world", "crlf line2 stripped");
 
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_rlcrlf")?!;
+  File.remove(_scratch("rlcrlf"))?!;
 }
 
 read_line_empty_lines() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_rlempty", "\n\nhello\n\n")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_rlempty")?!;
+  File.write_content(_scratch("rlempty"), "\n\nhello\n\n")?!;
+  File f = File.open_read(_scratch("rlempty"))?!;
 
   string l1 = _io_file_read_line(f._fd);
   assert(_io_errno() == 0, "e1");
@@ -340,16 +364,16 @@ read_line_empty_lines() `test(exclude: wasm) {
   assert(_io_errno() == _io_eof_sentinel(), "EOF after trailing newline");
 
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_rlempty")?!;
+  File.remove(_scratch("rlempty"))?!;
 }
 
 read_line_empty_file() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_rlef", "")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_rlef")?!;
+  File.write_content(_scratch("rlef"), "")?!;
+  File f = File.open_read(_scratch("rlef"))?!;
   string line = _io_file_read_line(f._fd);
   assert(_io_errno() == _io_eof_sentinel(), "EOF on empty file");
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_rlef")?!;
+  File.remove(_scratch("rlef"))?!;
 }
 
 read_line_long_line() `test(exclude: wasm) {
@@ -360,18 +384,18 @@ read_line_long_line() `test(exclude: wasm) {
     long = long + "x";
     i += 1;
   }
-  File.write_content(os.temp_dir + "/pr_iot_rllong", long + "\n")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_rllong")?!;
+  File.write_content(_scratch("rllong"), long + "\n")?!;
+  File f = File.open_read(_scratch("rllong"))?!;
   string line = _io_file_read_line(f._fd);
   assert(_io_errno() == 0, "no error on long line");
   assert(line.len == 400, "long line length preserved");
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_rllong")?!;
+  File.remove(_scratch("rllong"))?!;
 }
 
 read_line_single_no_newline() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_rlsingle", "onlythis")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_rlsingle")?!;
+  File.write_content(_scratch("rlsingle"), "onlythis")?!;
+  File f = File.open_read(_scratch("rlsingle"))?!;
   string line = _io_file_read_line(f._fd);
   assert(_io_errno() == 0, "no error");
   assert(line == "onlythis", "single line no trailing newline");
@@ -379,7 +403,7 @@ read_line_single_no_newline() `test(exclude: wasm) {
   _io_file_read_line(f._fd);
   assert(_io_errno() == _io_eof_sentinel(), "EOF after single line");
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_rlsingle")?!;
+  File.remove(_scratch("rlsingle"))?!;
 }
 
 file_open_directory() `test(exclude: wasm) {
@@ -393,23 +417,24 @@ file_open_directory() `test(exclude: wasm) {
 
 file_create_on_directory_path() `test(exclude: wasm) {
   // File.create on an existing directory path should fail
-  if !Dir.exists(os.temp_dir + "/pr_iot_cdir") {
-    Dir.make(os.temp_dir + "/pr_iot_cdir")?!;
+  if !Dir.exists(_scratch("cdir")) {
+    Dir.make(_scratch("cdir"))?!;
   }
   bool caught = false;
-  File.create(os.temp_dir + "/pr_iot_cdir")? e {
+  File.create(_scratch("cdir"))? e {
     caught = true;
   };
   assert(caught, "create on existing directory raises error");
-  Dir.remove(os.temp_dir + "/pr_iot_cdir")?!;
+  Dir.remove(_scratch("cdir"))?!;
 }
 
 file_exists_on_directory() `test(exclude: wasm) {
   // File.exists uses access(F_OK) — returns true for any path that exists,
-  // including directories. Use os.temp_dir so the test is portable: a literal
-  // "/tmp" resolves to the current drive's \tmp on Windows, which need not exist.
-  assert(File.exists(os.temp_dir), "temp dir exists via File.exists");
-  assert(Dir.exists(os.temp_dir), "temp dir exists via Dir.exists");
+  // including directories. Use this run's scratch directory so the test is
+  // portable: a literal "/tmp" resolves to the current drive's \tmp on Windows,
+  // which need not exist.
+  assert(File.exists(_scratch_dir()), "scratch dir exists via File.exists");
+  assert(Dir.exists(_scratch_dir()), "scratch dir exists via Dir.exists");
 }
 
 dir_exists_root() `test(exclude: wasm) {
@@ -417,41 +442,41 @@ dir_exists_root() `test(exclude: wasm) {
 }
 
 file_exists_nonexistent() `test(exclude: wasm) {
-  assert(!File.exists(os.temp_dir + "/pr_iot_never_exists_xyz"), "nonexistent path");
+  assert(!File.exists(_scratch("never_exists_xyz")), "nonexistent path");
 }
 
 dir_exists_nonexistent() `test(exclude: wasm) {
-  assert(!Dir.exists(os.temp_dir + "/pr_iot_never_exists_xyz"), "nonexistent dir");
+  assert(!Dir.exists(_scratch("never_exists_xyz")), "nonexistent dir");
 }
 
 file_write_readonly() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_wro", "data")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_wro")?!;
+  File.write_content(_scratch("wro"), "data")?!;
+  File f = File.open_read(_scratch("wro"))?!;
   bool caught = false;
   f.write_string("fail")? e {
     caught = true;
   };
   assert(caught, "writing to readonly file raises error");
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_wro")?!;
+  File.remove(_scratch("wro"))?!;
 }
 
 file_open_write_overwrites_in_place() `test(exclude: wasm) {
   // open_write (O_WRONLY) overwrites from the start without truncating: the
   // trailing bytes beyond what we write must survive (unlike create).
-  File.write_content(os.temp_dir + "/pr_iot_ow", "ABCDEFGH")?!;
-  File f = File.open_write(os.temp_dir + "/pr_iot_ow")?!;
+  File.write_content(_scratch("ow"), "ABCDEFGH")?!;
+  File f = File.open_write(_scratch("ow"))?!;
   f.write_string("xyz")?!;
   f.close()?!;
-  string data = File.read_content(os.temp_dir + "/pr_iot_ow")?!;
+  string data = File.read_content(_scratch("ow"))?!;
   assert(data == "xyzDEFGH", "open_write overwrites in place, does not truncate");
-  File.remove(os.temp_dir + "/pr_iot_ow")?!;
+  File.remove(_scratch("ow"))?!;
 }
 
 file_open_write_missing_raises() `test(exclude: wasm) {
   // O_WRONLY without O_CREAT: opening a nonexistent path must fail (ENOENT).
   bool caught = false;
-  File.open_write(os.temp_dir + "/pr_iot_ow_missing_xyz")? e {
+  File.open_write(_scratch("ow_missing_xyz"))? e {
     caught = true;
   };
   assert(caught, "open_write on missing file raises error");
@@ -459,22 +484,22 @@ file_open_write_missing_raises() `test(exclude: wasm) {
 
 file_open_write_read_raises() `test(exclude: wasm) {
   // A write-only handle cannot be read from; the read raises (EBADF).
-  File.write_content(os.temp_dir + "/pr_iot_owr", "data")?!;
-  File f = File.open_write(os.temp_dir + "/pr_iot_owr")?!;
+  File.write_content(_scratch("owr"), "data")?!;
+  File f = File.open_write(_scratch("owr"))?!;
   bool caught = false;
   f.read_all()? e {
     caught = true;
   };
   assert(caught, "reading from write-only handle raises error");
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_owr")?!;
+  File.remove(_scratch("owr"))?!;
 }
 
 file_create_handle_read_raises() `test(exclude: wasm) {
   // T1275 narrowed create to O_WRONLY|O_CREAT|O_TRUNC: the returned handle is
   // write-only, so reading from it must raise (EBADF). Guards the mode-5
   // narrowing — if create ever regressed to O_RDWR this read would succeed.
-  File f = File.create(os.temp_dir + "/pr_iot_crd")?!;
+  File f = File.create(_scratch("crd"))?!;
   f.write_string("payload")?!;
   f.seek(0)?!;
   bool caught = false;
@@ -483,15 +508,15 @@ file_create_handle_read_raises() `test(exclude: wasm) {
   };
   assert(caught, "reading from create handle raises error");
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_crd")?!;
+  File.remove(_scratch("crd"))?!;
 }
 
 file_append_handle_read_raises() `test(exclude: wasm) {
   // T1275 narrowed append to O_WRONLY|O_CREAT|O_APPEND: the returned handle is
   // write-only, so reading from it must raise (EBADF). Guards the mode-6
   // narrowing — if append ever regressed to O_RDWR this read would succeed.
-  File.write_content(os.temp_dir + "/pr_iot_ard", "existing")?!;
-  File f = File.append(os.temp_dir + "/pr_iot_ard")?!;
+  File.write_content(_scratch("ard"), "existing")?!;
+  File f = File.append(_scratch("ard"))?!;
   f.seek(0)?!;
   bool caught = false;
   f.read_all()? e {
@@ -499,20 +524,20 @@ file_append_handle_read_raises() `test(exclude: wasm) {
   };
   assert(caught, "reading from append handle raises error");
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_ard")?!;
+  File.remove(_scratch("ard"))?!;
 }
 
 file_append_creates_missing() `test(exclude: wasm) {
   // append carries O_CREAT (mode 6): opening a nonexistent path creates it
   // rather than raising, then writes land at the end.
-  File.remove(os.temp_dir + "/pr_iot_acm")? _ {
+  File.remove(_scratch("acm"))? _ {
   };
-  File f = File.append(os.temp_dir + "/pr_iot_acm")?!;
+  File f = File.append(_scratch("acm"))?!;
   f.write_string("fresh")?!;
   f.close()?!;
-  string d = File.read_content(os.temp_dir + "/pr_iot_acm")?!;
+  string d = File.read_content(_scratch("acm"))?!;
   assert(d == "fresh", "append creates a missing file");
-  File.remove(os.temp_dir + "/pr_iot_acm")?!;
+  File.remove(_scratch("acm"))?!;
 }
 
 // T1742: an append handle must write at the end regardless of the file position.
@@ -523,7 +548,7 @@ file_append_creates_missing() `test(exclude: wasm) {
 // append handle stays legal, and the seek must simply not affect where the bytes
 // land. Without FAPPEND the write below would overwrite from offset 0.
 file_append_ignores_seek() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_apsk";
+  string p = _scratch("apsk");
   File.write_content(p, "AAAA")?!;
   File f = File.append(p)?!;
   f.seek(0)?!; // legal on an append handle, and deliberately ignored by the write
@@ -536,7 +561,7 @@ file_append_ignores_seek() `test(exclude: wasm) {
 // T1742: repeated writes through one append handle each land at the end — the
 // FAPPEND seek happens per write, not once at open.
 file_append_repeated_writes() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_aprw";
+  string p = _scratch("aprw");
   File.write_content(p, "0")?!;
   File f = File.append(p)?!;
   f.write_string("1")?!;
@@ -551,7 +576,7 @@ file_append_repeated_writes() `test(exclude: wasm) {
 // start at the end. Two write handles on one path is only possible at all
 // because the share mode allows it.
 file_append_two_handles() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_apth";
+  string p = _scratch("apth");
   File.write_content(p, "x")?!;
   File a = File.append(p)?!;
   a.write_string("y")?!;
@@ -567,7 +592,7 @@ file_append_two_handles() `test(exclude: wasm) {
 // CRT open, so it must still work while another handle holds the file. A
 // deny-delete/deny-share open here would fail with a sharing violation.
 file_size_while_open() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_szwo";
+  string p = _scratch("szwo");
   File w = File.create(p)?!;
   w.write_string("12345")?!;
   assert(File.size(p)?! == 5, "size readable while a write handle is open");
@@ -584,7 +609,7 @@ file_size_while_open() `test(exclude: wasm) {
 // 4294967294, which surfaces as a nonsense IoError code instead of ENOENT.
 file_size_nonexistent_code() `test(exclude: wasm) {
   bool caught = false;
-  File.size(os.temp_dir + "/pr_iot_szne_code")? e is IoError {
+  File.size(_scratch("szne_code"))? e is IoError {
     caught = true;
     assert(e.code == 2, "File.size on a missing path reports ENOENT(2)");
     assert(e.message == "no such file or directory", "ENOENT message");
@@ -597,7 +622,7 @@ file_size_nonexistent_code() `test(exclude: wasm) {
 // distinct arm of the Win32 → errno table; POSIX reports ENOENT directly. Both
 // must reach Promise as the same code.
 file_open_missing_parent_directory() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_no_such_dir_xyz/inner.txt";
+  string p = _scratch("no_such_dir_xyz/inner.txt");
   bool caught = false;
   File.open_read(p)? e is IoError {
     caught = true;
@@ -619,7 +644,7 @@ file_open_missing_parent_directory() `test(exclude: wasm) {
 // through the first are visible to the second. FILE_SHARE_READ|WRITE is what
 // makes the second open legal at all; the PAL passes it on every mode.
 file_two_handles_share_reads_and_writes() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_shrw";
+  string p = _scratch("shrw");
   File.write_content(p, "")?!;
   File w = File.open_write(p)?!;
   w.write_string("shared")?!;
@@ -643,7 +668,7 @@ file_two_handles_share_reads_and_writes() `test(exclude: wasm) {
 // file_open_directory and file_create_on_directory_path cover the
 // cross-platform "it raises at all" half.
 file_open_directory_errno_windows() `test(exclude: wasm) `target(windows) {
-  string d = os.temp_dir;
+  string d = _scratch_dir();
 
   bool caught_read = false;
   File.open_read(d)? e is IoError {
@@ -678,43 +703,43 @@ file_open_directory_errno_windows() `test(exclude: wasm) `target(windows) {
 }
 
 file_read_after_close() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_rac", "data")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_rac")?!;
+  File.write_content(_scratch("rac"), "data")?!;
+  File f = File.open(_scratch("rac"))?!;
   f.close()?!;
   bool caught = false;
   f.read_all()? e {
     caught = true;
   };
   assert(caught, "reading after close raises error");
-  File.remove(os.temp_dir + "/pr_iot_rac")?!;
+  File.remove(_scratch("rac"))?!;
 }
 
 file_write_after_close() `test(exclude: wasm) {
-  File f = File.create(os.temp_dir + "/pr_iot_wac")?!;
+  File f = File.create(_scratch("wac"))?!;
   f.close()?!;
   bool caught = false;
   f.write_string("fail")? e {
     caught = true;
   };
   assert(caught, "writing after close raises error");
-  File.remove(os.temp_dir + "/pr_iot_wac")?!;
+  File.remove(_scratch("wac"))?!;
 }
 
 file_seek_after_close() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_sac", "data")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_sac")?!;
+  File.write_content(_scratch("sac"), "data")?!;
+  File f = File.open(_scratch("sac"))?!;
   f.close()?!;
   bool caught = false;
   f.seek(0)? e {
     caught = true;
   };
   assert(caught, "seeking after close raises error");
-  File.remove(os.temp_dir + "/pr_iot_sac")?!;
+  File.remove(_scratch("sac"))?!;
 }
 
 file_position_after_close() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_pac", "data")?!;
-  File f = File.open(os.temp_dir + "/pr_iot_pac")?!;
+  File.write_content(_scratch("pac"), "data")?!;
+  File f = File.open(_scratch("pac"))?!;
   f.close()?!;
   bool caught = false;
   int p = f.position? e {
@@ -722,78 +747,78 @@ file_position_after_close() `test(exclude: wasm) {
     0;
   };
   assert(caught, "position after close raises error");
-  File.remove(os.temp_dir + "/pr_iot_pac")?!;
+  File.remove(_scratch("pac"))?!;
 }
 
 file_remove_directory() `test(exclude: wasm) {
   // File.remove on a directory should fail (use Dir.remove for directories)
-  if !Dir.exists(os.temp_dir + "/pr_iot_frd") {
-    Dir.make(os.temp_dir + "/pr_iot_frd")?!;
+  if !Dir.exists(_scratch("frd")) {
+    Dir.make(_scratch("frd"))?!;
   }
   bool caught = false;
-  File.remove(os.temp_dir + "/pr_iot_frd")? e {
+  File.remove(_scratch("frd"))? e {
     caught = true;
   };
   assert(caught, "File.remove on directory raises error");
-  Dir.remove(os.temp_dir + "/pr_iot_frd")?!;
+  Dir.remove(_scratch("frd"))?!;
 }
 
 dir_remove_file() `test(exclude: wasm) {
   // Dir.remove on a file should fail
-  File.write_content(os.temp_dir + "/pr_iot_drf", "x")?!;
+  File.write_content(_scratch("drf"), "x")?!;
   bool caught = false;
-  Dir.remove(os.temp_dir + "/pr_iot_drf")? e {
+  Dir.remove(_scratch("drf"))? e {
     caught = true;
   };
   assert(caught, "Dir.remove on file raises error");
-  File.remove(os.temp_dir + "/pr_iot_drf")?!;
+  File.remove(_scratch("drf"))?!;
 }
 
 dir_remove_nonempty() `test(exclude: wasm) {
   // Dir.remove on a non-empty directory should fail
-  Dir.make_all(os.temp_dir + "/pr_iot_drne/sub")?!;
+  Dir.make_all(_scratch("drne/sub"))?!;
   bool caught = false;
-  Dir.remove(os.temp_dir + "/pr_iot_drne")? e {
+  Dir.remove(_scratch("drne"))? e {
     caught = true;
   };
   assert(caught, "removing non-empty dir raises error");
-  Dir.remove(os.temp_dir + "/pr_iot_drne/sub")?!;
-  Dir.remove(os.temp_dir + "/pr_iot_drne")?!;
+  Dir.remove(_scratch("drne/sub"))?!;
+  Dir.remove(_scratch("drne"))?!;
 }
 
 dir_make_duplicate() `test(exclude: wasm) {
-  if !Dir.exists(os.temp_dir + "/pr_iot_ddup") {
-    Dir.make(os.temp_dir + "/pr_iot_ddup")?!;
+  if !Dir.exists(_scratch("ddup")) {
+    Dir.make(_scratch("ddup"))?!;
   }
   // Dir.make (not make_all) on existing directory should fail with EEXIST
   bool caught = false;
-  Dir.make(os.temp_dir + "/pr_iot_ddup")? e {
+  Dir.make(_scratch("ddup"))? e {
     caught = true;
   };
   assert(caught, "Dir.make on existing dir raises error");
-  Dir.remove(os.temp_dir + "/pr_iot_ddup")?!;
+  Dir.remove(_scratch("ddup"))?!;
 }
 
 dir_make_all_single_component() `test(exclude: wasm) {
-  if Dir.exists(os.temp_dir + "/pr_iot_mksc") {
-    Dir.remove(os.temp_dir + "/pr_iot_mksc")?!;
+  if Dir.exists(_scratch("mksc")) {
+    Dir.remove(_scratch("mksc"))?!;
   }
-  Dir.make_all(os.temp_dir + "/pr_iot_mksc")?!;
-  assert(Dir.exists(os.temp_dir + "/pr_iot_mksc"), "single component created");
-  Dir.remove(os.temp_dir + "/pr_iot_mksc")?!;
+  Dir.make_all(_scratch("mksc"))?!;
+  assert(Dir.exists(_scratch("mksc")), "single component created");
+  Dir.remove(_scratch("mksc"))?!;
 }
 
 dir_make_all_trailing_slash() `test(exclude: wasm) {
-  if Dir.exists(os.temp_dir + "/pr_iot_mkts/sub") {
-    Dir.remove(os.temp_dir + "/pr_iot_mkts/sub")?!;
+  if Dir.exists(_scratch("mkts/sub")) {
+    Dir.remove(_scratch("mkts/sub"))?!;
   }
-  if Dir.exists(os.temp_dir + "/pr_iot_mkts") {
-    Dir.remove(os.temp_dir + "/pr_iot_mkts")?!;
+  if Dir.exists(_scratch("mkts")) {
+    Dir.remove(_scratch("mkts"))?!;
   }
-  Dir.make_all(os.temp_dir + "/pr_iot_mkts/sub/")?!;
-  assert(Dir.exists(os.temp_dir + "/pr_iot_mkts/sub"), "dir with trailing slash created");
-  Dir.remove(os.temp_dir + "/pr_iot_mkts/sub")?!;
-  Dir.remove(os.temp_dir + "/pr_iot_mkts")?!;
+  Dir.make_all(_scratch("mkts/sub/"))?!;
+  assert(Dir.exists(_scratch("mkts/sub")), "dir with trailing slash created");
+  Dir.remove(_scratch("mkts/sub"))?!;
+  Dir.remove(_scratch("mkts"))?!;
 }
 
 dir_make_all_empty_string() `test(exclude: wasm) {
@@ -803,28 +828,28 @@ dir_make_all_empty_string() `test(exclude: wasm) {
 
 dir_list_on_file() `test(exclude: wasm) {
   // Dir.list on a regular file should raise an error (ENOTDIR).
-  File.write_content(os.temp_dir + "/pr_iot_dlof", "x")?!;
+  File.write_content(_scratch("dlof"), "x")?!;
   bool caught = false;
-  Dir.list(os.temp_dir + "/pr_iot_dlof")? e {
+  Dir.list(_scratch("dlof"))? e {
     caught = true;
   };
   assert(caught, "Dir.list on a file raises error");
-  File.remove(os.temp_dir + "/pr_iot_dlof")?!;
+  File.remove(_scratch("dlof"))?!;
 }
 
 dir_list_mixed() `test(exclude: wasm) {
   // List a directory containing one file and one subdirectory.
-  if Dir.exists(os.temp_dir + "/pr_iot_dlmix") {
-    File.remove(os.temp_dir + "/pr_iot_dlmix/file.txt")? e {
+  if Dir.exists(_scratch("dlmix")) {
+    File.remove(_scratch("dlmix/file.txt"))? e {
     };
-    Dir.remove(os.temp_dir + "/pr_iot_dlmix/sub")? e {
+    Dir.remove(_scratch("dlmix/sub"))? e {
     };
-    Dir.remove(os.temp_dir + "/pr_iot_dlmix")?!;
+    Dir.remove(_scratch("dlmix"))?!;
   }
-  Dir.make(os.temp_dir + "/pr_iot_dlmix")?!;
-  File.write_content(os.temp_dir + "/pr_iot_dlmix/file.txt", "x")?!;
-  Dir.make(os.temp_dir + "/pr_iot_dlmix/sub")?!;
-  string[] entries = Dir.list(os.temp_dir + "/pr_iot_dlmix")?!;
+  Dir.make(_scratch("dlmix"))?!;
+  File.write_content(_scratch("dlmix/file.txt"), "x")?!;
+  Dir.make(_scratch("dlmix/sub"))?!;
+  string[] entries = Dir.list(_scratch("dlmix"))?!;
   assert(entries.len == 2, "two entries (file + subdir)");
   bool found_file = false;
   bool found_sub = false;
@@ -842,14 +867,14 @@ dir_list_mixed() `test(exclude: wasm) {
   }
   assert(found_file, "file.txt in listing");
   assert(found_sub, "sub in listing");
-  File.remove(os.temp_dir + "/pr_iot_dlmix/file.txt")?!;
-  Dir.remove(os.temp_dir + "/pr_iot_dlmix/sub")?!;
-  Dir.remove(os.temp_dir + "/pr_iot_dlmix")?!;
+  File.remove(_scratch("dlmix/file.txt"))?!;
+  Dir.remove(_scratch("dlmix/sub"))?!;
+  Dir.remove(_scratch("dlmix"))?!;
 }
 
 file_size_nonexistent() `test(exclude: wasm) {
   bool caught = false;
-  File.size(os.temp_dir + "/pr_iot_szne")? e {
+  File.size(_scratch("szne"))? e {
     caught = true;
   };
   assert(caught, "size of nonexistent raises error");
@@ -861,20 +886,20 @@ file_binary_content() `test(exclude: wasm) {
   // because write uses the Promise string length, not strlen.
   string data = "abc\0def";
   assert(data.len == 7, "string with null byte has correct len");
-  File.write_content(os.temp_dir + "/pr_iot_bin", data[0:data.len])?!;
-  int sz = File.size(os.temp_dir + "/pr_iot_bin")?!;
+  File.write_content(_scratch("bin"), data[0:data.len])?!;
+  int sz = File.size(_scratch("bin"))?!;
   // write_string uses the Promise string length internally, so it writes
   // all 7 bytes including the embedded \0.
   assert(sz == 7, "file size includes null byte");
-  string back = File.read_content(os.temp_dir + "/pr_iot_bin")?!;
+  string back = File.read_content(_scratch("bin"))?!;
   assert(back.len == 7, "read back preserves null byte");
   assert(back == data, "binary round-trip");
-  File.remove(os.temp_dir + "/pr_iot_bin")?!;
+  File.remove(_scratch("bin"))?!;
 }
 
 io_error_has_code() `test(exclude: wasm) {
   // Verify IoError message for ENOENT
-  File.open(os.temp_dir + "/pr_iot_never_exists_xyz")? e {
+  File.open(_scratch("never_exists_xyz"))? e {
     assert(e.message == "no such file or directory", "IoError message for nonexistent file");
   };
 }
@@ -891,18 +916,18 @@ io_error_open_root() `test(exclude: wasm) {
 }
 
 file_write_empty_string() `test(exclude: wasm) {
-  File f = File.create(os.temp_dir + "/pr_iot_wes")?!;
+  File f = File.create(_scratch("wes"))?!;
   f.write_string("")?!;
   f.write_string("hello")?!;
   f.write_string("")?!;
   f.close()?!;
-  string d = File.read_content(os.temp_dir + "/pr_iot_wes")?!;
+  string d = File.read_content(_scratch("wes"))?!;
   assert(d == "hello", "empty writes are no-ops");
-  File.remove(os.temp_dir + "/pr_iot_wes")?!;
+  File.remove(_scratch("wes"))?!;
 }
 
 file_write_read_bytes() `test(exclude: wasm) {
-  File fw = File.create(os.temp_dir + "/pr_iot_wrb")?!;
+  File fw = File.create(_scratch("wrb"))?!;
   u8[] data = u8[]();
   data.push(72u8); // H
   data.push(105u8); // i
@@ -910,19 +935,19 @@ file_write_read_bytes() `test(exclude: wasm) {
   assert(written == 2, "wrote 2 bytes");
   fw.close()?!;
 
-  File fr = File.open_read(os.temp_dir + "/pr_iot_wrb")?!;
+  File fr = File.open_read(_scratch("wrb"))?!;
   u8[] buf = Vector[u8].filled(0u8, 10);
   int n = fr.read(buf)?!;
   assert(n == 2, "read 2 bytes");
   assert(buf[0] as! int == 72, "first byte is H");
   assert(buf[1] as! int == 105, "second byte is i");
   fr.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_wrb")?!;
+  File.remove(_scratch("wrb"))?!;
 }
 
 file_read_method() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_rby", "abc")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_rby")?!;
+  File.write_content(_scratch("rby"), "abc")?!;
+  File f = File.open_read(_scratch("rby"))?!;
   u8[] buf = Vector[u8].filled(0u8, 10);
   int n = f.read(buf)?!;
   assert(n == 3, "read returns 3 bytes");
@@ -930,23 +955,23 @@ file_read_method() `test(exclude: wasm) {
   assert(buf[1] as! int == 98, "b");
   assert(buf[2] as! int == 99, "c");
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_rby")?!;
+  File.remove(_scratch("rby"))?!;
 }
 
 file_read_eof() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_reof", "x")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_reof")?!;
+  File.write_content(_scratch("reof"), "x")?!;
+  File f = File.open_read(_scratch("reof"))?!;
   u8[] buf = Vector[u8].filled(0u8, 10);
   int n1 = f.read(buf)?!;
   assert(n1 == 1, "first read got 1 byte");
   int n2 = f.read(buf)?!;
   assert(n2 == 0, "second read returns 0 (EOF)");
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_reof")?!;
+  File.remove(_scratch("reof"))?!;
 }
 
 file_read_after_close_bytes() `test(exclude: wasm) {
-  File f = File.create(os.temp_dir + "/pr_iot_racb")?!;
+  File f = File.create(_scratch("racb"))?!;
   f.close()?!;
   bool caught = false;
   u8[] buf = Vector[u8].filled(0u8, 4);
@@ -954,11 +979,11 @@ file_read_after_close_bytes() `test(exclude: wasm) {
     caught = true;
   };
   assert(caught, "byte read after close raises error");
-  File.remove(os.temp_dir + "/pr_iot_racb")?!;
+  File.remove(_scratch("racb"))?!;
 }
 
 file_write_after_close_bytes() `test(exclude: wasm) {
-  File f = File.create(os.temp_dir + "/pr_iot_wacb")?!;
+  File f = File.create(_scratch("wacb"))?!;
   f.close()?!;
   bool caught = false;
   u8[] buf = u8[]();
@@ -967,12 +992,12 @@ file_write_after_close_bytes() `test(exclude: wasm) {
     caught = true;
   };
   assert(caught, "byte write after close raises error");
-  File.remove(os.temp_dir + "/pr_iot_wacb")?!;
+  File.remove(_scratch("wacb"))?!;
 }
 
 file_read_line_method() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_frl", "alpha\nbeta\ngamma")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_frl")?!;
+  File.write_content(_scratch("frl"), "alpha\nbeta\ngamma")?!;
+  File f = File.open_read(_scratch("frl"))?!;
   if v := f.read_line()?! {
     assert(v == "alpha", "line1");
   } else {
@@ -992,12 +1017,12 @@ file_read_line_method() `test(exclude: wasm) {
     assert(false, "should be EOF");
   }
   f.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_frl")?!;
+  File.remove(_scratch("frl"))?!;
 }
 
 buffered_reader_basic() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_br", "hello world")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_br")?!;
+  File.write_content(_scratch("br"), "hello world")?!;
+  File f = File.open_read(_scratch("br"))?!;
   BufferedReader r = BufferedReader(move f, buf_size: 4);
   u8[] buf = Vector[u8].filled(0u8, 5);
   int n1 = r.read(buf)?!;
@@ -1008,12 +1033,12 @@ buffered_reader_basic() `test(exclude: wasm) {
   int n2 = r.read(buf)?!;
   assert(n2 > 0, "second read returns data");
   r.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_br")?!;
+  File.remove(_scratch("br"))?!;
 }
 
 buffered_reader_read_line() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_brl", "one\ntwo\nthree")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_brl")?!;
+  File.write_content(_scratch("brl"), "one\ntwo\nthree")?!;
+  File f = File.open_read(_scratch("brl"))?!;
   BufferedReader r = BufferedReader(move f, buf_size: 8);
   if v := r.read_line()?! {
     assert(v == "one", "line1");
@@ -1034,12 +1059,12 @@ buffered_reader_read_line() `test(exclude: wasm) {
     assert(false, "should be EOF");
   }
   r.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_brl")?!;
+  File.remove(_scratch("brl"))?!;
 }
 
 buffered_reader_read_line_crlf() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_brlc", "aa\r\nbb\r\n")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_brlc")?!;
+  File.write_content(_scratch("brlc"), "aa\r\nbb\r\n")?!;
+  File f = File.open_read(_scratch("brlc"))?!;
   BufferedReader r = BufferedReader(move f, buf_size: 4);
   if v := r.read_line()?! {
     assert(v == "aa", "crlf line1");
@@ -1055,12 +1080,12 @@ buffered_reader_read_line_crlf() `test(exclude: wasm) {
     assert(false, "should be EOF after crlf");
   }
   r.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_brlc")?!;
+  File.remove(_scratch("brlc"))?!;
 }
 
 buffered_reader_read_byte() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_brb", "AB")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_brb")?!;
+  File.write_content(_scratch("brb"), "AB")?!;
+  File f = File.open_read(_scratch("brb"))?!;
   BufferedReader r = BufferedReader(move f);
   if b := r.read_byte()?! {
     assert(b as! int == 65, "A");
@@ -1076,24 +1101,24 @@ buffered_reader_read_byte() `test(exclude: wasm) {
     assert(false, "should be EOF");
   }
   r.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_brb")?!;
+  File.remove(_scratch("brb"))?!;
 }
 
 buffered_writer_basic() `test(exclude: wasm) {
-  File f = File.create(os.temp_dir + "/pr_iot_bw")?!;
+  File f = File.create(_scratch("bw"))?!;
   BufferedWriter w = BufferedWriter(move f, buf_size: 8);
   u8[] data = u8[]();
   data.push(72u8); // H
   data.push(105u8); // i
   w.write(data)?!;
   w.close()?!;
-  string content = File.read_content(os.temp_dir + "/pr_iot_bw")?!;
+  string content = File.read_content(_scratch("bw"))?!;
   assert(content == "Hi", "buffered write round-trip");
-  File.remove(os.temp_dir + "/pr_iot_bw")?!;
+  File.remove(_scratch("bw"))?!;
 }
 
 buffered_writer_flush() `test(exclude: wasm) {
-  File f = File.create(os.temp_dir + "/pr_iot_bwf")?!;
+  File f = File.create(_scratch("bwf"))?!;
   BufferedWriter w = BufferedWriter(move f, buf_size: 4);
   // Write more than buffer size to trigger auto-flush
   u8[] data = u8[]();
@@ -1104,63 +1129,63 @@ buffered_writer_flush() `test(exclude: wasm) {
   }
   w.write(data)?!;
   w.close()?!;
-  string content = File.read_content(os.temp_dir + "/pr_iot_bwf")?!;
+  string content = File.read_content(_scratch("bwf"))?!;
   assert(content.len == 10, "all bytes flushed");
-  File.remove(os.temp_dir + "/pr_iot_bwf")?!;
+  File.remove(_scratch("bwf"))?!;
 }
 
 buffered_writer_write_string() `test(exclude: wasm) {
-  File f = File.create(os.temp_dir + "/pr_iot_bws")?!;
+  File f = File.create(_scratch("bws"))?!;
   BufferedWriter w = BufferedWriter(move f, buf_size: 16);
   w.write_string("hello ")?!;
   w.write_string("world")?!;
   w.close()?!;
-  string content = File.read_content(os.temp_dir + "/pr_iot_bws")?!;
+  string content = File.read_content(_scratch("bws"))?!;
   assert(content == "hello world", "write_string through buffer");
-  File.remove(os.temp_dir + "/pr_iot_bws")?!;
+  File.remove(_scratch("bws"))?!;
 }
 
 file_write_line() `test(exclude: wasm) {
-  File f = File.create(os.temp_dir + "/pr_iot_fwl")?!;
+  File f = File.create(_scratch("fwl"))?!;
   f.write_line("hello")?!;
   f.write_line("world")?!;
   f.close()?!;
-  string content = File.read_content(os.temp_dir + "/pr_iot_fwl")?!;
+  string content = File.read_content(_scratch("fwl"))?!;
   string sep = Platform.line_separator;
   assert(content == "hello" + sep + "world" + sep, "file write_line");
-  File.remove(os.temp_dir + "/pr_iot_fwl")?!;
+  File.remove(_scratch("fwl"))?!;
 }
 
 buffered_writer_write_line() `test(exclude: wasm) {
-  File f = File.create(os.temp_dir + "/pr_iot_bwl")?!;
+  File f = File.create(_scratch("bwl"))?!;
   BufferedWriter w = BufferedWriter(move f, buf_size: 16);
   w.write_line("alpha")?!;
   w.write_line("beta")?!;
   w.close()?!;
-  string content = File.read_content(os.temp_dir + "/pr_iot_bwl")?!;
+  string content = File.read_content(_scratch("bwl"))?!;
   string sep = Platform.line_separator;
   assert(content == "alpha" + sep + "beta" + sep, "buffered write_line");
-  File.remove(os.temp_dir + "/pr_iot_bwl")?!;
+  File.remove(_scratch("bwl"))?!;
 }
 
 metadata_file() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_mdf", "hello")?!;
-  Metadata m = File.metadata(os.temp_dir + "/pr_iot_mdf")?!;
+  File.write_content(_scratch("mdf"), "hello")?!;
+  Metadata m = File.metadata(_scratch("mdf"))?!;
   assert(m.size == 5, "metadata size");
   assert(m.is_file, "metadata is_file");
   assert(!m.is_directory, "metadata not directory");
   assert(!m.is_symlink, "metadata not symlink");
-  File.remove(os.temp_dir + "/pr_iot_mdf")?!;
+  File.remove(_scratch("mdf"))?!;
 }
 
 metadata_directory() `test(exclude: wasm) {
-  if !Dir.exists(os.temp_dir + "/pr_iot_mdd") {
-    Dir.make(os.temp_dir + "/pr_iot_mdd")?!;
+  if !Dir.exists(_scratch("mdd")) {
+    Dir.make(_scratch("mdd"))?!;
   }
-  Metadata m = File.metadata(os.temp_dir + "/pr_iot_mdd")?!;
+  Metadata m = File.metadata(_scratch("mdd"))?!;
   assert(m.is_directory, "metadata is_directory");
   assert(!m.is_file, "metadata not file");
-  Dir.remove(os.temp_dir + "/pr_iot_mdd")?!;
+  Dir.remove(_scratch("mdd"))?!;
 }
 
 _metadata_raises(string path) bool {
@@ -1171,55 +1196,55 @@ _metadata_raises(string path) bool {
 }
 
 metadata_not_found() `test(exclude: wasm) {
-  assert(_metadata_raises(os.temp_dir + "/pr_iot_nonexistent_xyz_999"), "metadata raises on missing path");
+  assert(_metadata_raises(_scratch("nonexistent_xyz_999")), "metadata raises on missing path");
 }
 
 metadata_size() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_mds", "0123456789")?!;
-  Metadata m = File.metadata(os.temp_dir + "/pr_iot_mds")?!;
+  File.write_content(_scratch("mds"), "0123456789")?!;
+  Metadata m = File.metadata(_scratch("mds"))?!;
   assert(m.size == 10, "metadata size exact");
-  File.remove(os.temp_dir + "/pr_iot_mds")?!;
+  File.remove(_scratch("mds"))?!;
 }
 
 metadata_mode() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_mdm", "x")?!;
-  Metadata m = File.metadata(os.temp_dir + "/pr_iot_mdm")?!;
+  File.write_content(_scratch("mdm"), "x")?!;
+  Metadata m = File.metadata(_scratch("mdm"))?!;
   assert(m.is_readable, "metadata is_readable");
-  File.remove(os.temp_dir + "/pr_iot_mdm")?!;
+  File.remove(_scratch("mdm"))?!;
 }
 
 metadata_timestamps() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_mdt", "t")?!;
-  Metadata m = File.metadata(os.temp_dir + "/pr_iot_mdt")?!;
+  File.write_content(_scratch("mdt"), "t")?!;
+  Metadata m = File.metadata(_scratch("mdt"))?!;
   assert(m.modified > 0, "metadata modified > 0");
   assert(m.accessed > 0, "metadata accessed > 0");
-  File.remove(os.temp_dir + "/pr_iot_mdt")?!;
+  File.remove(_scratch("mdt"))?!;
 }
 
 metadata_value_type() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_mdv", "v")?!;
-  Metadata m = File.metadata(os.temp_dir + "/pr_iot_mdv")?!;
+  File.write_content(_scratch("mdv"), "v")?!;
+  Metadata m = File.metadata(_scratch("mdv"))?!;
   // Value types are copyable — test copy semantics
   Metadata m2 = m;
   assert(m2.size == m.size, "metadata value copy");
   assert(m2.is_file == m.is_file, "metadata value copy is_file");
-  File.remove(os.temp_dir + "/pr_iot_mdv")?!;
+  File.remove(_scratch("mdv"))?!;
 }
 
 metadata_to_string() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_mts", "s")?!;
-  Metadata m = File.metadata(os.temp_dir + "/pr_iot_mts")?!;
+  File.write_content(_scratch("mts"), "s")?!;
+  Metadata m = File.metadata(_scratch("mts"))?!;
   string s = m.to_string();
   assert(s.contains("file"), "to_string contains kind");
   assert(s.contains("size:"), "to_string contains size");
-  File.remove(os.temp_dir + "/pr_iot_mts")?!;
+  File.remove(_scratch("mts"))?!;
 }
 
 metadata_is_writable() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_mdw", "w")?!;
-  Metadata m = File.metadata(os.temp_dir + "/pr_iot_mdw")?!;
+  File.write_content(_scratch("mdw"), "w")?!;
+  Metadata m = File.metadata(_scratch("mdw"))?!;
   assert(m.is_writable, "created file is writable");
-  File.remove(os.temp_dir + "/pr_iot_mdw")?!;
+  File.remove(_scratch("mdw"))?!;
 }
 
 metadata_is_executable() `test(exclude: wasm) `target(!windows) {
@@ -1227,20 +1252,20 @@ metadata_is_executable() `test(exclude: wasm) `target(!windows) {
   Metadata m = File.metadata("/bin/sh")?!;
   assert(m.is_executable, "/bin/sh is executable");
   // A regular file we create should NOT be executable
-  File.write_content(os.temp_dir + "/pr_iot_mde", "e")?!;
-  Metadata m2 = File.metadata(os.temp_dir + "/pr_iot_mde")?!;
+  File.write_content(_scratch("mde"), "e")?!;
+  Metadata m2 = File.metadata(_scratch("mde"))?!;
   assert(!m2.is_executable, "created file is not executable");
-  File.remove(os.temp_dir + "/pr_iot_mde")?!;
+  File.remove(_scratch("mde"))?!;
 }
 
 metadata_format() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_mdfmt", "f")?!;
-  Metadata m = File.metadata(os.temp_dir + "/pr_iot_mdfmt")?!;
+  File.write_content(_scratch("mdfmt"), "f")?!;
+  Metadata m = File.metadata(_scratch("mdfmt"))?!;
   // String interpolation invokes format!(Writer ~w)
   string s = "{m}";
   assert(s.contains("file"), "format contains kind");
   assert(s.contains("size:"), "format contains size");
-  File.remove(os.temp_dir + "/pr_iot_mdfmt")?!;
+  File.remove(_scratch("mdfmt"))?!;
 }
 
 // ---- T1734: the declared `is Closer` / `is Format` conformances are usable boxed ----
@@ -1248,66 +1273,66 @@ metadata_format() `test(exclude: wasm) {
 file_boxed_as_closer() `test(exclude: wasm) {
   // File declares `is Closer`; the conformance must hold through a boxed view,
   // not just as a direct method call.
-  File.write_content(os.temp_dir + "/pr_iot_boxclose", "x")?!;
-  Closer c = File.open_read(os.temp_dir + "/pr_iot_boxclose")?!;
+  File.write_content(_scratch("boxclose"), "x")?!;
+  Closer c = File.open_read(_scratch("boxclose"))?!;
   c.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_boxclose")?!;
+  File.remove(_scratch("boxclose"))?!;
 }
 
 buffered_writer_boxed_as_closer_flushes() `test(exclude: wasm) {
   // BufferedWriter declares `is Closer`; closing through the box must still run
   // the concrete close!, which flushes buffered bytes before closing the file.
-  File f = File.create(os.temp_dir + "/pr_iot_boxbwc")?!;
+  File f = File.create(_scratch("boxbwc"))?!;
   BufferedWriter w = BufferedWriter(move f, buf_size: 64);
   w.write_string("flushed-through-box")?!;
   Closer c = w;
   c.close()?!;
-  string content = File.read_content(os.temp_dir + "/pr_iot_boxbwc")?!;
+  string content = File.read_content(_scratch("boxbwc"))?!;
   assert(content == "flushed-through-box", "boxed close flushed the buffer");
-  File.remove(os.temp_dir + "/pr_iot_boxbwc")?!;
+  File.remove(_scratch("boxbwc"))?!;
 }
 
 buffered_reader_boxed_as_closer() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_boxbrc", "abc")?!;
-  File f = File.open_read(os.temp_dir + "/pr_iot_boxbrc")?!;
+  File.write_content(_scratch("boxbrc"), "abc")?!;
+  File f = File.open_read(_scratch("boxbrc"))?!;
   BufferedReader r = BufferedReader(move f, buf_size: 64);
   Closer c = r;
   c.close()?!;
-  File.remove(os.temp_dir + "/pr_iot_boxbrc")?!;
+  File.remove(_scratch("boxbrc"))?!;
 }
 
 metadata_boxed_as_format() `test(exclude: wasm) {
   // Metadata declares `is Format` — a pure value type whose concrete format!
   // must dispatch through a boxed Format view.
-  File.write_content(os.temp_dir + "/pr_iot_boxmf", "f")?!;
-  Format m = File.metadata(os.temp_dir + "/pr_iot_boxmf")?!;
+  File.write_content(_scratch("boxmf"), "f")?!;
+  Format m = File.metadata(_scratch("boxmf"))?!;
   Builder b = Builder();
   m.format(b)?!;
   string s = b.to_string();
   assert(s.contains("file"), "boxed format contains kind");
   assert(s.contains("size:"), "boxed format contains size");
-  File.remove(os.temp_dir + "/pr_iot_boxmf")?!;
+  File.remove(_scratch("boxmf"))?!;
 }
 
 metadata_uid_gid() `test(exclude: wasm) {
-  File.write_content(os.temp_dir + "/pr_iot_mdug", "u")?!;
-  Metadata m = File.metadata(os.temp_dir + "/pr_iot_mdug")?!;
+  File.write_content(_scratch("mdug"), "u")?!;
+  Metadata m = File.metadata(_scratch("mdug"))?!;
   assert(m.uid >= 0, "uid is non-negative");
   assert(m.gid >= 0, "gid is non-negative");
-  File.remove(os.temp_dir + "/pr_iot_mdug")?!;
+  File.remove(_scratch("mdug"))?!;
 }
 
 metadata_no_follow_symlinks() `test(exclude: wasm) {
   // When follow_symlinks=false the stat call uses lstat which returns
   // the symlink entry itself. For a regular file there is no symlink, so
   // results are identical to a regular stat call.
-  File.write_content(os.temp_dir + "/pr_iot_mdnf", "x")?!;
-  Metadata m1 = File.metadata(os.temp_dir + "/pr_iot_mdnf")?!;
-  Metadata m2 = File.metadata(os.temp_dir + "/pr_iot_mdnf", follow_symlinks: false)?!;
+  File.write_content(_scratch("mdnf"), "x")?!;
+  Metadata m1 = File.metadata(_scratch("mdnf"))?!;
+  Metadata m2 = File.metadata(_scratch("mdnf"), follow_symlinks: false)?!;
   assert(m1.size == m2.size, "no-follow size matches for regular file");
   assert(m1.is_file == m2.is_file, "no-follow is_file matches");
   assert(!m2.is_symlink, "regular file is not a symlink");
-  File.remove(os.temp_dir + "/pr_iot_mdnf")?!;
+  File.remove(_scratch("mdnf"))?!;
 }
 
 // --- T1520: durability primitives and advisory locking (docs/io.md) ---
@@ -1328,7 +1353,7 @@ strerror_durability_codes() `test {
 }
 
 file_sync_test() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_sync";
+  string p = _scratch("sync");
   File f = File.create(p[0:p.len])?!;
   f.write_string("durable")?!;
   f.sync()?!;
@@ -1339,12 +1364,12 @@ file_sync_test() `test(exclude: wasm) {
 
 dir_sync_test() `test(exclude: wasm) {
   // A no-op on Windows, a real fsync elsewhere — either way it must not raise.
-  Dir.sync(os.temp_dir)?!;
+  Dir.sync(_scratch_dir())?!;
 }
 
 file_rename_test() `test(exclude: wasm) {
-  string src = os.temp_dir + "/pr_iot_rn_src";
-  string dst = os.temp_dir + "/pr_iot_rn_dst";
+  string src = _scratch("rn_src");
+  string dst = _scratch("rn_dst");
   File.write_content(src[0:src.len], "moved")?!;
   if File.exists(dst[0:dst.len]) {
     File.remove(dst[0:dst.len])?!;
@@ -1360,8 +1385,8 @@ file_rename_test() `test(exclude: wasm) {
 // item. The reader keeps its own handle open across the rename, and the assertion
 // is that the rename succeeds and the path then holds the new bytes.
 file_rename_over_open_file() `test(exclude: wasm) {
-  string src = os.temp_dir + "/pr_iot_rnoo_src";
-  string dst = os.temp_dir + "/pr_iot_rnoo_dst";
+  string src = _scratch("rnoo_src");
+  string dst = _scratch("rnoo_dst");
   File.write_content(dst[0:dst.len], "old")?!;
   File.write_content(src[0:src.len], "new")?!;
   File reader = File.open_read(dst[0:dst.len])?!; // handle held across the rename
@@ -1375,10 +1400,10 @@ file_rename_over_open_file() `test(exclude: wasm) {
 // does not exist is the reachable, deterministic error; a genuine cross-device
 // rename would need a second mounted filesystem, which a test cannot assume.
 file_rename_missing_parent_raises() `test(exclude: wasm) {
-  string src = os.temp_dir + "/pr_iot_rnmp";
+  string src = _scratch("rnmp");
   File.write_content(src[0:src.len], "x")?!;
   bool raised = false;
-  File.rename(src[0:src.len], os.temp_dir + "/pr_iot_no_such_dir/x")? e {
+  File.rename(src[0:src.len], _scratch("no_such_dir/x"))? e {
     raised = true;
   };
   assert(raised, "rename into a missing directory raises");
@@ -1395,7 +1420,7 @@ file_rename_missing_parent_raises() `test(exclude: wasm) {
 // LockFileEx range this read failed with "permission denied", which is exactly
 // how replace_content's renamed-in destination became briefly unreadable.
 lock_does_not_block_readers() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_lkadv";
+  string p = _scratch("lkadv");
   File.write_content(p[0:p.len], "guarded")?!;
   File locker = File.open(p[0:p.len])?!;
   locker.lock()?!;
@@ -1407,7 +1432,7 @@ lock_does_not_block_readers() `test(exclude: wasm) {
 }
 
 try_lock_contends_between_two_handles() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_lk1";
+  string p = _scratch("lk1");
   File.write_content(p[0:p.len], "x")?!;
   File a = File.open(p[0:p.len])?!;
   File b = File.open(p[0:p.len])?!;
@@ -1422,7 +1447,7 @@ try_lock_contends_between_two_handles() `test(exclude: wasm) {
 }
 
 lock_shared_allows_two_holders() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_lk2";
+  string p = _scratch("lk2");
   File.write_content(p[0:p.len], "x")?!;
   File a = File.open(p[0:p.len])?!;
   File b = File.open(p[0:p.len])?!;
@@ -1442,7 +1467,7 @@ lock_shared_allows_two_holders() `test(exclude: wasm) {
 // Closing releases the lock even when unlock() was never called — one of the
 // three release guarantees docs/io.md 5.1 names.
 lock_released_by_close() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_lk3";
+  string p = _scratch("lk3");
   File.write_content(p[0:p.len], "x")?!;
   File a = File.open(p[0:p.len])?!;
   assert(a.try_lock()?!, "first handle takes the lock");
@@ -1454,7 +1479,7 @@ lock_released_by_close() `test(exclude: wasm) {
 }
 
 try_lock_for_uncontended_returns_immediately() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_lk4";
+  string p = _scratch("lk4");
   File.write_content(p[0:p.len], "x")?!;
   File a = File.open(p[0:p.len])?!;
   assert(a.try_lock_for(Duration.from_secs(5))?!, "uncontended acquire succeeds");
@@ -1466,7 +1491,7 @@ try_lock_for_uncontended_returns_immediately() `test(exclude: wasm) {
 // it does not fall under the "never synchronize with sleep" rule — the elapsed
 // assertion is the behaviour under test.
 try_lock_for_contended_times_out() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_lk5";
+  string p = _scratch("lk5");
   File.write_content(p[0:p.len], "x")?!;
   File a = File.open(p[0:p.len])?!;
   File b = File.open(p[0:p.len])?!;
@@ -1483,7 +1508,7 @@ try_lock_for_contended_times_out() `test(exclude: wasm) {
 // A zero timeout must still make exactly one attempt, so it behaves like
 // try_lock rather than failing unconditionally.
 try_lock_for_zero_timeout_still_attempts() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_lk6";
+  string p = _scratch("lk6");
   File.write_content(p[0:p.len], "x")?!;
   File a = File.open(p[0:p.len])?!;
   assert(a.try_lock_for(Duration.zero())?!, "zero timeout still acquires an uncontended lock");
@@ -1503,14 +1528,14 @@ _lock_waiter(string path) bool {
 // Acquire-on-release with no sleep anywhere: the task handle is the completion
 // signal, and the result is correct whichever order the two are scheduled in.
 try_lock_for_acquires_on_release() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_lk7";
+  string p = _scratch("lk7");
   File.write_content(p[0:p.len], "x")?!;
   File a = File.open(p[0:p.len])?!;
   assert(a.try_lock()?!, "main takes the lock first");
 
   // Spawn first, then release: whichever order the two are scheduled in, the
   // waiter either finds the lock free or is woken by the release.
-  waiter := go _lock_waiter(os.temp_dir + "/pr_iot_lk7");
+  waiter := go _lock_waiter(_scratch("lk7"));
   a.unlock()?!;
   bool got = <-waiter;
   assert(got, "the waiter acquired the lock once main released it");
@@ -1519,7 +1544,7 @@ try_lock_for_acquires_on_release() `test(exclude: wasm) {
 }
 
 replace_content_round_trip() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_rc1";
+  string p = _scratch("rc1");
   if File.exists(p[0:p.len]) {
     File.remove(p[0:p.len])?!;
   }
@@ -1532,7 +1557,7 @@ replace_content_round_trip() `test(exclude: wasm) {
 }
 
 replace_bytes_round_trip() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_rc2";
+  string p = _scratch("rc2");
   u8[] payload = [1u8, 2u8, 3u8, 0u8, 255u8];
   File.replace_bytes(p[0:p.len], payload)?!;
   File f = File.open_read(p[0:p.len])?!;
@@ -1548,7 +1573,7 @@ replace_bytes_round_trip() `test(exclude: wasm) {
 // opened the old file before the replace keeps reading the old bytes. Asserted
 // only off Windows, where an open file has no equivalent guarantee.
 replace_content_preserves_open_reader() `test(exclude: wasm) `target(!windows) {
-  string p = os.temp_dir + "/pr_iot_rc3";
+  string p = _scratch("rc3");
   File.write_content(p[0:p.len], "before")?!;
   File reader = File.open_read(p[0:p.len])?!;
   File.replace_content(p[0:p.len], "after")?!;
@@ -1562,7 +1587,7 @@ replace_content_preserves_open_reader() `test(exclude: wasm) `target(!windows) {
 // The whole reason section 3.4 exists: a temporary left behind by a hard kill is
 // unlocked, so the next writer to that path proves it stale and reuses the slot.
 replace_content_reclaims_orphan_temp() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_rc4";
+  string p = _scratch("rc4");
   string orphan = p + ".promise-sync0";
   File.write_content(p[0:p.len], "old")?!;
   File.write_content(orphan[0:orphan.len], "junk left by a crashed writer")?!;
@@ -1576,7 +1601,7 @@ replace_content_reclaims_orphan_temp() `test(exclude: wasm) {
 // from a handle this test keeps open, so the write has to land in slot 1 and slot
 // 0's contents must survive untouched.
 replace_content_skips_live_slot() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_rc5";
+  string p = _scratch("rc5");
   string slot0 = p + ".promise-sync0";
   File.write_content(p[0:p.len], "old")?!;
   File.write_content(slot0[0:slot0.len], "live writer data")?!;
@@ -1604,7 +1629,7 @@ replace_content_skips_live_slot() `test(exclude: wasm) {
 // leaves no debris. The destination's directory does not exist, so the very first
 // open fails and nothing is created at all.
 replace_content_failure_leaves_no_temp() `test(exclude: wasm) {
-  string dir = os.temp_dir + "/pr_iot_no_such_dir";
+  string dir = _scratch("no_such_dir");
   string p = dir + "/target";
   bool raised = false;
   File.replace_content(p[0:p.len], "x")? e {
@@ -1623,7 +1648,7 @@ replace_content_failure_leaves_no_temp() `test(exclude: wasm) {
 // primitive cannot get wrong — a failed replace that leaves a locked temporary
 // behind would make every later write to that path skip a slot forever.
 replace_content_failure_after_acquire_removes_temp() `test(exclude: wasm) {
-  string dir = os.temp_dir + "/pr_iot_rc6_dir";
+  string dir = _scratch("rc6_dir");
   if !Dir.exists(dir[0:dir.len]) {
     Dir.make(dir[0:dir.len])?!;
   }
@@ -1655,7 +1680,7 @@ parent_dir_nested_cases() `test {
 // something else entirely. close() sets _fd to -1, so one closed handle exercises
 // all six guards.
 durability_methods_on_closed_file_raise() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_bad_fd";
+  string p = _scratch("bad_fd");
   File.write_content(p[0:p.len], "x")?!;
   File f = File.open(p[0:p.len])?!;
   f.close()?!;
@@ -1704,7 +1729,7 @@ durability_methods_on_closed_file_raise() `test(exclude: wasm) {
 // POSIX and LOCKFILE_EXCLUSIVE_LOCK without LOCKFILE_FAIL_IMMEDIATELY on Windows.
 // Uncontended so it cannot block: a second handle only observes the exclusion.
 lock_blocking_exclusive_excludes_others() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_lk9";
+  string p = _scratch("lk9");
   File.write_content(p[0:p.len], "x")?!;
   File a = File.open(p[0:p.len])?!;
   File b = File.open(p[0:p.len])?!;
@@ -1723,16 +1748,16 @@ lock_blocking_exclusive_excludes_others() `test(exclude: wasm) {
 // open failed would believe it had built a durable write.
 dir_sync_missing_path_raises() `test(exclude: wasm) `target(!windows) {
   int code = 0;
-  Dir.sync(os.temp_dir + "/pr_iot_no_such_dir_sync")? e is IoError {
+  Dir.sync(_scratch("no_such_dir_sync"))? e is IoError {
     code = e.code;
   }!;
   assert(code == 2, "syncing a missing directory reports ENOENT(2), got {code}");
 }
 
 file_rename_missing_source_raises() `test(exclude: wasm) {
-  string dst = os.temp_dir + "/pr_iot_rnms_dst";
+  string dst = _scratch("rnms_dst");
   int code = 0;
-  File.rename(os.temp_dir + "/pr_iot_rnms_missing", dst[0:dst.len])? e is IoError {
+  File.rename(_scratch("rnms_missing"), dst[0:dst.len])? e is IoError {
     code = e.code;
   }!;
   assert(code == 2, "renaming a missing source reports ENOENT(2), got {code}");
@@ -1743,7 +1768,7 @@ file_rename_missing_source_raises() `test(exclude: wasm) {
 // with nothing outstanding, which must not be mistaken for the no-progress error
 // the loop raises when bytes remain.
 replace_content_empty_content() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_rc8";
+  string p = _scratch("rc8");
   File.write_content(p[0:p.len], "not empty")?!;
   File.replace_content(p[0:p.len], "")?!;
   assert(File.read_content(p[0:p.len])?! == "", "an empty replacement empties the file");
@@ -1754,7 +1779,7 @@ replace_content_empty_content() `test(exclude: wasm) {
 // A payload far larger than any single buffer, so the whole write goes through
 // the loop rather than the one-shot path in the common case.
 replace_bytes_large_payload() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_rc9";
+  string p = _scratch("rc9");
   u8[] payload = Vector[u8].filled(7u8, 200000);
   File.replace_bytes(p[0:p.len], payload)?!;
   assert(File.size(p[0:p.len])?! == 200000, "every byte reached the destination");
@@ -1779,7 +1804,7 @@ _hold_slot!(string path, int index) File {
 // make one write scan forever. With all eight held by live writers the write has
 // to give up and say so — not spin, and not overwrite somebody's slot.
 replace_content_slot_exhaustion_raises() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_rc10";
+  string p = _scratch("rc10");
   File.write_content(p[0:p.len], "old")?!;
   File[] holders = [];
   for int i = 0; i < 8; i += 1 {
@@ -1817,12 +1842,12 @@ _replace_worker(string path, string content) bool {
 // distinct byte repeated, so a destination that mixed two writers — or one that
 // had two writers sharing a temporary slot — would be neither payload.
 replace_content_concurrent_writers_never_interleave() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_rc11";
+  string p = _scratch("rc11");
   File.write_content(p[0:p.len], "seed")?!;
 
-  w1 := go _replace_worker(os.temp_dir + "/pr_iot_rc11", "A".repeat(4096));
-  w2 := go _replace_worker(os.temp_dir + "/pr_iot_rc11", "B".repeat(4096));
-  w3 := go _replace_worker(os.temp_dir + "/pr_iot_rc11", "C".repeat(4096));
+  w1 := go _replace_worker(_scratch("rc11"), "A".repeat(4096));
+  w2 := go _replace_worker(_scratch("rc11"), "B".repeat(4096));
+  w3 := go _replace_worker(_scratch("rc11"), "C".repeat(4096));
   assert(<-w1, "first writer finished");
   assert(<-w2, "second writer finished");
   assert(<-w3, "third writer finished");
@@ -1863,11 +1888,31 @@ _read_full_length(string path, int rounds) bool {
 }
 
 replace_content_reader_never_sees_partial() `test(exclude: wasm) {
-  string p = os.temp_dir + "/pr_iot_rc12";
+  string p = _scratch("rc12");
   File.replace_content(p[0:p.len], "A".repeat(2048))?!;
-  writer := go _replace_alternating(os.temp_dir + "/pr_iot_rc12", 16);
-  reader := go _read_full_length(os.temp_dir + "/pr_iot_rc12", 16);
+  writer := go _replace_alternating(_scratch("rc12"), 16);
+  reader := go _read_full_length(_scratch("rc12"), 16);
   assert(<-writer, "the writer completed every round");
   assert(<-reader, "every read saw a complete file, never a partial one");
   File.remove(p)?!;
+}
+
+// T1963: must stay the LAST test in this file — tests run in declaration order,
+// so anything declared below would leave its files behind. That position
+// dependence is a convention rather than a construction because the batch
+// harness has no teardown hook; T2032 is the item that would remove it.
+//
+// A clean run empties the directory itself, so this only has work to do after a
+// failing run — exactly when the debris would otherwise accumulate. Both
+// removals are best-effort on purpose: turning a failed run's leftovers into a
+// second failure would bury the first.
+scratch_dir_teardown() `test(exclude: wasm) {
+  string root = _scratch_dir();
+  string[] entries = Dir.list(root[0:root.len])?!;
+  for e in entries {
+    File.remove(root + "/" + e)? _err {
+    };
+  }
+  Dir.remove(root)? _err {
+  };
 }

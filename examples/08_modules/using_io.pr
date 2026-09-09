@@ -5,6 +5,10 @@
 use io;
 use os;
 
+// A per-process file name, so two copies of this example running at once never
+// share one file.
+_example_path() string => os.temp_dir + "/promise_example_" + os.process_id.to_string() + ".txt";
+
 main() `test(expected: """--- Write and Read ---
 wrote to file
 read back: Hello from Promise!
@@ -16,11 +20,11 @@ And another line.""", exclude: wasm) {
   print_line("--- Write and Read ---");
 
   // Write a string to a file (creates or overwrites).
-  io.File.write_content(os.temp_dir + "/promise_example.txt", "Hello from Promise!")?!;
+  io.File.write_content(_example_path(), "Hello from Promise!")?!;
   print_line("wrote to file");
 
   // Read the entire file back.
-  string content = io.File.read_content(os.temp_dir + "/promise_example.txt")?!;
+  string content = io.File.read_content(_example_path())?!;
   print_line("read back: {content}");
 
   // --- Append ---
@@ -28,13 +32,13 @@ And another line.""", exclude: wasm) {
   print_line("--- Append ---");
 
   // Append to an existing file.
-  io.File f = io.File.append(os.temp_dir + "/promise_example.txt")?!;
+  io.File f = io.File.append(_example_path())?!;
   f.write_line("\nAnd another line.")?!;
   f.close()?!;
 
-  string full = io.File.read_content(os.temp_dir + "/promise_example.txt")?!;
+  string full = io.File.read_content(_example_path())?!;
   print_line("appended content: {full}");
 
   // Clean up.
-  io.File.remove(os.temp_dir + "/promise_example.txt")?!;
+  io.File.remove(_example_path())?!;
 }

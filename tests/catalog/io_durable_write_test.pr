@@ -8,6 +8,11 @@
 use io;
 use os;
 
+// T1963: a scratch path must be unique per process, so two concurrent runs on
+// one machine never share a file. Flat rather than a subdirectory, so the
+// _durable_write recipe below still syncs the directory the temporary is in.
+_scratch(string name) string => os.temp_dir + "/pr_cat_" + os.process_id.to_string() + "_" + name;
+
 // The sequence from docs/io.md §3.1, written the way a streaming caller would:
 // sibling temporary, exclusive lock, write, sync, rename, sync the directory.
 _durable_write!(string path, string temp, string content) {
@@ -17,12 +22,14 @@ _durable_write!(string path, string temp, string content) {
   f.sync()?!; // contents are durable
   f.close()?!; // releases the lock
   io.File.rename(temp[0:temp.len], path[0:path.len])?!; // the swap is atomic
-  io.Dir.sync(os.temp_dir)?!; // the swap is durable
+  // The flat _scratch names keep the sibling temporary in the system temp dir,
+  // so that is the directory whose entry the rename has to make durable.
+  io.Dir.sync(os.temp_dir)?!; // temp-dir-ok: the directory is the operand, not a scratch file name
 }
 
 test_durable_write_by_hand() `test(exclude: wasm) {
-  string path = os.temp_dir + "/pr_cat_durable";
-  string temp = os.temp_dir + "/pr_cat_durable.tmp";
+  string path = _scratch("durable");
+  string temp = _scratch("durable.tmp");
 
   _durable_write(path[0:path.len], temp[0:temp.len], "first")?!;
   assert(io.File.read_content(path[0:path.len])?! == "first", "created by the hand-built sequence");
@@ -37,7 +44,7 @@ test_durable_write_by_hand() `test(exclude: wasm) {
 // The composite must be reachable under a qualified import too — it is the one
 // obvious way, and a caller who never touches the primitives still gets it.
 test_replace_content_qualified() `test(exclude: wasm) {
-  string path = os.temp_dir + "/pr_cat_replace";
+  string path = _scratch("replace");
   io.File.replace_content(path[0:path.len], "durable")?!;
   assert(io.File.read_content(path[0:path.len])?! == "durable", "replace_content via catalog import");
   io.File.remove(path)?!;

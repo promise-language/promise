@@ -3,6 +3,10 @@ use io;
 use os;
 use path;
 
+// T1963: a scratch path must be unique per process, so two concurrent runs of
+// the time tests on one machine never share a file.
+_scratch(string name) string => path.join(os.temp_dir, "pr_time_" + os.process_id.to_string() + "_" + name);
+
 // ---- DateTime: known-epoch decomposition ----
 
 datetime_epoch_zero() `test {
@@ -453,8 +457,8 @@ datetime_persist_reload_round_trip() `test(exclude: wasm) {
   dt := DateTime.create(2026, 6, 18, 9, 45, 12);
 
   // Path strings are consumed (moved) by the io/path APIs, so clone for reuse.
-  string nanos_path = path.join(os.temp_dir, "promise_time_nanos.txt");
-  string iso_path = path.join(os.temp_dir, "promise_time_iso.txt");
+  string nanos_path = _scratch("nanos.txt");
+  string iso_path = _scratch("iso.txt");
 
   // Persist both the raw epoch nanos and the ISO string.
   io.File.write_content(nanos_path.clone(), dt.unix_nanos.to_string())?!;

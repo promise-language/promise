@@ -4,6 +4,13 @@
 use io;
 use os;
 
+// T1963: a per-process scratch name, so two concurrent runs on one machine never
+// share a file. Flat rather than the per-process directory modules/io/io_test.pr
+// uses — this file owns a handful of names and no directory, and a pure
+// expression can be called from inside `go` blocks and task bodies with no error
+// path at the call site. See docs/code-style.md, "Test scratch paths".
+_scratch(string name) string => os.temp_dir + "/pr_sc_" + os.process_id.to_string() + "_" + name;
+
 main() `test(expected: """open_close ok
 write_read ok
 seek ok
@@ -14,13 +21,13 @@ error_handling ok""", exclude: wasm) {
   // Test 1: open, write_string, close, open, read_all, close
   channel[string] ch1 = channel[string](capacity: 1);
   go {
-    io.File f = io.File.create(os.temp_dir + "/pr_sc_ops1")?!;
+    io.File f = io.File.create(_scratch("ops1"))?!;
     f.write_string("goroutine wrote this")?!;
     f.close()?!;
-    io.File f2 = io.File.open_read(os.temp_dir + "/pr_sc_ops1")?!;
+    io.File f2 = io.File.open_read(_scratch("ops1"))?!;
     string data = f2.read_all()?!;
     f2.close()?!;
-    io.File.remove(os.temp_dir + "/pr_sc_ops1")?!;
+    io.File.remove(_scratch("ops1"))?!;
     ch1.send(move data);
   };
   r1 := <-ch1;
@@ -32,9 +39,9 @@ error_handling ok""", exclude: wasm) {
   // Test 2: write_content + read_content from goroutine
   channel[string] ch2 = channel[string](capacity: 1);
   go {
-    io.File.write_content(os.temp_dir + "/pr_sc_ops2", "content ops")?!;
-    string d = io.File.read_content(os.temp_dir + "/pr_sc_ops2")?!;
-    io.File.remove(os.temp_dir + "/pr_sc_ops2")?!;
+    io.File.write_content(_scratch("ops2"), "content ops")?!;
+    string d = io.File.read_content(_scratch("ops2"))?!;
+    io.File.remove(_scratch("ops2"))?!;
     ch2.send(move d);
   };
   r2 := <-ch2;
@@ -46,12 +53,12 @@ error_handling ok""", exclude: wasm) {
   // Test 3: seek from goroutine
   channel[string] ch3 = channel[string](capacity: 1);
   go {
-    io.File.write_content(os.temp_dir + "/pr_sc_ops3", "abcdefgh")?!;
-    io.File f = io.File.open(os.temp_dir + "/pr_sc_ops3")?!;
+    io.File.write_content(_scratch("ops3"), "abcdefgh")?!;
+    io.File f = io.File.open(_scratch("ops3"))?!;
     f.seek(4)?!;
     string rest = f.read_all()?!;
     f.close()?!;
-    io.File.remove(os.temp_dir + "/pr_sc_ops3")?!;
+    io.File.remove(_scratch("ops3"))?!;
     ch3.send(move rest);
   };
   r3 := <-ch3;
@@ -63,9 +70,9 @@ error_handling ok""", exclude: wasm) {
   // Test 4: stat_size from goroutine
   channel[int] ch4 = channel[int](capacity: 1);
   go {
-    io.File.write_content(os.temp_dir + "/pr_sc_ops4", "12345678")?!;
-    int sz = io.File.size(os.temp_dir + "/pr_sc_ops4")?!;
-    io.File.remove(os.temp_dir + "/pr_sc_ops4")?!;
+    io.File.write_content(_scratch("ops4"), "12345678")?!;
+    int sz = io.File.size(_scratch("ops4"))?!;
+    io.File.remove(_scratch("ops4"))?!;
     ch4.send(sz);
   };
   r4 := <-ch4;
@@ -77,10 +84,10 @@ error_handling ok""", exclude: wasm) {
   // Test 5: exists from goroutine
   channel[int] ch5 = channel[int](capacity: 1);
   go {
-    io.File.write_content(os.temp_dir + "/pr_sc_ops5", "x")?!;
-    bool e1 = io.File.exists(os.temp_dir + "/pr_sc_ops5");
-    io.File.remove(os.temp_dir + "/pr_sc_ops5")?!;
-    bool e2 = io.File.exists(os.temp_dir + "/pr_sc_ops5");
+    io.File.write_content(_scratch("ops5"), "x")?!;
+    bool e1 = io.File.exists(_scratch("ops5"));
+    io.File.remove(_scratch("ops5"))?!;
+    bool e2 = io.File.exists(_scratch("ops5"));
     int result = 0;
     if e1 {
       result = result + 1;
@@ -99,13 +106,13 @@ error_handling ok""", exclude: wasm) {
   // Test 6: mkdir, dir_exists, dir_remove from goroutine
   channel[int] ch6 = channel[int](capacity: 1);
   go {
-    if io.Dir.exists(os.temp_dir + "/pr_sc_ops6_dir") {
-      io.Dir.remove(os.temp_dir + "/pr_sc_ops6_dir")?!;
+    if io.Dir.exists(_scratch("ops6_dir")) {
+      io.Dir.remove(_scratch("ops6_dir"))?!;
     }
-    io.Dir.make(os.temp_dir + "/pr_sc_ops6_dir")?!;
-    bool de1 = io.Dir.exists(os.temp_dir + "/pr_sc_ops6_dir");
-    io.Dir.remove(os.temp_dir + "/pr_sc_ops6_dir")?!;
-    bool de2 = io.Dir.exists(os.temp_dir + "/pr_sc_ops6_dir");
+    io.Dir.make(_scratch("ops6_dir"))?!;
+    bool de1 = io.Dir.exists(_scratch("ops6_dir"));
+    io.Dir.remove(_scratch("ops6_dir"))?!;
+    bool de2 = io.Dir.exists(_scratch("ops6_dir"));
     int result = 0;
     if de1 {
       result = result + 1;
@@ -125,7 +132,7 @@ error_handling ok""", exclude: wasm) {
   channel[string] ch7 = channel[string](capacity: 1);
   go {
     string msg = "no error";
-    io.File.read_content(os.temp_dir + "/pr_sc_ops_noexist_xyz")? e {
+    io.File.read_content(_scratch("ops_noexist_xyz"))? e {
       msg = "caught";
     };
     ch7.send(move msg);

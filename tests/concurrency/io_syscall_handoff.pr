@@ -4,55 +4,62 @@
 use io;
 use os;
 
+// T1963: a per-process scratch name, so two concurrent runs on one machine never
+// share a file. Flat rather than the per-process directory modules/io/io_test.pr
+// uses — this file owns a handful of names and no directory, and a pure
+// expression can be called from inside `go` blocks and task bodies with no error
+// path at the call site. See docs/code-style.md, "Test scratch paths".
+_scratch(string name) string => os.temp_dir + "/pr_syscall_" + os.process_id.to_string() + "_" + name;
+
 main() `test(expected: """single ok
 concurrent ok
 interleaved ok""", exclude: wasm) {
   // Test 1: Single goroutine file IO
   channel[string] ch = channel[string](capacity: 1);
   go {
-    io.File.write_content(os.temp_dir + "/pr_syscall_t1", "hello from goroutine")?!;
-    string data = io.File.read_content(os.temp_dir + "/pr_syscall_t1")?!;
+    io.File.write_content(_scratch("t1"), "hello from goroutine")?!;
+    string data = io.File.read_content(_scratch("t1"))?!;
     ch.send(move data);
   };
   r := <-ch;
   if result := r {
     assert(result == "hello from goroutine", "goroutine file IO");
   }
-  io.File.remove(os.temp_dir + "/pr_syscall_t1")? e {
+  io.File.remove(_scratch("t1"))? e {
   };
   print_line("single ok");
 
   // Test 2: Multiple goroutines doing file IO concurrently
   channel[int] done = channel[int](capacity: 4);
   go {
-    io.File.write_content(os.temp_dir + "/pr_syscall_t2_0", "data_0")?!;
-    string d = io.File.read_content(os.temp_dir + "/pr_syscall_t2_0")?!;
+    io.File.write_content(_scratch("t2_0"), "data_0")?!;
+    string d = io.File.read_content(_scratch("t2_0"))?!;
     assert(d == "data_0", "concurrent 0");
-    io.File.remove(os.temp_dir + "/pr_syscall_t2_0")? e {
+    io.File.remove(_scratch("t2_0"))? e {
     };
     done.send(0);
   };
   go {
-    io.File.write_content(os.temp_dir + "/pr_syscall_t2_1", "data_1")?!;
-    string d = io.File.read_content(os.temp_dir + "/pr_syscall_t2_1")?!;
+    io.File.write_content(_scratch("t2_1"), "data_1")?!;
+    string d = io.File.read_content(_scratch("t2_1"))?!;
     assert(d == "data_1", "concurrent 1");
-    io.File.remove(os.temp_dir + "/pr_syscall_t2_1")? e {
+    io.File.remove(_scratch("t2_1"))? e {
     };
     done.send(1);
   };
   go {
-    io.File.write_content(os.temp_dir + "/pr_syscall_t2_2", "data_2")?!;
-    string d = io.File.read_content(os.temp_dir + "/pr_syscall_t2_2")?!;
+    io.File.write_content(_scratch("t2_2"), "data_2")?!;
+    string d = io.File.read_content(_scratch("t2_2"))?!;
     assert(d == "data_2", "concurrent 2");
-    io.File.remove(os.temp_dir + "/pr_syscall_t2_2")? e {
+    io.File.remove(_scratch("t2_2"))? e {
     };
     done.send(2);
   };
   go {
-    io.File.write_content(os.temp_dir + "/pr_syscall_t2_3", "data_3")?!;
-    string d = io.File.read_content(os.temp_dir + "/pr_syscall_t2_3")?!;
+    io.File.write_content(_scratch("t2_3"), "data_3")?!;
+    string d = io.File.read_content(_scratch("t2_3"))?!;
     assert(d == "data_3", "concurrent 3");
-    io.File.remove(os.temp_dir + "/pr_syscall_t2_3")? e {
+    io.File.remove(_scratch("t2_3"))? e {
     };
     done.send(3);
   };
@@ -64,16 +71,16 @@ interleaved ok""", exclude: wasm) {
   // Test 3: Goroutine file IO interleaved with channel ops
   channel[string] ch2 = channel[string](capacity: 1);
   go {
-    io.File.write_content(os.temp_dir + "/pr_syscall_t3", "ping")?!;
+    io.File.write_content(_scratch("t3"), "ping")?!;
     ch2.send("wrote");
   };
   r2 := <-ch2;
   if msg := r2 {
     assert(msg == "wrote", "channel sync after write");
   }
-  string data = io.File.read_content(os.temp_dir + "/pr_syscall_t3")?!;
+  string data = io.File.read_content(_scratch("t3"))?!;
   assert(data == "ping", "read after channel sync");
-  io.File.remove(os.temp_dir + "/pr_syscall_t3")? e {
+  io.File.remove(_scratch("t3"))? e {
   };
   print_line("interleaved ok");
 }

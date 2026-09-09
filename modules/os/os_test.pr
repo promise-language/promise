@@ -64,20 +64,20 @@ test_working_dir_absolute() `test(exclude: wasm) {
 }
 
 test_temp_dir_nonempty() `test(exclude: wasm) {
-  string tmp = temp_dir;
+  string tmp = temp_dir; // temp-dir-ok: temp_dir is the subject under test; nothing is written
   assert(tmp.len > 0, "temp directory should be non-empty");
 }
 
 test_temp_dir_no_trailing_separator() `test(exclude: wasm) {
-  string tmp = temp_dir;
+  string tmp = temp_dir; // temp-dir-ok: temp_dir is the subject under test; nothing is written
   // The getter strips a single trailing '/' or '\' so callers append uniformly.
   bool trailing = tmp.ends_with("/") || tmp.ends_with("\\");
   assert(!trailing, "temp directory should not end with a path separator");
 }
 
 test_temp_dir_is_stable() `test(exclude: wasm) {
-  string t1 = temp_dir;
-  string t2 = temp_dir;
+  string t1 = temp_dir; // temp-dir-ok: temp_dir is the subject under test; nothing is written
+  string t2 = temp_dir; // temp-dir-ok: temp_dir is the subject under test; nothing is written
   assert(t1 == t2, "reading temp_dir twice should return the same value");
 }
 
@@ -118,7 +118,7 @@ test_strip_trailing_sep_removes_one_only() `test(exclude: wasm) {
 test_temp_dir_uses_env_with_strip() `test(exclude: wasm) `target(windows) {
   string? orig_temp = get_env_var("TEMP");
   set_env_var("TEMP", "C:\\PromiseTempDirTest\\");
-  string got = temp_dir;
+  string got = temp_dir; // temp-dir-ok: temp_dir is the subject under test; nothing is written
   set_env_var("TEMP", move orig_temp); // restore (absent -> unset)
   assert(got == "C:\\PromiseTempDirTest", "temp_dir should return TEMP with the trailing separator stripped");
 }
@@ -126,7 +126,7 @@ test_temp_dir_uses_env_with_strip() `test(exclude: wasm) `target(windows) {
 test_temp_dir_uses_env_with_strip() `test(exclude: wasm) `target(!windows) {
   string? orig = get_env_var("TMPDIR");
   set_env_var("TMPDIR", "/promise/tmp/dir/");
-  string got = temp_dir;
+  string got = temp_dir; // temp-dir-ok: temp_dir is the subject under test; nothing is written
   set_env_var("TMPDIR", move orig); // restore (absent -> unset)
   assert(got == "/promise/tmp/dir", "temp_dir should return TMPDIR with the trailing separator stripped");
 }
@@ -138,7 +138,7 @@ test_temp_dir_fallback_when_unset() `test(exclude: wasm) `target(windows) {
   set_env_var("TEMP", move unset_temp);
   string? unset_tmp;
   set_env_var("TMP", move unset_tmp);
-  string got = temp_dir;
+  string got = temp_dir; // temp-dir-ok: temp_dir is the subject under test; nothing is written
   set_env_var("TEMP", move orig_temp); // restore both before asserting
   set_env_var("TMP", move orig_tmp);
   assert(got == "C:\\Windows\\Temp", "temp_dir should fall back to C:\\Windows\\Temp when TEMP and TMP are unset");
@@ -148,7 +148,7 @@ test_temp_dir_fallback_when_unset() `test(exclude: wasm) `target(!windows) {
   string? orig = get_env_var("TMPDIR");
   string? unset;
   set_env_var("TMPDIR", move unset);
-  string got = temp_dir;
+  string got = temp_dir; // temp-dir-ok: temp_dir is the subject under test; nothing is written
   set_env_var("TMPDIR", move orig); // restore before asserting
   assert(got == "/tmp", "temp_dir should fall back to /tmp when TMPDIR is unset");
 }

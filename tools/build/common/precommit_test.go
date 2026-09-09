@@ -1097,3 +1097,359 @@ func TestCheckTestSleeps_ErrorsWhenGitCannotList(t *testing.T) {
 		t.Errorf("error should name the failing step, got: %v", err)
 	}
 }
+
+// --- T1963: scratch paths must be unique per process ---
+
+func TestTempDirLines_DetectsFixedPath(t *testing.T) {
+	data := []byte("  string p = os.temp_dir + \"/pr_iot_cer\";\n")
+	if got := tempDirLines(data); len(got) != 1 || got[0] != 1 {
+		t.Errorf("tempDirLines = %v, want [1]", got)
+	}
+}
+
+// The hoisted form — a bare assignment with no concatenation — is the shape a
+// narrower `temp_dir + "…"` rule would miss. It is exactly as shared.
+func TestTempDirLines_DetectsHoistedAssignment(t *testing.T) {
+	data := []byte("  string d = os.temp_dir;\n")
+	if got := tempDirLines(data); len(got) != 1 || got[0] != 1 {
+		t.Errorf("tempDirLines = %v, want [1] for a hoisted temp_dir", got)
+	}
+}
+
+// A path that names the pid is per-process by construction — the point of the
+// rule — so it needs no marker.
+func TestTempDirLines_AllowsProcessIDOnSameLine(t *testing.T) {
+	data := []byte("_scratch(string n) string => os.temp_dir + \"/pr_\" + os.process_id.to_string() + n;\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none when process_id is on the line", got)
+	}
+}
+
+func TestTempDirLines_AllowsMarkerWithReason(t *testing.T) {
+	data := []byte("  string tmp = temp_dir; // temp-dir-ok: temp_dir is the subject under test\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none for an annotated site", got)
+	}
+}
+
+func TestTempDirLines_RejectsMarkerWithoutReason(t *testing.T) {
+	data := []byte("  string tmp = temp_dir; // temp-dir-ok:\n")
+	if got := tempDirLines(data); len(got) != 1 || got[0] != 1 {
+		t.Errorf("tempDirLines = %v, want [1] for a marker with no reason", got)
+	}
+}
+
+// The marker is per-line, like sleep-ok: one earned exemption must not license
+// the next line in the same file.
+func TestTempDirLines_RejectsMarkerOnAnotherLine(t *testing.T) {
+	data := []byte("  // temp-dir-ok: explained above\n  string d = os.temp_dir;\n")
+	if got := tempDirLines(data); len(got) != 1 || got[0] != 2 {
+		t.Errorf("tempDirLines = %v, want [2] — a marker on a previous line does not carry", got)
+	}
+}
+
+func TestTempDirLines_IgnoresComment(t *testing.T) {
+	data := []byte("// Use os.temp_dir so the test is portable across platforms.\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none for temp_dir in a comment", got)
+	}
+}
+
+// Literal contents are stripped, so an assertion message or a snapshot's
+// expected output mentioning temp_dir does not read as a use.
+func TestTempDirLines_IgnoresStringLiteral(t *testing.T) {
+	data := []byte("  assert(ok, \"temp_dir should be non-empty\");\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none for temp_dir inside a string", got)
+	}
+}
+
+func TestTempDirLines_IgnoresTripleQuotedBlock(t *testing.T) {
+	data := []byte("main() `test(expected: \"\"\"wrote to temp_dir\nread back\"\"\") {\n  assert(1 == 1);\n}\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none for temp_dir inside a \"\"\" block", got)
+	}
+}
+
+// An interpolation is code, not literal text — `"{os.temp_dir}/pr_x"` is as
+// idiomatic a spelling of the shared-path bug as the concatenated form, so
+// stripping the whole literal would leave the guard blind to it.
+func TestTempDirLines_DetectsInterpolatedPath(t *testing.T) {
+	data := []byte("  string p = \"{os.temp_dir}/pr_iot_cer\";\n")
+	if got := tempDirLines(data); len(got) != 1 || got[0] != 1 {
+		t.Errorf("tempDirLines = %v, want [1] for an interpolated temp_dir", got)
+	}
+}
+
+// …and the pid exemption has to be visible through interpolation too, or the
+// fixed form and the correct form would both be flagged.
+func TestTempDirLines_AllowsInterpolatedProcessID(t *testing.T) {
+	data := []byte("  string p = \"{os.temp_dir}/pr_{os.process_id}/x\";\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none when the pid is interpolated too", got)
+	}
+}
+
+// Two adjacent interpolations must not fuse into one identifier: "{a}{b}" is
+// not a use of `ab`. The halves of temp_dir are the case that would matter.
+func TestTempDirLines_AdjacentInterpolationsDoNotFuse(t *testing.T) {
+	data := []byte("  string s = \"{temp}{_dir}\";\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none — adjacent interpolations are separate expressions", got)
+	}
+}
+
+// A brace inside a nested string literal belongs to that literal, so it must
+// not end the interpolation early and spill the rest of the line into code.
+func TestTempDirLines_NestedStringInInterpolation(t *testing.T) {
+	data := []byte("  print_line(\"{fmt(\\\"}\\\")} temp_dir\");\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none — text after the interpolation is still literal", got)
+	}
+}
+
+// Raw strings do not interpolate (RAW_STRING in PromiseLexer.g4), so a brace in
+// one is literal text.
+func TestTempDirLines_IgnoresRawString(t *testing.T) {
+	data := []byte("  string s = r\"{os.temp_dir}\";\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none — a raw string does not interpolate", got)
+	}
+}
+
+// Identifier boundaries are required on both sides: a declaration named after
+// temp_dir is not a use of it.
+func TestTempDirLines_IgnoresIdentifierContainingTempDir(t *testing.T) {
+	data := []byte("test_temp_dir_nonempty() `test {\n_temp_dir_lookup() string {\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none for identifiers merely containing temp_dir", got)
+	}
+}
+
+func TestTempDirLines_ReportsEverySite(t *testing.T) {
+	data := []byte("a := os.temp_dir;\nb := 1;\nc := os.temp_dir + \"/x\";\n")
+	got := tempDirLines(data)
+	if len(got) != 2 || got[0] != 1 || got[1] != 3 {
+		t.Errorf("tempDirLines = %v, want [1 3]", got)
+	}
+}
+
+func TestCheckTestTempPaths_RejectsViolation(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("tests/foo/bad_test.pr", []byte("test_x() `test { io.File.remove(os.temp_dir + \"/fixed\")?!; }\n"))
+	err := CheckTestTempPaths(root)
+	if err == nil {
+		t.Fatal("expected error for a fixed temp path in a test file, got nil")
+	}
+	if !strings.Contains(err.Error(), "tests/foo/bad_test.pr:1") {
+		t.Errorf("error should name the violating path AND line, got: %v", err)
+	}
+}
+
+func TestCheckTestTempPaths_AllowsPerProcessPath(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("modules/io/io_test.pr",
+		[]byte("_scratch(string n) string => os.temp_dir + \"/pr_\" + os.process_id.to_string() + n;\n"))
+	if err := CheckTestTempPaths(root); err != nil {
+		t.Fatalf("expected no error for a per-process path, got: %v", err)
+	}
+}
+
+func TestCheckTestTempPaths_AllowsAnnotatedSite(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("modules/os/os_test.pr",
+		[]byte("test_t() `test { string tmp = temp_dir; } // temp-dir-ok: the getter is the subject\n"))
+	if err := CheckTestTempPaths(root); err != nil {
+		t.Fatalf("expected no error for an annotated site, got: %v", err)
+	}
+}
+
+// A non-test .pr file is out of scope: modules/os/os.pr implements temp_dir.
+func TestCheckTestTempPaths_IgnoresNonTestFile(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("modules/os/os.pr", []byte("get temp_dir string `public { return _temp_dir_lookup(); }\n"))
+	if err := CheckTestTempPaths(root); err != nil {
+		t.Fatalf("expected no error for temp_dir in a non-test file, got: %v", err)
+	}
+}
+
+// Examples run as part of the suite, so a fixed path there collides exactly as
+// one in a test file does.
+func TestCheckTestTempPaths_ScansExamples(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("examples/08_modules/using_io.pr",
+		[]byte("main() { io.File.remove(os.temp_dir + \"/promise_example.txt\")?!; }\n"))
+	err := CheckTestTempPaths(root)
+	if err == nil {
+		t.Fatal("expected error for a fixed temp path in an example, got nil")
+	}
+	if !strings.Contains(err.Error(), "examples/08_modules/using_io.pr:1") {
+		t.Errorf("error should name the example site, got: %v", err)
+	}
+}
+
+func TestCheckTestTempPaths_SkipsTrackedButAbsent(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("tests/foo/absent_test.pr", []byte("test_x() `test { p := os.temp_dir + \"/x\"; }\n"))
+
+	git := exec.Command("git", "commit", "-m", "add test")
+	git.Dir = root
+	git.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=1+test@users.noreply.github.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=1+test@users.noreply.github.com",
+	)
+	if out, err := git.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+	if err := os.Remove(filepath.Join(root, "tests", "foo", "absent_test.pr")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := CheckTestTempPaths(root); err != nil {
+		t.Fatalf("expected no error for a tracked-but-absent file, got: %v", err)
+	}
+}
+
+// Same reasoning as TestCheckTestSleeps_ErrorsWhenGitCannotList: the guard must
+// surface a git failure rather than report a clean tree, and the root has to be
+// a path that does not exist rather than merely one outside a repository —
+// verify points TMPDIR at .promise-home/ inside the checkout, so git would walk
+// up, find the real repo, and make a t.TempDir() root pass for the wrong reason.
+func TestCheckTestTempPaths_ErrorsWhenGitCannotList(t *testing.T) {
+	err := CheckTestTempPaths(filepath.Join(t.TempDir(), "no-such-dir"))
+	if err == nil {
+		t.Fatal("expected an error when git cannot list the index, got nil")
+	}
+	if !strings.Contains(err.Error(), "list tracked Promise files") {
+		t.Errorf("error should name the failing step, got: %v", err)
+	}
+}
+
+// A nested string literal inside an interpolation is spelled with plain quotes
+// (INTERP0_STR in PromiseLexer.g4 pushes INTERP_STR on a bare '"'), so its
+// braces must not end the interpolation early. If they did, the scanner would
+// fall back into code mode mid-literal and read the rest of the string as code.
+func TestTempDirLines_NestedPlainQuotedStringInInterpolation(t *testing.T) {
+	data := []byte("  print_line(\"{join(v, \"}\")} temp_dir\");\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none — text after the nested string is still literal", got)
+	}
+}
+
+// …and the converse: a genuine use in an interpolation that also contains a
+// nested string is still a use.
+func TestTempDirLines_DetectsUseAlongsideNestedString(t *testing.T) {
+	data := []byte("  string p = \"{os.temp_dir + join(v, \"}\")}\";\n")
+	if got := tempDirLines(data); len(got) != 1 || got[0] != 1 {
+		t.Errorf("tempDirLines = %v, want [1] — temp_dir is code here, not literal text", got)
+	}
+}
+
+// A nested `{…}` inside an interpolation (INTERP0_LBRACE → INTERPN) raises the
+// brace depth, so the '}' that closes it must not close the interpolation. If
+// depth were not tracked, everything after that '}' would be misread as literal
+// text and the temp_dir following it would be missed.
+func TestTempDirLines_DetectsUseAfterNestedBraces(t *testing.T) {
+	data := []byte("  string p = \"{f({1}) + os.temp_dir}\";\n")
+	if got := tempDirLines(data); len(got) != 1 || got[0] != 1 {
+		t.Errorf("tempDirLines = %v, want [1] — the inner '}' closes the nested brace, not the interpolation", got)
+	}
+}
+
+// The pid exemption must survive the same nesting, or the correct spelling would
+// be flagged alongside the broken one.
+func TestTempDirLines_AllowsProcessIDInsideNestedBraces(t *testing.T) {
+	data := []byte("  string p = \"{f({os.process_id}) + os.temp_dir}\";\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none — the pid is visible through the nested braces", got)
+	}
+}
+
+// A char literal holding a double quote (CHAR_LITERAL in PromiseLexer.g4) must
+// not be read as a string opener. If it were, the quote parity would invert and
+// the *contents* of the next real string would be exposed as code — here that
+// would report a temp_dir that is only a word in a message.
+func TestTempDirLines_CharLiteralQuoteDoesNotFlipStringParity(t *testing.T) {
+	data := []byte("  bool q = c == '\"' && msg == \"temp_dir\";\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none — the char literal must not open a string", got)
+	}
+}
+
+// The `\'` escape inside a char literal must be consumed, or the literal appears
+// to close early and the unmatched quote swallows the rest of the line — hiding
+// the genuine use that follows it.
+func TestTempDirLines_EscapedQuoteCharLiteralDoesNotSwallowLine(t *testing.T) {
+	data := []byte("  bool q = c == '\\'' && p == os.temp_dir;\n")
+	if got := tempDirLines(data); len(got) != 1 || got[0] != 1 {
+		t.Errorf("tempDirLines = %v, want [1] — the escaped quote must not end the char literal", got)
+	}
+}
+
+// `\{` is an escape (STRING_ESCAPE in PromiseLexer.g4), not an interpolation, so
+// what follows it is literal text rather than code.
+func TestTempDirLines_IgnoresEscapedBrace(t *testing.T) {
+	data := []byte("  print_line(\"a \\{os.temp_dir} b\");\n")
+	if got := tempDirLines(data); len(got) != 0 {
+		t.Errorf("tempDirLines = %v, want none — \\{ escapes the brace, so this is literal text", got)
+	}
+}
+
+// An unterminated raw string must terminate the scan of its own line without
+// leaking state into the next one — raw strings, unlike \"\"\" blocks, never span
+// lines, so the following line is still scanned as code.
+func TestTempDirLines_UnterminatedRawStringDoesNotSwallowNextLine(t *testing.T) {
+	data := []byte("  string s = r\"{os.temp_dir}\n  string p = os.temp_dir + \"/x\";\n")
+	if got := tempDirLines(data); len(got) != 1 || got[0] != 2 {
+		t.Errorf("tempDirLines = %v, want [2] — the raw string ends with its line", got)
+	}
+}
+
+// Code following the close of a \"\"\" block on the same line is still code. The
+// existing block test closes at end of line, so it does not pin this down.
+func TestTempDirLines_ScansCodeAfterBlockStringCloses(t *testing.T) {
+	data := []byte("main() `test(expected: \"\"\"x\"\"\") { string p = os.temp_dir + \"/y\"; }\n")
+	if got := tempDirLines(data); len(got) != 1 || got[0] != 1 {
+		t.Errorf("tempDirLines = %v, want [1] — scanning resumes after the block closes", got)
+	}
+}
+
+// The pid exemption is per-line, like the marker. A file that already defines a
+// correct per-process helper must not license a hand-written fixed path later —
+// that copy-the-literal-form drift is precisely what the guard exists to catch.
+func TestTempDirLines_HelperDoesNotExemptLaterFixedPath(t *testing.T) {
+	data := []byte("_scratch(string n) string => os.temp_dir + \"/pr_\" + os.process_id.to_string() + n;\n" +
+		"\n" +
+		"  string p = os.temp_dir + \"/pr_iot_fixed\";\n")
+	if got := tempDirLines(data); len(got) != 1 || got[0] != 3 {
+		t.Errorf("tempDirLines = %v, want [3] — a correct helper above does not exempt line 3", got)
+	}
+}
+
+// isTestPrFile admits any .pr under tests/, not only *_test.pr — and the suite's
+// real offenders (tests/concurrency/io_syscall_*.pr) are exactly that shape.
+func TestCheckTestTempPaths_ScansNonSuffixedTestsFile(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("tests/concurrency/io_syscall_stress.pr",
+		[]byte("test_x() `test { string p = os.temp_dir + \"/pr_sc_fixed\"; }\n"))
+	err := CheckTestTempPaths(root)
+	if err == nil {
+		t.Fatal("expected error for a fixed temp path under tests/, got nil")
+	}
+	if !strings.Contains(err.Error(), "tests/concurrency/io_syscall_stress.pr:1") {
+		t.Errorf("error should name the violating site, got: %v", err)
+	}
+}
+
+// The guard is only a guard if RunPreCommit actually calls it.
+func TestRunPreCommit_RejectsFixedTempPathInTestFile(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("tests/new/scratch_test.pr",
+		[]byte("test_x() `test { string p = os.temp_dir + \"/pr_fixed\"; }\n"))
+	err := RunPreCommit(root)
+	if err == nil {
+		t.Fatal("expected RunPreCommit to reject a fixed temp path in a test file, got nil")
+	}
+	if !strings.Contains(err.Error(), "tests/new/scratch_test.pr") {
+		t.Errorf("error should name the violating file, got: %v", err)
+	}
+}

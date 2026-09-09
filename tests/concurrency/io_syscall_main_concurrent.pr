@@ -4,10 +4,17 @@
 use io;
 use os;
 
+// T1963: a per-process scratch name, so two concurrent runs on one machine never
+// share a file. Flat rather than the per-process directory modules/io/io_test.pr
+// uses — this file owns a handful of names and no directory, and a pure
+// expression can be called from inside `go` blocks and task bodies with no error
+// path at the call site. See docs/code-style.md, "Test scratch paths".
+_scratch(string name) string => os.temp_dir + "/pr_sc_" + os.process_id.to_string() + "_" + name;
+
 main() `test(expected: """main_io ok
 concurrent_main_io ok""", exclude: wasm) {
   // Test 1: Main does file IO, goroutine does CPU work + channel send
-  io.File.write_content(os.temp_dir + "/pr_sc_main1", "from main")?!;
+  io.File.write_content(_scratch("main1"), "from main")?!;
   channel[int] ch = channel[int](capacity: 1);
   go {
     int sum = 0;
@@ -17,9 +24,9 @@ concurrent_main_io ok""", exclude: wasm) {
     ch.send(sum);
   };
   // Main does more IO while goroutine runs
-  string data = io.File.read_content(os.temp_dir + "/pr_sc_main1")?!;
+  string data = io.File.read_content(_scratch("main1"))?!;
   assert(data == "from main", "main read");
-  io.File.remove(os.temp_dir + "/pr_sc_main1")?!;
+  io.File.remove(_scratch("main1"))?!;
   r1 := <-ch;
   if val := r1 {
     assert(val == 499500, "goroutine computed sum");
@@ -29,21 +36,21 @@ concurrent_main_io ok""", exclude: wasm) {
   // Test 2: Main and goroutines both do IO simultaneously
   channel[string] done = channel[string](capacity: 3);
   go {
-    io.File.write_content(os.temp_dir + "/pr_sc_main2a", "goroutine_a")?!;
-    string d = io.File.read_content(os.temp_dir + "/pr_sc_main2a")?!;
-    io.File.remove(os.temp_dir + "/pr_sc_main2a")?!;
+    io.File.write_content(_scratch("main2a"), "goroutine_a")?!;
+    string d = io.File.read_content(_scratch("main2a"))?!;
+    io.File.remove(_scratch("main2a"))?!;
     done.send(move d);
   };
   go {
-    io.File.write_content(os.temp_dir + "/pr_sc_main2b", "goroutine_b")?!;
-    string d = io.File.read_content(os.temp_dir + "/pr_sc_main2b")?!;
-    io.File.remove(os.temp_dir + "/pr_sc_main2b")?!;
+    io.File.write_content(_scratch("main2b"), "goroutine_b")?!;
+    string d = io.File.read_content(_scratch("main2b"))?!;
+    io.File.remove(_scratch("main2b"))?!;
     done.send(move d);
   };
   // Main also does IO concurrently
-  io.File.write_content(os.temp_dir + "/pr_sc_main2c", "main_data")?!;
-  string mainData = io.File.read_content(os.temp_dir + "/pr_sc_main2c")?!;
-  io.File.remove(os.temp_dir + "/pr_sc_main2c")?!;
+  io.File.write_content(_scratch("main2c"), "main_data")?!;
+  string mainData = io.File.read_content(_scratch("main2c"))?!;
+  io.File.remove(_scratch("main2c"))?!;
   assert(mainData == "main_data", "main concurrent IO");
 
   // Collect goroutine results

@@ -1,3 +1,10 @@
+use os;
+
+// T1963: a scratch path must be unique per process, so two concurrent runs of
+// the gzip tests on one machine never share a file. A Promise module is one
+// declaration scope, so this single helper serves every *_test.pr here.
+_gzip_scratch(string name) string => os.temp_dir + "/pr_gzip_" + os.process_id.to_string() + "_" + name;
+
 // All fixtures generated with Python:
 //   gzip.GzipFile(fileobj=buf, mode='wb', mtime=0).write(data)
 gunzip_hello_test() `test {

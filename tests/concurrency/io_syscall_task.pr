@@ -4,31 +4,38 @@
 use io;
 use os;
 
+// T1963: a per-process scratch name, so two concurrent runs on one machine never
+// share a file. Flat rather than the per-process directory modules/io/io_test.pr
+// uses — this file owns a handful of names and no directory, and a pure
+// expression can be called from inside `go` blocks and task bodies with no error
+// path at the call site. See docs/code-style.md, "Test scratch paths".
+_scratch(string name) string => os.temp_dir + "/pr_sc_" + os.process_id.to_string() + "_" + name;
+
 _write_and_read_1() string {
-  io.File.write_content(os.temp_dir + "/pr_sc_task1", "task data")?!;
-  string data = io.File.read_content(os.temp_dir + "/pr_sc_task1")?!;
-  io.File.remove(os.temp_dir + "/pr_sc_task1")?!;
+  io.File.write_content(_scratch("task1"), "task data")?!;
+  string data = io.File.read_content(_scratch("task1"))?!;
+  io.File.remove(_scratch("task1"))?!;
   return data;
 }
 
 _write_and_read_2a() string {
-  io.File.write_content(os.temp_dir + "/pr_sc_task2a", "alpha")?!;
-  string data = io.File.read_content(os.temp_dir + "/pr_sc_task2a")?!;
-  io.File.remove(os.temp_dir + "/pr_sc_task2a")?!;
+  io.File.write_content(_scratch("task2a"), "alpha")?!;
+  string data = io.File.read_content(_scratch("task2a"))?!;
+  io.File.remove(_scratch("task2a"))?!;
   return data;
 }
 
 _write_and_read_2b() string {
-  io.File.write_content(os.temp_dir + "/pr_sc_task2b", "beta")?!;
-  string data = io.File.read_content(os.temp_dir + "/pr_sc_task2b")?!;
-  io.File.remove(os.temp_dir + "/pr_sc_task2b")?!;
+  io.File.write_content(_scratch("task2b"), "beta")?!;
+  string data = io.File.read_content(_scratch("task2b"))?!;
+  io.File.remove(_scratch("task2b"))?!;
   return data;
 }
 
 _write_and_read_2c() string {
-  io.File.write_content(os.temp_dir + "/pr_sc_task2c", "gamma")?!;
-  string data = io.File.read_content(os.temp_dir + "/pr_sc_task2c")?!;
-  io.File.remove(os.temp_dir + "/pr_sc_task2c")?!;
+  io.File.write_content(_scratch("task2c"), "gamma")?!;
+  string data = io.File.read_content(_scratch("task2c"))?!;
+  io.File.remove(_scratch("task2c"))?!;
   return data;
 }
 

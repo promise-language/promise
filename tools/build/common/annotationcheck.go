@@ -89,10 +89,11 @@ type annotationGap struct {
 // compiler's tables that is known and already owned by an open tracker item.
 // A gap listed here is not reported; a gap that is not listed is.
 //
-// It lives in this file rather than in the document because docs/normative.md
-// §7 makes a specification a statement of the end state carrying no status:
-// "None of that is written in the document." The tag query is the status
-// section, so the exception ledger belongs to the checker.
+// It lives in this file rather than in the document because docs/org/normative.md
+// §3 makes a specification a statement of the end state carrying no status, and
+// no inline marker naming an item. The tag query is the status section, so the
+// exception ledger belongs to the checker — which is the rule docs/normative.md
+// §5 states in the other direction.
 //
 // The item ID is for the reader. Pre-commit runs offline and cannot reach the
 // tracker, so nothing here verifies the item is still open — that is review's

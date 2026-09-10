@@ -706,6 +706,37 @@ func TestAnnotationCoverageSemaFileMayCarryOtherDeclarations(t *testing.T) {
 	}
 }
 
+func TestAnnotationCoverageSemaVarWithoutAnInitializerIsAnError(t *testing.T) {
+	// `var builtinMetas map[string][]MetaTarget` with the entries filled in
+	// by an init() is a table this check cannot read. The declaration is
+	// there, so a name-only match would find it and then reconcile the
+	// document against an empty set — reporting every §6 row as naming an
+	// unregistered annotation. It must fail as an unreadable table instead.
+	root := annotationTree(t, copyMetas, copySpecs, coherentDocument())
+	overwriteSema(t, root, builtinMetasGo, "package sema\n\n"+
+		"var builtinMetas map[string][]MetaTarget\n\n"+
+		"func init() { builtinMetas = map[string][]MetaTarget{\n"+copyMetas+"} }\n")
+	expectFinding(t, checkAnnotationCoverage(root), "declares no package-level builtinMetas")
+}
+
+func TestAnnotationCoverageSemaVarMayShareItsDeclaration(t *testing.T) {
+	// Two shapes the compiler is free to adopt and the fixtures never
+	// produce: the table inside a parenthesized `var (...)` block, and the
+	// table sharing one ValueSpec with another name. The second is the one
+	// worth pinning — the value must be picked by the position of the
+	// matching name, so a table that is not the first in its spec still
+	// reconciles rather than being read from its neighbour.
+	root := annotationTree(t, copyMetas, copySpecs,
+		annotationDocument([]string{copyRow}, []string{rejectedRow}, nil))
+	overwriteSema(t, root, builtinMetasGo, "package sema\n\nvar (\n"+
+		"\tunrelated = map[string][]MetaTarget{\"decoy\": {TargetType}}\n\n"+
+		"\talsoUnrelated, builtinMetas = map[string][]MetaTarget{\"decoy\": {TargetType}}, "+
+		"map[string][]MetaTarget{\n"+copyMetas+"\t}\n)\n")
+	if err := checkAnnotationCoverage(root); err != nil {
+		t.Fatalf("the table must be found by name and read from its own position, got:\n%v", err)
+	}
+}
+
 // --- malformed document tables ---
 
 // groupedEntryTable renders a "### <heading>" section whose body is a table

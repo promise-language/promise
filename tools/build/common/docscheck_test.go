@@ -687,3 +687,81 @@ func TestReadDirIfExistsDistinguishesAbsentFromNotADirectory(t *testing.T) {
 		t.Fatalf("directory: got (%d entries, exists=%v, err=%v), want (1, true, nil)", len(entries), exists, err)
 	}
 }
+
+// --- the real repository ---
+
+// TestDocsReconcileThisCheckout runs the three document checks over the real
+// tree, the way TestAnnotationCoverageReconcilesThisCheckout runs the fourth.
+// Everything above proves each check reports what it should on a fixture; this
+// proves the repository it ships in is clean.
+//
+// Without it, a dangling link or an unindexed doc is caught only at commit
+// time, by the pre-commit hook. That is too late for the case these checks
+// exist to serve: someone reorganizing docs/ — retargeting a link, `git mv`ing
+// a document between docs/ root and docs/proposals/, or re-vendoring
+// docs/org/ — is running `go test ./common/`, not committing on every edit.
+//
+// The three run as subtests rather than through CheckDocs so a failure names
+// which invariant broke. checkAnnotationCoverage is deliberately not repeated
+// here: it has its own real-tree test, and calling it would have to reckon with
+// the annotationGaps ledger that the fixture tests swap out.
+func TestDocsReconcileThisCheckout(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	// A guard, not a courtesy: if the relative path ever stops reaching the
+	// repository root, every check below scopes itself out and the test
+	// passes while asserting nothing.
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(docIndex))); err != nil {
+		t.Fatalf("%s must be reachable from the package directory, or this test is a silent no-op: %v",
+			docIndex, err)
+	}
+
+	for _, c := range []struct {
+		name  string
+		check func(string) error
+	}{
+		{"links", checkDocLinks},
+		{"index", checkDocIndex},
+		{"catalog", checkCatalogCoverage},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if err := c.check(root); err != nil {
+				t.Fatalf("this checkout does not reconcile:\n%v", err)
+			}
+		})
+	}
+}
+
+// TestDocIndexCoversTheVendoredOrgCorpus pins the half of checkDocIndex's scope
+// that is easiest to lose. docs/org/ is vendored wholesale from another
+// repository and re-vendored as a unit, so a document appearing or disappearing
+// there is not an edit anyone here reviews line by line — the index entry is
+// what makes it visible, and the recursive `docs/*.md` pathspec is what forces
+// one to exist.
+//
+// checkDocIndex over the real tree (above) already fails if an org document is
+// unindexed. This asserts the corpus is non-empty and indexed, so that result
+// cannot come from there being nothing to check.
+func TestDocIndexCoversTheVendoredOrgCorpus(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	index, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(docIndex)))
+	if err != nil {
+		t.Fatalf("read %s: %v", docIndex, err)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "docs", "org"))
+	if err != nil {
+		t.Fatalf("read docs/org/: %v", err)
+	}
+	found := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		found++
+		if !strings.Contains(string(index), "(org/"+e.Name()+")") {
+			t.Errorf("%s does not link docs/org/%s", docIndex, e.Name())
+		}
+	}
+	if found == 0 {
+		t.Fatal("docs/org/ ships no Markdown; this test and the org half of checkDocIndex assert nothing")
+	}
+}

@@ -5,7 +5,13 @@ everything else there is.
 
 ## How to read this tree
 
-A file's directory determines whether it binds: everything in the `docs/` root is a specification, while `proposals/`, `research/` and `archive/` are not. [normative.md](normative.md) has the rules — what makes a document binding, the header every specification carries, why none of them contains a status section, and the one-fact-one-home rule that keeps two of them from disagreeing.
+A file's directory determines whether it binds: everything in the `docs/` root is a specification, while `proposals/`, `research/` and `archive/` are not. [org/normative.md](org/normative.md) has the rules — what makes a document binding, the header every specification carries, why none of them contains a status section, and the one-fact-one-home rule that keeps two of them from disagreeing. [normative.md](normative.md) carries this project's delta to them.
+
+**The status query.** A specification says what the project should be, never how far along it is — so its status section is the set of open items carrying its tag, which is always the file's basename. This project records items in its `tracker` MCP server, so the query is:
+
+```sh
+mcp__tracker__list --tag <basename>     # --tag large-integers, for large-integers.md
+```
 
 ---
 
@@ -49,7 +55,7 @@ A file's directory determines whether it binds: everything in the `docs/` root i
 - [../CONTRIBUTING.md](../CONTRIBUTING.md) — Contributor/maintainer onboarding: build the compiler, run tests, verify, and gates.
 - [build-tools.md](build-tools.md) — Build tooling architecture and the `bin/` tool inventory.
 - [gate-system.md](gate-system.md) — Four-class regression prevention gates (tests, memory, stability, size, performance).
-- [normative.md](normative.md) — How normative documents work: location as the binding rule, the tag header, why status lives in the tracker, and the ban on one fact having two homes.
+- [normative.md](normative.md) — This project's delta to [org/normative.md](org/normative.md): where a gap is recorded, one reconciliation item per document, forward-only scope, and what is actually machine-checked.
 - [tags.md](tags.md) — Canonical tag vocabulary and tagging rules for the `tracker` MCP server.
 - [platform-documentation.md](platform-documentation.md) — `promise doc` system for extracting `doc()` meta tags.
 
@@ -62,7 +68,7 @@ A file's directory determines whether it binds: everything in the `docs/` root i
 
 Vendored from [promise-language/org](https://github.com/promise-language/org) at the release named in [org/stamp.json](org/stamp.json). Never edited here: an issue about one of these documents is filed against `org` (org/normative.md §7); what this project files locally under their tags is its own compliance gaps.
 
-- [org/normative.md](org/normative.md) — What makes a document binding, and the one docs structure every project holds. This project's own [normative.md](normative.md) predates it; reconciling the two is tracked work.
+- [org/normative.md](org/normative.md) — What makes a document binding, and the one docs structure every project holds. This project's own [normative.md](normative.md) states only its delta to it.
 - [org/engineering-guide.md](org/engineering-guide.md) — How code in this organization is written, in any language.
 - [org/engineering-guide-promise.md](org/engineering-guide-promise.md) — The engineering guide applied to Promise source.
 - [org/engineering-guide-go.md](org/engineering-guide-go.md) — The engineering guide applied to Go source.

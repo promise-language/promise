@@ -2,176 +2,90 @@
 
 > **Tag:** `normative` — remaining work to complete this document: `mcp__tracker__list --tag normative`
 
-What makes a document in this repository binding, what one must contain, and the rules that keep
-two of them from ever disagreeing. Its subject is the documents themselves; it is one of them, and
-every rule below applies to it.
+[org/normative.md](org/normative.md) defines what makes a document in this repository binding, the
+header every specification carries, why none of them contains a status section, and the
+one-fact-one-home rule that keeps two of them from disagreeing. It binds here, and it is never
+edited here: a defect in one of its rules is filed against
+[promise-language/org](https://github.com/promise-language/org).
 
-## 1. Location is the whole rule
+This document is the **project-local delta** — the few facts about reconciliation that the shared
+document cannot carry, because they differ from project to project. Every other rule about the
+documents in this repository is [org/normative.md](org/normative.md)'s, and is cited here rather
+than restated (§4 there).
 
-There is no configuration file and no per-document marker. Which directory a file sits in
-determines what it is:
+## 1. Where a gap is recorded
 
-| Location | What a file there is | Binding? |
-|----------|----------------------|----------|
-| `docs/` root | A **specification**: what the project *should* be — the intended end state. | **Yes.** |
-| `docs/proposals/` | An end state that has **not been ratified** — a draft, an RFC, a direction still under discussion. | No. |
-| `docs/archive/` | An end state that has been **superseded** — kept for history. | No. |
-| `docs/research/` | Background analysis feeding a decision — an assessment, not a design. | No. |
+Items live in this project's `tracker` MCP server. GitHub Issues is the public inbound surface: an
+issue filed there is imported and becomes a tracker item, and the item is what the tag query
+returns. The query's exact spelling is stated once, in [index.md](index.md), which is the home
+[org/normative.md](org/normative.md) §2 designates for it.
 
-**Ratifying a proposal is a `git mv` into the root**, plus the header of §2. Retiring a
-specification is a `git mv` into `docs/archive/`. Nothing else marks the transition, so the move
-*is* the decision and shows up as one reviewable diff.
+Which tags an item carries is [tags.md](tags.md), where a document tag never satisfies the
+subsystem requirement (§1.3, §2.6 there).
 
-[index.md](index.md) is the map of the tree and the one file in the root that is not a
-specification. Every document must be listed there.
+## 2. Granularity — one item per document
 
-## 2. The header
+> **A reconciliation pass files at most one item per document — never one per gap.**
 
-A specification opens with its title, and on the line beneath it, its tag:
+Its body is a checklist with one row per gap. A row either names the item that closes that gap, or
+describes the gap in place. When someone picks a described row up, it is promoted to its own item
+and the row points at it instead. The document's item closes when every row is closed, and a pass
+that finds no gap files nothing at all.
 
-```markdown
-# Large Integers
+This is what makes [org/normative.md](org/normative.md) §7's invariant hold at a bounded item count.
+The tag query returns one item per document plus whatever rows have been promoted out of it, so the
+list stays readable while every gap stays individually addressable — and a document whose pass has
+not run shows up as one open item rather than as nothing at all, which is the failure mode an
+honour-system invariant otherwise has. A row nobody can act on without re-deriving the gap is a row
+written badly, not an argument for finer granularity.
 
-> **Tag:** `large-integers` — remaining work to complete this document: `mcp__tracker__list --tag large-integers`
-```
+## 3. When the pass runs — forward-only
 
-The line is a blockquote, and sits directly under the title with a blank line either side.
+Every ratification and amendment runs the pass over its own delta, as its own change
+([org/normative.md](org/normative.md) §7). That is the whole steady-state rule, and nothing periodic
+sweeps behind it.
 
-The tag is always the file's basename, so the vocabulary is the directory listing and
-[tags.md](tags.md) does not duplicate it. The line is not decoration: it is what makes §3 work.
+A document ratified before this rule existed carries **one backlog item covering its whole surface**,
+filed once and scheduled like any other work. There is no bulk sweep: the backlog is walked one
+document at a time, and that document's item is the record that its pass has not run yet.
 
-## 3. A specification states the end state
+## 4. What a gap is filed as
 
-**A specification describes what the project should be, never how far along it is.** It says
-nothing about what is implemented, unimplemented, partially implemented, or implemented wrongly.
-It contains no status section, no progress notes, no phasing, no "currently", "not yet",
-"planned" or "implemented" — and **no inline markers naming a tracker item**, which are a status
-section arriving one sentence at a time.
+The three kinds of gap — unbuilt, divergent, unspecified — are named in
+[org/normative.md](org/normative.md) §7, and the tag facets in [tags.md](tags.md). This project
+files them as:
 
-Status is not a property of a specification. It is a property of the *relationship* between the
-specification and the implementation, and that relationship is recorded in the tracker (§7) — so
-`mcp__tracker__list --tag <basename>` *is* the status section, always current, and never something
-a reader has to trust prose about.
-
-The practical test: **a specification should read identically the day before and the day after the
-work that implements it.** If a sentence would have to change when an item closes, that sentence is
-status and does not belong.
-
-## 4. One fact, one home — supersession is forbidden
-
-**A fact is specified in exactly one document.** Two specifications must never define the same
-thing, and no specification may claim authority over another.
-
-These are forbidden: *supersedes*, *takes precedence over*, *overrides*, *governs*, *this document
-wins*, *the authoritative version is*. A document that needs to say one of them is proof that a
-fact has two homes. The remedy is always to **delete the duplicate and cross-reference**, never to
-rank the copies.
-
-The reasons are the same ones that make duplication a defect in code:
-
-- **Precedence is unenforceable.** Nothing checks it, so it survives only as long as someone
-  remembers. A reader who reaches the stale copy first has no way to know it lost.
-- **Copies drift, and the wrong one gets believed.** This is not hypothetical here: a capability
-  table listed `Task[T]` as `` `sendable ``-only while the compiler treated it as sharable, and the
-  disagreement was resolved in favour of the wrong side — the same failure that
-  [annotations.md](annotations.md) §1 forbids one level down, where a property declared twice in the
-  compiler let an uncompilable program past the type checker.
-- **A precedence note is a permanent apology.** It documents the defect instead of fixing it, and it
-  costs every future reader a second lookup.
-
-This constrains specifications only. A note in `docs/archive/` saying which specification replaced a
-retired document records a *retirement* — the move already happened, and nothing binding is in two
-places — so it is a fact, not a precedence claim.
-
-**How to split a subject instead.** Give each document a different *kind* of statement about it:
-
-| | Home | Contains |
+| Gap kind | Item type | Tags |
 |---|---|---|
-| The **model** | the section that owns the concept | What the thing means, what invariant it preserves, how it is derived |
-| The **contract** | the reference for that surface | Targets, parameters, interactions, where it is read |
+| **Divergent** | `bug` | document tag + subsystem/area + exactly one quality/kind tag |
+| **Unbuilt** | `task` | document tag + subsystem/area |
+| **Unspecified** | `task` | document tag + subsystem/area |
 
-`` `sendable `` is the worked example: §6.5 of [language-design.md](language-design.md) defines the
-capability — what crossing a goroutine boundary means, and how the capability is derived from a
-type's fields — while [annotations.md](annotations.md) defines the annotation that asserts it.
-Neither restates the other, and each links to the other once.
+A **Divergent** gap is an ordinary defect that a document happens to forbid, so it is filed as one
+and *additionally* carries the document's tag. That tag is what puts it in the document's status
+section; it is never the item's only area tag.
 
-**A fact whose home is source code stays there.** Which capability `Task[T]` asserts is read from
-`modules/std/task.pr`; copying it into prose creates a third copy that no test can catch drifting.
-Prose says where to look, not what it will say.
+The table governs a row promoted out of a document's item (§2). The document's own item is always a
+`task`, whatever kinds its rows turn out to be, tagged with the document's basename plus `normative`
+and `docs` — the pass is documentation work until one of its rows is picked up.
 
-## 5. Cross-reference, do not copy
+## 5. What is checked
 
-Link to the document that owns a fact. If a passage must be edited whenever the target changes, it
-is a copy however it is worded — a paraphrase and a quotation drift identically.
+**Nothing verifies that a gap has an item.** There is no machine-readable notion of a gap in
+general — one side is prose and the other is a compiler — so
+[org/normative.md](org/normative.md) §7's invariant is upheld by review, exactly as its §8 says.
+Nothing re-checks at close time that a closed item's gap is really gone, either. The review that
+closes the item is the whole guarantee.
 
-Restating something to save the reader a click is the way duplication is always introduced. The
-click is cheaper than the divergence.
+One surface is the exception, and it is project-local: [annotations.md](annotations.md) §6's
+annotation table is machine-readable on both sides, so `checkAnnotationCoverage` reconciles it
+against the compiler's registration tables in both directions. A divergence there is not
+honour-system — an unledgered one fails the commit, and a ledger row whose divergence is gone is
+itself a finding.
 
-## 6. Lifecycle
+> **A known divergence is excused by a row in the checker's ledger, never by a marker in the
+> document.**
 
-A specification has three transitions, and each is a single reviewed change.
-
-**Ratification — proposal becomes binding.** A design begins in `docs/proposals/`, where it is not
-binding, carries no tag, and may be rewritten freely. Ratifying it is one change that does three
-things together: `git mv` into the root, add the §2 header, and move its entry into the body of
-[index.md](index.md). That change *is* the decision, and it is reviewed as one — there is no
-separate approval step and no marker recording that it happened.
-
-**Amendment — a binding document changes.** An amendment is an ordinary reviewed diff against the
-document. It lands **before or with** the change that implements it, never after: a specification
-that trails its implementation has stopped describing the end state and started reporting history.
-An amendment that widens the gap between the document and the implementation must file the items
-that close it, in the same change (§7).
-
-**Retirement.** `git mv` into `docs/archive/`, and move its index entry to the archive list. A
-retired document keeps its content; only its location, and so its authority, changes.
-
-## 7. Reconciliation with the implementation
-
-A specification states the end state, so at any moment the implementation may lag it, diverge from
-it, or exceed it. **None of that is written in the document.** It is carried entirely by the
-tracker, under one invariant:
-
-> **Every gap between a specification and the implementation is covered by an open tracker item
-> carrying that document's tag.**
-
-That invariant is what makes `mcp__tracker__list --tag <basename>` a *complete* status section
-rather than a partial one, and it is why the document needs no markers: a reader who wants to know
-what is true today runs the query, and a reader who wants to know what should be true reads the
-document. Neither answer contaminates the other.
-
-Three kinds of gap exist, and all three are recorded the same way:
-
-| Gap | Meaning | Item describes |
-|---|---|---|
-| **Unbuilt** | The document specifies something that does not exist yet. | Building it. |
-| **Divergent** | The implementation does something the document forbids, or does it differently. | Correcting the implementation — or, if the document is wrong, amending it under §6. |
-| **Unspecified** | The implementation has surface the document does not describe. | Specifying it, or removing it. A gap in the *document* is still a gap. |
-
-**The reconciliation pass.** After a document is ratified or amended, walk it against the
-implementation and file the items that close every gap found. Run the pass as its **own change**,
-separate from the document change: the document's diff then stays reviewable as a statement of
-intent, and the resulting item list stays reviewable as a plan. Nothing about the pass is written
-into the document.
-
-Two rules keep the invariant true over time:
-
-- **Closing an item is what shrinks the gap** — never an edit to the document. When the work is
-  done, close the item and change nothing else; there was nothing in the document to update.
-- **An item may not be closed while its gap remains.** The tag query is the only record, so closing
-  an item early does not defer the gap, it erases it.
-
-## 8. What is enforced mechanically
-
-`CheckDocs` in `tools/build/common/` runs unconditionally in `RunPreCommit`, before the staged-file
-scan, so these cannot be skipped or deferred:
-
-| Check | Asserts |
-|---|---|
-| `checkDocLinks` | Every relative `.md` link resolves to a file that exists. Anchors are not checked, which is what keeps the false-positive rate at zero. |
-| `checkDocIndex` | Every tracked `docs/**.md` is linked from `index.md`. |
-| `checkCatalogCoverage` | Every directory under `modules/` has a catalog entry, and every shipped module is named in each inventory document. |
-| `checkAnnotationCoverage` | Every annotation the compiler registers has a row in `annotations.md`, and every row names a registered annotation, with matching targets and parameters; every row has an entry, and every entry repeats its own row. Known divergences between the document and the compiler are excused one at a time by a ledger in the checker — never by a marker in the document — and a ledger entry whose divergence is gone is itself a finding. The document's internal consistency is not ledgerable. |
-
-Everything else here is upheld by review. The rules most worth adding a check for are the ones a
-reader cannot verify locally: §3's ban on status sections, and §4's ban on precedence language.
+That is what lets a check strict enough to be worth running coexist with
+[org/normative.md](org/normative.md) §3's ban on inline markers: the exception has a home, and the
+home is source, where a stale one is caught.

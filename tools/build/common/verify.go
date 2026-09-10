@@ -84,6 +84,14 @@ func RunVerify(root string, args []string) error {
 	}
 	defer unlock()
 
+	// Drop any previous blessing before doing anything else. From here on a
+	// run that dies — a failing step, a Ctrl+C, a crash — leaves nothing
+	// blessed, so the commit gate refuses rather than honouring a record that
+	// describes content this run has already begun changing.
+	if err := clearVerifiedTree(root); err != nil {
+		return fmt.Errorf("clear verified tree: %w", err)
+	}
+
 	// Clean caches first if requested. Done before SetupLocalCache so that
 	// the local home is recreated empty, and before any build/test work so
 	// the run starts from a known state.
@@ -272,6 +280,18 @@ func RunVerify(root string, args []string) error {
 	}
 	if err := WriteGateValues(root, gv); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
+	}
+
+	// 11. Bless this tree. Every step above passed and the repairs are already
+	// applied, so the recorded id is of the content a commit would carry.
+	// Recorded before --push on purpose — the one place a red run does leave
+	// something blessed: a push that fails (non-fast-forward, a network blip)
+	// has not unverified the content, and dropping the record would charge a
+	// full re-verify to get it back. Unlike the gate-values sidecar above this
+	// is a hard failure: a silently skipped record is indistinguishable from a
+	// pass, and would refuse every subsequent commit with no way to tell why.
+	if err := recordVerifiedTree(root); err != nil {
+		return fmt.Errorf("record verified tree: %w", err)
 	}
 
 	if push {

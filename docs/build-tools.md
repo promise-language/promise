@@ -226,12 +226,14 @@ Release builds compile with `-tags embed_llvm` to enable the embedded tool extra
 
 The verify tool orchestrates the full pre-commit check:
 
+0. **Clear the blessing** — delete `.workspace/verified-tree` (see below)
 1. **Format** — `gofmt -w .` in compiler/, then `promise format` on all `.pr` files
 2. **Build** — full build pipeline (see above)
 3. **Vet** — `go vet ./...` excluding `internal/parser` (auto-generated)
 4. **Go tests** — `go test ./...` in compiler/, then tools/build, then flows/
 5. **Promise tests (host)** — `promise test tests/... modules/... examples/...`
 6. **Promise tests (WASM)** — if `--wasm` flag, same with `-target wasm32-wasi`
+7. **Record the blessing** — write the tree id of the verified content (see below)
 
 **A Go-suite failure ends the run.** All three Go suites in step 4 run — their
 failures are cheap and belong on screen together — but if any of them failed,
@@ -241,6 +243,49 @@ have nothing to add, and every Promise row of the summary says
 `not run (go tests failed)` rather than reporting a `0s` failure for a phase
 that never happened. The closing `FAILED:` line names the suite that stopped
 the run.
+
+### The verified tree
+
+Steps 0 and 7 are the writing end of a two-ended contract with the commit gate.
+Verify records the tree it blessed at `.workspace/verified-tree` — one git tree
+object id, in the gitignored per-clone `.workspace/` directory — and the commit
+gate refuses a commit whose staged tree is not that one. `verifiedtree.go` holds
+the writing end; the reading end is `bin/precommit-guard`, provisioned by
+`workspace setup` and never built here, so the record's path is spelled at both
+ends. That is the contract, not duplicated logic: the two ends compute different
+things.
+
+**The comparison is content against content — there is no clock on either side.**
+A tree blessed last week and untouched since is still blessed; a tree edited five
+seconds after verify passed is not. Formatting rides that same comparison: verify
+*repairs* (`gofmt -w`, `promise format`) in step 1 and records in step 7, so the
+blessed tree is always the formatted tree and unformatted content cannot be
+blessed at all.
+
+Three details are load-bearing:
+
+- **Step 0 clears before anything else runs**, immediately after the host lock is
+  taken. A run that dies mid-way — a red step, a Ctrl+C, a crash — must leave
+  nothing blessed, or the gate would honour a record describing content the dead
+  run had already begun changing.
+- **The tree is computed over a temp index seeded from a copy of the real index**,
+  so it is exactly what `git add -A` would stage, and the real index is untouched.
+  Ignore rules apply only to untracked paths, so any other seed gets the
+  ignored-versus-tracked cases wrong: an empty seed drops a tracked-but-ignored
+  file, and a `HEAD` seed both drops one force-added but not yet committed and
+  keeps one just `git rm --cached`ed. Either records a tree no `git add -A` can
+  stage — a permanent gate refusal whose named recovery, re-running verify,
+  reproduces it.
+- **`/.workspace/` must be gitignored.** An un-ignored record is itself part of
+  what `git add -A` stages, so rewriting it after the tree was measured blesses
+  an id no commit can match — the same permanent refusal, reached the other way.
+  Recording checks the entry and fails naming it, rather than producing a tree
+  that can never be staged.
+
+Recording is a hard failure, unlike the gate-values sidecar, which only warns: a
+silently skipped record is indistinguishable from a pass and would refuse every
+later commit with no way to tell why. Outside a git checkout there is no commit
+to gate, so recording reports a no-op instead.
 
 ### Flags
 

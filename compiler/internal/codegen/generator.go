@@ -71,6 +71,69 @@ func (c *Compiler) promoteGeneratorToFailable(genVal value.Value) value.Value {
 	return c.block.NewInsertValue(promoted, errSlot, 2)
 }
 
+// isRawGeneratorResult reports whether the type of a CALL result is a `stream[T]`,
+// i.e. a raw coroutine value rather than a `{vtable, instance}` structural view.
+//
+// The premise is sema-enforced and holds for EVERY stream-typed expression a
+// call can produce: a `stream[T]`-returning function or method must contain a
+// `yield` (sema/check.go — "returns stream[T] but contains no yield statements"),
+// a stream value can never be stored, returned or passed on (T1313/T1314/T1315),
+// and sema's isStructuralStreamView rejects every CallExpr. So the value is
+// always `{handle, slot}` (or `{handle, slot, errslot}` when failable), whose
+// field 1 is the YIELD SLOT — never an `_FnIter` instance. Generator values are
+// owned by their own cleanup paths (genForInGenerator's bindingGenerator,
+// dropDiscardedGenerator, genYieldDelegateGenerator); the structural-view temp
+// machinery must keep its hands off them (T0088/T1514/T1983/T1985).
+//
+// "a CALL result" is load-bearing, not incidental — `stream[T]` and `Stream[T]`
+// are one type (sema installs the lowercase spelling as an alias), so this is a
+// true type test only where sema has already ruled the structural view out. A
+// caller that starts from an arbitrary expression must gate on
+// isGeneratorFactoryCallExpr first.
+//
+// The premise expires the day a function may return a structural `Stream[T]`
+// VIEW — which docs/language-design.md §12 arguably already asks for and sema
+// today rejects (T1992). At that point this must stop testing the type and start
+// asking whether the callee is a generator (sema's Info.GeneratorFuncs); leaving
+// it as a type test would silently stop tracking such a view and leak it.
+func isRawGeneratorResult(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	_, ok := types.AsStream(t)
+	return ok
+}
+
+// isGeneratorFactoryCallExpr reports whether expr is the CALL half of the premise
+// isRawGeneratorResult documents, seeing through the wrappers a discarded factory
+// call can wear: `(gen(3));`, `genf(3)?!;`, `genf(3)?^;`, `genf(3)? e { … };` (T1999).
+//
+// Sema only guarantees "this Stream[T] value is a raw coroutine" for a CallExpr
+// (isStructuralStreamView, sema/stmt.go). Any OTHER Stream[T]-typed expression —
+// a local of the protocol type, a borrowed parameter — holds a structural VIEW,
+// whose field 0 is a vtable pointer; handing that to __promise_gen_destroy
+// segfaults. The one expression this misclassifies is a generator GETTER, which
+// really is a factory behind a MemberExpr — but that shape crashes on every path
+// today and is fixed by T1943, whose resolved-callee discriminator should replace
+// this syntactic test at both sites when it lands.
+func isGeneratorFactoryCallExpr(expr ast.Expr) bool {
+	for {
+		switch e := expr.(type) {
+		case *ast.ParenExpr:
+			expr = e.Expr
+		case *ast.ErrorPanicExpr:
+			expr = e.Expr
+		case *ast.ErrorPropagateExpr:
+			expr = e.Expr
+		case *ast.ErrorHandlerExpr:
+			expr = e.Expr
+		default:
+			_, ok := expr.(*ast.CallExpr)
+			return ok
+		}
+	}
+}
+
 // defineGeneratorFunc compiles a top-level generator function.
 func (c *Compiler) defineGeneratorFunc(fd *ast.FuncDecl, fn *ir.Func, elemType types.Type) {
 	obj := c.lookupFunc(fd.Name)

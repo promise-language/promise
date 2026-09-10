@@ -31,6 +31,58 @@ func (c *Compiler) cleanupStmtLevelTemps() {
 	c.drainEnumCtorTempsFrom(c.blockTempFloorEnum)
 }
 
+// tempRegistries holds the heap- and closure-env temp registries of an enclosing
+// statement while a nested region is compiled against fresh, empty ones.
+type tempRegistries struct {
+	heapTemps   []heapTemp
+	heapTempMap map[value.Value]int
+	envTemps    []envTemp
+	envTempMap  map[value.Value]int
+}
+
+// isolateTempRegistries hands the current heap (B0173) and closure-env (T0100)
+// registries back to the caller and installs empty ones, so a drain reached
+// inside the nested region touches only what that region created. It exists for
+// the two if-statement forms, which evaluate the condition/init BEFORE the
+// branches: those temps belong to the if statement itself and must be dropped
+// once, in the merge block, not separately down each arm.
+//
+// The stmtTemp and enum-ctor registries are deliberately NOT isolated: their
+// sites rely on seeing the enclosing statement's temps, and T1329's block-value
+// floors guard them instead. genBlock does its own heap-only save (T0088) and
+// must NOT isolate envTemps: an early `return` out of the block drains the
+// registry it can see, so hiding the enclosing statement's env temps there would
+// leak them — which is why T1515 gave a for-in iterable's env temps a scope
+// binding (promoteEnvTempsToScopeFrom) rather than a block barrier.
+//
+// The returned snapshot must be handed to restoreTempRegistries on every exit
+// path; both callers restore at their merge block and then drain from the T1329
+// floor.
+func (c *Compiler) isolateTempRegistries() tempRegistries {
+	saved := tempRegistries{
+		heapTemps:   c.heapTemps,
+		heapTempMap: c.heapTempMap,
+		envTemps:    c.envTemps,
+		envTempMap:  c.envTempMap,
+	}
+	c.heapTemps = nil
+	c.heapTempMap = make(map[value.Value]int)
+	c.envTemps = nil
+	c.envTempMap = make(map[value.Value]int)
+	return saved
+}
+
+// restoreTempRegistries puts back the registries isolateTempRegistries took away,
+// discarding whatever the nested region registered (each branch already drained
+// its own). Emits no IR — a caller that also wants the restored temps dropped
+// here calls cleanupHeapTempsFrom / cleanupEnvTempsFrom afterwards.
+func (c *Compiler) restoreTempRegistries(saved tempRegistries) {
+	c.heapTemps = saved.heapTemps
+	c.heapTempMap = saved.heapTempMap
+	c.envTemps = saved.envTemps
+	c.envTempMap = saved.envTempMap
+}
+
 // drainEnumCtorTemps emits a flag-guarded drop for every tracked inline
 // enum-constructor temp, then clears the list. Each temp's drop flag was set at
 // construction and cleared at any move site that consumed it (var binding, moved
@@ -1571,9 +1623,10 @@ func (c *Compiler) cleanupEnvTempsFrom(floor int) {
 
 // maybeTrackIterTemp tracks the instance pointer from a method call result
 // when the result type is a structural interface (T0088). At statement end,
-// unclaimed temps are cleaned up. Iterator/Stream types use __promise_iter_cleanup
+// unclaimed temps are cleaned up. Iterator types use __promise_iter_cleanup
 // (handles _FnIter parent chain + closure env). Other structural types use
 // __promise_structural_drop (B0270: RTTI-based drop for arbitrary concrete types).
+// A generator (`stream[T]`) result is deliberately excluded — see below.
 func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 	if result == nil || c.block == nil || c.block.Term != nil {
 		return
@@ -1590,17 +1643,26 @@ func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 	if !isStructuralView(resultNamed) {
 		return
 	}
+	// T1514/T1985: `stream[T]` satisfies isStructuralView, but a generator factory's
+	// result is a raw coroutine {handle, slot} pair whose field 1 is the YIELD SLOT,
+	// not an _FnIter instance. Registering it here aims __promise_iter_cleanup at
+	// coroutine memory that genForInGenerator, dropDiscardedGenerator (T1306) and
+	// genYieldDelegateGenerator already own — a double free on the discard and
+	// `yield *` paths, and the reason for-in used to blanket-clear every pending
+	// heap temp (which orphaned the ones it did not own). See isRawGeneratorResult.
+	if isRawGeneratorResult(resultType) {
+		return
+	}
 	// The result is a value struct {i8* vtable, i8* instance}. Extract instance ptr.
 	if _, ok := result.Type().(*irtypes.StructType); !ok {
 		return
 	}
 	instancePtr := c.block.NewExtractValue(result, 1)
-	// Iterator[T] and Stream[T] use iterCleanup (handles _FnIter parent chain).
-	// Other structural types use structuralDrop (B0270: RTTI-based, works for any type).
+	// Iterator[T] uses iterCleanup (handles _FnIter parent chain). Other structural
+	// types use structuralDrop (B0270: RTTI-based, works for any type).
 	_, isIter := types.AsIterator(resultType)
-	_, isStream := types.AsStream(resultType)
 	before := len(c.heapTemps)
-	if (isIter || isStream) && c.iterCleanup != nil {
+	if isIter && c.iterCleanup != nil {
 		c.trackHeapTemp(instancePtr, c.iterCleanup)
 	} else if c.structuralDrop != nil {
 		c.trackHeapTemp(instancePtr, c.structuralDrop)

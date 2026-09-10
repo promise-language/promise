@@ -1321,16 +1321,9 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 		c.block.NewCondBr(cond, thenBlock, mergeBlock)
 	}
 
-	// B0173: Save heap/env temps from the condition expression so branches don't
-	// prematurely clean them. Cleanup runs once in the merge block.
-	savedHeapTemps := c.heapTemps
-	savedHeapTempMap := c.heapTempMap
-	c.heapTemps = nil
-	c.heapTempMap = make(map[value.Value]int)
-	savedEnvTempsIf := c.envTemps     // T0100
-	savedEnvTempMapIf := c.envTempMap // T0100
-	c.envTemps = nil
-	c.envTempMap = make(map[value.Value]int)
+	// B0173/T0100: Isolate the heap/env temps from the condition expression so
+	// branches don't prematurely clean them. Cleanup runs once in the merge block.
+	savedTemps := c.isolateTempRegistries()
 
 	// B0198: Save condition's string temps so branches don't permanently clear them.
 	// Branches see the condition temps (for cleanup on return paths), but after each
@@ -1390,12 +1383,9 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 	// body, the enclosing expression's sibling heap/env temps sit below the floor
 	// and must survive to the enclosing merge — drain only the suffix created at/
 	// after the if. 0 outside a block-value body → full drain (unchanged).
-	c.heapTemps = savedHeapTemps
-	c.heapTempMap = savedHeapTempMap
+	c.restoreTempRegistries(savedTemps)
 	c.cleanupHeapTempsFrom(c.blockTempFloorHeap)
-	c.envTemps = savedEnvTempsIf     // T0100
-	c.envTempMap = savedEnvTempMapIf // T0100
-	c.cleanupEnvTempsFrom(c.blockTempFloorEnv)
+	c.cleanupEnvTempsFrom(c.blockTempFloorEnv) // T0100
 }
 
 // genIfStmtValue generates an if/else statement in value-producing position
@@ -2151,16 +2141,9 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 		c.block.NewCondBr(flag, thenBlock, mergeBlock)
 	}
 
-	// B0173: Save heap/env temps from the init expression so branches don't
-	// prematurely clean them. Cleanup runs once in the merge block.
-	savedHeapTemps := c.heapTemps
-	savedHeapTempMap := c.heapTempMap
-	c.heapTemps = nil
-	c.heapTempMap = make(map[value.Value]int)
-	savedEnvTempsUW := c.envTemps     // T0100
-	savedEnvTempMapUW := c.envTempMap // T0100
-	c.envTemps = nil
-	c.envTempMap = make(map[value.Value]int)
+	// B0173/T0100: Isolate the heap/env temps from the init expression so branches
+	// don't prematurely clean them. Cleanup runs once in the merge block.
+	savedTemps := c.isolateTempRegistries()
 
 	// Then: unwrap value, bind to local (scoped to then-block only)
 	c.block = thenBlock
@@ -2319,10 +2302,7 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 	// then and else paths reach the cleanup (via their branches to mergeBlock).
 	// T1329: floor-aware drain (see genIfStmt) so a sibling heap/env prefix
 	// survives when this if-unwrap is a leading statement in a block-value body.
-	c.heapTemps = savedHeapTemps
-	c.heapTempMap = savedHeapTempMap
+	c.restoreTempRegistries(savedTemps)
 	c.cleanupHeapTempsFrom(c.blockTempFloorHeap)
-	c.envTemps = savedEnvTempsUW     // T0100
-	c.envTempMap = savedEnvTempMapUW // T0100
-	c.cleanupEnvTempsFrom(c.blockTempFloorEnv)
+	c.cleanupEnvTempsFrom(c.blockTempFloorEnv) // T0100
 }

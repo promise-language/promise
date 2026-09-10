@@ -707,7 +707,7 @@ test_t1467_channel_arg() `test {
   assert(total == 5, "channel arg: {total}");
 }
 
-// --- 21. intermediate temps consumed by a nested borrowing call --------------
+// --- 21a. intermediate temps consumed by a nested borrowing call -------------
 //
 // The promoted value is the OUTER call's result; the inline temp the inner call
 // only borrowed is a different value that must keep its own (statement) owner.
@@ -736,6 +736,417 @@ test_t1467_vector_intermediate_arg() `test {
     acc = acc + s + ";";
   }
   assert(acc == "0:x1y2z3;1:x1y2z3;", "vector intermediate: {acc}");
+}
+
+// The same shape with a HEAP USER TYPE intermediate (T1514). `rebox` only borrows
+// the inline `Box(...)`, so that ctor's instance (and its string) stay caller-owned
+// and must reach the ordinary statement-end drain. for-in used to blanket-clear the
+// drop flag of EVERY pending heap temp before handing the coroutine to the loop
+// (T0088) — a disarm, not a transfer, so the intermediate was freed by nobody
+// (2 leaked allocations).
+
+rebox(Box b) Box `doc("Borrows b and returns an unrelated fresh box.") {
+  return Box(s: "-" + "w");
+}
+
+boxed_label(int n, Box b) string `doc("Non-generator control with the same signature.") {
+  return "{n}{b.s}";
+}
+
+test_t1514_heap_intermediate_ctor_arg() `test {
+  string acc = "";
+  for s in boxed_items(2, rebox(Box(s: "-" + "i"))) {
+    acc = acc + s;
+  }
+  assert(acc == "0-w1-w", "heap intermediate: {acc}");
+}
+
+// Re-entering the window from an enclosing loop: a flag left in the wrong state
+// across iterations would double free on the second pass or leak on every pass.
+test_t1514_heap_intermediate_ctor_arg_repeated() `test {
+  string acc = "";
+  int k = 0;
+  while (k < 3) {
+    for s in boxed_items(2, rebox(Box(s: "-" + "i"))) {
+      acc = acc + s;
+    }
+    k += 1;
+  }
+  assert(acc == "0-w1-w0-w1-w0-w1-w", "heap intermediate repeated: {acc}");
+}
+
+// Control: the identical nested shape with a NON-generator callee has always been
+// clean — the statement-end drain frees the intermediate. The generator shape must
+// now behave the same way.
+test_t1514_heap_intermediate_nongenerator_control() `test {
+  string r = boxed_label(2, rebox(Box(s: "-" + "i")));
+  assert(r == "2-w", "heap intermediate control: {r}");
+}
+
+// The other heap-temp KIND in the same window. §21a's intermediate is a plain
+// user-type instance drained by `Box.drop`; an iterator combinator chain
+// registers its `_FnIter` through maybeTrackIterTemp instead, with
+// `__promise_iter_cleanup` as the drop function and a parent chain plus a closure
+// env hanging off it. The blanket clear zeroed both kinds indiscriminately, so
+// the iterator kind needs its own guard — and it is the kind whose registration
+// the fix removed for stream results, which makes "still registered for a real
+// Iterator" worth pinning too.
+
+sum_iter(Iterator[int] it `doc("Borrowed iterator.")) int `doc("Sums the iterator without consuming the caller's chain.") {
+  int total = 0;
+  for x in it {
+    total += x;
+  }
+  return total;
+}
+
+test_t1514_iterator_intermediate_arg() `test {
+  int[] v = [1];
+  string acc = "";
+  for s in boxed_items(sum_iter(v.iter().map[int](|int x| -> x * 2)), Box(s: "-" + "p")) {
+    acc = acc + s;
+  }
+  assert(acc == "0-p1-p", "iterator intermediate: {acc}");
+}
+
+// A FAILABLE factory reaches genForInGenerator through
+// unwrapFailableGeneratorResult, which runs between the call and the loop — the
+// one for-in window the deleted blanket clear sat behind. Both spellings take
+// that branch: a bare call (T0284 auto-panic in a non-failable function) and an
+// explicit `?!`.
+
+boxed_items_failably!(int n `doc("Count."), Box b `doc("Box.")) stream[string] `doc("Failable twin of boxed_items; never raises for small n.") {
+  int i = 0;
+  while (i < n) {
+    if (i > 10) {
+      raise error("too many");
+    }
+    yield "{i}{b.s}";
+    i += 1;
+  }
+}
+
+test_t1514_failable_factory_heap_intermediate_arg() `test {
+  string acc = "";
+  for s in boxed_items_failably(2, rebox(Box(s: "-" + "i"))) {
+    acc = acc + s;
+  }
+  assert(acc == "0-w1-w", "failable intermediate: {acc}");
+}
+
+test_t1514_failable_factory_heap_intermediate_arg_panicking() `test {
+  string acc = "";
+  for s in boxed_items_failably(2, rebox(Box(s: "-" + "i")))?! {
+    acc = acc + s;
+  }
+  assert(acc == "0-w1-w", "failable intermediate ?!: {acc}");
+}
+
+// The for-in is not always a top-level statement. Both `if` forms isolate the
+// condition/init temps into their own registries before compiling the branches
+// (isolateTempRegistries), so a for-in inside a branch drains against a registry
+// that is not the enclosing statement's — the blanket clear used to reach into
+// whatever registry happened to be installed.
+
+box_len(Box b `doc("Borrowed box.")) int `doc("Length of b's string.") {
+  return b.s.len;
+}
+
+test_t1514_intermediate_inside_if_branch() `test {
+  string acc = "";
+  if (box_len(Box(s: "-" + "c")) == 2) {
+    for s in boxed_items(2, rebox(Box(s: "-" + "i"))) {
+      acc = acc + s;
+    }
+  }
+  assert(acc == "0-w1-w", "intermediate in if branch: {acc}");
+}
+
+test_t1514_intermediate_inside_if_unwrap_branch() `test {
+  string acc = "";
+  if b := maybe_box(true) {
+    for s in boxed_items(2, rebox(Box(s: "-" + "i"))) {
+      acc = acc + s + b.s;
+    }
+  }
+  assert(acc == "0-w-m1-w-m", "intermediate in if-unwrap branch: {acc}");
+}
+
+// --- 21b. closure arguments to a generator METHOD ---------------------------
+//
+// T1514: a method call whose result is a `stream[T]` no longer registers an
+// iterator temp, so it no longer claims the pending closure-env temps either —
+// that claim (T0100/B0213) exists for combinators like `.map(f)`, which store the
+// lambda inside the returned `_FnIter`. A coroutine only BORROWS its closure
+// parameter, so the env must stay caller-owned and be freed exactly once: by
+// T1467's promoted binding for the argument itself, and by the statement-end
+// drain for anything else in the window.
+
+type GenMapper `public `doc("Generator method taking a mapping closure.") {
+  string tag;
+
+  mapped(this, int n, (int) -> string f) stream[string] `public `doc("Streams f(i) for i in 0..n, each suffixed by the tag.") {
+    int i = 0;
+    while (i < n) {
+      yield "{f(i)}{this.tag}";
+      i += 1;
+    }
+  }
+
+  labelled(this, int n, (int) -> string f) string `public `doc("Non-generator control with the same signature.") {
+    return "{f(n)}{this.tag}";
+  }
+
+  counted(this, int n) stream[string] `public `doc("Streams i suffixed by the tag, for i in 0..n.") {
+    int i = 0;
+    while (i < n) {
+      yield "{i}{this.tag}";
+      i += 1;
+    }
+  }
+
+  counted_label(this, int n) string `public `doc("Non-generator control with the same signature.") {
+    return "{n}{this.tag}";
+  }
+}
+
+make_suffixer()(int) -> string `doc("Returns a closure owning a heap suffix.") {
+  string suffix = "-" + "c";
+  return move |int i| -> "{i}{suffix}";
+}
+
+test_t1514_generator_method_inline_closure_arg() `test {
+  GenMapper m = GenMapper(tag: "-" + "m");
+  string suffix = "-" + "s";
+  string acc = "";
+  for s in m.mapped(2, move |int i| -> "{i}{suffix}") {
+    acc = acc + s;
+  }
+  assert(acc == "0-s-m1-s-m", "inline closure arg: {acc}");
+}
+
+test_t1514_generator_method_call_result_closure_arg() `test {
+  GenMapper m = GenMapper(tag: "-" + "m");
+  string acc = "";
+  for s in m.mapped(2, make_suffixer()) {
+    acc = acc + s;
+  }
+  assert(acc == "0-c-m1-c-m", "call-result closure arg: {acc}");
+}
+
+test_t1514_method_closure_arg_nongenerator_control() `test {
+  GenMapper m = GenMapper(tag: "-" + "m");
+  string r = m.labelled(2, make_suffixer());
+  assert(r == "2-c-m", "non-generator closure control: {r}");
+}
+
+// A closure-env INTERMEDIATE: the inline lambda is consumed by a wrapper that
+// only BORROWS it and hands back an unrelated closure, so the lambda's env must
+// outlive the loop — the coroutine reads it on every resume. T1515 gave that env
+// a SCOPE binding (promoteEnvTempsToScopeFrom, run on every for-in iterable), so
+// this test does not re-cover that promotion; it pins the half T1514 owns, that
+// the generator method's own factory call no longer claims the env temp away
+// (claimAllEnvTemps fires only when the call tracked an iterator temp, and a
+// `stream[T]` result no longer does). Claimed, the promoted binding would inherit
+// a 0 flag and free nothing.
+
+wrap_borrowing((int) -> string f `doc("Borrowed inner closure."))(int) -> string `doc("Borrows f and returns a fresh capture-free closure.") {
+  return |int i| -> "{i}";
+}
+
+test_t1514_closure_intermediate_freed_once() `test {
+  GenMapper m = GenMapper(tag: "-" + "m");
+  string suffix = "-" + "s";
+  string acc = "";
+  for s in m.mapped(2, wrap_borrowing(move |int i| -> "{i}{suffix}")) {
+    acc = acc + s;
+  }
+  assert(acc == "0-m1-m", "closure intermediate: {acc}");
+}
+
+// The same shape through a generator FREE function — no receiver, no method
+// dispatch, so nothing but the argument window can own the env.
+mapped_free(int n `doc("Count."), (int) -> string f `doc("Mapper.")) stream[string] `doc("Streams f(i) for i in 0..n.") {
+  int i = 0;
+  while (i < n) {
+    yield "{f(i)}";
+    i += 1;
+  }
+}
+
+test_t1514_closure_intermediate_free_function() `test {
+  string suffix = "-" + "s";
+  string acc = "";
+  for s in mapped_free(2, wrap_borrowing(move |int i| -> "{i}{suffix}")) {
+    acc = acc + s;
+  }
+  assert(acc == "01", "closure intermediate, free fn: {acc}");
+}
+
+// --- 21c. a TEMP receiver of a generator METHOD ------------------------------
+//
+// T1983: the receiver claim (T0130) fires whenever a method's result is a
+// structural view, because a combinator (`.map(f)`) adopts the receiver into the
+// returned _FnIter's _parent chain and frees it from there. A `stream[T]` result
+// is a structural view too, but a coroutine adopts nothing — it only BORROWS
+// `this` — so the claim disarmed the receiver temp without giving it a new owner
+// and the receiver leaked. Unclaimed it keeps statement lifetime and is dropped
+// at the end of the for-in statement, which is after the last resume.
+
+make_gen_mapper() GenMapper `doc("Returns a fresh heap GenMapper — a caller-owned temp receiver.") {
+  return GenMapper(tag: "-" + "t");
+}
+
+test_t1983_generator_method_temp_receiver() `test {
+  string acc = "";
+  for s in make_gen_mapper().counted(2) {
+    acc = acc + s;
+  }
+  assert(acc == "0-t1-t", "temp receiver: {acc}");
+}
+
+// Same shape from an enclosing loop — a flag left live across iterations would
+// double free on the second pass.
+test_t1983_generator_method_temp_receiver_repeated() `test {
+  string acc = "";
+  int k = 0;
+  while (k < 3) {
+    for s in make_gen_mapper().counted(1) {
+      acc = acc + s;
+    }
+    k += 1;
+  }
+  assert(acc == "0-t0-t0-t", "temp receiver repeated: {acc}");
+}
+
+// Control: the identical shape with a non-generator method has always been clean.
+test_t1983_temp_receiver_nongenerator_control() `test {
+  string r = make_gen_mapper().counted_label(2);
+  assert(r == "2-t", "temp receiver control: {r}");
+}
+
+// A FAILABLE generator method, and a temp receiver produced by a failable factory
+// the call site unwraps — both reach the same claim site, and both leaked pre-fix.
+
+type FailSrc `public `doc("Source with a failable generator method.") {
+  string tag;
+
+  items!(this, int n) stream[string] `public `doc("Streams i suffixed by the tag; raises past 5.") {
+    int i = 0;
+    while (i < n) {
+      if (i > 5) {
+        raise error("too many");
+      }
+      yield "{i}{this.tag}";
+      i += 1;
+    }
+  }
+}
+
+make_fail_src() FailSrc `doc("Returns a fresh heap FailSrc.") {
+  return FailSrc(tag: "-" + "e");
+}
+
+make_fail_src_failably!() FailSrc `doc("Failable factory for a heap FailSrc.") {
+  return FailSrc(tag: "-" + "u");
+}
+
+test_t1983_failable_generator_method_temp_receiver() `test {
+  string acc = "";
+  for s in make_fail_src().items(2) {
+    acc = acc + s;
+  }
+  assert(acc == "0-e1-e", "failable generator temp receiver: {acc}");
+}
+
+test_t1983_unwrapped_temp_receiver() `test {
+  string acc = "";
+  for s in make_fail_src_failably()?!.items(2) {
+    acc = acc + s;
+  }
+  assert(acc == "0-u1-u", "unwrapped temp receiver: {acc}");
+}
+
+// A temp receiver outside a for-in. The receiver claim fires on the CALL, so it
+// is independent of how the stream is consumed: the two other consumers of a
+// generator factory value must keep the receiver owned too. Neither has a for-in
+// drain to fall back on — the discard is freed by dropDiscardedGenerator (T1306)
+// and the delegation by genYieldDelegateGenerator, and in both the receiver is
+// the statement's own temp.
+
+test_t1983_discarded_temp_receiver_generator_method() `test {
+  make_gen_mapper().counted(2);
+  assert(true, "discarded temp receiver ok");
+}
+
+t1983_delegate_temp_receiver() stream[string] `doc("Delegates to a generator method on a temp receiver.") {
+  yield * make_gen_mapper().counted(2);
+}
+
+test_t1983_yield_delegate_temp_receiver() `test {
+  string acc = "";
+  for s in t1983_delegate_temp_receiver() {
+    acc = acc + s;
+  }
+  assert(acc == "0-t1-t", "yield* temp receiver: {acc}");
+}
+
+// --- 21d. a temp receiver AND an intermediate on the same call ---------------
+//
+// The two owners this change restores meet on one statement: the receiver, which
+// the T0130 claim used to disarm (T1983), and an argument-list intermediate,
+// which the for-in blanket clear used to disarm (T1514). Both are heap instances
+// with their own drop, both must survive every resume, and both must be freed
+// exactly once — across all three ways a factory value is consumed.
+
+type BoxMapper `public `doc("Generator method taking a heap box argument.") {
+  string tag;
+
+  boxed(this, int n `doc("Count."), Box b `doc("Box.")) stream[string] `public `doc("Streams n items suffixed by the box's string and the tag.") {
+    int i = 0;
+    while (i < n) {
+      yield "{i}{b.s}{this.tag}";
+      i += 1;
+    }
+  }
+}
+
+make_box_mapper() BoxMapper `doc("Returns a fresh heap BoxMapper — a caller-owned temp receiver.") {
+  return BoxMapper(tag: "-" + "m");
+}
+
+test_t1514_method_heap_intermediate_arg() `test {
+  BoxMapper m = BoxMapper(tag: "-" + "m");
+  string acc = "";
+  for s in m.boxed(2, rebox(Box(s: "-" + "i"))) {
+    acc = acc + s;
+  }
+  assert(acc == "0-w-m1-w-m", "method heap intermediate: {acc}");
+}
+
+test_t1983_temp_receiver_with_heap_intermediate() `test {
+  string acc = "";
+  for s in make_box_mapper().boxed(2, rebox(Box(s: "-" + "i"))) {
+    acc = acc + s;
+  }
+  assert(acc == "0-w-m1-w-m", "temp receiver + intermediate: {acc}");
+}
+
+test_t1983_discarded_temp_receiver_with_heap_intermediate() `test {
+  make_box_mapper().boxed(2, rebox(Box(s: "-" + "i")));
+  assert(true, "discarded receiver + intermediate ok");
+}
+
+t1983_delegate_receiver_and_intermediate() stream[string] `doc("Delegates to a generator method carrying both a temp receiver and an intermediate.") {
+  yield * make_box_mapper().boxed(2, rebox(Box(s: "-" + "i")));
+}
+
+test_t1983_yield_delegate_temp_receiver_with_heap_intermediate() `test {
+  string acc = "";
+  for s in t1983_delegate_receiver_and_intermediate() {
+    acc = acc + s;
+  }
+  assert(acc == "0-w-m1-w-m", "yield* receiver + intermediate: {acc}");
 }
 
 // --- 22. generic shapes ------------------------------------------------------
@@ -785,6 +1196,46 @@ test_t1467_generic_type_heap_default() `test {
   assert(acc == "0-gx71-gx7", "generic type heap default: {acc}");
 }
 
+// T1983: a TEMP receiver whose type is a generic INSTANCE. A non-generic method on
+// a generic owner dispatches through the ordinary method path, so the receiver
+// claim applies there too and the monomorphized instance leaked pre-fix.
+
+make_generic_gen() GenericGen[string] `doc("Returns a fresh heap GenericGen[string].") {
+  return GenericGen[string](v: "-" + "gt");
+}
+
+test_t1983_generic_owner_temp_receiver() `test {
+  string acc = "";
+  for s in make_generic_gen().items("-" + "gs") {
+    acc = acc + s;
+  }
+  assert(acc == "0-gs-gt1-gs-gt", "generic owner temp receiver: {acc}");
+}
+
+// A generic free generator with INFERRED type args carrying an intermediate. The
+// inferred form routes through genInferredGenericCall, the second of the two call
+// shapes that reach maybeTrackIterTemp (the explicit-type-arg spelling goes
+// through genGenericFuncCall and never did) — so it is the generic half of the
+// registration the fix removed, with a heap intermediate riding along in the same
+// window.
+
+generic_indexed[T](T[] move items `doc("Consumed items."), Box b `doc("Box.")) stream[int] `doc("Streams one index per item, offset by the box's string length.") {
+  int i = 0;
+  while (i < items.len) {
+    yield i + b.s.len;
+    i += 1;
+  }
+}
+
+test_t1514_inferred_generic_heap_intermediate_arg() `test {
+  int[] v = [1, 2, 3];
+  int sum = 0;
+  for x in generic_indexed(move v, rebox(Box(s: "-" + "i"))) {
+    sum = sum + x;
+  }
+  assert(sum == 9, "inferred generic intermediate: {sum}");
+}
+
 // --- 23. two generator loops nested inside one another -----------------------
 //
 // The inner loop's promoted binding lives in the inner scope while the outer
@@ -800,6 +1251,56 @@ test_t1467_nested_generator_loops() `test {
     }
   }
   assert(acc == "0-A0-B;0-A1-B;1-A0-B;1-A1-B;", "nested generator loops: {acc}");
+}
+
+// --- 23b. an intermediate inside a COROUTINE body ----------------------------
+//
+// T1514: the blanket disarm the fix removed also fired inside a generator body
+// and inside a `go {}` block, where cleanup routes differently — a promoted
+// binding becomes a coroutine frame local rather than an ordinary scope binding.
+// Both leaked 2 pre-fix, exactly as the plain §21a shape did. The `yield *` case
+// is the CONTROL: delegation never had a blanket clear, so it was already clean —
+// it is kept because it is the other path maybeTrackIterTemp's bogus generator
+// temp used to reach (T1985's double free). The argument-only shapes are §16
+// and §23; these add the INTERMEDIATE.
+
+nested_boxed_items() stream[string] `doc("Consumes an inner generator whose argument list holds an intermediate.") {
+  for s in boxed_items(2, rebox(Box(s: "-" + "i"))) {
+    yield s;
+  }
+}
+
+test_t1514_intermediate_in_generator_body() `test {
+  string acc = "";
+  for s in nested_boxed_items() {
+    acc = acc + s;
+  }
+  assert(acc == "0-w1-w", "intermediate in generator body: {acc}");
+}
+
+delegated_boxed_items() stream[string] `doc("Delegates to an inner generator whose argument list holds an intermediate.") {
+  yield * boxed_items(2, rebox(Box(s: "-" + "i")));
+}
+
+// Control — clean before the fix as well (see the section note).
+test_t1514_intermediate_in_yield_delegate() `test {
+  string acc = "";
+  for s in delegated_boxed_items() {
+    acc = acc + s;
+  }
+  assert(acc == "0-w1-w", "intermediate in yield*: {acc}");
+}
+
+test_t1514_intermediate_in_goroutine() `test {
+  task[string] t = go {
+    string acc = "";
+    for s in boxed_items(2, rebox(Box(s: "-" + "i"))) {
+      acc = acc + s;
+    }
+    acc;
+  };
+  string r = <-t;
+  assert(r == "0-w1-w", "intermediate in goroutine: {r}");
 }
 
 // --- 24. `move` params: the callee already owns the argument ------------------
@@ -1455,15 +1956,26 @@ test_t1515_closure_intermediate_in_generator_body() `test {
   assert(acc == "0-F1-F", "generator body: {acc}");
 }
 
-// Not covered here, deliberately — each is a pre-existing defect with its own
-// item, verified to reproduce identically on a clean pre-T1467 build:
-//   - a heap user-type INTERMEDIATE in the argument list
-//     (`boxed_items(2, rebox(Box(s: "-" + "i")))`) leaks: for-in's stream branch
-//     disarms every pending heap temp before building the generator (T0088), so
-//     an intermediate the promotion did not claim is never freed — T1514.
-//   - a mut-ref (`T ~p`) generator param reads garbage after the first resume —
-//     T1516.
+// Not covered here, deliberately — pre-existing defects with their own items,
+// each verified to reproduce on a build that carries every fix above. All three
+// belong next to the shapes above once their own item is fixed.
+//
 //   - a FAILABLE method returning its own heap default double-frees on the
 //     direct call path (the `{i1, T, i8*}` result skips the return-alias
-//     check) — T1517.
-// All three belong next to the shapes above once their own items are fixed.
+//     check) — T1517, verified identical on a clean pre-T1467 build.
+//   - a `break` out of a generator for-in leaks 3 allocations — but it leaks the
+//     same 3 WITH and WITHOUT an intermediate in the argument list, so the whole
+//     delta is the coroutine frame's live locals on a mid-flight destroy (T1453),
+//     not the caller-side window this file is about. No leak-clean test of the
+//     `break` path can exist until T1453 lands.
+//   - a generator method carrying its own type params
+//     (`make_generic_src().labelled(move v, rebox(Box(…)))`) is the one factory
+//     call shape §21c and §21d cannot reach: it panics codegen, because
+//     defineMonoMethodInstances' named-type tail routes it to defineMethodFunc
+//     instead of defineGeneratorMethod — T2051.
+//
+// The three entries that used to sit here are all fixed now: the heap user-type
+// INTERMEDIATE is T1514, covered by §21a above (its early-`return` residue is
+// T1984); the closure-env INTERMEDIATE is T1515, covered by its own §20-§22
+// above; and the mut-ref (`T ~p`) generator param is T1516, covered by
+// tests/e2e/t1516_mutref_generator_test.pr.

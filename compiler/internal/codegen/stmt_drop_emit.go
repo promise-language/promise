@@ -731,10 +731,17 @@ func (c *Compiler) dropDiscardedTuple(expr ast.Expr, result value.Value) {
 // the yield slot (+ error slot for the failable {handle, slot, errslot} shape).
 //
 // NOT __promise_iter_cleanup / __promise_structural_drop: a generator instance has
-// a distinct layout from _FnIter (T0088), so those would crash. Every stream[T]
-// value is freshly produced by a generator factory (a stream[T]-returning function
-// MUST contain yield — sema-enforced), so it is always owned and never an alias:
+// a distinct layout from _FnIter (T0088), so those would crash — which is why
+// maybeTrackIterTemp refuses to register a stream[T] result at all (T1985). A
+// FACTORY-CALL stream[T] value is freshly produced and therefore always owned and
+// never an alias (see isRawGeneratorResult for the sema invariant), so
 // unconditionally freeing it at statement end is sound.
+//
+// Unlike this function's two siblings, the expression here is any discarded
+// ExprStmt, not necessarily a call — and `stream[T]` is the same type as the
+// `Stream[T]` protocol, so a discarded structural VIEW (`Stream[int] s = v; s;`)
+// lands here with a `{vtable, instance}` pair whose field 0 is a vtable pointer.
+// Destroying that as a coroutine handle segfaults, hence the call gate (T1999).
 func (c *Compiler) dropDiscardedGenerator(expr ast.Expr, result value.Value) {
 	if result == nil || c.block == nil || c.block.Term != nil {
 		return
@@ -746,7 +753,7 @@ func (c *Compiler) dropDiscardedGenerator(expr ast.Expr, result value.Value) {
 	if exprType == nil {
 		return
 	}
-	if _, ok := types.AsStream(exprType); !ok {
+	if !isRawGeneratorResult(exprType) || !isGeneratorFactoryCallExpr(expr) {
 		return
 	}
 	// Discriminate by LAYOUT through the shared predicates, exactly as the for-in

@@ -1224,6 +1224,149 @@ test_t1306_discarded_owned_arg_generator_no_leak() `test {
   assert(true, "owned-arg discard ok");
 }
 
+// T1985: every discard test above goes through a call shape that never reaches
+// maybeTrackIterTemp (a plain free function, or a generic one with EXPLICIT type
+// args). The two shapes that do reach it are a METHOD call and a generic free
+// function with INFERRED type args; both used to register the coroutine's yield
+// slot as an __promise_iter_cleanup temp (field 1 of a `stream[T]` value is the
+// yield slot, not an _FnIter instance). The statement-end drain then freed that
+// slot a second time after dropDiscardedGenerator (T1306) had already released
+// it, aborting the process with `fatal: invalid free (bad header magic)`.
+test_t1985_discarded_generator_method_no_crash() `test {
+  c := Counter(limit: 3);
+  c.values();
+  assert(c.limit == 3, "method discard ok");
+}
+
+// T1985: the inferred-generic FREE function half of the same reachability —
+// genInferredGenericCall calls maybeTrackIterTemp too. `t1306_gen_of` above is
+// the explicit-type-arg spelling, which routes through genGenericFuncCall and
+// never did.
+t1985_indices[T](T[] move items) stream[int] {
+  int i = 0;
+  while i < items.len {
+    yield i;
+    i = i + 1;
+  }
+}
+
+test_t1985_discarded_inferred_generic_generator_no_crash() `test {
+  int[] v = [1, 2, 3];
+  t1985_indices(move v);
+  assert(true, "inferred generic discard ok");
+}
+
+test_t1985_inferred_generic_generator_forin() `test {
+  int[] v = [1, 2, 3];
+  int sum = 0;
+  for x in t1985_indices(move v) {
+    sum = sum + x;
+  }
+  assert(sum == 3, "0+1+2 == 3");
+}
+
+// T1985: `yield *` over a generator METHOD is the second shape with no blanket
+// heap-temp clear to accidentally disarm the bogus temp — same double free.
+t1985_delegate_to_method() stream[int] {
+  c := Counter(limit: 3);
+  yield * c.values();
+}
+
+test_t1985_yield_delegate_generator_method() `test {
+  int sum = 0;
+  for x in t1985_delegate_to_method() {
+    sum = sum + x;
+  }
+  assert(sum == 3, "0+1+2 == 3");
+}
+
+// T1999: `stream[T]` and the `Stream[T]` protocol are the SAME type, so a
+// discarded expression statement holding a structural VIEW reaches
+// dropDiscardedGenerator with a `{vtable, instance}` pair. Destroying field 0 as
+// a coroutine handle segfaulted; the discard is only a generator's when the
+// expression is a factory CALL (isGeneratorFactoryCallExpr).
+test_t1999_discarded_structural_stream_view() `test {
+  int[] v = [1, 2, 3];
+  Stream[int] s = v;
+  s;
+  int sum = 0;
+  for x in s {
+    sum = sum + x;
+  }
+  assert(sum == 6, "view survives its own discard: {sum}");
+}
+
+// The gate must still see through every wrapper a discarded FACTORY call wears,
+// or the coroutine frame and yield slot leak (T1306): parentheses, and each of
+// the three error operators on a failable factory.
+test_t1999_discarded_generator_call_wrappers() `test {
+  count_to(3);
+  (count_to(3));
+  t0504_fail_gen()?!;
+  t0504_fail_gen()? e {
+  };
+  assert(true, "wrapped discards freed");
+}
+
+t1999_propagating_discard!() {
+  t0504_fail_gen()?^;
+}
+
+test_t1999_discarded_generator_propagate_wrapper() `test {
+  t1999_propagating_discard()?!;
+  assert(true, "?^ discard freed");
+}
+
+// The peel and the call test are two separate conditions. A gate that answered
+// "factory" as soon as it peeled a wrapper would destroy a parenthesised VIEW's
+// vtable pointer, so the negative side needs the wrapped spelling too — and the
+// view must still be iterable afterwards, proving nothing was freed.
+test_t1999_discarded_structural_stream_view_parenthesised() `test {
+  int[] v = [1, 2, 3];
+  Stream[int] s = v;
+  (s);
+  int sum = 0;
+  for x in s {
+    sum = sum + x;
+  }
+  assert(sum == 6, "parenthesised view survives its own discard: {sum}");
+}
+
+// Wrappers nest: the peel is a loop, not a single step.
+test_t1999_nested_wrapper_discard() `test {
+  ((count_to(3)));
+  (t0504_fail_gen()?!);
+  ((t0504_fail_gen())?!);
+  assert(true, "nested wrapped discards freed");
+}
+
+// T1306's discard cleanup is emitted wherever the discarded statement is, but
+// every test above discards from an ordinary function body. A generator body and
+// a `go {}` block route scope cleanup differently — the enclosing frame is a
+// coroutine, so the cleanup blocks the discard appends land inside a split
+// function. Both must still free the inner coroutine exactly once.
+t1306_discards_inside_generator() stream[int] `doc("Discards an inner generator, then yields.") {
+  count_to(2);
+  yield 7;
+}
+
+test_t1306_discarded_generator_inside_generator_body() `test {
+  int sum = 0;
+  for x in t1306_discards_inside_generator() {
+    sum = sum + x;
+  }
+  assert(sum == 7, "discard inside a generator body: {sum}");
+}
+
+test_t1306_discarded_generator_inside_goroutine() `test {
+  task[int] t = go {
+    count_to(2);
+    5;
+  };
+  int r = <-t;
+  assert(r == 5, "discard inside a goroutine: {r}");
+}
+
 // T1313: binding a generator value to a variable is now rejected in sema (it
 // previously segfaulted). This locks in that the working inline-consume path is
 // undisturbed by that rejection and does not leak (T0067 enforces no leak).

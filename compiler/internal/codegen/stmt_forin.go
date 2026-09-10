@@ -180,12 +180,14 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 			if c.info.FailableExprs[s.Iterable] {
 				genVal = c.unwrapFailableGeneratorResult(genVal, s.Pos())
 			}
-			// T0088: Generators have their own cleanup (bindingGenerator). Clear all
-			// pending heap temps to prevent __promise_iter_cleanup from running on
-			// generator instances (which have a different layout than _FnIter).
-			for i := range c.heapTemps {
-				c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.heapTemps[i].dropFlag)
-			}
+			// T1514: no heap-temp disarm here. maybeTrackIterTemp no longer registers
+			// a generator factory's coroutine value as an iterator temp (see
+			// isRawGeneratorResult), so nothing in this window holds the yield slot;
+			// the generator itself is owned by bindingGenerator, and every other temp
+			// keeps its statement lifetime and is drained after the loop by genStmt —
+			// exactly as the same call shape outside a for-in already is. T0088
+			// cleared EVERY pending heap temp here, which orphaned the ones it did not
+			// own: an inline ctor a nested borrowing call consumed was freed by nobody.
 			c.genForInGenerator(s, genVal, elem)
 		}
 	} else if elem, ok := types.AsRange(iterableType); ok {

@@ -182,12 +182,24 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		// structural interface (combinator like filter/take/skip). Terminal operations
 		// (count, collect, find) return non-structural types — their receiver should
 		// be freed at statement end, not claimed.
+		//
+		// T1983: a `stream[T]` result satisfies isStructuralView but is NOT such a
+		// combinator — it is a raw coroutine that only BORROWS `this`, never adopts
+		// the receiver into an _FnIter._parent chain that __promise_iter_cleanup
+		// would follow. Claiming there is a disarm without a new owner, so
+		// `for s in make_src().items(2)` leaked the receiver. Left unclaimed it keeps
+		// statement lifetime and is drained at the end of the for-in statement, which
+		// is after every resume — the same lifetime the identical non-generator shape
+		// (`make_src().label(2)`) already gets. Third caller of isRawGeneratorResult,
+		// after maybeTrackIterTemp (T1985) and dropDiscardedGenerator (T1306); the
+		// same premise is what let the for-in blanket disarm go away (T1514).
 		if c.pendingReceiverClaim != nil {
 			callResultType := c.info.Types[e]
 			if c.typeSubst != nil {
 				callResultType = types.Substitute(callResultType, c.typeSubst)
 			}
-			if resultNamed := extractNamed(callResultType); isStructuralView(resultNamed) {
+			if resultNamed := extractNamed(callResultType); isStructuralView(resultNamed) &&
+				!isRawGeneratorResult(callResultType) {
 				c.claimHeapTemp(c.pendingReceiverClaim)
 			}
 		}

@@ -408,7 +408,7 @@ func TestCodegenResourceReturn(t *testing.T) {
 	out := GeneratePromise(modules, "web")
 	// Wrapper constructs Element from handle
 	assertContains(t, out, "handle := _document_create_element(this._handle, tag);\n")
-	assertContains(t, out, "return Element(_handle: handle);")
+	assertContains(t, out, "return Element(_handle: handle, _owned: true);")
 	// Extern returns i32, not Element
 	assertContains(t, out, "_document_create_element(i32 handle, string tag) i32")
 }
@@ -433,7 +433,7 @@ func TestCodegenOptionalResourceReturn(t *testing.T) {
 	out := GeneratePromise(modules, "web")
 	// Wrapper checks handle and constructs
 	assertContains(t, out, "if handle == 0 { return none; }")
-	assertContains(t, out, "return Element(_handle: handle);")
+	assertContains(t, out, "return Element(_handle: handle, _owned: true);")
 	// Extern returns i32
 	assertContains(t, out, "_document_get_element_by_id(i32 handle, string id) i32")
 }
@@ -598,14 +598,15 @@ func TestCodegenConstructorWrapper(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "new(~this, string path) `public {")
-	assertContains(t, out, "this._handle = _descriptor_constructor(path);")
+	assertContains(t, out, createFactoryLine("Descriptor", "create", "string path"))
+	assertContains(t, out, "handle := _descriptor_constructor(path);")
+	assertContains(t, out, "return Descriptor(_handle: handle, _owned: true);")
 	assertContains(t, out, "`wasm_import(\"wasi:fs/types\", \"[constructor]descriptor\")")
 }
 
-// TestCodegenConstructorWrapperNoParams covers the no-argument constructor path
-// where the `thisParam` builder stays as bare `~this` (params == "").
-// Without this, the empty-params branch is not exercised by the other constructor tests.
+// TestCodegenConstructorWrapperNoParams covers the no-argument constructor path,
+// where the factory's parameter list is empty. Without this, the empty-params
+// branch is not exercised by the other constructor tests.
 func TestCodegenConstructorWrapperNoParams(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
@@ -621,8 +622,8 @@ func TestCodegenConstructorWrapperNoParams(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "new(~this) `public {")
-	assertContains(t, out, "this._handle = _descriptor_constructor();")
+	assertContains(t, out, createFactoryLine("Descriptor", "create", ""))
+	assertContains(t, out, "handle := _descriptor_constructor();")
 }
 
 func TestCodegenConstructorWrapperFailable(t *testing.T) {
@@ -642,8 +643,11 @@ func TestCodegenConstructorWrapperFailable(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "new!(~this, string path) `public {")
-	assertContains(t, out, "this._handle = _descriptor_constructor(path)^;")
+	assertContains(t, out, createFactoryLine("Descriptor", "create!", "string path"))
+	// `?^` is the propagate operator; a raise leaves the factory before any
+	// wrapper exists, so no wrapper can claim a handle the host never minted.
+	assertContains(t, out, "handle := _descriptor_constructor(path)?^;")
+	assertContains(t, out, "return Descriptor(_handle: handle, _owned: true);")
 }
 
 func TestCodegenStaticWrapper(t *testing.T) {
@@ -3726,7 +3730,7 @@ func TestWebIdlAttributeResourceTyped(t *testing.T) {
 	// Getter: handle-to-resource construction.
 	assertContains(t, out, "get parent Node `public {")
 	assertContains(t, out, "handle := _element_parent(this._handle);")
-	assertContains(t, out, "return Node(_handle: handle);")
+	assertContains(t, out, "return Node(_handle: handle, _owned: true);")
 
 	// Setter: resource value passed as handle.
 	assertContains(t, out, "set parent(Node value) `public {")
@@ -3954,7 +3958,7 @@ func TestWebIdlAttributeNullableResource(t *testing.T) {
 	assertContains(t, out, "get parent Node? `public {")
 	assertContains(t, out, "handle := _element_parent(this._handle);")
 	assertContains(t, out, "if handle == 0 { return none; }")
-	assertContains(t, out, "return Node(_handle: handle);")
+	assertContains(t, out, "return Node(_handle: handle, _owned: true);")
 }
 
 // TestWebIdlAttributeNullableBuiltinSetter exercises the Option<Builtin>
@@ -4266,7 +4270,7 @@ func TestCodegenStaticWrapperResourceReturn(t *testing.T) {
 	out := GeneratePromise(modules, "wasi")
 	assertContains(t, out, "open_file(string path) File `public `global {")
 	assertContains(t, out, "handle := _dir_open_file(path);")
-	assertContains(t, out, "return File(_handle: handle);")
+	assertContains(t, out, "return File(_handle: handle, _owned: true);")
 }
 
 func TestCodegenStaticWrapperOptionalResourceReturn(t *testing.T) {
@@ -4288,7 +4292,7 @@ func TestCodegenStaticWrapperOptionalResourceReturn(t *testing.T) {
 	assertContains(t, out, "find_file(string name) File? `public `global {")
 	assertContains(t, out, "handle := _dir_find_file(name);")
 	assertContains(t, out, "if handle == 0 { return none; }")
-	assertContains(t, out, "return File(_handle: handle);")
+	assertContains(t, out, "return File(_handle: handle, _owned: true);")
 }
 
 func TestFormatReturnSig(t *testing.T) {
@@ -4540,12 +4544,13 @@ func TestWebIdlDOMExceptionGeneratesValidPromise(t *testing.T) {
 	if strings.Contains(out, "`static") {
 		t.Errorf("generated source still contains `static:\n%s", out)
 	}
-	// Constructor uses Promise's new(~this, ...) shape. The wrapper signature
-	// keeps `string?` (T0698: caller-side option semantics preserved), but the
-	// call site lowers each option to its zero-value sentinel before crossing
-	// the FFI boundary so the extern doesn't have to carry an Option.
-	assertContains(t, out, "new(~this, string? message, string? name) `public {")
-	assertContains(t, out, `this._handle = _dom_exception_constructor(message ?: "", name ?: "");`)
+	// The constructor is a `global factory returning the resource (T1974). The
+	// wrapper signature keeps `string?` (T0698: caller-side option semantics
+	// preserved), but the call site lowers each option to its zero-value
+	// sentinel before crossing the FFI boundary so the extern doesn't have to
+	// carry an Option.
+	assertContains(t, out, createFactoryLine("DOMException", "create", "string? message, string? name"))
+	assertContains(t, out, `handle := _dom_exception_constructor(message ?: "", name ?: "");`)
 	// The extern declaration uses bare `string`, not `string?` — option-of-builtin
 	// is not a representable extern-param ABI (T0698).
 	assertContains(t, out, "_dom_exception_constructor(string message, string name) i32")
@@ -4562,4 +4567,364 @@ func TestWebIdlDOMExceptionGeneratesValidPromise(t *testing.T) {
 	// The wasm import name preserves the original IDL identifier verbatim —
 	// the snake-case change only affects internal Promise aliases.
 	assertContains(t, out, "`wasm_import(\"promise_env\", \"DOMException.constructor\")")
+}
+
+// --- T1510: owned vs borrowed resource wrappers ---
+
+// borrowFactoryLine is the exact factory a resource named `name` should emit.
+func borrowFactoryLine(name, factory string) string {
+	return factory + "(i32 handle) " + name + " `public `global `doc(\"Wrap an existing host handle without taking ownership. " +
+		"Dropping the returned wrapper does not release the handle; its owner (or the host) remains responsible for it.\") {"
+}
+
+// createFactoryLine builds the generated owning-factory signature for a
+// constructor that carried no IDL/WIT documentation of its own, so the default
+// `doc applies (T1974).
+func createFactoryLine(name, factory, params string) string {
+	return factory + "(" + params + ") " + name + " `public `global `doc(\"Construct a new resource, taking ownership of the handle the host mints. " +
+		"The returned wrapper releases that handle when it drops.\") {"
+}
+
+// TestCodegenResourceOwnershipShape pins the generated owned/borrowed shape on
+// the WIT path: every resource carries a `_owned` flag, gets a non-owning
+// `borrow` factory, and releases its handle only when it owns it. Before T1510
+// the drop was unconditional, so wrapping a handle somebody else owned — a
+// seeded ambient global, or another wrapper's handle — released it twice.
+func TestCodegenResourceOwnershipShape(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "Descriptor",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "read",
+				Kind:       FuncMethod,
+				Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}},
+				ImportName: "[method]descriptor.read",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+
+	assertContains(t, out, "i32 _handle;\n    bool _owned;\n")
+	assertContains(t, out, borrowFactoryLine("Descriptor", "borrow"))
+	assertContains(t, out, "return Descriptor(_handle: handle, _owned: false);")
+	// Drop releases only for an owning wrapper.
+	assertContains(t, out, "drop(~this) {\n        if this._owned {\n            _descriptor_drop(this._handle);\n        }\n    }")
+}
+
+// TestCodegenResourceOwnershipShapeWebIdl is the same check on the WebIDL path,
+// which reaches emitResource through WebIdlToIR rather than a hand-built IR.
+func TestCodegenResourceOwnershipShapeWebIdl(t *testing.T) {
+	src := `interface Node {
+		Node appendChild(Node child);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	out := GeneratePromise(WebIdlToIR(file), "web")
+
+	assertContains(t, out, "i32 _handle;\n    bool _owned;\n")
+	assertContains(t, out, borrowFactoryLine("Node", "borrow"))
+	assertContains(t, out, "return Node(_handle: handle, _owned: false);")
+	assertContains(t, out, "drop(~this) {\n        if this._owned {\n            _node_drop(this._handle);\n        }\n    }")
+	// A handle the host just minted for us is owned.
+	assertContains(t, out, "return Node(_handle: handle, _owned: true);")
+}
+
+// TestCodegenResourceNoDropStillHasOwnership covers the Drop-false resource:
+// no drop method and no [resource-drop] import (unchanged), but the `_owned`
+// field and `borrow` factory are still emitted. They are unconditional so a
+// construction site never has to know the target resource's Drop flag — a
+// method returning resource R spells `_owned: true` whether or not R drops.
+func TestCodegenResourceNoDropStillHasOwnership(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "Handle",
+			Drop: false,
+			Methods: []Func{{
+				Name:       "value",
+				Kind:       FuncMethod,
+				Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}},
+				ImportName: "[method]handle.value",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertNotContains(t, out, "drop(~this)")
+	assertNotContains(t, out, "[resource-drop]")
+	assertContains(t, out, "bool _owned;")
+	assertContains(t, out, borrowFactoryLine("Handle", "borrow"))
+}
+
+// TestCodegenConstructorWrapperMarksOwned verifies the constructor claims the
+// handle the host just minted, so the factory produces an OWNING wrapper —
+// the one difference between it and the `borrow` factory beside it.
+func TestCodegenConstructorWrapperMarksOwned(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "Descriptor",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "constructor",
+				Kind:       FuncConstructor,
+				Params:     []Param{{Name: "path", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+				ImportName: "[constructor]descriptor",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "handle := _descriptor_constructor(path);\n        return Descriptor(_handle: handle, _owned: true);")
+}
+
+// TestCodegenBorrowFactoryNameCollision covers the fallback: an IDL member whose
+// generated name is already `borrow` would produce two members of that name, so
+// the factory is emitted as `borrow_handle` instead.
+func TestCodegenBorrowFactoryNameCollision(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Slot",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "borrow",
+				Kind:       FuncMethod,
+				Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}},
+				ImportName: "Slot.borrow",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "web")
+	assertContains(t, out, borrowFactoryLine("Slot", "borrow_handle"))
+	assertContains(t, out, "return Slot(_handle: handle, _owned: false);")
+	// The IDL member keeps its own name; only the factory moves aside.
+	assertContains(t, out, "borrow(this) u32 `public {")
+}
+
+// TestCodegenBorrowFactoryNameNoFalseCollision guards the other direction: a
+// *constructor* emits `new`, never `borrow`, so it must not push the factory to
+// its fallback name.
+func TestCodegenBorrowFactoryNameNoFalseCollision(t *testing.T) {
+	r := Resource{
+		Name: "Slot",
+		Drop: true,
+		Methods: []Func{
+			{Name: "borrow", Kind: FuncConstructor, ImportName: "[constructor]slot"},
+			{Name: "read", Kind: FuncMethod, ImportName: "Slot.read"},
+		},
+	}
+	if got := borrowFactoryName(r); got != "borrow" {
+		t.Errorf("borrowFactoryName = %q, want \"borrow\" (a constructor emits `new`)", got)
+	}
+}
+
+// TestGenerateJSGlueSeedsAmbientHandlesDeterministically pins the seeding and
+// pinning halves of T1510: the three ambient handles are stored unconditionally
+// (so handle 2 is `document` — or nothing — but never `console` in a DOM-less
+// host), and _refRelease refuses to free them. The pinned range is *derived*
+// from the seed list rather than repeated as a literal, so adding a fourth
+// ambient reference cannot leave it releasable.
+func TestGenerateJSGlueSeedsAmbientHandlesDeterministically(t *testing.T) {
+	js := GenerateJSGlue([]*Module{{Name: "test", ImportModule: "promise_env"}})
+	assertContains(t, js, "const _ambientRefs = [\n  globalThis,\n"+
+		`  typeof document !== "undefined" ? document : undefined,`+"\n"+
+		`  typeof console !== "undefined" ? console : undefined,`+"\n];")
+	assertContains(t, js, "for (const _ambient of _ambientRefs) _refStore(_ambient);")
+	assertContains(t, js, "const _pinnedMax = _ambientRefs.length;")
+	assertContains(t, js, "function _refRelease(handle) {\n  if (handle <= _pinnedMax) return;")
+	// The old conditional form shifted console into slot 2 without a DOM, and the
+	// old literal bound could drift from the number of seeded slots.
+	assertNotContains(t, js, "if (typeof document !== \"undefined\") {\n    _refStore(document);")
+	assertNotContains(t, js, "const _pinnedMax = 3;")
+}
+
+// TestCodegenBorrowFactoryNameCollisionMemberKinds walks the member kinds that
+// can carry an IDL-derived name. Every non-constructor member emits a member of
+// that name inside the resource body — a method, a static `global function, or a
+// property accessor — so any of them named `borrow` must push the factory to its
+// fallback name. Only the WebIDL `attribute` path reaches AccessorGetter/Setter,
+// which is how a plain `attribute DOMString borrow;` would collide.
+// TestCodegenCreateFactoryNameCollision is the create-side twin of
+// TestCodegenBorrowFactoryNameCollision: an IDL member already named `create`
+// pushes the generated owning factory aside rather than colliding with it
+// (T1974).
+func TestCodegenCreateFactoryNameCollision(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Slot",
+			Drop: true,
+			Methods: []Func{
+				{
+					Name:       "create",
+					Kind:       FuncMethod,
+					Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}},
+					ImportName: "Slot.create",
+				},
+				{
+					Name:       "constructor",
+					Kind:       FuncConstructor,
+					ImportName: "[constructor]slot",
+				},
+			},
+		}},
+	}}
+	out := GeneratePromise(modules, "web")
+	assertContains(t, out, createFactoryLine("Slot", "create_handle", ""))
+	assertContains(t, out, "return Slot(_handle: handle, _owned: true);")
+	// The IDL member keeps its own name; only the factory moves aside.
+	assertContains(t, out, "create(this) u32 `public {")
+}
+
+func TestCodegenCreateFactoryNameCollisionMemberKinds(t *testing.T) {
+	cases := []struct {
+		name   string
+		member Func
+		want   string
+	}{
+		{"method", Func{Name: "create", Kind: FuncMethod, ImportName: "Slot.create"}, "create_handle"},
+		{"static", Func{Name: "create", Kind: FuncStatic, ImportName: "Slot.create"}, "create_handle"},
+		{"getter", Func{Name: "create", Kind: FuncMethod, Accessor: AccessorGetter, ImportName: "Slot.create.get"}, "create_handle"},
+		{"setter", Func{Name: "create", Kind: FuncMethod, Accessor: AccessorSetter, ImportName: "Slot.create.set"}, "create_handle"},
+		// The constructor IS the factory — it never collides with itself.
+		{"constructor", Func{Name: "create", Kind: FuncConstructor, ImportName: "[constructor]slot"}, "create"},
+		// Only one fallback level exists, so a member already named
+		// `create_handle` must not drag the factory anywhere — it keeps `create`,
+		// which is free.
+		{"unrelated name", Func{Name: "create_handle", Kind: FuncMethod, ImportName: "Slot.create_handle"}, "create"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Resource{Name: "Slot", Drop: true, Methods: []Func{tc.member}}
+			if got := createFactoryName(r); got != tc.want {
+				t.Errorf("createFactoryName = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodegenBorrowFactoryNameCollisionMemberKinds(t *testing.T) {
+	cases := []struct {
+		name   string
+		member Func
+		want   string
+	}{
+		{"method", Func{Name: "borrow", Kind: FuncMethod, ImportName: "Slot.borrow"}, "borrow_handle"},
+		{"static", Func{Name: "borrow", Kind: FuncStatic, ImportName: "Slot.borrow"}, "borrow_handle"},
+		{"getter", Func{Name: "borrow", Kind: FuncMethod, Accessor: AccessorGetter, ImportName: "Slot.borrow.get"}, "borrow_handle"},
+		{"setter", Func{Name: "borrow", Kind: FuncMethod, Accessor: AccessorSetter, ImportName: "Slot.borrow.set"}, "borrow_handle"},
+		{"constructor", Func{Name: "borrow", Kind: FuncConstructor, ImportName: "[constructor]slot"}, "borrow"},
+		// Only one fallback level exists, so a member already named
+		// `borrow_handle` must not drag the factory anywhere — it keeps `borrow`,
+		// which is free.
+		{"unrelated name", Func{Name: "borrow_handle", Kind: FuncMethod, ImportName: "Slot.borrow_handle"}, "borrow"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Resource{Name: "Slot", Drop: true, Methods: []Func{tc.member}}
+			if got := borrowFactoryName(r); got != tc.want {
+				t.Errorf("borrowFactoryName = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCodegenBorrowFactoryNameIsPerResource guards against choosing the factory
+// name once per module: a resource that collides must rename while its siblings
+// keep the plain `borrow`, or a single awkward interface would rename the
+// factory across an entire IDL file.
+func TestCodegenBorrowFactoryNameIsPerResource(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{
+			{Name: "Slot", Drop: true, Methods: []Func{
+				{Name: "borrow", Kind: FuncMethod, Results: []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}}, ImportName: "Slot.borrow"},
+			}},
+			{Name: "Free", Drop: true},
+		},
+	}}
+	out := GeneratePromise(modules, "web")
+	assertContains(t, out, borrowFactoryLine("Slot", "borrow_handle"))
+	assertContains(t, out, borrowFactoryLine("Free", "borrow"))
+	assertNotContains(t, out, borrowFactoryLine("Free", "borrow_handle"))
+}
+
+// TestWebIdlBorrowAttributeCollision drives the collision through the real
+// WebIDL front end rather than a hand-built IR: an `attribute` named `borrow`
+// becomes a getter/setter pair called `borrow`, which is the realistic way an
+// IDL file collides with the generated factory.
+func TestWebIdlBorrowAttributeCollision(t *testing.T) {
+	src := `interface Slot {
+		attribute DOMString borrow;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	out := GeneratePromise(WebIdlToIR(file), "web")
+	assertContains(t, out, borrowFactoryLine("Slot", "borrow_handle"))
+	// The attribute keeps its own name; only the factory moves aside.
+	assertContains(t, out, "get borrow string `public {")
+	assertContains(t, out, "set borrow(string value) `public {")
+}
+
+// TestCodegenResourceOwnershipShapeCanonicalABI pins that ownership is an
+// ABI-independent property of the wrapper: the canonical-ABI lowering changes
+// how externs are flattened, not who releases the handle, so `_owned`, the
+// `borrow` factory and the guarded drop are emitted there too.
+func TestCodegenResourceOwnershipShapeCanonicalABI(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "Descriptor",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "read",
+				Kind:       FuncMethod,
+				Params:     []Param{{Name: "length", Type: TypeRef{Kind: BuiltinKind, Builtin: "u64"}}},
+				Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}},
+				ImportName: "[method]descriptor.read",
+			}},
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, "i32 _handle;\n    bool _owned;\n")
+	assertContains(t, out, borrowFactoryLine("Descriptor", "borrow"))
+	assertContains(t, out, "return Descriptor(_handle: handle, _owned: false);")
+	assertContains(t, out, "drop(~this) {\n        if this._owned {\n            _descriptor_drop(this._handle);\n        }\n    }")
+}
+
+// TestGenerateJSGlueSeedsBeforeInit pins where the ambient seeding happens. It
+// used to run inside init(), so the handle numbers only became valid after a
+// successful instantiate — and a second init() re-seeded, minting fresh handles
+// for the same three objects. At module scope it runs exactly once, before any
+// import can observe the table.
+func TestGenerateJSGlueSeedsBeforeInit(t *testing.T) {
+	js := GenerateJSGlue([]*Module{{Name: "test", ImportModule: "promise_env"}})
+	seed := strings.Index(js, "for (const _ambient of _ambientRefs) _refStore(_ambient);")
+	if seed < 0 {
+		t.Fatal("ambient seeding loop not emitted")
+	}
+	initAt := strings.Index(js, "export async function init(")
+	if initAt < 0 {
+		t.Fatal("init() not emitted")
+	}
+	if seed > initAt {
+		t.Errorf("ambient handles are seeded at offset %d, after init() at %d — seeding must run at module scope", seed, initAt)
+	}
+	// The seeds must also come after _refStore's declaration reads, and the
+	// pinned bound must be derived rather than restated.
+	if store := strings.Index(js, "function _refStore("); store < 0 || store > seed {
+		t.Errorf("_refStore is not declared before the seeding loop (decl at %d, seed at %d)", store, seed)
+	}
 }

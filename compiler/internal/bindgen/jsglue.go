@@ -75,10 +75,29 @@ function _refLoad(handle) {
 }
 
 function _refRelease(handle) {
-  if (handle <= 0) return;
+  if (handle <= _pinnedMax) return;
   _refs[handle] = undefined;
   _freeList.push(handle);
 }
+
+// The ambient host references, seeded once at module load — before any import
+// can run, so handle N is always _ambientRefs[N - 1] and the numbers mean the
+// same thing in every host. Each entry is stored unconditionally: a DOM-less
+// host leaves slot 2 holding undefined rather than shifting console down into
+// it, which would otherwise make the handle numbers a property of the page.
+//
+// These references belong to the host, not to any wrapper, so releasing one is
+// always a bug — and a silently aliasing one, since the freed slot would be
+// handed to the next _refStore and a later _refLoad(2) would then read an
+// unrelated object. _refRelease ignores them instead; wrap them with a
+// resource's borrow() factory so no wrapper claims to own them (T1510).
+const _ambientRefs = [
+  globalThis,
+  typeof document !== "undefined" ? document : undefined,
+  typeof console !== "undefined" ? console : undefined,
+];
+for (const _ambient of _ambientRefs) _refStore(_ambient);
+const _pinnedMax = _ambientRefs.length;
 
 `)
 }
@@ -380,15 +399,6 @@ export async function init(wasmPath) {
   const response = await fetch(wasmPath);
   const { instance } = await WebAssembly.instantiateStreaming(response, importObject);
   wasm = instance;
-
-  // Store global references
-  _refStore(globalThis);           // handle 1 = globalThis
-  if (typeof document !== "undefined") {
-    _refStore(document);           // handle 2 = document
-  }
-  if (typeof console !== "undefined") {
-    _refStore(console);            // handle 3 = console
-  }
 
   // Call WASM _initialize if exported. A normal main() return is signaled by
   // pal_exit(0), which lowers to the promise_env.exit import — the only way

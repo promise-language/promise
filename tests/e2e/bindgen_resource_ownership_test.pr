@@ -1,0 +1,293 @@
+// T1510: runtime semantics of the owned/borrowed resource wrapper that
+// `promise bind webidl` / `promise bind wit` emit.
+//
+// The generated wrapper cannot run on the host target — its release path is a
+// `wasm_import extern into the JS/WASI host — so the shape is reproduced here
+// with the extern replaced by an `OwnTable` standing in for the host's
+// reference table. Everything the generator actually decides is kept verbatim:
+// the `i32 _handle` + `bool _owned` fields, the `borrow` `global factory
+// returning `_owned: false`, every other construction path spelling
+// `_owned: true`, and the `if this._owned` guarded `drop(~this)`. The bindgen
+// Go tests pin the emitted *text*; this file proves that text means what T1510
+// needs it to mean.
+//
+// Before T1510 the drop was unconditional, so wrapping a handle somebody else
+// owned released it twice: the seeded ambient globals (an init could only run
+// once per page) and a temporary rewrap over another wrapper's handle (which
+// left the original pointing at a freed slot).
+// Stand-in for the host reference table. `live` is a bitmask — bit h set means
+// handle h still resolves; `releases` counts release calls the guarded drops
+// made; `doubles` counts the ones that hit an already-free slot, which is
+// exactly the T1510 bug and must never be nonzero.
+type OwnTable `public `doc("Test double for the host reference table a generated wrapper releases into.") {
+  int live `value;
+  int releases `value;
+  int doubles `value;
+}
+
+// release_handle applies one host-side release to the shared table. Split out of
+// the drops so every wrapper type below releases identically, the way each
+// generated wrapper calls its own `_<name>_drop` extern.
+release_handle(Ref[Mutex[OwnTable]] host, i32 handle) `doc("Release one handle in the shared table, recording a double release rather than hiding it.") {
+  g := host.borrow.lock();
+  bit := 1 << (handle as int);
+  live := g.borrow.live;
+  if (live & bit) == 0 {
+    g.borrow = OwnTable(live: live, releases: g.borrow.releases + 1, doubles: g.borrow.doubles + 1);
+  } else {
+    g.borrow = OwnTable(live: live & ~bit, releases: g.borrow.releases + 1, doubles: g.borrow.doubles);
+  }
+}
+
+// mint_handle stands in for a host call that returns a fresh handle, and fails
+// the way the extern behind a failable generated constructor can.
+mint_handle!(bool ok, i32 handle) i32 `doc("Return a freshly minted handle, or raise the way a failing host call would.") {
+  if !ok {
+    raise error("host refused to mint a handle");
+  }
+  return handle;
+}
+
+// OwnNode mirrors a generated resource wrapper for an interface that declares no
+// constructor: `structural(protocol: false), handle plus ownership flag, a
+// non-owning `borrow` factory, a method that returns a wrapper over a handle the
+// host just minted (`_owned: true`, as every generated construction site does),
+// and a guarded drop. Field-wise construction stands in for the generated
+// static/getter wrapper sites.
+type OwnNode `structural(protocol: false) `public `doc("Model of a bindgen-generated resource wrapper with owned/borrowed handles.") {
+  i32 _handle;
+  bool _owned;
+  Ref[Mutex[OwnTable]] _host;
+
+  borrow(i32 handle, Ref[Mutex[OwnTable]] move host) OwnNode `public `global `doc("Wrap an existing host handle without taking ownership.") {
+    return OwnNode(_handle: handle, _owned: false, _host: move host);
+  }
+
+  child(this, i32 handle) OwnNode `public `doc("Return a wrapper over a handle the host just minted for us.") {
+    return OwnNode(_handle: handle, _owned: true, _host: this._host.clone());
+  }
+
+  drop(~this) {
+    if this._owned {
+      release_handle(this._host, this._handle);
+    }
+  }
+}
+
+// OwnMinted mirrors a generated wrapper for a resource that also has a way to
+// mint a fresh handle. `docs/wasm-bindings.md` maps a WIT/WebIDL `constructor`
+// to "Factory function returning R", so minting is spelled as a `global factory
+// beside `borrow` — both then reach the same field-wise construction and differ
+// only in the ownership they claim. (bindgen instead emits `new(~this, ...)`,
+// which shadows field-wise construction and so cannot coexist with the
+// `borrow` factory at all — that is T1974; this file models the shape the
+// doc specifies rather than the one that does not compile.)
+//
+// The order inside `mint` is load-bearing, and matches the generated failable
+// constructor body (`this._handle = _extern(...)^;` — the propagate operator
+// is misspelled there, T1973 — then `this._owned = true;`):
+// a raise propagates out of the handle acquisition before ownership is claimed,
+// so a failed mint never produces a wrapper that would release a handle the host
+// never minted.
+type OwnMinted `structural(protocol: false) `public `doc("Model of a generated wrapper that can both mint an owned handle and borrow one.") {
+  i32 _handle;
+  bool _owned;
+  Ref[Mutex[OwnTable]] _host;
+
+  borrow(i32 handle, Ref[Mutex[OwnTable]] move host) OwnMinted `public `global `doc("Wrap an existing host handle without taking ownership.") {
+    return OwnMinted(_handle: handle, _owned: false, _host: move host);
+  }
+
+  mint!(bool ok, i32 handle, Ref[Mutex[OwnTable]] move host) OwnMinted `public `global `doc("Mint a fresh handle from the host and take ownership of it.") {
+    minted := mint_handle(ok, handle)?^;
+    return OwnMinted(_handle: minted, _owned: true, _host: move host);
+  }
+
+  drop(~this) {
+    if this._owned {
+      release_handle(this._host, this._handle);
+    }
+  }
+}
+
+// OwnDocument is a second wrapper type over the same table — the rewrap case
+// from the bug report, where a handle owned by one wrapper is handed to an API
+// expecting a different resource type.
+type OwnDocument `structural(protocol: false) `public `doc("A second generated-style wrapper over the same host reference table.") {
+  i32 _handle;
+  bool _owned;
+  Ref[Mutex[OwnTable]] _host;
+
+  borrow(i32 handle, Ref[Mutex[OwnTable]] move host) OwnDocument `public `global `doc("Wrap an existing host handle without taking ownership.") {
+    return OwnDocument(_handle: handle, _owned: false, _host: move host);
+  }
+
+  drop(~this) {
+    if this._owned {
+      release_handle(this._host, this._handle);
+    }
+  }
+}
+
+own_table() Ref[Mutex[OwnTable]] `doc("A shared table with handles 0-7 live and no releases recorded.") {
+  return Ref[Mutex[OwnTable]](Mutex[OwnTable](OwnTable(live: 0xFF, releases: 0, doubles: 0)));
+}
+
+own_releases(Ref[Mutex[OwnTable]] host) int `doc("Total releases recorded so far.") => host.borrow.lock().borrow.releases;
+
+own_doubles(Ref[Mutex[OwnTable]] host) int `doc("Releases that hit an already-free slot.") => host.borrow.lock().borrow.doubles;
+
+own_is_live(Ref[Mutex[OwnTable]] host, i32 handle) bool `doc("Whether the handle still resolves in the table.") {
+  return (host.borrow.lock().borrow.live & (1 << (handle as int))) != 0;
+}
+
+// own_try_mint mints an owning wrapper and reports whether the host call
+// succeeded, dropping the wrapper inside its own scope either way.
+own_try_mint(Ref[Mutex[OwnTable]] host, bool ok, i32 handle) bool `doc("Mint an owning wrapper, reporting whether the host minted a handle.") {
+  OwnMinted w = OwnMinted.mint(ok, handle, host.clone())? e {
+    return false;
+  };
+  return true;
+}
+
+// An owning wrapper releases its handle exactly once — the behavior that must
+// not regress while making borrowed wrappers release nothing.
+test_owned_wrapper_releases_once() `test {
+  h := own_table();
+  {
+    w := OwnNode(_handle: 4, _owned: true, _host: h.clone());
+    assert(own_releases(h) == 0, "no release before scope exit");
+  }
+  assert(own_releases(h) == 1, "owned wrapper released its handle");
+  assert(own_doubles(h) == 0, "no double release");
+  assert(!own_is_live(h, 4), "handle 4 freed");
+}
+
+// A borrowed wrapper releases nothing: the handle still resolves after it drops,
+// and the table saw no release at all.
+test_borrowed_wrapper_releases_nothing() `test {
+  h := own_table();
+  {
+    b := OwnNode.borrow(4, h.clone());
+    assert(b._handle == 4, "borrow keeps the handle it was given");
+    assert(!b._owned, "borrow produces a non-owning wrapper");
+  }
+  assert(own_releases(h) == 0, "borrowed wrapper released nothing");
+  assert(own_is_live(h, 4), "handle 4 still live");
+}
+
+// Bug report item 1 — a seeded ambient handle (globalThis/document/console)
+// wrapped once per init. With an unconditional drop the second init read a
+// released slot; a borrow can be repeated any number of times.
+test_seeded_ambient_handle_survives_repeated_wrapping() `test {
+  h := own_table();
+  int i = 0;
+  while i < 5 {
+    d := OwnDocument.borrow(2, h.clone());
+    assert(own_is_live(h, 2), "ambient handle live while wrapped");
+    i = i + 1;
+  }
+  assert(own_releases(h) == 0, "wrapping an ambient handle never releases it");
+  assert(own_is_live(h, 2), "ambient handle survives every wrap");
+}
+
+// Bug report item 2 — rewrapping another wrapper's handle as a different
+// resource type. The temporary must not release the owner's handle, and the
+// owner must still release it exactly once afterwards.
+test_rewrap_does_not_steal_the_owners_handle() `test {
+  h := own_table();
+  {
+    owner := OwnNode(_handle: 5, _owned: true, _host: h.clone());
+    {
+      rewrapped := OwnDocument.borrow(owner._handle, h.clone());
+      assert(rewrapped._handle == owner._handle, "rewrap sees the same handle");
+    }
+    assert(own_releases(h) == 0, "temporary rewrap released nothing");
+    assert(own_is_live(h, 5), "owner's handle still live after the rewrap drops");
+  }
+  assert(own_releases(h) == 1, "owner released exactly once");
+  assert(own_doubles(h) == 0, "the owner's release was not a double release");
+  assert(!own_is_live(h, 5), "handle 5 freed once the owner dropped");
+}
+
+// A handle the host mints for us is owned, so a wrapper returned from a method
+// releases on its own — the `_owned: true` at every generated construction site.
+// The borrowed receiver it came from is untouched.
+test_method_returned_wrapper_is_owned() `test {
+  h := own_table();
+  {
+    parent := OwnNode.borrow(1, h.clone());
+    {
+      kid := parent.child(6);
+      assert(kid._owned, "a freshly minted handle is owned");
+    }
+    assert(own_releases(h) == 1, "the returned wrapper released its own handle");
+    assert(!own_is_live(h, 6), "handle 6 freed");
+    assert(own_is_live(h, 1), "the borrowed parent is untouched");
+  }
+  assert(own_releases(h) == 1, "the borrowed parent released nothing");
+  assert(own_doubles(h) == 0, "no double release");
+}
+
+// The owning mint path claims the handle it minted; a raise leaves the wrapper
+// unbuilt, so nothing releases a handle the host never minted.
+test_mint_ownership() `test {
+  h := own_table();
+  assert(!own_try_mint(h, false, 3), "the host refusal propagated");
+  assert(own_releases(h) == 0, "a failed construction releases nothing");
+  assert(own_doubles(h) == 0, "no double release after a failed construction");
+  assert(own_is_live(h, 3), "handle 3 was never claimed");
+
+  assert(own_try_mint(h, true, 3), "the host minted a handle");
+  assert(own_releases(h) == 1, "the minted wrapper released once");
+  assert(!own_is_live(h, 3), "handle 3 freed");
+}
+
+// A borrowed wrapper of a type that can also mint still releases nothing — the
+// ownership flag, not the construction path, decides.
+test_borrow_on_mintable_type_releases_nothing() `test {
+  h := own_table();
+  {
+    b := OwnMinted.borrow(2, h.clone());
+    assert(!b._owned, "borrow is non-owning even on a mintable resource");
+  }
+  assert(own_releases(h) == 0, "borrowed wrapper released nothing");
+  assert(own_is_live(h, 2), "handle 2 still live");
+}
+
+// Many wrappers over one handle: only the single owner releases it, no matter
+// how many borrowed views exist or in what order they drop.
+test_many_borrows_one_owner() `test {
+  h := own_table();
+  {
+    OwnNode[] views = [];
+    int i = 0;
+    while i < 4 {
+      views.push(OwnNode.borrow(7, h.clone()));
+      i = i + 1;
+    }
+    {
+      owner := OwnNode(_handle: 7, _owned: true, _host: h.clone());
+    }
+    assert(own_releases(h) == 1, "the one owner released once");
+    assert(!own_is_live(h, 7), "handle 7 freed by its owner");
+  }
+  assert(own_releases(h) == 1, "dropping the borrowed views added no releases");
+  assert(own_doubles(h) == 0, "no borrowed view double-released");
+}
+
+// The negative control. Every test above asserts `doubles == 0`; this one shows
+// that arm is reachable, so those assertions can actually fail. Two owning
+// wrappers over one handle is precisely the pre-T1510 shape — the seeded global
+// and the rewrap both produced it, because there was no way to spell a wrapper
+// that does not release.
+test_table_detects_a_double_release() `test {
+  h := own_table();
+  {
+    first := OwnNode(_handle: 4, _owned: true, _host: h.clone());
+    second := OwnNode(_handle: 4, _owned: true, _host: h.clone());
+  }
+  assert(own_releases(h) == 2, "both owning wrappers released");
+  assert(own_doubles(h) == 1, "the second release hit an already-free slot");
+  assert(!own_is_live(h, 4), "handle 4 is gone either way");
+}

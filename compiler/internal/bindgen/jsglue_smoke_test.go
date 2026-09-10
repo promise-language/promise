@@ -1,6 +1,7 @@
 package bindgen
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -154,12 +155,66 @@ console.error = (...args) => { errs.push(args.join(" ")); };
 })();
 `
 
+// refTableDriver instantiates the same glue and then exercises the reference
+// table directly through the module's exported _refStore/_refLoad/_refRelease.
+// It reports one JSON object of named boolean checks so the Go side can name the
+// exact invariant that broke rather than eyeballing a handle number (T1510).
+const refTableDriver = `
+const fs = require("fs");
+const path = require("path");
+const { pathToFileURL } = require("url");
+
+const dir = __dirname;
+
+globalThis.fetch = async (url) => {
+  const data = await fs.promises.readFile(path.join(dir, url));
+  return new Response(data, { headers: { "content-type": "application/wasm" } });
+};
+
+(async () => {
+  const mod = await import(pathToFileURL(path.join(dir, "glue.js")).href);
+  await mod.init("frontend.wasm");
+  const { _refStore, _refLoad, _refRelease } = mod;
+  const checks = {};
+
+  // Seeding is positional, not conditional: Node has no DOM, so slot 2 holds
+  // undefined and console still lands in slot 3 rather than sliding into 2.
+  checks.global_is_1 = _refLoad(1) === globalThis;
+  checks.slot_2_absent_without_dom = _refLoad(2) === undefined;
+  checks.console_is_3 = _refLoad(3) === console;
+
+  // Pinned: a release of an ambient handle is ignored, so an owning wrapper
+  // over a seeded handle cannot empty the slot or alias it to a later object.
+  _refRelease(3);
+  checks.console_survives_release = _refLoad(3) === console;
+  const first = _refStore({ tag: "first" });
+  checks.fresh_handle_above_pinned = first > 3;
+
+  // A handle the program actually owns still round-trips through the free list.
+  _refRelease(first);
+  checks.released_slot_cleared = _refLoad(first) === undefined;
+  checks.released_slot_reused = _refStore({ tag: "second" }) === first;
+
+  process.stdout.write("RESULT:" + JSON.stringify(checks) + "\n");
+})().catch((e) => {
+  process.stdout.write("RESULT:ERR " + JSON.stringify(e && e.message) + "\n");
+});
+`
+
 // runGlueSmoke generates glue for a bare "promise_env" module (no resources
 // or free functions — the minimal shape that still needs the base PAL
 // imports), writes it next to a hand-built smoke .wasm exiting with
-// exitCode, runs the Node driver above against them, and returns its single
+// exitCode, runs nodeSmokeDriver against them, and returns its single
 // "RESULT:..." stdout line.
 func runGlueSmoke(t *testing.T, nodePath string, exitCode byte) string {
+	t.Helper()
+	return runGlueSmokeDriver(t, nodePath, exitCode, nodeSmokeDriver)
+}
+
+// runGlueSmokeDriver is runGlueSmoke parameterized by the driver script, so a
+// test can instantiate the real generated glue and then poke at whatever part
+// of it it cares about.
+func runGlueSmokeDriver(t *testing.T, nodePath string, exitCode byte, driver string) string {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -172,7 +227,7 @@ func runGlueSmoke(t *testing.T, nodePath string, exitCode byte) string {
 		t.Fatalf("write smoke wasm: %v", err)
 	}
 	driverFile := filepath.Join(dir, "driver.js")
-	if err := os.WriteFile(driverFile, []byte(nodeSmokeDriver), 0644); err != nil {
+	if err := os.WriteFile(driverFile, []byte(driver), 0644); err != nil {
 		t.Fatalf("write driver: %v", err)
 	}
 
@@ -240,5 +295,34 @@ func TestGenerateJSGlueSmokeSurfacesNonZeroExit(t *testing.T) {
 	}
 	if !strings.Contains(result, `code=1`) {
 		t.Errorf("expected the exit code to be preserved on the propagated error, got: %s", result)
+	}
+}
+
+// TestGenerateJSGlueRefTablePinsAmbientHandles is the runtime half of T1510:
+// before the fix, init() seeded document/console conditionally (so handle 2 meant
+// `console` in a DOM-less host) and _refRelease freed any handle, which let a
+// wrapper that wrongly claimed to own a seeded slot both blank it and hand it to
+// the next _refStore — silently aliasing `document` to an unrelated object. The
+// per-handle checks below cover both halves plus the ordinary free-list reuse
+// that pinning must not disturb.
+func TestGenerateJSGlueRefTablePinsAmbientHandles(t *testing.T) {
+	nodePath := requireNode(t)
+	result := runGlueSmokeDriver(t, nodePath, 0, refTableDriver)
+
+	payload := strings.TrimPrefix(result, "RESULT:")
+	if strings.HasPrefix(payload, "ERR ") {
+		t.Fatalf("ref-table driver failed: %s", result)
+	}
+	var checks map[string]bool
+	if err := json.Unmarshal([]byte(payload), &checks); err != nil {
+		t.Fatalf("cannot parse driver result %q: %v", result, err)
+	}
+	if len(checks) == 0 {
+		t.Fatalf("driver reported no checks: %s", result)
+	}
+	for name, ok := range checks {
+		if !ok {
+			t.Errorf("ref-table invariant %q does not hold", name)
+		}
 	}
 }

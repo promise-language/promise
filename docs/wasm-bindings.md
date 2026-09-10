@@ -374,7 +374,7 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 | `variant { ... }` | `enum { ... }` | Promise enum with variant data |
 | `enum { ... }` | `enum { ... }` | Fieldless Promise enum |
 | `flags { ... }` | `type { ... }` | Value type with named flag constants, bitwise methods |
-| `resource` | `type { int _handle; drop(~this) { ... } }` | Ownership type |
+| `resource` | `type { i32 _handle; bool _owned; drop(~this) { ... } }` | Ownership type |
 | `own<R>` | `~R` (parameter) / `R` (return) | Unique ownership |
 | `borrow<R>` | `&R` | Shared reference |
 
@@ -452,13 +452,11 @@ enum JsValue `public `doc("Represents a dynamic JavaScript value.") {
         }
     }
 
-    `doc "Access a property by name. Returns Undefined if not found."
-    get(this, string key) JsValue `public {
+    get(this, string key) JsValue `public `doc("Access a property by name. Returns Undefined if not found.") {
         return _web_js_value_get(this, key);
     }
 
-    `doc "Set a property by name."
-    set(this, string key, JsValue value) `public {
+    set(this, string key, JsValue value) `public `doc("Set a property by name.") {
         _web_js_value_set(this, key, value);
     }
 }
@@ -492,41 +490,55 @@ WIT resources have lifecycle semantics that map naturally to Promise's ownership
 
 | WIT Concept | Promise Mapping |
 |-------------|----------------|
-| `resource R` | `type R { int _handle; drop(~this) { ... } }` |
+| `resource R` | `type R { i32 _handle; bool _owned; drop(~this) { ... } }` |
 | `own<R>` (parameter) | `~R` — consumed, caller loses access |
 | `own<R>` (return) | `R` — caller receives ownership |
 | `borrow<R>` (parameter) | `&R` — borrowed, not consumed |
-| `constructor` | Factory function returning `R` |
+| `constructor` | `R.create(...) R` — factory returning `R`, owning the handle it mints (never `new(~this, ...)`: an explicit `new` replaces field-wise construction, which `borrow` and every resource-returning wrapper need) |
 | `method` (self: borrow) | Method taking `this` (shared ref) |
-| resource drop | `drop(~this)` calls host's `[resource-drop]` import |
+| resource drop | `drop(~this)` calls host's `[resource-drop]` import **when `_owned`** |
+| (generated) | `R.borrow(i32 handle) R` — non-owning wrapper around a handle someone else owns |
 
 Example generated binding for a WIT filesystem resource:
 
 ```promise
 type Descriptor `public {
-    int _handle;
+    i32 _handle;
+    bool _owned;
 
-    `doc "Get file metadata."
-    stat!(this) DescriptorStat `public {
+    borrow(i32 handle) Descriptor `public `global `doc("Wrap an existing handle without taking ownership.") {
+        return Descriptor(_handle: handle, _owned: false);
+    }
+
+    create(string path) Descriptor `public `global `doc("Open a descriptor, taking ownership of the handle the host mints.") {
+        handle := _wasi_descriptor_constructor(path);
+        return Descriptor(_handle: handle, _owned: true);
+    }
+
+    stat!(this) DescriptorStat `public `doc("Get file metadata.") {
         return _wasi_descriptor_stat(this._handle)^;
     }
 
-    `doc "Read bytes from the file."
-    read!(this, u64 length) u8[] `public {
+    read!(this, u64 length) u8[] `public `doc("Read bytes from the file.") {
         return _wasi_descriptor_read(this._handle, length)^;
     }
 
-    `doc "Write bytes to the file."
-    write!(this, u8[] data) u64 `public {
+    write!(this, u8[] data) u64 `public `doc("Write bytes to the file.") {
         return _wasi_descriptor_write(this._handle, data)^;
     }
 
     drop(~this) {
-        _wasi_descriptor_drop(this._handle);
+        if this._owned {
+            _wasi_descriptor_drop(this._handle);
+        }
     }
 }
 
 // Low-level WASI imports (private)
+_wasi_descriptor_constructor(string path) i32
+    `extern("descriptor_constructor")
+    `wasm_import("wasi:filesystem/types", "[constructor]descriptor");
+
 _wasi_descriptor_stat(int handle) DescriptorStat!
     `extern("descriptor_stat")
     `wasm_import("wasi:filesystem/types", "[method]descriptor.stat");
@@ -841,27 +853,64 @@ non-zero.
 
 JS objects (DOM elements, fetch responses, etc.) cannot live in WASM linear memory. The glue layer maintains a reference table: an array indexed by `i32` handles.
 
-In the Promise binding module, each Web API type wraps a `_js_ref` handle:
+In the Promise binding module, each Web API type wraps a `_handle` into that
+table — the same field a WIT resource wraps, since one generator emits both:
 
 ```promise
 type Element `public `target(web) {
-    int _js_ref;
+    i32 _handle;
+    bool _owned;
 
     get tag_name string `public {
-        return _web_element_tag_name(this._js_ref);
+        return _web_element_tag_name(this._handle);
     }
 
     set_attribute(this, string name, string value) `public {
-        _web_element_set_attribute(this._js_ref, name, value);
+        _web_element_set_attribute(this._handle, name, value);
     }
 
     drop(~this) {
-        _web_ref_release(this._js_ref);
+        if this._owned {
+            _web_ref_release(this._handle);
+        }
     }
 }
 ```
 
-When a `~Element` is dropped in Promise, `drop(~this)` calls `_web_ref_release`, which calls `refRelease(id)` in the JS glue. This integrates with Promise's ownership model — the ownership checker prevents use-after-drop of JS references, and the destructor ensures no JS reference leaks.
+When an owning `~Element` is dropped in Promise, `drop(~this)` calls `_web_ref_release`, which calls `refRelease(id)` in the JS glue. This integrates with Promise's ownership model — the ownership checker prevents use-after-drop of JS references, and the destructor ensures no JS reference leaks.
+
+#### Owned and Borrowed Wrappers
+
+A handle is released exactly once, by the one wrapper that owns it. Ownership is
+per wrapper, not per type, and is carried in the `_owned` field:
+
+- **Owned.** Every wrapper the bindings build around a handle the host has just
+  minted for the program — `R.create(...)`, the factory a `constructor` generates,
+  and any method, static method, or getter returning a resource — is owning
+  (`_owned: true`). Its drop releases the handle.
+- **Borrowed.** `R.borrow(handle)` wraps a handle that somebody else owns. Its drop
+  releases nothing, so the owner (or the host) stays responsible for the handle.
+  This is the only safe way to name a handle the program did not receive ownership
+  of: an owning wrapper over such a handle releases it a second time, leaving the
+  real owner pointing at an empty slot.
+
+**Seeded ambient handles.** The glue seeds three fixed slots at module load,
+before any import can run — `1` = `globalThis`, `2` = `document`, `3` =
+`console` — unconditionally and in that order, so the numbers mean the same thing
+in every host (a host without a DOM leaves slot 2 empty rather than shifting
+`console` into it). These references belong to the host and no Promise wrapper
+owns them, so they must be wrapped with `borrow`:
+
+```promise
+doc := Document.borrow(2);      // non-owning: dropping it releases nothing
+```
+
+The glue pins these slots: `_refRelease` ignores any handle within the seeded
+range, a bound derived from the seed list rather than written out separately, so
+a fourth ambient reference is pinned by adding it. Releasing an ambient reference
+is always a bug, and an unpinned one would not merely blank the slot — the freed
+slot would be handed to the next `_refStore`, silently aliasing `document` to an
+unrelated object.
 
 ---
 

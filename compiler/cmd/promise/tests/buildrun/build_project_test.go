@@ -848,3 +848,211 @@ func TestMissingPerFileImportFailsBuild(t *testing.T) {
 		t.Errorf("missing per-file import hint\noutput:\n%s", combined)
 	}
 }
+
+// TestBindWebIdlBorrowFactoryCompilesClean is the end-to-end acceptance for
+// T1510's user-visible surface: `promise bind webidl` on an IDL with a resource,
+// plus a program that actually *calls* the generated non-owning factory, must
+// compile cleanly for wasm32-web.
+//
+// The generator-level tests pin the emitted text; only this one proves the text
+// is a callable declaration — that a `global factory is legal inside a
+// `structural(protocol: false) resource, that its `i32 handle` param accepts a
+// plain integer literal (the seeded ambient handle a caller writes by hand), and
+// that the extra `_owned` field does not break the wrapper's own construction
+// sites. Wrapping a seeded handle is the whole point of the item, so a
+// regression here is the failure a user hits first.
+func TestBindWebIdlBorrowFactoryCompilesClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := t.TempDir()
+	idlPath := filepath.Join(dir, "dom.idl")
+	idl := `interface Node {
+	constructor(DOMString tag);
+	attribute DOMString textContent;
+};
+
+interface Document {
+	Node createElement(DOMString tag);
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", outDir, idlPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	// A second file in the generated project (bind writes promise.toml, so outDir
+	// is a project and all its .pr files merge) using the borrow factory the way
+	// docs/wasm-bindings.md documents it: wrap ambient handle 2 without owning it,
+	// then use an owning wrapper the bindings minted alongside it.
+	//
+	// `Node` declares a constructor on purpose (T1974). A constructor emitted as
+	// `new(~this, ...)` REPLACES field-wise construction, which both the `borrow`
+	// factory and `create_element`'s `Node(_handle: ...)` return depend on — so
+	// one constructor-bearing interface made the whole generated module fail to
+	// compile. Every bind→compile fixture was constructor-less, which is why
+	// nothing caught it.
+	userPath := filepath.Join(outDir, "use_borrow.pr")
+	user := `main() {
+    doc := Document.borrow(2);
+    el := doc.create_element("div");
+    el.text_content = "hi";
+    made := Node.create("span");
+    made.text_content = "there";
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	emitCmd := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir)
+	out, err := emitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	// The borrowed wrapper must reach codegen as a real function, and the drop
+	// must be the guarded form — an unconditional release is the T1510 bug.
+	for _, want := range []string{"@Document.borrow(", "@Document.drop(", "@Node.borrow(", "@Node.create("} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR is missing %q", want)
+		}
+	}
+}
+
+// TestBindWitBorrowFactoryCompilesClean is the WIT/wasi counterpart of
+// TestBindWebIdlBorrowFactoryCompilesClean. `emitResource` is shared by both
+// front ends, but the surrounding module is not: the wasi path emits
+// `target(wasi) declarations and `wasm_import`s into a WIT interface name, and
+// nothing else compiles a `bind wit` result. Without this, the ownership fields
+// and the `borrow` factory were only ever compile-checked on the web target.
+func TestBindWitBorrowFactoryCompilesClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := t.TempDir()
+	witPath := filepath.Join(dir, "api.wit")
+	wit := `package test:api;
+
+interface types {
+  resource descriptor {
+    constructor(path: string);
+    read: func(len: u32) -> u32;
+    reopen: func() -> descriptor;
+  }
+}
+
+world api {
+  import types;
+}
+`
+	if err := os.WriteFile(witPath, []byte(wit), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "wit", "-name", "fsapi", "-o", outDir, witPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind wit failed: %v\n%s", err, out)
+	}
+
+	// Borrow an ambient handle, call a method through it, and let both a
+	// method-minted and a constructor-minted (owning) wrapper drop alongside it —
+	// every ownership state in one scope. The `constructor` is what T1974 broke on
+	// the WIT side, exactly as it did on the WebIDL side.
+	userPath := filepath.Join(outDir, "use_borrow.pr")
+	user := `main() {
+    d := Descriptor.borrow(3);
+    n := d.read(4u32);
+    fresh := d.reopen();
+    minted := Descriptor.create("/tmp/x");
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	emitCmd := exec.Command(bin, "emit-ir", "-target", "wasm32-wasi", outDir)
+	out, err := emitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-wasi failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	for _, want := range []string{"@Descriptor.borrow(", "@Descriptor.drop(", "@Descriptor.create("} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR is missing %q", want)
+		}
+	}
+}
+
+// TestBindWebIdlBorrowedWrapperSkipsRelease checks the *shape* of the generated
+// drop in IR rather than in the .pr text: the release import must sit behind a
+// conditional branch on `_owned`, not on the drop's entry path. A regression to
+// the pre-T1510 unconditional drop still emits `@Document.drop` and still passes
+// every text assertion in the bindgen package once the .pr is regenerated, so
+// this is the check that the guard survived lowering.
+func TestBindWebIdlBorrowedWrapperSkipsRelease(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := t.TempDir()
+	idlPath := filepath.Join(dir, "dom.idl")
+	if err := os.WriteFile(idlPath, []byte("interface Document {\n\tDOMString title();\n};\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	if out, err := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", outDir, idlPath).CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "use.pr"), []byte("main() {\n    d := Document.borrow(2);\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed: %v\n%s", err, out)
+	}
+
+	body, ok := irFunctionBody(string(out), "@Document.drop(")
+	if !ok {
+		t.Fatal("no @Document.drop definition in the generated IR")
+	}
+	release := strings.Index(body, "@document_drop(")
+	if release < 0 {
+		t.Fatalf("Document.drop never calls the release import:\n%s", body)
+	}
+	guard := strings.Index(body, "br i1 ")
+	if guard < 0 || guard > release {
+		t.Errorf("the release import is not guarded by a branch on _owned (branch at %d, release at %d):\n%s", guard, release, body)
+	}
+}
+
+// irFunctionBody returns the text of the first `define` whose signature contains
+// marker, up to the closing brace at column 0.
+func irFunctionBody(ir, marker string) (string, bool) {
+	for _, def := range strings.Split(ir, "\ndefine ") {
+		if !strings.Contains(def, marker) {
+			continue
+		}
+		if end := strings.Index(def, "\n}"); end >= 0 {
+			return def[:end], true
+		}
+		return def, true
+	}
+	return "", false
+}

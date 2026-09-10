@@ -226,23 +226,91 @@ func (g *generator) emitFlags(t Type) {
 	g.line("}")
 }
 
+// borrowDoc is the `doc text on every generated non-owning wrapper factory. It
+// says "host handle" rather than "JS handle" because emitResource is shared by
+// the WebIDL/web and WIT/wasi paths — a wasi Descriptor's handle indexes the
+// host's handle table, not a JS ref table.
+const borrowDoc = "Wrap an existing host handle without taking ownership. " +
+	"Dropping the returned wrapper does not release the handle; its owner " +
+	"(or the host) remains responsible for it."
+
+// borrowFactoryName returns the name of the generated non-owning wrapper factory
+// for a resource — normally "borrow", falling back to "borrow_handle" when an IDL
+// member already generates a member of that name. One fallback level is enough: a
+// resource declaring both `borrow` and `borrow_handle` is vanishingly unlikely and
+// fails loudly as a duplicate-member error when the generated module is compiled,
+// which beats an unbounded name search that silently renames the factory (T1510).
+func borrowFactoryName(r Resource) string {
+	for _, m := range r.Methods {
+		// The constructor is emitted under its own factory name, which is
+		// checked separately by createFactoryName — it is never a member named
+		// "borrow", so it cannot collide here.
+		if m.Kind != FuncConstructor && m.Name == "borrow" {
+			return "borrow_handle"
+		}
+	}
+	return "borrow"
+}
+
+// createDoc is the `doc text on a generated owning factory whose IDL/WIT
+// constructor carried no documentation of its own. Every `public declaration
+// carries a `doc, and the half a caller cannot read off the signature is the
+// ownership the returned wrapper claims.
+const createDoc = "Construct a new resource, taking ownership of the handle the host mints. " +
+	"The returned wrapper releases that handle when it drops."
+
+// createFactoryName returns the name of the generated owning factory for a
+// resource — normally "create", falling back to "create_handle" when an IDL
+// member already generates a member of that name. Same single fallback level,
+// for the same reason, as borrowFactoryName (T1974).
+func createFactoryName(r Resource) string {
+	for _, m := range r.Methods {
+		if m.Kind != FuncConstructor && m.Name == "create" {
+			return "create_handle"
+		}
+	}
+	return "create"
+}
+
 func (g *generator) emitResource(r Resource, importModule string) {
 	g.line("type %s `structural(protocol: false) `public `target(%s)%s {", r.Name, g.target, docAnnot(r.Doc))
 	g.indent++
 	g.line("i32 _handle;")
+	// Ownership state travels with the wrapper: every construction path below
+	// wraps a handle the host just minted for us and so owns it, while `borrow`
+	// wraps a handle somebody else owns. The field is emitted even when the
+	// resource has no drop, so a construction site never has to know the target
+	// resource's Drop flag to spell its ownership (T1510).
+	g.line("bool _owned;")
+	g.blank()
+
+	// Non-owning wrapper factory — the one construction path that does not take
+	// ownership. Used to wrap the glue's seeded ambient handles (globalThis,
+	// document, console) and to hand an existing wrapper's handle to an API
+	// expecting a different resource type, neither of which may be released twice.
+	borrowName := borrowFactoryName(r)
+	g.line("%s(i32 handle) %s `public `global%s {", borrowName, r.Name, docAnnot(borrowDoc))
+	g.indent++
+	g.line("return %s(_handle: handle, _owned: false);", r.Name)
+	g.indent--
+	g.line("}")
 	g.blank()
 
 	// Methods
 	for _, m := range r.Methods {
-		g.emitResourceMethod(m, r.Name, importModule)
+		g.emitResourceMethod(m, r, importModule)
 		g.blank()
 	}
 
-	// Drop
+	// Drop — releases the host handle only for an owning wrapper.
 	if r.Drop {
 		g.line("drop(~this) {")
 		g.indent++
+		g.line("if this._owned {")
+		g.indent++
 		g.line("_%s_drop(this._handle);", toSnake(r.Name))
+		g.indent--
+		g.line("}")
 		g.indent--
 		g.line("}")
 	}
@@ -270,7 +338,8 @@ func (g *generator) emitResource(r Resource, importModule string) {
 	}
 }
 
-func (g *generator) emitResourceMethod(m Func, resourceName, importModule string) {
+func (g *generator) emitResourceMethod(m Func, r Resource, importModule string) {
+	resourceName := r.Name
 	if m.Accessor == AccessorGetter {
 		g.emitGetterWrapper(m, resourceName, importModule)
 		return
@@ -282,7 +351,7 @@ func (g *generator) emitResourceMethod(m Func, resourceName, importModule string
 
 	switch m.Kind {
 	case FuncConstructor:
-		g.emitConstructorWrapper(m, resourceName, importModule)
+		g.emitConstructorWrapper(m, resourceName, createFactoryName(r), importModule)
 	case FuncStatic:
 		g.emitStaticWrapper(m, resourceName, importModule)
 	default:
@@ -290,26 +359,40 @@ func (g *generator) emitResourceMethod(m Func, resourceName, importModule string
 	}
 }
 
-func (g *generator) emitConstructorWrapper(m Func, resourceName, importModule string) {
+// emitConstructorWrapper emits the owning construction path for a resource: a
+// `global factory returning R, never a `new(~this, ...)` constructor.
+//
+// Two reasons, and either alone would decide it. docs/wasm-bindings.md maps a
+// WIT/WebIDL `constructor` to "Factory function returning `R`", so this is the
+// normative shape. And an explicit `new` REPLACES field-wise construction in
+// Promise, so a resource declaring a constructor could not also emit the
+// `borrow` factory — one such interface made the whole generated module fail to
+// compile (T1974). As a factory, minting and borrowing reach the same field-wise
+// construction and differ only in the ownership they claim.
+func (g *generator) emitConstructorWrapper(m Func, resourceName, factoryName, importModule string) {
 	params := g.formatParams(m.Params)
 	externName := fmt.Sprintf("_%s_constructor", toSnake(resourceName))
 	externParams := g.formatExternCallArgs(m.Params)
-
-	thisParam := "~this"
-	if params != "" {
-		thisParam = "~this, " + params
-	}
 
 	failMark := ""
 	raise := ""
 	if isFailable(m.Results) {
 		failMark = "!"
-		raise = "^"
+		raise = "?^"
 	}
 
-	g.line("new%s(%s) `public%s {", failMark, thisParam, docAnnot(m.Doc))
+	doc := m.Doc
+	if doc == "" {
+		doc = createDoc
+	}
+
+	g.line("%s%s(%s) %s `public `global%s {", factoryName, failMark, params, resourceName, docAnnot(doc))
 	g.indent++
-	g.line("this._handle = %s(%s)%s;", externName, externParams, raise)
+	// The handle is acquired before the wrapper exists: a failable constructor
+	// propagates out of this line, so a raise can never leave behind a wrapper
+	// that would release a handle the host never minted.
+	g.line("handle := %s(%s)%s;", externName, externParams, raise)
+	g.line("return %s(_handle: handle, _owned: true);", resourceName)
 	g.indent--
 	g.line("}")
 }
@@ -349,14 +432,14 @@ func (g *generator) emitStaticWrapper(m Func, resourceName, importModule string)
 		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("handle := %s(%s)%s;", externName, externParams, raise)
-		g.line("return %s(_handle: handle);", resReturn)
+		g.line("return %s(_handle: handle, _owned: true);", resReturn)
 		g.indent--
 	} else if !g.canonicalABI && isOptResReturn {
 		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("handle := %s(%s)%s;", externName, externParams, raise)
 		g.line("if handle == 0 { return none; }")
-		g.line("return %s(_handle: handle);", optResReturn)
+		g.line("return %s(_handle: handle, _owned: true);", optResReturn)
 		g.indent--
 	} else if retType != "" {
 		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
@@ -421,11 +504,11 @@ func (g *generator) emitGetterWrapper(m Func, resourceName, importModule string)
 		g.line("return JsValue.Object(_js_ref: ref as int);")
 	case !g.canonicalABI && isResReturn:
 		g.line("handle := %s(%s)%s;", externName, externArgs, raise)
-		g.line("return %s(_handle: handle);", resReturn)
+		g.line("return %s(_handle: handle, _owned: true);", resReturn)
 	case !g.canonicalABI && isOptResReturn:
 		g.line("handle := %s(%s)%s;", externName, externArgs, raise)
 		g.line("if handle == 0 { return none; }")
-		g.line("return %s(_handle: handle);", optResReturn)
+		g.line("return %s(_handle: handle, _owned: true);", optResReturn)
 	default:
 		g.line("return %s(%s)%s;", externName, externArgs, raise)
 	}
@@ -538,14 +621,14 @@ func (g *generator) emitMethodWrapper(m Func, resourceName, importModule string)
 		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("handle := %s(%s)%s;", externName, externCallArgs, raise)
-		g.line("return %s(_handle: handle);", resReturn)
+		g.line("return %s(_handle: handle, _owned: true);", resReturn)
 		g.indent--
 	} else if !g.canonicalABI && isOptResReturn {
 		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("handle := %s(%s)%s;", externName, externCallArgs, raise)
 		g.line("if handle == 0 { return none; }")
-		g.line("return %s(_handle: handle);", optResReturn)
+		g.line("return %s(_handle: handle, _owned: true);", optResReturn)
 		g.indent--
 	} else if retType != "" {
 		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))

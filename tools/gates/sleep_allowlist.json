@@ -1,0 +1,4 @@
+[
+  "modules/net/net_test.pr",
+  "tests/std/time_test.pr"
+]

@@ -1,10 +1,13 @@
-#!/bin/sh
-# Trampoline: delegates to the Go-based pre-commit tool.
-# All hook logic lives in bin/precommit (compiled by ./make).
-root="$(git rev-parse --show-toplevel)"
-hook="$root/bin/precommit"
-if [ ! -x "$hook" ]; then
-    echo "pre-commit: bin/precommit not found — run ./make first" >&2
-    exit 1
+#!/usr/bin/env bash
+# Git pre-commit trampoline — execs the installed hook, or refuses the commit.
+# Wired up by 'git config core.hooksPath .githooks', which provisioning runs for you.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -x "$root/bin/precommit-guard" ]; then
+    exec "$root/bin/precommit-guard"
 fi
-exec "$hook" "$@"
+# Fail closed: the commit gate is mandatory. If bin/precommit-guard is not
+# installed, a commit could slip past every check — so block it and demand
+# provisioning. The guard is delivered by the workspace, not built here.
+echo "pre-commit: bin/precommit-guard not installed — run bin/workspace setup first, then commit" >&2
+exit 1

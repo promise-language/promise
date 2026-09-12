@@ -49,8 +49,8 @@ func TestRunGate_UnknownSubcommand(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "unknown subcommand") {
-		t.Errorf("error %q does not contain 'unknown subcommand'", err.Error())
+	if !strings.Contains(err.Error(), "unknown gate") {
+		t.Errorf("error %q does not contain 'unknown gate'", err.Error())
 	}
 }
 
@@ -136,8 +136,8 @@ func TestRunGate_OldWasmTestsNameRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for removed subcommand wasm-tests, got nil")
 	}
-	if !strings.Contains(err.Error(), "unknown subcommand") {
-		t.Errorf("error %q does not contain 'unknown subcommand'", err.Error())
+	if !strings.Contains(err.Error(), "unknown gate") {
+		t.Errorf("error %q does not contain 'unknown gate'", err.Error())
 	}
 }
 

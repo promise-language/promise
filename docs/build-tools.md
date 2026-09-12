@@ -28,6 +28,7 @@ The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries i
 | `bin/precommit` | The `pre-commit` git hook body: identity, staged-file, baseline-ratchet, formatting, and documentation checks. |
 | `bin/setup` | One-time dev setup (git hooks). |
 | `bin/prereqs` | Install build prerequisites (LLVM, Go, Java, wasmtime). |
+| `bin/run` | Run one contract gate and judge it against `tools/gates/thresholds.json`. `bin/run <gate>` measures and judges for a person; `bin/run <gate> --verdict` judges an envelope on stdin (what the SDK calls); `bin/run --list [--json]` prints the gates and commands this project provides. See [gate-system.md](gate-system.md#the-contract-gates-and-the-judge-binrun). |
 
 ## Architecture
 

@@ -50,6 +50,10 @@ bin/coverage               # Go + Promise test coverage
 bin/stress                 # stress test for flaky detection
 bin/prereqs                # check build prerequisites
 bin/setup                  # configure git hooks
+bin/gate --list            # the gates this project provides (one name per line)
+bin/gate <gate> --envelope # measure one gate; prints one JSON envelope, nothing else
+bin/run <gate>             # measure one gate and judge it against this project's terms
+bin/run <gate> --verdict   # judge an envelope on stdin (what the flow SDK asks)
 ```
 
 All build steps (ANTLR generation, resource embedding, compilation) are handled by `bin/build` directly — there is no `compiler/Makefile`.

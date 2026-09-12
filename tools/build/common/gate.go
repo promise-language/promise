@@ -22,8 +22,24 @@ func RunGate(root string, args []string) error {
 	// helpers in exec.go set cmd.Env, so they all inherit os.Environ(). bin/guard
 	// checks this marker and denies every prompt-invoking tool while it's set.
 	os.Setenv("PROMISE_GATE", "1")
+	// --list answers "which gates does this project provide?". It is the only
+	// mode besides a measurement that writes to stdout, and it cannot be
+	// mistaken for an envelope: names one per line, or one JSON object under
+	// --json. An orchestrator must not hold a second copy of this list, and
+	// asking the entry point is the only way to learn it that cannot go stale.
+	if list, jsonOut, ok := parseListArgs(args); ok {
+		if !list {
+			return fmt.Errorf("use of unknown flag; run `bin/gate --list [--json]` to list the gates")
+		}
+		return writeGateList(os.Stdout, jsonOut)
+	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-web-test  run only wasm32-web target tests (via Node) and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values\n  install     run the end-to-end install gate (--variant {thin|full} [--channel {next|stable|<epoch>}] [--system])\n  latest-invariant  assert `releases/latest` resolves to an epoch-* release (fails fast otherwise)\n  schema      print the test-output JSON schema (see docs/gate-system.md)")
+		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-web-test  run only wasm32-web target tests (via Node) and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values\n  install     run the end-to-end install gate (--variant {thin|full} [--channel {next|stable|<epoch>}] [--system])\n  latest-invariant  assert `releases/latest` resolves to an epoch-* release (fails fast otherwise)\n  schema      print the test-output JSON schema (see docs/gate-system.md)\n  fit         measure whether this machine may be given work (judge it with bin/run fit)\n\nListing:\n  --list      print the gates this project provides, one name per line\n  --list --json  print the gate manifest as JSON")
+	}
+	// Flow-contract gates take the whole argv (`fit --envelope`), because the
+	// runner appends --envelope after the name and nothing else may be accepted.
+	if IsContractGate(args[0]) {
+		return runContractGate(root, args, os.Stdout)
 	}
 	switch args[0] {
 	case "test":
@@ -44,22 +60,9 @@ func RunGate(root string, args []string) error {
 		return runGateStress(root, args[1:])
 	case "coverage":
 		return runGateCoverage(root, args[1:])
-	case "schema":
-		return runGateSchema()
 	default:
-		return fmt.Errorf("unknown subcommand %q\nSubcommands: test, wasm-test, wasm-web-test, wasm-size, go-test, stress, coverage, install, latest-invariant, schema", args[0])
+		return fmt.Errorf("unknown gate %q\nGates: test, wasm-test, wasm-web-test, wasm-size, go-test, stress, coverage, install, latest-invariant, fit, integration", args[0])
 	}
-}
-
-// runGateSchema prints the test-output JSON schema so the tracker (or anyone
-// ingesting the gate output) can read the contract without running a gate. The
-// contract is embedded (GateOutputSchema) rather than read from a doc file, so
-// the command is independent of the working directory and never depends on a
-// doc path existing on disk. The human-facing narrative lives in
-// docs/gate-system.md ("Gate Output Schema"). T0763.
-func runGateSchema() error {
-	fmt.Print(GateOutputSchema)
-	return nil
 }
 
 // runGateTest runs Promise tests and writes structured JSON gate values to stdout.

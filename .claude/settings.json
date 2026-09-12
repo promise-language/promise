@@ -1,4 +1,9 @@
 {
+  "enabledPlugins": {
+    "code-review@claude-plugins-official": true,
+    "commit-commands@claude-plugins-official": true,
+    "github@claude-plugins-official": true
+  },
   "hooks": {
     "PostToolUse": [
       {
@@ -10,7 +15,7 @@
             "type": "command"
           }
         ],
-        "matcher": "Bash|Edit|Write|Skill|Task|Agent|mcp__.*"
+        "matcher": "*"
       }
     ],
     "PreToolUse": [
@@ -23,18 +28,7 @@
             "type": "command"
           }
         ],
-        "matcher": "Bash|Edit|Write"
-      },
-      {
-        "hooks": [
-          {
-            "command": "\"$CLAUDE_PROJECT_DIR/bin/guard\" || exit 2",
-            "shell": "bash",
-            "timeout": 10,
-            "type": "command"
-          }
-        ],
-        "matcher": "Skill|Task|Agent|mcp__.*"
+        "matcher": "*"
       }
     ]
   }

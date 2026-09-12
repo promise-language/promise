@@ -270,7 +270,7 @@ WASM is cross-platform (runs anywhere with wasmtime) so it is a commit gate, not
 
 ## Gate Output Schema (`bin/gate`) (T0763)
 
-Every `bin/gate` subcommand emits a single JSON envelope (`GateOutput`) on stdout. Human-readable progress goes to stderr, so stdout is always clean machine-readable JSON. Run `bin/gate schema` to print this contract — it is emitted from an embedded string (`GateOutputSchema` in `tools/build/common/gate_schema.go`), so the command never depends on this doc existing on disk. Keep the embedded string and this section in sync when the envelope changes.
+The tracker gates (`test`, `wasm-test`, `wasm-web-test`, `go-test`, `stress`, `coverage`, `wasm-size`, `install`, `latest-invariant`) emit a single JSON envelope (`GateOutput`) on stdout. The contract gates ([below](#the-contract-gates-and-the-judge-binrun)) emit the flow envelope instead. Human-readable progress goes to stderr either way, so stdout is always clean machine-readable JSON. This section is the contract: it is not printed by any command, because a command printing an embedded copy is a second copy that drifts from this one silently.
 
 ### One envelope for all subcommands
 
@@ -378,6 +378,49 @@ Under `-coverage` the same stream also carries one **coverage record** per file 
 A record's `context` is bounded (≈50 lines / 4 KB, with a `… (truncated)` marker) before it enters the envelope. A failure that dumps a large body (e.g. a Go test printing the full generated IR) would otherwise JSON-encode onto a single multi-MB line, which the runner's line-oriented drain cannot consume — deadlocking the gate to its wall-clock timeout (T0777). The full, untruncated output still reaches the gate's stderr/console log.
 
 ---
+
+## The contract gates, and the judge (`bin/run`)
+
+These gates speak the contract the flow SDK and BASE share, and the SDK **fails closed**: a gate or judge that cannot answer means *no*.
+
+| | Exec line | Reads | Prints on stdout |
+|---|---|---|---|
+| Gate | `bin/gate <name> --envelope` | nothing | one envelope: `{"gate","metrics":[{"name","type","value","unit"?}…],"incomplete"?}` |
+| Judge | `bin/run <name> --verdict` | the envelope, on stdin | one verdict: `{"acceptable":bool,"thresholds":{…},"detail":"…"}` |
+| Listing | `bin/gate --list [--json]` | nothing | the gate names, one per line (or `{"gates":[…]}`) |
+| Listing | `bin/run --list [--json]` | nothing | the same gates, plus this project's commands |
+
+`--envelope`, `--list` and `--json` are flags of the **binary**. They are not gate names and not modifiers of one; a runner appends `--envelope` last when it asks for a measurement.
+
+**The gates.** A name is a concept and an optional instance (`checked:go`), and every row is separately runnable — that is what narrowing means here:
+
+| Gate | Measures | Metrics |
+|---|---|---|
+| `formatted:go` | Go files `gofmt` would rewrite — without rewriting them | `unformatted_go_files` |
+| `formatted:promise` | `.pr` files `promise format` would rewrite | `unformatted_promise_files` |
+| `formatted` | both of the above | both |
+| `builds` | Go packages that fail to compile, per module | `unbuildable_go_packages` |
+| `checked:go` | `go vet` diagnostics | `vet_findings` |
+| `checked` | every language's checker — Go only for now, see below | `vet_findings` |
+| `tested:go` | failing tests in the compiler's Go suite | `go_test_failures`, `go_test_packages_failed` |
+| `tested:promise` | failing tests in the host Promise suite | `host_test_failures`, `host_leak_count`, `host_test_count` |
+| `tested` | both host suites | both |
+| `integration` | `formatted` + `builds` + `checked` + `tested`, measured at once — what a landing decision rests on | all of the above |
+| `fit` | the machine, before work is given to it | `worktree_free_bytes`, `build_cache_free_bytes` |
+
+- **`integration` is a composition, and every part is addressable.** A step fixing Go vet findings runs `bin/run checked:go` (seconds) rather than paying for the whole suite each round. Passing the parts is not passing the whole, and only the whole may be cited: a fix for one area can break another, and a sequence of narrow passes describes no single state.
+- **`fit` is not part of `integration`.** A machine that cannot build is not a change that may not land. It reports free space on the worktree's filesystem (which also holds `.promise-home/`) and on the one under `go env GOCACHE`, always both, so the envelope's shape does not vary by host.
+- **The gate never judges; the judge never measures, and reads two kinds of terms.** A **cap** is an absolute a person edits, in [`tools/gates/thresholds.json`](../tools/gates/thresholds.json) — today the `fit` floors. A **baseline** is derived, the best a metric has been, and ratchets in [`tools/gates/baselines.json`](../tools/gates/baselines.json) per platform: anything that ratchets lives there, judged `up`/`down`/`exact` in its three states (enforced, pending, informational). A metric carrying both must satisfy both, and a gate reads neither.
+- **An incomplete run is still judged; what it may not do is move a baseline.** Refusing it outright would make any gate that deliberately measures less than everything permanently unpassable, which reads at the call site as a broken gate. The verdict says a baseline may not move from it; `bin/run` never moves one in any case — the commit gate does that, on a complete passing run.
+- **A gate never modifies its subject, the tracked tree.** Every check is the check-only form — this is the difference from `bin/verify`, which repairs on its way to an answer. Writing outside the subject is fine and necessary: `tested` builds the compiler, because there is no Promise suite to measure without one.
+- **Stdout carries one JSON object and nothing else.** `bin/gate <name>` without `--envelope` prints nothing and exits non-zero, so a bare run can never be mistaken for a pass. An error path prints nothing at all: a reader gets one envelope or none.
+- **`thresholds` is always present in a verdict**, even when empty: a verdict without the terms it was reached from cannot be re-checked by anyone who was not there.
+- **An incomplete run is never a pass.** A run that measured less than a full one says so in `incomplete`, and the judge refuses it even when every number is within its cap — honest numbers that understate what was checked are indistinguishable from an improvement.
+- `bin/run <name>` without `--verdict` is the by-hand path: it spawns `bin/gate <name> --envelope` as a process, prints each metric beside its cap, and exits non-zero when a cap is missed. No decision rests on it.
+
+**`checked` has no `:promise` instance yet, and that is a missing tool rather than a decision.** `promise check` takes one file, and most `.pr` files are not checkable alone: a file of a multi-file module reports undefined names its own module defines (`modules/std/vector.pr` does not see `_FnIter` in `iter.pr`), and the fixtures under `tests/modules/` are invalid on purpose. A per-file count measures how files are arranged rather than whether the code is sound — 50 of 942 here, none of them a defect. Promise's semantic analysis is exercised today by `tested:promise`, since every test compiles its module graph. Closing the gap needs `promise check <project>`: checking a project without building it.
+
+**Not yet migrated.** The tracker gates above still use `GateOutput` and are not in `bin/gate --list`, because everything listed must be runnable through `bin/run`. `integration` also omits the `tools/build` Go suite (T2084 — outside `bin/verify`'s lock it deletes `~/.promise`) and the WASM suites, which stay separately runnable so a host-only arena can still land a change; both omissions are reported in `incomplete`.
 
 ## Exception Management
 

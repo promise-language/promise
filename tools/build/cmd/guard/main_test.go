@@ -726,11 +726,21 @@ func TestSettingsJSONRoutesPromptToolsThroughGuard(t *testing.T) {
 	for _, name := range promptTools {
 		matched := false
 		for _, entry := range parsed.Hooks.PreToolUse {
-			re, err := regexp.Compile(entry.Matcher)
-			if err != nil {
-				t.Fatalf("PreToolUse matcher %q: %v", entry.Matcher, err)
+			// A matcher is a regexp OR one of Claude Code's wildcards, "*" and
+			// "", each meaning every tool. The wildcards are not regexps — a
+			// bare "*" is a repetition with nothing to repeat — so compiling
+			// them fails, and a settings file using the documented spelling for
+			// "guard everything" would read here as a broken matcher rather
+			// than as the widest possible coverage.
+			applies := entry.Matcher == "*" || entry.Matcher == ""
+			if !applies {
+				re, err := regexp.Compile(entry.Matcher)
+				if err != nil {
+					t.Fatalf("PreToolUse matcher %q: %v", entry.Matcher, err)
+				}
+				applies = re.MatchString(name)
 			}
-			if !re.MatchString(name) {
+			if !applies {
 				continue
 			}
 			for _, h := range entry.Hooks {

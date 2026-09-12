@@ -7,7 +7,14 @@
       "direction": "up"
     },
     "go_test_failures": {
-      "direction": "exact"
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "go_test_packages_failed": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
     },
     "host_excluded_count": {
       "type": "informational"
@@ -45,8 +52,33 @@
     "promise_coverage_pct": {
       "direction": "up"
     },
+    "stale_generated_files": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
     "stress_flaky_count": {
       "direction": "down"
+    },
+    "unbuildable_go_packages": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "unformatted_go_files": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "unformatted_promise_files": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "vet_findings": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
     },
     "wasm_excluded_count": {
       "type": "informational"
@@ -117,7 +149,14 @@
       "direction": "up"
     },
     "go_test_failures": {
-      "direction": "exact"
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "go_test_packages_failed": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
     },
     "host_excluded_count": {
       "type": "informational"
@@ -155,8 +194,33 @@
     "promise_coverage_pct": {
       "direction": "up"
     },
+    "stale_generated_files": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
     "stress_flaky_count": {
       "direction": "down"
+    },
+    "unbuildable_go_packages": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "unformatted_go_files": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "unformatted_promise_files": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "vet_findings": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
     },
     "wasm_excluded_count": {
       "type": "informational"
@@ -211,6 +275,11 @@
     }
   },
   "linux-arm64": {
+    "go_test_packages_failed": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
     "host_leak_count": {
       "type": "informational"
     },
@@ -219,6 +288,31 @@
     },
     "host_test_failures": {
       "type": "informational"
+    },
+    "stale_generated_files": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "unbuildable_go_packages": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "unformatted_go_files": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "unformatted_promise_files": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "vet_findings": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
     },
     "wasm_leak_count": {
       "type": "informational"
@@ -231,6 +325,11 @@
     }
   },
   "windows-amd64": {
+    "go_test_packages_failed": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
     "host_excluded_count": {
       "type": "informational"
     },
@@ -263,6 +362,31 @@
       "value": 0,
       "direction": "down",
       "updated": "2026-06-03"
+    },
+    "stale_generated_files": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "unbuildable_go_packages": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "unformatted_go_files": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "unformatted_promise_files": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
+    },
+    "vet_findings": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-11"
     },
     "wasm_excluded_count": {
       "type": "informational"

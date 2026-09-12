@@ -369,6 +369,7 @@ The standard library (`modules/std/`) is auto-imported via `use std as _` into e
 | `gzip` | `modules/gzip/` | RFC 1951 (DEFLATE) + RFC 1952 (gzip): `gzip_encode`, `gunzip!`, `gunzip_from!`, `deflate`, `inflate!`, `crc32`, `GzipWriter`, `GunzipReader`, `DecompressError` |
 | `crypto` | `modules/crypto/` | `sha256.pr` — `Sha256` streaming context, `Digest256`, one-shot `sha256()`; `constant_time.pr` — `constant_time_equal` |
 | `encoding` | `modules/encoding/` | Binary-to-text encodings (RFC 4648): `hex_encode`, `hex_decode!`, `EncodingError` |
+| `web` | `modules/web/web.pr` | Browser host callbacks for `wasm32-web`, `` `target(web) ``-only (`docs/web-apps.md`, #25): `web.events(el, kinds)`/`events_with_policy(...)` — subscribe to DOM events over a real `Channel[i32]` with overflow policy (`DropOldest`/`DropNewest`/`Coalesce`) and a `dropped` count; `web.on(el, kind, handler)` — sugar that spawns a goroutine dispatching each event to a moved closure; `Element`/`Document`/`Console`/`Event` handles |
 
 ## Test Suite
 

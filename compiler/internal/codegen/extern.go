@@ -58,6 +58,22 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 			continue
 		}
 
+		// The C name may already be defined by an earlier codegen phase keyed
+		// on the same LLVM symbol — e.g. wasm32-web's reactor delivery
+		// primitives (sched_wasm_web_delivery.go) are always emitted for
+		// every wasm32-web build, independently of whether the program
+		// `use`s the module (modules/web) whose `extern("...") declarations
+		// name them. Reuse that Func instead of calling module.NewFunc again
+		// for the same name, which would produce two LLVM functions sharing
+		// one symbol ("invalid redefinition" at the verifier).
+		if fn, ok := c.funcs[ext.CName]; ok {
+			ext.IRFunc = fn
+			ext.HasSret = hasSret
+			cFuncs[ext.CName] = fn
+			c.funcs[ext.PromiseName] = fn
+			continue
+		}
+
 		var params []*ir.Param
 		if hasSret {
 			params = append(params, ir.NewParam("sret", irtypes.I8Ptr))

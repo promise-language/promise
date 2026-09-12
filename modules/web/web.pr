@@ -1,0 +1,190 @@
+// modules/web/web.pr — Layer 1 of docs/wasm-web-callbacks.md: the minimal,
+// hand-written (no bindgen — §14.2) Promise surface for browser host
+// callbacks on wasm32-web. Everything here is `target(web) — filtered out of
+// every other build target entirely (compiler/internal/sema/target.go), so
+// referencing it from a native or wasm32-wasi program is a plain compile
+// error, not a link failure.
+//
+// `web.events(el, kinds)` is the one real primitive (§8): it subscribes via
+// the native promise_web_subscribe (compiler/internal/codegen/
+// sched_wasm_web_delivery.go), which allocates a genuine Channel[i32] and
+// hands its pointer back through promise_web_channel. The browser's event
+// listener later calls the exported promise_web_enqueue, which writes into
+// that same channel and wakes any parked receiver exactly the way an
+// ordinary `<-ch` does — so `for e in subscription` here is completely
+// ordinary Promise code with no new language machinery underneath it.
+//
+// `web.on` (§8, sugar) is implemented below, on top of events(). WebIDL
+// `callback` lowering (§15, Layer 2) is not implemented here — that is
+// bindgen work (compiler/internal/bindgen), not a hand-written surface.
+// --- Internal delivery externs (compiler/internal/codegen/sched_wasm_web_delivery.go) ---
+_web_subscribe(i32 capacity, i32 policy) i32 `extern("promise_web_subscribe") `target(web);
+
+_web_channel(i32 sub_id) Channel[i32] `extern("promise_web_channel") `target(web);
+
+_web_unsubscribe(i32 sub_id) `extern("promise_web_unsubscribe") `target(web);
+
+_web_subscription_dropped(i32 sub_id) i32 `extern("promise_web_subscription_dropped") `target(web);
+
+// --- Internal host imports (browser-side glue — bootstrap loader in cmd/promise) ---
+
+_web_add_event_listener(i32 target_handle, string kind, i32 sub_id) `extern("web_add_event_listener") `wasm_import("promise_env", "web_add_event_listener") `target(web);
+
+_document_get_body(i32 handle) i32 `extern("document_get_body") `wasm_import("promise_env", "document_get_body") `target(web);
+
+_event_drop(i32 handle) `extern("event_drop") `wasm_import("promise_env", "[resource-drop]event") `target(web);
+
+_element_drop(i32 handle) `extern("element_drop") `wasm_import("promise_env", "[resource-drop]element") `target(web);
+
+_console_log(i32 handle, string message) `extern("console_log") `wasm_import("promise_env", "console_log") `target(web);
+
+// --- Public types ---
+
+// Deliberately minimal for Layer 1 (§18: "a full web catalog API" is a
+// non-goal — the rest belongs to #17): it carries no fields describing the
+// underlying JS event (kind, coordinates, key code, ...). A single
+// subscription can request several kinds at once and promise_web_enqueue's
+// queue entry carries only (sub_id, handle) — no kind — so exposing it here
+// would need another host round-trip returning a Promise string, which is a
+// real design surface of its own (constructing a valid Promise string
+// instance from JS) best left to Layer 2's typed WebIDL bindings (§15),
+// which know the real event shape, rather than guessed at here.
+type Event `public `target(web) `doc("An event delivered through a web.events() subscription. Carries no fields describing the underlying JS event itself (kind, coordinates, key code, ...) — read those from a typed binding once one exists. The underlying JS event object is released when this value is dropped.") {
+  i32 _handle;
+
+  drop(~this) {
+    _event_drop(this._handle);
+  }
+}
+
+type Element `public `target(web) `doc("A handle to a DOM element, e.g. web.document.body.") {
+  i32 _handle;
+
+  drop(~this) {
+    _element_drop(this._handle);
+  }
+}
+
+type Document `public `target(web) `doc("The browser document, reachable via web.document.") {
+  i32 _handle;
+
+  get body Element `public `doc("The document's <body> element.") {
+    return Element(_handle: _document_get_body(this._handle));
+  }
+}
+
+type Console `public `target(web) `doc("The browser console, reachable via web.console.") {
+  i32 _handle;
+
+  log(string message) `public `doc("Logs a message to the browser console.") {
+    _console_log(this._handle, message);
+  }
+}
+
+type EventSubscription `public `target(web) `doc("A live subscription to browser events, created by web.events()/web.events_with_policy(). Iterate with `for e in subscription` — the loop parks, without freezing the page, between events, and ends once the subscription is closed.") {
+  i32 _sub_id;
+  Channel[i32] _channel;
+  // Guards against double-closing `_channel`: close(~this) and drop(~this)
+  // both call `_web_unsubscribe` unconditionally (the host side tolerates
+  // repeated calls — sched_wasm_web_delivery.go), but drop() always runs at
+  // scope exit regardless of an earlier explicit close() (`` `File.close!``
+  // in modules/io/io.pr follows the identical guard-field pattern), and
+  // Channel.close() panics on a second call.
+  bool _closed;
+
+  // A silent drop that no one can observe is the failure mode this exists to
+  // avoid (§8.1).
+  get dropped i32 `public `doc("Number of events dropped so far because the queue was full.") {
+    return _web_subscription_dropped(this._sub_id);
+  }
+
+  // KNOWN BROKEN as of promise-language/promise#68 when called from a
+  // goroutine other than main() itself: receiving from a channel through a
+  // method call (this one) currently makes the wasm32-web reactor's initial
+  // drain misreport a live subscription as a deadlock instead of idling.
+  // See web.on's doc comment below for the full repro. This means `for e in
+  // subscription` inside any `go { }` block is currently unsafe in real
+  // (non-test) wasm32-web usage, not just web.on.
+  next() Event? `public `doc("Returns the next event, parking until one arrives or the subscription closes. Duck-typed for-in support — write `for e in subscription` rather than calling this directly.") {
+    h := <-this._channel;
+    if h is present {
+      return Event(_handle: h);
+    }
+    return none;
+  }
+
+  // Closing does not corrupt an in-flight handler (§8) — a handler that is
+  // already running finishes normally.
+  close(~this) `public `doc("Stops receiving events for this subscription's kinds. Also closes the underlying channel, so a parked `for e in subscription` loop (including one inside web.on) wakes with `none` and ends instead of parking forever.") {
+    _web_unsubscribe(this._sub_id);
+    if !this._closed {
+      this._channel.close();
+      this._closed = true;
+    }
+  }
+
+  drop(~this) {
+    _web_unsubscribe(this._sub_id);
+    if !this._closed {
+      this._channel.close();
+    }
+  }
+}
+
+// --- Public module-level surface ---
+
+get document Document `public `target(web) `doc("The browser's document object.") => Document(_handle: 2);
+
+get console Console `public `target(web) `doc("The browser's console object.") => Console(_handle: 3);
+
+// QueueDropOldest (0), QueueDropNewest (1), or QueueCoalesce (2) — see
+// docs/web-apps.md §8.1 for the tradeoffs between them.
+events_with_policy(Element target, string[] kinds, i32 capacity, i32 policy) EventSubscription `public `target(web) `doc("Subscribes to one or more event kinds on a DOM element, with an explicit queue capacity and overflow policy. A non-positive capacity uses the default of 256. events(el, kinds) is the same call with the default capacity and DropOldest policy.") {
+  sub_id := _web_subscribe(capacity, policy);
+  ch := _web_channel(sub_id);
+  for kind in kinds {
+    _web_add_event_listener(target._handle, kind, sub_id);
+  }
+  return EventSubscription(_sub_id: sub_id, _channel: move ch, _closed: false);
+}
+
+// `for e in web.events(el, ["click"])` is the primitive every other
+// event-handling shape (including web.on below) builds on (§8).
+events(Element target, string[] kinds) EventSubscription `public `target(web) `doc("Subscribes to one or more event kinds on a DOM element, with the default queue capacity (256) and overflow policy (DropOldest).") => events_with_policy(target, kinds, 0, 0);
+
+// Defined in terms of events() above (§8: "(b) is the Layer 1 primitive. (a)
+// is sugar implemented on top of it"), so it inherits (b)'s lifetime
+// properties instead of introducing its own: no Promise closure is ever
+// reachable from JS — the subscription channel is the only thing that
+// crosses the boundary — so closing it ends the loop the same way any other
+// channel close does, and a handler mid-execution is ordinary Promise code
+// on an ordinary goroutine that finishes normally.
+//
+// `move` on the handler parameter is load-bearing, not decoration: this
+// function spawns a goroutine that outlives the call, and a closure crosses
+// a `go` boundary by moving its heap environment into the coroutine frame
+// (T1640, promise-language/promise#29). A borrowed `(Event) -> void`
+// parameter would be rejected at compile time, because the caller's scope
+// would free the environment while the consuming goroutine is still
+// invoking it.
+//
+// KNOWN BROKEN as of promise-language/promise#68: `for e in subscription`
+// below desugars to a method call (`subscription.next()`), and a goroutine's
+// channel receive that happens through ANY function-call indirection — not
+// just this one — currently makes the wasm32-web reactor's initial drain
+// misreport a live, correctly-registered subscription as
+// "fatal: all goroutines are asleep - deadlock!" instead of idling per §4.3.
+// Confirmed via three isolated repros (bare top-level receive: works; same
+// receive one call-frame deeper, struct+method or plain function: both
+// broken) in both debug and --release builds. Invisible to `bin/promise
+// test` (batch tests never run the reactor drain — they always use
+// promise_sched_coop_run). Do not treat `bin/verify --wasm-web` passing as
+// evidence this works in a real browser/Node host.
+on(Element target, string move kind, (Event) -> void move handler) `public `target(web) `doc("Subscribes to one event kind on a DOM element and spawns a goroutine that calls handler once per event, until the subscription is closed or dropped. The handler is consumed (`(Event) -> void move handler`) because the spawned goroutine outlives this call.") {
+  subscription := events(target, [kind]);
+  go {
+    for e in subscription {
+      handler(e);
+    }
+  };
+}

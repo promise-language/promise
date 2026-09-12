@@ -207,6 +207,15 @@ func (c *Compiler) declareIntrinsics() {
 		c.defineSchedCoopStepFunc() // T0668: must precede coop_run (and Task[T].drop)
 		c.defineSchedCoopRunFunc()
 	}
+	if c.isWasmWeb {
+		// wasm32-web reactor top level (docs/wasm-web-callbacks.md §4, §19 phase 1).
+		// promise_sched_coop_run above stays the run-to-completion driver for
+		// GenerateTestMain's per-test batches; these are only reachable from
+		// wrapMainWithScheduler's wasm32-web branch (ordinary program mains).
+		c.defineWebReactorGlobals()
+		c.defineWebReactorDrainFunc()
+		c.defineWebPumpFunc()
+	}
 	c.defineSchedShutdownFunc()
 	c.defineWaiterEnqueueFunc()
 	c.defineWaiterDequeueFunc()
@@ -215,6 +224,20 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineWaiterWakeOneFunc()
 	c.defineWaiterWakeAllFunc()
 	c.defineWaiterRemoveFunc()
+
+	if c.isWasmWeb {
+		// Delivery (§19 phase 2): subscription table + promise_web_enqueue,
+		// each subscription backed by a real Channel[i32] (promise_channel_new,
+		// registered above) whose recv-waiters promise_web_enqueue wakes via
+		// promise_waiter_wake_one, just registered above too — both must exist
+		// in c.funcs before these bodies are built.
+		c.defineWebSubscriptionGlobals()
+		c.defineWebSubscribeFunc()
+		c.defineWebChannelFunc()
+		c.defineWebUnsubscribeFunc()
+		c.defineWebEnqueueFunc()
+		c.defineWebSubscriptionDroppedFunc()
+	}
 
 	// T0285: MutexGuard close/drop need waiter_dequeue + sched_enqueue from above
 	c.defineMutexGuardCloseFunc() // T0156: MutexGuard close (unlock + free)

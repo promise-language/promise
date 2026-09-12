@@ -87,3 +87,6 @@ description = "Capability-controlled execution: Capability enum, Sandbox, Execut
 
 [modules.cloud]
 description = "Schema-driven durable state: Ref/Inverse, single-endpoint sync protocol, block-scoped transactions, pluggable Backend (planned — see docs/cloud-persistence.md, T0456)"
+
+[modules.web]
+description = "Browser host callbacks for wasm32-web, target(web)-only: web.events()/web.on() subscribe to DOM events over a real Channel[i32] with overflow policy and drop counting, Element/Document/Console handles (see docs/web-apps.md, #25)"

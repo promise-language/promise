@@ -35,6 +35,7 @@ import (
 	"github.com/promise-language/promise/compiler/internal/parser"
 	"github.com/promise-language/promise/compiler/internal/sema"
 	"github.com/promise-language/promise/compiler/internal/types"
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // normalizeArgs canonicalizes CLI flag arguments so that both -/-- prefixes
@@ -5886,11 +5887,16 @@ func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) er
 // output for wasm32-web targets. The loader handles WebAssembly.instantiateStreaming,
 // wires up the base PAL runtime imports every wasm32-web binary needs
 // (promise_env.write/exit/monotonic_nanos — mirroring the browser-equivalent
-// behavior of the Node test harness's wasm_web_harness.js), and provides the
-// basic runtime entry point. A caller-supplied importObject (e.g. the
-// WebIDL-bindgen-generated glue from `promise bind webidl`) is deep-merged on
-// top of these defaults so both halves are available together; the caller's
-// own promise_env entries win on conflict.
+// behavior of the Node test harness's wasm_web_harness.js), and — for the
+// reactor design (docs/wasm-web-callbacks.md) — default implementations of
+// the reactor's own import (promise_env.schedule_pump, §4.2) and the
+// modules/web primitive's imports (§14.2's no-bindgen surface:
+// web_add_event_listener, console_log, document_get_body, the
+// [resource-drop]* handle releases), and provides the basic runtime entry
+// point. A caller-supplied importObject (e.g. the WebIDL-bindgen-generated
+// glue from `promise bind webidl`) is deep-merged on top of all of the above
+// so every piece is available together; the caller's own promise_env
+// entries win on conflict.
 func emitWebBootstrapJS(wasmFile string) {
 	jsFile := strings.TrimSuffix(wasmFile, ".wasm") + ".js"
 	wasmBase := filepath.Base(wasmFile)
@@ -5898,7 +5904,8 @@ func emitWebBootstrapJS(wasmFile string) {
 	content := fmt.Sprintf(`// Auto-generated bootstrap loader for %s
 // Import module-specific glue files separately if using WebIDL bindings; any
 // promise_env entries on the importObject passed to init() are merged on top
-// of (and override) the base PAL runtime glue below.
+// of (and override) the base PAL runtime glue and the reactor/modules-web
+// defaults below.
 
 const _decoder = new TextDecoder("utf-8");
 
@@ -5913,8 +5920,116 @@ class _ExitSignal extends Error {
   }
 }
 
+// --- Resource handle table (docs/wasm-web-callbacks.md §12) ---
+// Mirrors internal/bindgen/jsglue.go's _refStore/_refLoad/_refRelease and its
+// fixed handle numbering (1 = globalThis, 2 = document, 3 = console), so
+// hand-written (this file) and generated (WebIDL bindgen) glue agree on
+// what a handle means without either having to know about the other.
+// wasm32-web targets both browsers and Node.js (no DOM there), so document
+// is guarded — referencing it unqualified would throw ReferenceError and
+// break bootstrap.js for every program on Node, not just ones using
+// modules/web's document handle.
+const _refs = [undefined, globalThis, typeof document !== "undefined" ? document : undefined, console];
+const _refFree = [];
+
+function _refStore(obj) {
+  if (_refFree.length > 0) {
+    const h = _refFree.pop();
+    _refs[h] = obj;
+    return h;
+  }
+  return _refs.push(obj) - 1;
+}
+
+function _refLoad(handle) {
+  return _refs[handle];
+}
+
+function _refRelease(handle) {
+  _refs[handle] = undefined;
+  _refFree.push(handle);
+}
+
+function _decodeString(memory, ptr, len) {
+  return new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+}
+
+// --- schedule_pump (§4.2): the reactor's one import ---
+// kind 0 = ASAP (MessageChannel — no the setTimeout(0) ~4ms clamp),
+// kind 1 = Timer (setTimeout(delay_ms)), kind 2 = AnimationFrame (rAF).
+function _makeScheduleImport(getInstance) {
+  const mc = new MessageChannel();
+  const asapQueue = [];
+  mc.port1.onmessage = () => {
+    const fn = asapQueue.shift();
+    if (fn) fn();
+  };
+  // In Node.js, assigning onmessage implicitly starts the port and refs it,
+  // keeping the event loop alive on its own — unref it (after, not before,
+  // the assignment above: start() re-refs, so unref() must come last) so
+  // the reactor's own scheduling channel is never what holds the process
+  // open (§4.1: liveness must come from actual live registrations, not
+  // from this plumbing). Browsers have no equivalent concept, so guard for
+  // its absence there.
+  if (typeof mc.port1.unref === "function") {
+    mc.port1.unref();
+    mc.port2.unref();
+  }
+  return (kind, delayMs) => {
+    const pump = () => getInstance().exports.promise_web_pump();
+    if (kind === 1) {
+      setTimeout(pump, delayMs);
+    } else if (kind === 2) {
+      requestAnimationFrame(pump);
+    } else {
+      asapQueue.push(pump);
+      mc.port2.postMessage(null);
+    }
+  };
+}
+
+// modules/web (§14.2's no-bindgen primitive) plus the reactor's
+// schedule_pump — layered under the base PAL glue and any caller-supplied
+// importObject in init() below.
+function _defaultImportObject(getInstance) {
+  const scheduleImport = _makeScheduleImport(getInstance);
+  return {
+    promise_env: {
+      schedule_pump: scheduleImport,
+
+      // modules/web (§14.2's no-bindgen primitive)
+      web_add_event_listener: (targetHandle, kindPtr, kindLen, subId) => {
+        const el = _refLoad(targetHandle);
+        const kind = _decodeString(getInstance().exports.memory, kindPtr, kindLen);
+        el.addEventListener(kind, (event) => {
+          const handle = _refStore(event);
+          const instance = getInstance();
+          instance.exports.promise_web_enqueue(subId, handle);
+          instance.exports.promise_web_pump();
+        });
+      },
+      console_log: (handle, msgPtr, msgLen) => {
+        const consoleObj = _refLoad(handle);
+        consoleObj.log(_decodeString(getInstance().exports.memory, msgPtr, msgLen));
+      },
+      document_get_body: (handle) => _refStore(_refLoad(handle).body),
+      "[resource-drop]event": (handle) => _refRelease(handle),
+      "[resource-drop]element": (handle) => _refRelease(handle),
+    },
+  };
+}
+
+function _mergeImports(base, importObject) {
+  return {
+    ...base,
+    ...importObject,
+    promise_env: { ...base.promise_env, ...(importObject.promise_env || {}) },
+  };
+}
+
 export async function init(importObject = {}) {
   let instance;
+  const getInstance = () => instance;
 
   // console.log/console.error each add their own trailing newline, but
   // Promise's print_line already appends one before the write ever reaches
@@ -5960,13 +6075,13 @@ export async function init(importObject = {}) {
     },
   };
 
-  const mergedImportObject = {
-    ...importObject,
-    promise_env: { ...basePromiseEnv, ...(importObject.promise_env || {}) },
-  };
+  const merged = _mergeImports(
+    { promise_env: { ...basePromiseEnv, ..._defaultImportObject(getInstance).promise_env } },
+    importObject,
+  );
 
   const response = await fetch("%s");
-  const result = await WebAssembly.instantiateStreaming(response, mergedImportObject);
+  const result = await WebAssembly.instantiateStreaming(response, merged);
   instance = result.instance;
 
   try {
@@ -6025,6 +6140,18 @@ func buildWasmLinkArgs(objFiles []string, target, outputFile string, useLTO bool
 	)
 	if isWeb {
 		args = append(args, "--export=_initialize", "--export-memory")
+		// Reactor top level (docs/web-apps.md §14): the bounded pump every JS
+		// callback calls after delivering an event.
+		args = append(args, "--export="+wasmweb.ExportPump)
+		// Delivery (§8, §14): promise_web_enqueue is the actual host->wasm entry
+		// point a real addEventListener callback calls to push one event —
+		// wasmweb.names.go's own comment already warns "adding a name here is not
+		// enough on its own"; this was the missing --export= for it. Without this,
+		// promise_web_enqueue is defined (defineWebEnqueueFunc, called unconditionally
+		// for isWasmWeb) but never appears in the wasm export section, so JS has no
+		// way to deliver an event into a subscription's channel at all — confirmed via
+		// WebAssembly.Module.exports() on a wasm32-web build using _web_subscribe.
+		args = append(args, "--export="+wasmweb.ExportEnqueue)
 	} else {
 		args = append(args, "--export=_start")
 	}

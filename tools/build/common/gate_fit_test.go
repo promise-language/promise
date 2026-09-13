@@ -138,6 +138,29 @@ func TestJudge_AtLeastFloor(t *testing.T) {
 	}
 }
 
+// The other sense a cap can have, and it is untested by the project's own data:
+// thresholds.json holds only fit's two at_least floors, so nothing exercises
+// the ceiling this repository actually reaches for first. It is the sense a
+// count of bad things takes — TestIntegration_PartMetricsAreJudged allows any
+// integration metric to be judged by a cap instead of a baseline, and every one
+// of them counts something that should not happen — so the branch is one edit
+// to thresholds.json away from being load-bearing.
+func TestJudge_AtMostCeiling(t *testing.T) {
+	caps := map[string]Threshold{"vet_findings": {Direction: AtMost, Cap: 0}}
+	over := Envelope{Gate: "checked:go", Metrics: []Metric{Count("vet_findings", 3)}}
+	ok, terms, detail := judge(over, caps, nil)
+	if ok || !strings.Contains(detail, "vet_findings is 3, cap at_most 0") {
+		t.Errorf("above the ceiling: ok=%v detail=%q", ok, detail)
+	}
+	if len(terms) != 1 || terms["vet_findings"].Direction != string(AtMost) {
+		t.Errorf("a verdict carries exactly the terms it applied, got %v", terms)
+	}
+	at := Envelope{Gate: "checked:go", Metrics: []Metric{Count("vet_findings", 0)}}
+	if ok, _, detail := judge(at, caps, nil); !ok {
+		t.Errorf("at the ceiling must pass: %s", detail)
+	}
+}
+
 // A ratcheted metric is judged against the baseline, and only an ENFORCED one
 // judges: a pending entry has no value yet, and an informational one never
 // blocks.

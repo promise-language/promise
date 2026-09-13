@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -627,14 +628,39 @@ func TestRecordInALinkedWorktree(t *testing.T) {
 	}
 }
 
+// identityAtCapture reads a file's identity through an open handle rather than
+// from its path, so it names the file that existed at the moment of the call.
+//
+// os.Stat is not usable for this. On Windows the FileInfo it returns carries
+// the path and resolves the volume serial + file index lazily, inside
+// os.SameFile — so both sides of a comparison re-resolve to whatever lives at
+// that name by then, and two stats of one path compare equal however the file
+// was replaced. The assertion below would hold for a correct implementation
+// and a broken one alike (T2087). (*os.File).Stat fills the id from the handle,
+// and discriminates on every platform.
+func identityAtCapture(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi
+}
+
 func TestRecordReplacesRatherThanRewritesInPlace(t *testing.T) {
 	// The reader is a different process — bin/precommit-guard, mid-commit —
 	// so "atomic" here is not a nicety. A rewrite in place (open with O_TRUNC,
 	// then write) exposes a window in which the record is a zero-length file,
 	// and the guard reading it then refuses a commit over content that is
 	// perfectly well blessed. Replacement is checked by file identity rather
-	// than by racing a reader: os.SameFile is false across a rename and true
-	// across an in-place rewrite, on every platform, every time.
+	// than by racing a reader. The write STRATEGY is all this asserts: that a
+	// second record lands new content is TestRecordIsAtomicallyReplaced's, and
+	// asserting it twice is two places to change when the contract moves.
 	dir := vtRepo(t)
 	writeFile(t, dir, "a.txt", "a\n")
 	vtGit(t, dir, "add", "-A")
@@ -644,20 +670,91 @@ func TestRecordReplacesRatherThanRewritesInPlace(t *testing.T) {
 	if err := recordVerifiedTree(dir); err != nil {
 		t.Fatalf("first record: %v", err)
 	}
-	before, err := os.Stat(record)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := identityAtCapture(t, record)
 
 	writeFile(t, dir, "b.txt", "b\n")
 	if err := recordVerifiedTree(dir); err != nil {
 		t.Fatalf("second record: %v", err)
 	}
-	after, err := os.Stat(record)
+	after := identityAtCapture(t, record)
+	if os.SameFile(before, after) {
+		t.Error("the record was rewritten in place — a reader can catch it empty")
+	}
+}
+
+// The oracle above must be able to FAIL, and that is not self-evident: the
+// defect this test set carries a scar from was an oracle that quietly stopped
+// discriminating on one platform (os.SameFile over two os.Stats of one path —
+// T2087), so TestRecordReplacesRatherThanRewritesInPlace passed for a correct
+// implementation and would have passed for a broken one. A test that cannot
+// fail is indistinguishable from a passing one, and nothing else in the suite
+// notices the difference.
+//
+// So: drive identityAtCapture over BOTH write strategies on a scratch file and
+// require it to tell them apart. Whatever platform this runs on, a capture that
+// has degraded back to naming the path rather than the file fails here — next
+// to the helper, rather than as a silent gap in the test that uses it.
+func TestIdentityAtCaptureTellsReplacementFromRewrite(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "record")
+
+	// Replacement — what recordVerifiedTree does: a fresh file renamed over
+	// the name. The two captures must name different files.
+	if err := os.WriteFile(target, []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := identityAtCapture(t, target)
+	tmp := filepath.Join(dir, ".record-tmp")
+	if err := os.WriteFile(tmp, []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, identityAtCapture(t, target)) {
+		t.Error("a rename-replace read as the same file — the capture is naming the path, not the file, so the assertion it backs holds for any implementation")
+	}
+
+	// Rewrite in place — the strategy that exposes a zero-length window. Same
+	// file throughout, or the oracle answers "replaced" to everything and is
+	// equally useless in the other direction.
+	rewritten := identityAtCapture(t, target)
+	if err := os.WriteFile(target, []byte("three\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(rewritten, identityAtCapture(t, target)) {
+		t.Error("an in-place rewrite read as a different file — the oracle calls everything a replacement and can never catch one")
+	}
+}
+
+// The temp file is an implementation detail of the atomic write, and it must
+// not outlive the write. .workspace/ is gitignored, so litter there is invisible
+// to every check in this repository — it would accumulate one file per verify
+// run, silently, and the only symptom would be a puzzling directory. This also
+// pins the mechanism rather than a proxy for it: a rename consumed the temp
+// file, and nothing else does.
+func TestRecordLeavesNoTemporaryFileBehind(t *testing.T) {
+	dir := vtRepo(t)
+	writeFile(t, dir, "a.txt", "a\n")
+	vtGit(t, dir, "add", "-A")
+	vtGit(t, dir, "commit", "-q", "-m", "base")
+
+	for i, content := range []string{"b\n", "c\n", "d\n"} {
+		writeFile(t, dir, "b.txt", content)
+		if err := recordVerifiedTree(dir); err != nil {
+			t.Fatalf("record %d: %v", i, err)
+		}
+	}
+
+	entries, err := os.ReadDir(filepath.Join(dir, ".workspace"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if os.SameFile(before, after) {
-		t.Error("the record was rewritten in place — a reader can catch it empty")
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if !slices.Equal(names, []string{"verified-tree"}) {
+		t.Errorf(".workspace/ holds %v after three records — the temp file outlived the write, and it is gitignored, so nothing else would ever say so", names)
 	}
 }

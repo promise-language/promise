@@ -3,6 +3,9 @@ package common
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -200,27 +203,57 @@ func TestContractGates_PartGraphTerminates(t *testing.T) {
 	}
 }
 
+// integrationMetrics names what integration's parts report. It is spelled out
+// rather than derived because deriving it means running the gates, which is
+// minutes of compiling and testing for a list that changes a few times a year.
+var integrationMetrics = []string{
+	"unformatted_go_files", "unformatted_promise_files",
+	"unbuildable_go_packages", "vet_findings",
+	"go_test_failures", "go_test_packages_failed",
+	"host_test_failures", "host_leak_count",
+	"stale_generated_files",
+}
+
 // Every metric integration's parts report must carry a term — a person-edited
 // cap or an enforced baseline — or integration passes on numbers nothing looks
 // at. Which of the two a metric gets is the project's call: absolutes are caps,
 // and anything that ratchets is a baseline.
+//
+// This checks every target the baselines file knows, not just the host's. A
+// term is per-target data, written where a gate has actually run, so a
+// host-scoped check is blind to the platform its author is not sitting on: the
+// gap then lands as a red trunk for the next person there rather than as a
+// failure for whoever opened it. That is exactly how T2087 reached main —
+// go_test_failures was seeded on two targets of four.
 func TestIntegration_PartMetricsAreJudged(t *testing.T) {
-	caps, baselines, err := projectTerms("../../..")
+	caps, err := loadThresholds("../../..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{
-		"unformatted_go_files", "unformatted_promise_files",
-		"unbuildable_go_packages", "vet_findings",
-		"go_test_failures", "go_test_packages_failed",
-		"host_test_failures", "host_leak_count",
-	} {
-		if _, capped := caps[name]; capped {
-			continue
-		}
-		b, tracked := baselines[name]
-		if !tracked || b.Value == nil || b.Direction == "" || b.Type == "informational" {
-			t.Errorf("%s has neither a cap nor an enforced baseline, so nothing judges it", name)
+	all, err := LoadBaselines("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := make([]string, 0, len(all)+1)
+	for target := range all {
+		targets = append(targets, target)
+	}
+	slices.Sort(targets)
+	// A host with no block of its own is checked too, or the platform most in
+	// need of the seeding is the one target nothing asks about.
+	if !slices.Contains(targets, HostTarget()) {
+		targets = append(targets, HostTarget())
+	}
+	for _, target := range targets {
+		for _, name := range integrationMetrics {
+			if _, capped := caps[name]; capped {
+				continue
+			}
+			b, tracked := all[target][name]
+			if !tracked || b.Value == nil || b.Direction == "" || b.Type == "informational" {
+				t.Errorf("%s/%s has neither a cap nor an enforced baseline, so nothing judges it there — give it a value and a direction in %s",
+					target, name, baselinesFile)
+			}
 		}
 	}
 }
@@ -236,6 +269,296 @@ func TestFit_FloorsAreCaps(t *testing.T) {
 		th, ok := caps[name]
 		if !ok || th.Direction != AtLeast || th.Cap <= 0 {
 			t.Errorf("%s = %+v, want a positive at_least floor", name, th)
+		}
+	}
+}
+
+// integrationMetricsUnjudged names metrics integration's parts report that
+// integrationMetrics deliberately leaves out, each with the reason. An
+// unexplained omission and an overlooked one look identical in a list of
+// strings, and the second is exactly how T2087 happened; spelling the reason
+// makes the next person's choice a decision rather than an inheritance.
+var integrationMetricsUnjudged = map[string]string{
+	"host_test_count": "a suite's size is not a quality of the change. It ratchets `up` where a target carries a figure, but requiring that everywhere would fail a target for deleting a test — which is sometimes the right change.",
+}
+
+// metricNameLiteral matches the name a gate gives a metric at the only place
+// one is ever spelled: the Count/Size constructors in gate source.
+var metricNameLiteral = regexp.MustCompile(`\b(?:Count|Size)\("([a-z0-9_]+)"`)
+
+// reportedMetricNames scans this package's non-test sources for every metric
+// name a gate can report. Reading the source rather than running the gates is
+// what makes this affordable — running them is minutes of compiling and testing
+// — and it is sound because a metric only exists by being constructed here.
+func reportedMetricNames(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range metricNameLiteral.FindAllSubmatch(src, -1) {
+			seen[string(m[1])] = true
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("scanned the package and found no metric names at all — the constructors moved, and every check built on this scan has quietly stopped checking")
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// integrationMetrics is hand-maintained, and a hand-maintained list of what a
+// program reports drifts from what it reports. The drift is silent in both
+// directions and both directions matter: a metric added to a part gate and not
+// added here is never asked for a term on any target — T2087's defect one layer
+// up, and the one the all-targets sweep cannot see — while a name left here
+// after the metric was renamed away demands a baseline for a number nothing
+// will ever produce, which no green run can ever satisfy.
+//
+// So: every metric this program can report is accounted for, as an enforced
+// term, a cap, or a written reason not to judge it; and everything named here
+// is a metric this program can actually report.
+func TestIntegrationMetrics_AccountsForEveryMetricReported(t *testing.T) {
+	caps, err := loadThresholds("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reported := reportedMetricNames(t)
+	for _, name := range reported {
+		switch {
+		case slices.Contains(integrationMetrics, name):
+		case caps[name].Direction != "":
+		case integrationMetricsUnjudged[name] != "":
+		default:
+			t.Errorf("a gate reports %q, but nothing accounts for it: add it to integrationMetrics (and give it a term on every target in %s), give it a cap, or say in integrationMetricsUnjudged why it is not judged",
+				name, baselinesFile)
+		}
+	}
+	for _, name := range integrationMetrics {
+		if !slices.Contains(reported, name) {
+			t.Errorf("integrationMetrics names %q, which no gate in this package reports — every target is being asked for a baseline on a number that will never arrive", name)
+		}
+	}
+	for name := range integrationMetricsUnjudged {
+		if !slices.Contains(reported, name) {
+			t.Errorf("integrationMetricsUnjudged excuses %q, which no gate reports — the excuse outlived the metric", name)
+		}
+	}
+}
+
+// foreignTarget is a platform no host can be, so a block keyed by it is never
+// the one a run reads. Spelled rather than derived: picking a real target that
+// "isn't this one" makes the test's meaning depend on where it runs.
+const foreignTarget = "nosuchos-nosucharch"
+
+// writeTerms builds a root carrying both manifests the judge reads. Either body
+// may be empty, meaning the file is simply absent — which is a state the judge
+// has an answer for, and therefore one worth testing.
+func writeTerms(t *testing.T, thresholds, baselines string) string {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "tools", "gates")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		filepath.Base(ThresholdsFile): thresholds,
+		filepath.Base(baselinesFile):  baselines,
+	} {
+		if body == "" {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// someCaps is a valid thresholds manifest naming a metric none of these tests
+// measures, so a baseline is the only thing that can judge anything here.
+const someCaps = `{"worktree_free_bytes": {"direction": "at_least", "cap": 1}}`
+
+// Baselines are PER TARGET, and which target a run reads is the whole of
+// T2087's first failure: go_test_failures carried an enforced baseline on two
+// of four targets, so the same gate judged it on two hosts and silently did not
+// on the others. projectTerms is where that choice is made, and every branch of
+// it below answers "nothing judges this metric here" — none of them loudly.
+func TestProjectTerms_AreScopedToTheHostTarget(t *testing.T) {
+	host := HostTarget()
+
+	t.Run("the host's own block is the one that judges", func(t *testing.T) {
+		root := writeTerms(t, someCaps, `{
+			"`+host+`":          {"mine":   {"value": 0, "direction": "exact"}},
+			"`+foreignTarget+`": {"theirs": {"value": 0, "direction": "exact"}}
+		}`)
+		caps, baselines, err := projectTerms(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := caps["worktree_free_bytes"]; !ok {
+			t.Error("the caps did not survive the lookup")
+		}
+		if _, ok := baselines["mine"]; !ok {
+			t.Error("the host's own baseline is missing, so a run here is judged by nothing it should be")
+		}
+		if _, ok := baselines["theirs"]; ok {
+			t.Error("another target's baseline reached this run — a figure measured on one machine cannot judge another")
+		}
+	})
+
+	t.Run("a host with no block of its own is judged by nothing", func(t *testing.T) {
+		root := writeTerms(t, someCaps, `{"`+foreignTarget+`": {"mine": {"value": 0, "direction": "exact"}}}`)
+		caps, baselines, err := projectTerms(root)
+		// Silence is the finding. This path is NOT an error and should not
+		// become one — a new platform must be able to run a gate before anyone
+		// has a figure for it — which is exactly why the gap is invisible from
+		// the inside, and why the check that catches it has to be a test over
+		// the whole file rather than over whatever HostTarget() says today.
+		if err != nil {
+			t.Fatalf("an unseeded host must still be able to run a gate: %v", err)
+		}
+		if len(baselines) != 0 {
+			t.Errorf("baselines = %v, want none: this host has no block", baselines)
+		}
+		if len(caps) == 0 {
+			t.Error("the caps stopped judging too — an unseeded host would then be judged by nothing at all")
+		}
+	})
+
+	t.Run("an unreadable baselines file leaves the caps judging", func(t *testing.T) {
+		for name, body := range map[string]string{
+			"absent":      "",
+			"not json":    `{`,
+			"wrong shape": `[]`,
+		} {
+			root := writeTerms(t, someCaps, body)
+			caps, baselines, err := projectTerms(root)
+			if err != nil {
+				t.Errorf("%s: %v — losing the baselines must not cost the caps", name, err)
+				continue
+			}
+			if len(caps) == 0 {
+				t.Errorf("%s: the caps went with the baselines", name)
+			}
+			if len(baselines) != 0 {
+				t.Errorf("%s: baselines = %v, want none", name, baselines)
+			}
+		}
+	})
+
+	t.Run("an absent thresholds manifest is fatal", func(t *testing.T) {
+		// The other direction, and it is not symmetric: a project with a judge
+		// must have caps, so their absence is a broken tree rather than an
+		// unseeded one. Judging on silently empty terms is the failure this
+		// whole item is about.
+		root := writeTerms(t, "", `{"`+host+`": {"mine": {"value": 0, "direction": "exact"}}}`)
+		if _, _, err := projectTerms(root); err == nil {
+			t.Error("a missing thresholds manifest must be refused, not absorbed into terms that judge nothing")
+		}
+	})
+}
+
+// The same gap, end to end, through the program that makes landing decisions:
+// an envelope reporting failures passes with no term applied, because the
+// baseline for that metric lives under a different target. This is precisely
+// what `bin/run tested:go` did on windows-amd64 at 5600e002.
+//
+// TestIntegration_PartMetricsAreJudged asserts the repository's data has no
+// such hole. This asserts what the hole COSTS, which is what makes that data
+// assertion worth keeping: without it the verdict is not merely unjudged, it is
+// affirmatively "acceptable".
+func TestJudgeStdin_ABaselineOnAnotherTargetIsNoTermHere(t *testing.T) {
+	const envelope = `{"schema_version":1,"gate":"tested:go","target":"nosuchos-nosucharch","metrics":[{"name":"go_test_failures","type":"int","value":7}]}`
+	const seeded = `{"value": 0, "direction": "exact"}`
+
+	for name, tc := range map[string]struct {
+		baselines      string
+		wantAcceptable bool
+		wantTerm       bool
+	}{
+		"seeded only on another target": {
+			baselines:      `{"` + foreignTarget + `": {"go_test_failures": ` + seeded + `}}`,
+			wantAcceptable: true, // seven failing tests, and the verdict is yes
+			wantTerm:       false,
+		},
+		"seeded on this host": {
+			baselines:      `{"` + HostTarget() + `": {"go_test_failures": ` + seeded + `}}`,
+			wantAcceptable: false,
+			wantTerm:       true,
+		},
+		"tracked here but informational": {
+			// The third state, and it judges exactly as little as no entry at
+			// all — which is why the data test refuses it as a term.
+			baselines:      `{"` + HostTarget() + `": {"go_test_failures": {"type": "informational"}}}`,
+			wantAcceptable: true,
+			wantTerm:       false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := writeTerms(t, someCaps, tc.baselines)
+			var out bytes.Buffer
+			if err := JudgeStdin(root, "tested:go", strings.NewReader(envelope), &out); err != nil {
+				t.Fatal(err)
+			}
+			var got verdictWire
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatalf("the verdict is not one JSON object: %v (%q)", err, out.String())
+			}
+			if got.Acceptable != tc.wantAcceptable {
+				t.Errorf("acceptable = %v, want %v (detail: %s)", got.Acceptable, tc.wantAcceptable, got.Detail)
+			}
+			if _, applied := got.Thresholds["go_test_failures"]; applied != tc.wantTerm {
+				t.Errorf("a term was applied = %v, want %v — the verdict must carry exactly what it was reached from", applied, tc.wantTerm)
+			}
+		})
+	}
+}
+
+// The sweep above walks every target the baselines FILE knows, which closes
+// the gap for a platform someone has already seeded and leaves one open for a
+// platform nobody has: a target with no block at all is not a target with a
+// hole in it, and the loop has nothing to iterate. That is the same defect one
+// step earlier — the first person on that platform meets a red trunk — and the
+// file cannot detect it about itself.
+//
+// requiredPlatforms is the answer, because it is already the list of platforms
+// this project ships and refuses to tag without (release_cut.go). Anchoring
+// here means adding a platform there makes its baselines a checked obligation
+// in the same change, rather than a discovery someone makes months later on the
+// machine. The reasoning is the one written over requiredPlatforms itself:
+// shipping something nothing gates on is how a platform silently rots.
+func TestBaselines_KnowEveryPlatformThisProjectShips(t *testing.T) {
+	all, err := LoadBaselines("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, platform := range requiredPlatforms {
+		if len(all[platform]) == 0 {
+			t.Errorf("%s is release-blocking, but %s has no block for it — the all-targets sweep has nothing to walk there, so every metric on that platform is unjudged and nothing says so until someone sits down at one",
+				platform, baselinesFile)
+		}
+	}
+	// And the other way: a block for a platform nobody ships is terms no run
+	// will ever read, and the sweep spends a real failure on maintaining them.
+	for platform := range all {
+		if !slices.Contains(requiredPlatforms, platform) {
+			t.Errorf("%s carries a block for %q, which this project does not ship — either it belongs in requiredPlatforms or the block is dead data the sweep now demands upkeep of",
+				baselinesFile, platform)
 		}
 	}
 }

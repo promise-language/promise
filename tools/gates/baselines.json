@@ -275,19 +275,28 @@
     }
   },
   "linux-arm64": {
+    "go_test_failures": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-13"
+    },
     "go_test_packages_failed": {
       "value": 0,
       "direction": "exact",
       "updated": "2026-09-11"
     },
     "host_leak_count": {
-      "type": "informational"
+      "value": 0,
+      "direction": "down",
+      "updated": "2026-09-13"
     },
     "host_test_count": {
       "type": "informational"
     },
     "host_test_failures": {
-      "type": "informational"
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-13"
     },
     "stale_generated_files": {
       "value": 0,
@@ -325,6 +334,11 @@
     }
   },
   "windows-amd64": {
+    "go_test_failures": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-13"
+    },
     "go_test_packages_failed": {
       "value": 0,
       "direction": "exact",

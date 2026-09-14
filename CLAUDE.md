@@ -38,12 +38,12 @@ bin/test tools             # tools/build Go tests only (opt-in; unreliable on so
 bin/test all               # go + promise + tools
 bin/test --wasm            # include wasm32-wasi target (wasmtime)
 bin/test --wasm-web        # include wasm32-web target (Node.js harness)
-bin/test --clean           # clear caches first
+bin/test --clean           # wipe .promise-home/ first; Go tests run uncached
 bin/verify --wasm          # format + vet + all tests (pre-commit check)
 bin/verify --wasm-web      # same + wasm32-web tests via Node
 bin/verify --shared --wasm # same but using shared ~/.promise cache
-bin/clean                  # wipe .promise-home/ + go test cache (pristine state)
-bin/clean --shared         # wipe ~/.promise/ instead
+bin/clean                  # wipe .promise-home/ (pristine state)
+bin/clean --shared         # wipe ~/.promise/cache instead (keeps installed epochs/, bin/, active)
 bin/format                 # format Go + Promise code
 bin/vet                    # go vet (excluding generated parser)
 bin/coverage               # Go + Promise test coverage

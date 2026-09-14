@@ -140,8 +140,8 @@ touches ~/.promise or the shared Go caches — deleting the first cost this
 machine its installed toolchain, and stamping the second costs every clone
 on it a full rerun of the compiler's Go tests (T2084).
 
-If nothing in this package is to blame, a concurrent bin/clean, bin/verify
---clean or promise install on the host can also move these.
+If nothing in this package is to blame, a concurrent bin/clean --shared,
+promise install, or a go clean -testcache run by hand can also move these.
 =====================================================================
 `, what, before, after)
 }
@@ -232,7 +232,7 @@ func TestSandboxGuardSeesWhatItWatches(t *testing.T) {
 			t.Errorf("listing = %q, want %q (sorted, verify lock excluded)", got, want)
 		}
 
-		// Losing a top-level subtree is what a stray `--shared --clean` does.
+		// Losing a top-level subtree is what a RemoveAll aimed at the home does.
 		if err := os.RemoveAll(filepath.Join(promise, "bin")); err != nil {
 			t.Fatal(err)
 		}

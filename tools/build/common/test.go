@@ -20,7 +20,8 @@ import (
 // they are unreliable across CI runners; bin/verify runs them locally where that
 // environment holds. Flows are never run here (no flow-sdk workspace on CI).
 // Flags: -shared (use ~/.promise), -wasm (include wasm32-wasi),
-// -wasm-web (include wasm32-web via Node), -clean (clear caches first).
+// -wasm-web (include wasm32-web via Node), -clean (wipe .promise-home first and
+// run the Go suites uncached; refused with -shared).
 // Default cache is local (.promise-home/); -local is accepted for clarity.
 func RunTest(root string, args []string) error {
 	start := time.Now()
@@ -43,15 +44,18 @@ func RunTest(root string, args []string) error {
 			return fmt.Errorf("usage: bin/test [go|promise|tools|all] [-shared] [-wasm] [-wasm-web] [-clean]")
 		}
 	}
+	if shared && clean {
+		return errCleanWithShared
+	}
 
 	runCompiler := suite == "default" || suite == "all" || suite == "go"
 	runTools := suite == "all" || suite == "tools"
 	runPromise := suite == "default" || suite == "all" || suite == "promise"
 
-	// Clean caches first if requested, before SetupLocalCache so the local
-	// home is recreated empty.
+	// Clean first if requested, before SetupLocalCache so the local home is
+	// recreated empty. The Go suites then skip saved results (goTestFlags).
 	if clean {
-		if err := Clean(root, CleanOptions{Shared: shared}); err != nil {
+		if err := Clean(root, CleanOptions{}); err != nil {
 			return fmt.Errorf("clean: %w", err)
 		}
 	}
@@ -72,7 +76,7 @@ func RunTest(root string, args []string) error {
 	// Compiler Go tests — the CI set.
 	if runCompiler {
 		Progress().Println("\nRunning go tests (compiler)...")
-		if err := RunGoTests(root); err != nil {
+		if err := RunGoTests(root, goTestFlags(clean)...); err != nil {
 			return fmt.Errorf("go tests (compiler): %w", err)
 		}
 	}
@@ -81,7 +85,7 @@ func RunTest(root string, args []string) error {
 	// part of the default CI set. See the RunTest doc comment for why.
 	if runTools {
 		Progress().Println("\nRunning go tests (tools)...")
-		if err := RunToolsGoTests(root); err != nil {
+		if err := RunToolsGoTests(root, goTestFlags(clean)...); err != nil {
 			return fmt.Errorf("go tests (tools): %w", err)
 		}
 	}
@@ -158,23 +162,40 @@ func goTestConcurrencyArgs() []string {
 //
 // -timeout 30m: see RunTests — the codegen package exceeds Go's default
 // 10m per-package limit on slow runners (GitHub windows-amd64).
-func goTestArgs() []string {
+//
+// extra flags (goTestFlags) go ahead of the package pattern; with none, this is
+// exactly the command the gate measures.
+func goTestArgs(extra ...string) []string {
 	args := append([]string{"test", "-timeout", "30m"}, goTestConcurrencyArgs()...)
+	args = append(args, extra...)
 	return append(args, "./...")
 }
 
-// RunGoTests runs only compiler Go unit tests. Used by verify.
-func RunGoTests(root string) error {
+// goTestFlags is what a run adds to goTestArgs. A --clean run must not reuse
+// saved test results and says so with -count=1, which affects that run alone;
+// `go clean -testcache` would instead stamp the host-global
+// $GOCACHE/testexpire.txt and expire every saved result in every clone on the
+// machine.
+func goTestFlags(clean bool) []string {
+	if clean {
+		return []string{"-count=1"}
+	}
+	return nil
+}
+
+// RunGoTests runs only compiler Go unit tests. Used by verify. extra flags are
+// passed to `go test` ahead of the package pattern.
+func RunGoTests(root string, extra ...string) error {
 	compilerDir := filepath.Join(root, "compiler")
-	return runInRendered(compilerDir, Progress(), isGoTestPassLine, "go", goTestArgs()...)
+	return runInRendered(compilerDir, Progress(), isGoTestPassLine, "go", goTestArgs(extra...)...)
 }
 
 // RunToolsGoTests runs Go unit tests for the tools/build module. Same
 // concurrency reasoning as RunGoTests: these tests drive the build tools, which
 // drive the compiler.
-func RunToolsGoTests(root string) error {
+func RunToolsGoTests(root string, extra ...string) error {
 	toolsDir := filepath.Join(root, "tools", "build")
-	return runInRendered(toolsDir, Progress(), isGoTestPassLine, "go", goTestArgs()...)
+	return runInRendered(toolsDir, Progress(), isGoTestPassLine, "go", goTestArgs(extra...)...)
 }
 
 // RunFlowsGoTests runs Go unit tests for the flows module.

@@ -95,6 +95,19 @@ Oversubscription here was never buying wall time — it was spending it. On a
 
 ## Test Sandboxing
 
+**No test, and no command run from the worktree** (`bin/*` and the tests they
+drive), **writes a shared, machine-global location** — not the shared Promise
+home (`~/.promise`), not the host Go caches. There are two exceptions, both
+explicit. One is the download cache for external artifacts (the LLVM, musl,
+OpenSSL and compiler-rt blobs), and every write to it is made under a lock that
+coordinates concurrent processes. The other is `bin/clean --shared`, which an
+operator runs by hand and which removes only `~/.promise/cache` — never the
+installed toolchain (`epochs/`, `bin/`, `active`) or the verify lock. Nothing
+that runs tests clears the shared home: `--clean` combined with `--shared` on
+`bin/test` or `bin/verify` is refused before any side effect. The installed
+`promise` CLI's own cache management (`promise clean` on a user's machine) is a
+product feature, not a worktree command, and is outside this rule.
+
 A tools test builds its own world — a temp root, a redirected `HOME`, a
 redirected `GOCACHE` — and touches neither the host's Promise home nor the
 shared Go caches. The tools are the one package whose subject *is* the machine's
@@ -102,14 +115,12 @@ global state, so a test that runs them for real spends the host's state to
 assert on a flag.
 
 - **Proving a flag parses is a pure-parse test** (`parseVerifyArgs`,
-  `parseCleanArgs`), never a pipeline run. `--shared --clean` resolves to the
-  real `~/.promise` and removes it — the installed toolchain on `PATH` included;
-  `--push` pushes.
-- **`go clean -testcache` is host-global.** It stamps `$GOCACHE/testexpire.txt`,
-  and cmd/go then treats every test result saved before that moment as expired —
-  in every module, and in every clone sharing the cache. A test that reaches it
-  points `GOCACHE` at a throwaway directory first; the repo-local `.promise-home`
-  and a temp `compiler/go.mod` do not scope it.
+  `parseCleanArgs`), never a pipeline run: `--push` pushes.
+- **`go clean -testcache` is host-global, so no tool runs it.** It stamps
+  `$GOCACHE/testexpire.txt`, and cmd/go then treats every test result saved
+  before that moment as expired — in every module, and in every clone sharing
+  the cache. A `--clean` run asks its own `go test` for `-count=1` instead,
+  which reaches no further than that run.
 - **`TestMain` in `tools/build/common` snapshots both** — the top-level listing of
   `~/.promise` and the expiry stamp — and fails the package if either moved, even
   when every test passed. A test that reaches machine-global state reddens
@@ -319,7 +330,7 @@ to gate, so recording reports a no-op instead.
 - `--local` — use `.promise-home/` in the repo instead of `~/.promise` (default; avoids polluting user home)
 - `--shared` — use `~/.promise` shared cache instead of the local `.promise-home/`
 - `--wasm` — include wasm32-wasi target tests (requires `wasmtime`)
-- `--clean` — clear Go and Promise test caches before running
+- `--clean` — wipe the repo-local `.promise-home/` first and run the Go suites with `-count=1`; refused with `--shared`
 
 ### Progress rendering
 

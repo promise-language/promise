@@ -1,6 +1,7 @@
 package common
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -103,6 +104,42 @@ func TestRunGoTests_TrivialModule(t *testing.T) {
 	}
 	if err := RunGoTests(root); err != nil {
 		t.Fatalf("RunGoTests: %v", err)
+	}
+}
+
+// TestGoTestFlags_CleanRunsUncached pins what replaced `go clean -testcache` in
+// a --clean run: -count=1 on that run's own `go test`, ahead of the package
+// pattern — and nothing at all for an ordinary run, so the ordinary command
+// stays exactly the goTestArgs() the tested:go gate compares against.
+func TestGoTestFlags_CleanRunsUncached(t *testing.T) {
+	if got := goTestFlags(false); len(got) != 0 {
+		t.Errorf("goTestFlags(false) = %v, want none", got)
+	}
+	if got, want := goTestArgs(goTestFlags(false)...), goTestArgs(); !slices.Equal(got, want) {
+		t.Errorf("an ordinary run's go test = %v, want the gate's %v", got, want)
+	}
+	args := goTestArgs(goTestFlags(true)...)
+	if n := len(args); n < 2 || args[n-2] != "-count=1" || args[n-1] != "./..." {
+		t.Errorf("a --clean run's go test = %v, want it to end in -count=1 ./...", args)
+	}
+}
+
+// TestRunTest_CleanWithSharedIsRefused: RunTest has no separate parser, so the
+// refusal is pinned at the entry point, where it must come before the clean,
+// the cache setup and the build. HOME is redirected, so a regression that took
+// the verify lock or touched ~/.promise shows up in this test's own home.
+func TestRunTest_CleanWithSharedIsRefused(t *testing.T) {
+	home := cleanTestHome(t)
+	for _, args := range [][]string{
+		{"--shared", "--clean"},
+		{"go", "--clean", "--shared"},
+	} {
+		if err := RunTest(t.TempDir(), args); !errors.Is(err, errCleanWithShared) {
+			t.Errorf("RunTest(%v) = %v, want errCleanWithShared", args, err)
+		}
+	}
+	if promise := filepath.Join(home, ".promise"); Exists(promise) {
+		t.Errorf("a refused run must not take the verify lock or touch the shared home; %s exists", promise)
 	}
 }
 

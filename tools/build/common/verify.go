@@ -81,14 +81,17 @@ func parseVerifyArgs(args []string) (verifyOptions, error) {
 			return verifyOptions{}, fmt.Errorf("usage: bin/verify [--shared] [--wasm] [--wasm-web] [--clean] [--push] [--lock-timeout=<dur>]")
 		}
 	}
+	if opts.shared && opts.clean {
+		return verifyOptions{}, errCleanWithShared
+	}
 	return opts, nil
 }
 
 // RunVerify orchestrates the full pre-commit verification pipeline:
 // format → build → vet → test. All steps are internal calls (no subprocess).
 // Flags: -shared (use ~/.promise), -wasm (include wasm32-wasi),
-// -wasm-web (include wasm32-web via Node), -clean (clear caches),
-// -push (git push on success).
+// -wasm-web (include wasm32-web via Node), -clean (wipe .promise-home and run
+// the Go suites uncached; refused with -shared), -push (git push on success).
 // Default cache is local (.promise-home/); -local is accepted for clarity.
 func RunVerify(root string, args []string) error {
 	opts, err := parseVerifyArgs(args)
@@ -118,7 +121,7 @@ func RunVerify(root string, args []string) error {
 	// the local home is recreated empty, and before any build/test work so
 	// the run starts from a known state.
 	if opts.clean {
-		if err := cleanLocked(root, CleanOptions{Shared: opts.shared}); err != nil {
+		if err := cleanLocked(root, CleanOptions{}); err != nil {
 			return fmt.Errorf("clean: %w", err)
 		}
 	}
@@ -175,9 +178,10 @@ func RunVerify(root string, args []string) error {
 	// 5. (Cache clearing now happens up front via Clean.)
 
 	// 6-8b. Go suites, then (only if they all passed) the Promise suites.
+	goFlags := goTestFlags(opts.clean)
 	res, err := runVerifyTestPhases(root, opts.wasm, opts.wasmWeb, verifySuites{
-		goTests:      RunGoTests,
-		toolsTests:   RunToolsGoTests,
+		goTests:      func(root string) error { return RunGoTests(root, goFlags...) },
+		toolsTests:   func(root string) error { return RunToolsGoTests(root, goFlags...) },
 		flowsTests:   RunFlowsGoTests,
 		promiseTests: RunPromiseTests,
 	})

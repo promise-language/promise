@@ -75,7 +75,7 @@ bin/test go              # Go unit tests only
 bin/test promise         # Promise tests only
 bin/test --wasm          # also run the wasm32-wasi target (wasmtime)
 bin/test --wasm-web      # also run the wasm32-web target (Node.js)
-bin/test --clean         # clear caches first
+bin/test --clean         # wipe .promise-home/ first; Go tests run uncached
 ```
 
 Narrower loops while iterating:
@@ -139,9 +139,13 @@ default) or `~/.promise` (shared, via `--shared`). To get back to a pristine
 state:
 
 ```sh
-bin/clean                # wipe .promise-home/ + Go test cache
-bin/clean --shared       # wipe ~/.promise instead
+bin/clean                # wipe .promise-home/
+bin/clean --shared       # wipe ~/.promise/cache instead
 ```
+
+`bin/clean --shared` removes only the shared cache — never the installed
+toolchain (`epochs/`, `bin/`, `active`). `bin/test` and `bin/verify` never clear
+the shared home: `--clean` together with `--shared` is refused.
 
 ## 9. Repository layout
 

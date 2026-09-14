@@ -66,8 +66,13 @@ func TestParseVerifyArgs_EveryFlagSetsItsOption(t *testing.T) {
 		{"last timeout wins", []string{"--lock-timeout=1s", "--lock-timeout=2s"}, verifyOptions{lockTimeout: 2 * time.Second}},
 		{
 			"all together",
-			[]string{"--shared", "--wasm", "--wasm-web", "--clean", "--push", "--lock-timeout=1s"},
-			verifyOptions{shared: true, wasm: true, wasmWeb: true, clean: true, push: true, lockTimeout: time.Second},
+			[]string{"--wasm", "--wasm-web", "--clean", "--push", "--lock-timeout=1s"},
+			verifyOptions{wasm: true, wasmWeb: true, clean: true, push: true, lockTimeout: time.Second},
+		},
+		{
+			"shared with everything but clean",
+			[]string{"--shared", "--wasm", "--wasm-web", "--push", "--lock-timeout=1s"},
+			verifyOptions{shared: true, wasm: true, wasmWeb: true, push: true, lockTimeout: time.Second},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -79,6 +84,27 @@ func TestParseVerifyArgs_EveryFlagSetsItsOption(t *testing.T) {
 				t.Errorf("parseVerifyArgs(%v) = %+v, want %+v", tc.args, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestParseVerifyArgs_CleanWithSharedIsRefused pins the one combination the
+// parser rejects. A verify run never clears the shared ~/.promise — that is an
+// operator's explicit bin/clean --shared — and --clean clears only the
+// repo-local .promise-home, which a --shared run never uses, so the pair asks
+// either for a clean of the shared home or for nothing. Refusing at the parser
+// puts the refusal ahead of the lock, the clean and the build.
+func TestParseVerifyArgs_CleanWithSharedIsRefused(t *testing.T) {
+	for _, args := range [][]string{
+		{"--shared", "--clean"},
+		{"--clean", "--wasm", "--shared"},
+	} {
+		got, err := parseVerifyArgs(args)
+		if !errors.Is(err, errCleanWithShared) {
+			t.Errorf("parseVerifyArgs(%v) = %v, want errCleanWithShared", args, err)
+		}
+		if got != (verifyOptions{}) {
+			t.Errorf("a rejected command line must yield zero options, got %+v", got)
+		}
 	}
 }
 

@@ -85,6 +85,27 @@ func TestRunToolsGoTests_TrivialModule(t *testing.T) {
 	}
 }
 
+// TestRunGoTests_TrivialModule is the same shape for verify's other Go phase.
+// Both now assemble their command line from one goTestArgs(), which the
+// tested:go gate reads too — so this is what says the shared spelling still
+// runs the compiler module, not only the tools one.
+func TestRunGoTests_TrivialModule(t *testing.T) {
+	root := t.TempDir()
+	compilerDir := filepath.Join(root, "compiler")
+	if err := os.MkdirAll(compilerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(compilerDir, "go.mod"), []byte("module example.com/compiler\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(compilerDir, "noop_test.go"), []byte("package compiler\n\nimport \"testing\"\n\nfunc TestNoop(t *testing.T) { t.Log(\"noop\") }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunGoTests(root); err != nil {
+		t.Fatalf("RunGoTests: %v", err)
+	}
+}
+
 // argsStubSource is a stand-in for bin/promise that prints the argument list it
 // was given, one per line, so a test can assert on the child command line the
 // Promise test phases assemble.

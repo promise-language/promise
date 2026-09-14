@@ -202,7 +202,7 @@ var contractGates = map[string]contractGateDef{
 		parts:   []string{"checked:go"},
 	},
 	"tested:go": {
-		summary: "failing tests in the compiler's Go suite",
+		summary: "failing tests in every Go module's suite",
 		measure: measureTestedGo,
 	},
 	"tested:promise": {
@@ -443,6 +443,10 @@ func captureSplit(dir, name string, args ...string) (stdout, stderr string, err 
 	err = cmd.Run()
 	return out.String(), errBuf.String(), err
 }
+
+// captureFunc is captureSplit's shape as a parameter: the seam a gate uses when
+// a test of it must stand in for a child process rather than spawn one.
+type captureFunc func(dir, name string, args ...string) (stdout, stderr string, err error)
 
 // countPrefixed counts lines starting with prefix.
 func countPrefixed(s, prefix string) int {

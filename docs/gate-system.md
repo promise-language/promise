@@ -402,7 +402,7 @@ These gates speak the contract the flow SDK and BASE share, and the SDK **fails 
 | `builds` | Go packages that fail to compile, per module | `unbuildable_go_packages` |
 | `checked:go` | `go vet` diagnostics | `vet_findings` |
 | `checked` | every language's checker — Go only for now, see below | `vet_findings` |
-| `tested:go` | failing tests in the compiler's Go suite | `go_test_failures`, `go_test_packages_failed` |
+| `tested:go` | failing tests in every Go module's suite (`compiler/`, `tools/build/`) | `go_test_failures`, `go_test_packages_failed` |
 | `tested:promise` | failing tests in the host Promise suite | `host_test_failures`, `host_leak_count`, `host_test_count` |
 | `tested` | both host suites | both |
 | `integration` | `formatted` + `builds` + `checked` + `tested`, measured at once — what a landing decision rests on | all of the above |
@@ -421,7 +421,7 @@ These gates speak the contract the flow SDK and BASE share, and the SDK **fails 
 
 **`checked` has no `:promise` instance yet, and that is a missing tool rather than a decision.** `promise check` takes one file, and most `.pr` files are not checkable alone: a file of a multi-file module reports undefined names its own module defines (`modules/std/vector.pr` does not see `_FnIter` in `iter.pr`), and the fixtures under `tests/modules/` are invalid on purpose. A per-file count measures how files are arranged rather than whether the code is sound — 50 of 942 here, none of them a defect. Promise's semantic analysis is exercised today by `tested:promise`, since every test compiles its module graph. Closing the gap needs `promise check <project>`: checking a project without building it.
 
-**Not yet migrated.** The tracker gates above still use `GateOutput` and are not in `bin/gate --list`, because everything listed must be runnable through `bin/run`. `integration` also omits the `tools/build` Go suite (T2084 — outside `bin/verify`'s lock it deletes `~/.promise`) and the WASM suites, which stay separately runnable so a host-only arena can still land a change; both omissions are reported in `incomplete`.
+**Not yet migrated.** The tracker gates above still use `GateOutput` and are not in `bin/gate --list`, because everything listed must be runnable through `bin/run`. `integration` is host-scoped by construction — one run reports exactly one target — so the WASM suites are not an omission from it but a different target's measurement, asked for by name (`bin/gate wasm-test`, `bin/gate wasm-web-test`) and judged against that target's own block. Nothing about them belongs in `incomplete`: a reason that could never be discharged would make every host run incomplete, and no baseline moves from an incomplete run.
 
 ## Exception Management
 

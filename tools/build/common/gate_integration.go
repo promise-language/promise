@@ -122,32 +122,52 @@ func measureCheckedGo(root string) ([]Metric, string, error) {
 	return []Metric{Count("vet_findings", n)}, "", nil
 }
 
-// measureTestedGo counts failing Go tests and failing packages. Both are worth
-// having: one failing test in one package and forty in forty are different
-// situations, and a single number cannot tell them apart.
+// measureTestedGo counts failing Go tests and failing packages, across every Go
+// module in the tree. Both numbers are worth having: one failing test in one
+// package and forty in forty are different situations, and a single number
+// cannot tell them apart.
 //
-// Only the compiler module. The tools/build suite deletes ~/.promise and
-// expires every cached Go test result on the machine when it runs outside
-// bin/verify's lock (T2084), and a gate must not do that to the host it
-// measures on. The run says so rather than reporting a number that looks like
-// the full set.
+// Every module, for the same reason `builds` and `checked:go` sweep them:
+// `./...` is module-scoped, so measuring only compiler/ would pass a change
+// that bin/verify fails on tools/build — a landing decision made on a smaller
+// subject than the one that has to hold.
 func measureTestedGo(root string) ([]Metric, string, error) {
-	compilerDir := filepath.Join(root, "compiler")
-	args := append([]string{"test", "-timeout", "30m"}, goTestConcurrencyArgs()...)
-	stdout, _, testErr := captureSplit(compilerDir, "go", append(args, "./...")...)
-	failedTests := countPrefixed(stdout, "--- FAIL:")
-	failedPackages := countPrefixed(stdout, "FAIL\t")
-	if testErr != nil && failedTests == 0 && failedPackages == 0 {
-		// The run did not happen — a build failure in a test package, most
-		// often. That is not "zero failing tests".
-		return nil, "", fmt.Errorf("go test in %s: %w: %s", compilerDir, testErr, firstLine(stdout))
+	return measureTestedGoWith(root, captureSplit)
+}
+
+// measureTestedGoWith is measureTestedGo with the child call as a parameter. A
+// test in this package cannot make the real one: `go test ./...` in tools/build
+// IS this suite, so a test that ran it would spawn an unbounded chain of go test
+// subprocesses (the hazard TestRunToolsGoTests_TrivialModule already names).
+func measureTestedGoWith(root string, capture captureFunc) ([]Metric, string, error) {
+	// The same command bin/verify runs (RunGoTests / RunToolsGoTests), from the
+	// one place it is spelled: the gate and verify cannot disagree about what
+	// "the Go suite" is.
+	argv := goTestArgs()
+
+	failedTests, failedPackages := 0, 0
+	for _, dir := range goModules(root) {
+		stdout, stderr, testErr := capture(dir, "go", argv...)
+		tests := countPrefixed(stdout, "--- FAIL:")
+		packages := countPrefixed(stdout, "FAIL\t")
+		if testErr != nil && tests == 0 && packages == 0 {
+			// The run did not happen — a build failure in a test package, most
+			// often. That is not "zero failing tests". go reports that kind of
+			// failure on stderr; a failing TEST reaches stdout, which is what
+			// the two counts above read.
+			detail := firstLine(stderr)
+			if detail == "" {
+				detail = firstLine(stdout)
+			}
+			return nil, "", fmt.Errorf("go test in %s: %w: %s", dir, testErr, detail)
+		}
+		failedTests += tests
+		failedPackages += packages
 	}
 	return []Metric{
-			Count("go_test_failures", failedTests),
-			Count("go_test_packages_failed", failedPackages),
-		},
-		"the tools/build Go suite was not run (T2084: outside bin/verify's lock it deletes ~/.promise)",
-		nil
+		Count("go_test_failures", failedTests),
+		Count("go_test_packages_failed", failedPackages),
+	}, "", nil
 }
 
 // measureTestedPromise runs the host Promise suite. It builds the compiler

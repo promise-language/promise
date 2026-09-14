@@ -151,22 +151,30 @@ func goTestConcurrencyArgs() []string {
 	return []string{"-p", strconv.Itoa(p), "-parallel", strconv.Itoa(parallel)}
 }
 
+// goTestArgs is the whole `go test` command the compiler and tools suites run —
+// verify's two phases below and the tested:go gate alike. One spelling, so the
+// gate cannot come to measure something narrower than what verify requires.
+// (RunFlowsGoTests keeps its own, without the concurrency bound.)
+//
+// -timeout 30m: see RunTests — the codegen package exceeds Go's default
+// 10m per-package limit on slow runners (GitHub windows-amd64).
+func goTestArgs() []string {
+	args := append([]string{"test", "-timeout", "30m"}, goTestConcurrencyArgs()...)
+	return append(args, "./...")
+}
+
 // RunGoTests runs only compiler Go unit tests. Used by verify.
 func RunGoTests(root string) error {
 	compilerDir := filepath.Join(root, "compiler")
-	// -timeout 30m: see RunTests — the codegen package exceeds Go's default
-	// 10m per-package limit on slow runners (GitHub windows-amd64).
-	args := append([]string{"test", "-timeout", "30m"}, goTestConcurrencyArgs()...)
-	return runInRendered(compilerDir, Progress(), isGoTestPassLine, "go", append(args, "./...")...)
+	return runInRendered(compilerDir, Progress(), isGoTestPassLine, "go", goTestArgs()...)
 }
 
-// RunToolsGoTests runs Go unit tests for the tools/build module.
+// RunToolsGoTests runs Go unit tests for the tools/build module. Same
+// concurrency reasoning as RunGoTests: these tests drive the build tools, which
+// drive the compiler.
 func RunToolsGoTests(root string) error {
 	toolsDir := filepath.Join(root, "tools", "build")
-	// Same concurrency reasoning as RunGoTests: these tests drive the build
-	// tools, which drive the compiler.
-	args := append([]string{"test", "-timeout", "30m"}, goTestConcurrencyArgs()...)
-	return runInRendered(toolsDir, Progress(), isGoTestPassLine, "go", append(args, "./...")...)
+	return runInRendered(toolsDir, Progress(), isGoTestPassLine, "go", goTestArgs()...)
 }
 
 // RunFlowsGoTests runs Go unit tests for the flows module.

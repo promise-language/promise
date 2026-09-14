@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -727,15 +728,25 @@ func TestFormatGo_PreservesFileMode(t *testing.T) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := FormatGo(root); err != nil {
-		t.Fatalf("FormatGo: %v", err)
-	}
-	fi, err := os.Stat(path)
+	// The mode to preserve is the one the filesystem actually recorded, not the
+	// one Chmod was handed: Windows keeps no POSIX permission bits and reports
+	// 0666 for any writable file, so asserting a literal 0600 there asserts a bit
+	// pattern the platform can never produce (T2094). Reading it back makes this
+	// test preservation - the property it is named for - on every platform, and
+	// on POSIX it is the same assertion as before, since 0600 is what comes back.
+	before, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := fi.Mode().Perm(); got != 0o600 {
-		t.Errorf("mode = %v, want 0600", got)
+	if err := FormatGo(root); err != nil {
+		t.Fatalf("FormatGo: %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := after.Mode().Perm(), before.Mode().Perm(); got != want {
+		t.Errorf("mode = %v, want %v", got, want)
 	}
 }
 
@@ -817,6 +828,20 @@ func TestFormatGo_RewritesExactlyWhatUnformattedGoFilesNames(t *testing.T) {
 // files — it has not looked. Both modes must fail rather than report a clean
 // tree, which is the same false-clean the checked:go pair was fixed for (T2104).
 func TestFormatGo_AnUnreadableDirectoryIsAnErrorNotACleanTree(t *testing.T) {
+	// The condition has to be induced with POSIX permission bits, and only a
+	// platform that has them can hold it. Windows keeps none - os.Chmod there
+	// toggles the read-only attribute, which does not stop a directory being
+	// listed - so the walk would succeed and this test would assert the opposite
+	// of what it is named for. The platform check has to come first, because
+	// os.Geteuid reports -1 on Windows and so never trips the root skip (T2094).
+	//
+	// A Windows-side induction does exist (open the file with no sharing, so the
+	// walk's ReadFile fails), but it is platform-specific test machinery for a
+	// property this file tests adequately elsewhere; skipping is the honest
+	// outcome rather than asserting something weaker and calling it covered.
+	if runtime.GOOS == "windows" {
+		t.Skip("windows has no POSIX directory permission bits: an unreadable directory cannot be induced")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: permissions do not restrict the walk")
 	}

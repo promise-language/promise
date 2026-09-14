@@ -58,37 +58,39 @@ func probeField(t *testing.T, out, key string) string {
 	return ""
 }
 
-// resolvedDir is what os.working_dir (getcwd) will report for dir. t.TempDir()
-// hands back a path under a symlink on macOS (/var → /private/var), and getcwd
-// resolves it while filepath.Abs deliberately does not — os.src_dir is exactly
-// the directory the caller named, so only the cwd side needs resolving.
-func resolvedDir(t *testing.T, dir string) string {
-	t.Helper()
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatalf("resolve %s: %v", dir, err)
-	}
-	return resolved
-}
-
-// assertSameDir compares two paths as directories rather than as strings. A
-// relative argument is resolved against the invoking cwd, whose spelling the
-// caller chooses: a shell that reached the directory through a symlink (and
-// os/exec, which sets the child's PWD to Cmd.Dir) reports the symlinked path,
-// while an absolute argument is baked exactly as given. Both name one directory,
-// so the assertion is on identity, not on spelling.
+// assertSameDir compares two paths as directories rather than as strings, on
+// os.SameFile - directory identity - because a directory has more than one
+// valid spelling and which one a value happens to carry is not what any test here
+// is about. A relative argument is resolved against the invoking cwd, whose
+// spelling the caller chooses; an absolute one is baked exactly as given.
+//
+// Two spellings reach these tests. On macOS t.TempDir() hands back a path under a
+// symlink (/var -> /private/var), which getcwd resolves and filepath.Abs
+// deliberately does not. On Windows a path inherited through %TEMP% may name a
+// component by its 8.3 short name (C:\Users\RUNNER~1\..., the GitHub runner's
+// shape), and getcwd reports the cwd with the spelling it was *set* with - so the
+// child answers short where the test's own path may be long (T2094).
+//
+// Resolving both sides to a canonical spelling would also work, but only because
+// filepath.EvalSymlinks happens to expand 8.3 components on Windows - incidental
+// to a function named for symlinks. os.SameFile asserts the property directly and
+// requires no spelling to be canonical.
 func assertSameDir(t *testing.T, got, want, what string) {
 	t.Helper()
 	if got == want {
 		return
 	}
-	gotReal, err := filepath.EvalSymlinks(got)
+	gotInfo, err := os.Stat(got)
 	if err != nil {
-		t.Errorf("%s = %q, want %q (and it does not resolve: %v)", what, got, want, err)
+		t.Errorf("%s = %q, want the directory %q (and %q does not stat: %v)", what, got, want, got, err)
 		return
 	}
-	if gotReal != resolvedDir(t, want) {
-		t.Errorf("%s = %q (resolving to %q), want the directory %q", what, got, gotReal, want)
+	wantInfo, err := os.Stat(want)
+	if err != nil {
+		t.Fatalf("test setup is broken: %s expects directory %q, which does not stat: %v", what, want, err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		t.Errorf("%s = %q, want the directory %q - two different directories, not two spellings of one", what, got, want)
 	}
 }
 
@@ -126,9 +128,7 @@ func TestRunSrcDirIsSourceNotCwd(t *testing.T) {
 	if got, want := probeField(t, out, "src_dir"), srcDir; got != want {
 		t.Errorf("os.src_dir = %q, want the program's own directory %q", got, want)
 	}
-	if got, want := probeField(t, out, "working_dir"), resolvedDir(t, cwdDir); got != want {
-		t.Errorf("os.working_dir = %q, want the invocation directory %q", got, want)
-	}
+	assertSameDir(t, probeField(t, out, "working_dir"), cwdDir, "os.working_dir")
 }
 
 // TestRunProjectSrcDirIsProjectDir covers the project frontend: for a directory
@@ -232,9 +232,7 @@ func TestBuiltBinaryKeepsSrcDir(t *testing.T) {
 	if got, want := probeField(t, out, "src_dir"), srcDir; got != want {
 		t.Errorf("built binary: os.src_dir = %q, want the source directory %q", got, want)
 	}
-	if got, want := probeField(t, out, "working_dir"), resolvedDir(t, runDir); got != want {
-		t.Errorf("built binary: os.working_dir = %q, want the invocation directory %q", got, want)
-	}
+	assertSameDir(t, probeField(t, out, "working_dir"), runDir, "built binary: os.working_dir")
 }
 
 // TestRunSrcDirFromRelativeArgument covers the spellings a tool is actually

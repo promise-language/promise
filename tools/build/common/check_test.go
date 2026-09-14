@@ -400,7 +400,11 @@ func TestRunCheck_ReportsFindingsAndFails(t *testing.T) {
 	if !strings.Contains(stderr, "# compiler") {
 		t.Errorf("stderr %q names no module, so its paths resolve from nowhere", stderr)
 	}
-	if !strings.Contains(stderr, filepath.ToSlash(filepath.Join("internal", "sema"))) {
+	// Normalize the haystack, not the needle: go vet prints paths with the
+	// platform's separator, so on Windows this is internal\sema and the
+	// forward-slash needle could never match. What the assertion is about is
+	// that the finding names the file, not which slash spells it (T2094).
+	if !strings.Contains(filepath.ToSlash(stderr), "internal/sema") {
 		t.Errorf("stderr %q does not name the file", stderr)
 	}
 	if !strings.Contains(stderr, "unreachable code") {

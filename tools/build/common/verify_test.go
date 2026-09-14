@@ -2,9 +2,13 @@ package common
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +17,8 @@ import (
 // TestRunVerify_UnknownFlagReturnsUsageError verifies that passing an unknown
 // flag causes RunVerify to return the usage error immediately (before any lock
 // or filesystem side effects). Also confirms the usage string includes [--push].
+// This is the wiring pin: parsing happens ahead of every side effect, so a
+// mistyped flag cannot take the lock, clean, build or push.
 func TestRunVerify_UnknownFlagReturnsUsageError(t *testing.T) {
 	err := RunVerify(t.TempDir(), []string{"--unknown"})
 	if err == nil {
@@ -24,37 +30,84 @@ func TestRunVerify_UnknownFlagReturnsUsageError(t *testing.T) {
 	}
 }
 
-// TestRunVerify_PushFlagIsValid verifies that --push is accepted by the arg
-// validation switch and does not produce a usage error.
-// --shared is included to skip SetupLocalCache env-var side effects.
-// --lock-timeout=100ms prevents blocking on the global ~/.promise/verify.lock
-// when the test runs inside an outer bin/verify (which holds the lock).
-// The pipeline will fail in a temp dir (no source code), but the error must
-// not be the usage-validation error.
-func TestRunVerify_PushFlagIsValid(t *testing.T) {
-	err := RunVerify(t.TempDir(), []string{"--shared", "--push", "--lock-timeout=100ms"})
-	if err != nil && strings.HasPrefix(err.Error(), "usage:") {
-		t.Errorf("--push treated as unknown flag, got usage error: %v", err)
+// TestParseVerifyArgs_EveryFlagSetsItsOption checks that every documented flag
+// parses into the option it names, and into no other.
+//
+// It asserts on parseVerifyArgs rather than running RunVerify, which is what
+// this coverage used to do (T2084). Running the pipeline to prove a flag parsed
+// was both destructive and weak: `--shared --clean` resolved CleanHome to the
+// host's ~/.promise and deleted it — the installed toolchain included — and the
+// only assertion (the error is not a "usage:" error) was equally satisfied by a
+// flag parsed into the wrong field, or by an ErrLockTimeout returned before the
+// pipeline it claimed to exercise ever started.
+func TestParseVerifyArgs_EveryFlagSetsItsOption(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want verifyOptions
+	}{
+		{"local", []string{"--local"}, verifyOptions{}},
+		{"shared", []string{"--shared"}, verifyOptions{shared: true}},
+		{"wasm", []string{"--wasm"}, verifyOptions{wasm: true}},
+		{"wasm-web", []string{"--wasm-web"}, verifyOptions{wasmWeb: true}},
+		{"clean", []string{"--clean"}, verifyOptions{clean: true}},
+		{"push", []string{"--push"}, verifyOptions{push: true}},
+		{"lock-timeout", []string{"--lock-timeout=100ms"}, verifyOptions{lockTimeout: 100 * time.Millisecond}},
+		{"lock-timeout separate value", []string{"--lock-timeout", "10m"}, verifyOptions{lockTimeout: 10 * time.Minute}},
+		{"single dash", []string{"-wasm"}, verifyOptions{wasm: true}},
+		{"none", nil, verifyOptions{}},
+		// 0 is not "do not wait" — it is the zero value the absent flag leaves
+		// behind, which acquireVerifyLockIn reads as "wait indefinitely". Anyone
+		// reaching for --lock-timeout=0 to make verify give up immediately gets
+		// the opposite, so the collision is pinned rather than left to be
+		// rediscovered.
+		{"zero timeout is the unbounded sentinel", []string{"--lock-timeout=0s"}, verifyOptions{}},
+		{"repeated flag", []string{"--wasm", "--wasm"}, verifyOptions{wasm: true}},
+		{"last timeout wins", []string{"--lock-timeout=1s", "--lock-timeout=2s"}, verifyOptions{lockTimeout: 2 * time.Second}},
+		{
+			"all together",
+			[]string{"--shared", "--wasm", "--wasm-web", "--clean", "--push", "--lock-timeout=1s"},
+			verifyOptions{shared: true, wasm: true, wasmWeb: true, clean: true, push: true, lockTimeout: time.Second},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseVerifyArgs(tc.args)
+			if err != nil {
+				t.Fatalf("parseVerifyArgs(%v) = %v", tc.args, err)
+			}
+			if got != tc.want {
+				t.Errorf("parseVerifyArgs(%v) = %+v, want %+v", tc.args, got, tc.want)
+			}
+		})
 	}
 }
 
-// TestRunVerify_AllKnownFlagsAreValid checks that every documented flag
-// individually passes arg validation.
-// --lock-timeout=100ms prevents blocking on the global ~/.promise/verify.lock
-// when the test runs inside an outer bin/verify (which holds the lock).
-func TestRunVerify_AllKnownFlagsAreValid(t *testing.T) {
-	for _, flag := range []string{"--local", "--shared", "--wasm", "--wasm-web", "--clean", "--push"} {
-		// Always pair with --shared to avoid SetupLocalCache env-var side effects.
-		// Always add --lock-timeout=100ms to avoid blocking when the global lock
-		// is held by an outer bin/verify run (e.g. the one running these tests).
-		args := []string{"--shared", "--lock-timeout=100ms", flag}
-		if flag == "--shared" {
-			args = []string{"--shared", "--lock-timeout=100ms"}
-		}
-		err := RunVerify(t.TempDir(), args)
-		if err != nil && strings.HasPrefix(err.Error(), "usage:") {
-			t.Errorf("flag %q treated as unknown: %v", flag, err)
-		}
+// TestParseVerifyArgs_Rejections covers the error paths: an unknown flag gets
+// the usage string, and a bad --lock-timeout value gets a flag-specific message
+// naming the offending flag rather than the generic usage line.
+func TestParseVerifyArgs_Rejections(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unknown flag", []string{"--unknown"}, "usage: bin/verify"},
+		{"missing value", []string{"--lock-timeout"}, "-lock-timeout requires a duration value"},
+		{"unparseable value", []string{"--lock-timeout=nope"}, "-lock-timeout: invalid duration"},
+		{"negative value", []string{"--lock-timeout=-5s"}, "-lock-timeout: invalid duration"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseVerifyArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parseVerifyArgs(%v) = %+v, want an error", tc.args, got)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q should contain %q", err.Error(), tc.want)
+			}
+			if got != (verifyOptions{}) {
+				t.Errorf("a rejected command line must yield zero options, got %+v", got)
+			}
+		})
 	}
 }
 
@@ -79,30 +132,6 @@ func TestAcquireVerifyLock_WritesRepoDir(t *testing.T) {
 	got := strings.TrimSpace(string(data))
 	if got != "/home/user/my-repo" {
 		t.Errorf("owner file = %q, want %q", got, "/home/user/my-repo")
-	}
-}
-
-// TestRunVerify_LockTimeoutFlagIsValid confirms --lock-timeout with a duration
-// value passes arg validation (NormalizeArgs splits --lock-timeout=100ms into two
-// tokens). The pipeline fails later in a temp dir, but never with a usage error.
-// Using 100ms (not a large value) so the test doesn't block when the global lock
-// is held by an outer bin/verify run.
-func TestRunVerify_LockTimeoutFlagIsValid(t *testing.T) {
-	err := RunVerify(t.TempDir(), []string{"--shared", "--lock-timeout=100ms"})
-	if err != nil && strings.HasPrefix(err.Error(), "usage:") {
-		t.Errorf("--lock-timeout treated as unknown flag, got usage error: %v", err)
-	}
-}
-
-// TestRunVerify_LockTimeoutInvalidDuration rejects a non-duration value with a
-// clear, flag-specific error (not the generic usage error).
-func TestRunVerify_LockTimeoutInvalidDuration(t *testing.T) {
-	err := RunVerify(t.TempDir(), []string{"--lock-timeout=nope"})
-	if err == nil {
-		t.Fatal("expected error for invalid --lock-timeout duration, got nil")
-	}
-	if !strings.Contains(err.Error(), "lock-timeout") {
-		t.Errorf("error %q should name the offending flag", err.Error())
 	}
 }
 
@@ -502,4 +531,209 @@ func TestRunVerifyTestPhases_InterruptStopsAtNextCheckpoint(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunVerify_HonoursTheParsedLockTimeout is the accepted-command-line half
+// of the wiring, as TestRunVerify_UnknownFlagReturnsUsageError is the rejected
+// half: --lock-timeout has to survive the trip from parseVerifyArgs into
+// acquireVerifyLock, and the resulting ErrLockTimeout has to come back
+// unwrapped.
+//
+// Both halves are load-bearing for the tracker runner, which distinguishes
+// "another verify held the lock, retry next turn" from "verification failed" by
+// errors.Is on this value. A regression that dropped opts.lockTimeout would not
+// fail anything visibly — it would wait forever, which is exactly how the bug
+// this test guards against would present.
+//
+// The lock is this test's own: HOME is redirected, so acquireVerifyLock resolves
+// to a private ~/.promise rather than the host's, which an outer bin/verify
+// holds while these tests run.
+func TestRunVerify_HonoursTheParsedLockTimeout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+
+	lockDir := filepath.Join(home, ".promise")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireVerifyLockIn(filepath.Join(lockDir, "verify.lock"), "/holder", 0)
+	if err != nil {
+		t.Fatalf("acquireVerifyLockIn: %v", err)
+	}
+
+	// A stale blessing to watch: clearVerifiedTree is RunVerify's first step
+	// after the lock, so this file surviving proves the run gave up at the lock
+	// and never entered the pipeline.
+	root := t.TempDir()
+	writeFile(t, root, ".workspace/verified-tree", "stale-blessing\n")
+
+	done := make(chan error, 1)
+	go func() { done <- RunVerify(root, []string{"--lock-timeout=100ms"}) }()
+
+	select {
+	case err := <-done:
+		unlock()
+		if !errors.Is(err, ErrLockTimeout) {
+			t.Fatalf("RunVerify = %v, want ErrLockTimeout", err)
+		}
+	case <-time.After(30 * time.Second):
+		// Deliberately not unlocking: the run is still blocked on the lock, and
+		// releasing it now would send a verify with a broken timeout into the
+		// pipeline — format, build, test and push — on a temp root, after
+		// t.Setenv has already restored the real HOME.
+		t.Fatal("RunVerify ignored --lock-timeout=100ms and is still waiting for the lock")
+	}
+
+	if !Exists(filepath.Join(root, ".workspace", "verified-tree")) {
+		t.Error("a run that timed out on the lock must not have started the pipeline")
+	}
+}
+
+// runVerifyStringArgs returns every string literal appearing inside each call to
+// RunVerify in the given file, keyed by call site. Collecting literals from the
+// whole call expression rather than matching an argument shape keeps it working
+// for both RunVerify(dir, []string{...}) and any future spelling.
+func runVerifyStringArgs(fset *token.FileSet, file *ast.File) map[string][]string {
+	sites := map[string][]string{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || id.Name != "RunVerify" {
+			return true
+		}
+		site := fset.Position(call.Pos()).String()
+		var args []string
+		ast.Inspect(call, func(n ast.Node) bool {
+			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				if s, err := strconv.Unquote(lit.Value); err == nil {
+					args = append(args, s)
+				}
+			}
+			return true
+		})
+		sites[site] = NormalizeArgs(args)
+		return true
+	})
+	return sites
+}
+
+// TestRunVerifyStringArgs exercises the scanner against synthetic source, so
+// TestNoTestDrivesRunVerifyWithPush means something. Run only over the real
+// (clean) tree, the scanner could match nothing at all — a typo'd function name,
+// or a walk that never descends into the argument slice — and stay green
+// forever.
+func TestRunVerifyStringArgs(t *testing.T) {
+	const src = `package p
+func f() {
+	RunVerify(dir, []string{"--shared", "--lock-timeout=30s"})
+	RunVerify(dir, []string{"--push"})
+	RunVerify(dir, nil)
+	RunClean(dir, []string{"--push"})
+	notRunVerify(dir, []string{"--push"})
+}`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "synthetic_test.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	sites := runVerifyStringArgs(fset, file)
+	if len(sites) != 3 {
+		t.Fatalf("found %d RunVerify call sites, want 3: %v", len(sites), sites)
+	}
+
+	var withPush, total int
+	for _, args := range sites {
+		total++
+		if slices.Contains(args, "-push") {
+			withPush++
+		}
+	}
+	if withPush != 1 {
+		t.Errorf("%d of %d call sites pass --push, want exactly 1 — the scanner is not reading the argument slice", withPush, total)
+	}
+	// --lock-timeout=30s must arrive normalized, the same way the parser sees it.
+	var sawTimeout bool
+	for _, args := range sites {
+		if slices.Contains(args, "-lock-timeout") && slices.Contains(args, "30s") {
+			sawTimeout = true
+		}
+	}
+	if !sawTimeout {
+		t.Error("literals must be normalized like a real command line (--lock-timeout=30s → -lock-timeout 30s)")
+	}
+}
+
+// TestNoTestDrivesRunVerifyWithPush forbids this package's tests from handing
+// RunVerify the one flag whose effect leaves the machine.
+//
+// The TestMain guard watches ~/.promise and the Go test cache, so a test that
+// reached the clean is caught after the fact. A push cannot be caught that way:
+// it publishes to the real remote, from whatever checkout the test pointed at,
+// and there is nothing to compare afterwards. Before T2084 a flag-acceptance
+// test did pass --push, and was harmless only because FormatGo happened to fail
+// first on an empty temp root — one reordering away from a real push.
+//
+// Flag acceptance is a parser question: assert on parseVerifyArgs.
+func TestNoTestDrivesRunVerifyWithPush(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	var scanned int
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, e.Name(), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", e.Name(), err)
+		}
+		scanned++
+		for site, args := range runVerifyStringArgs(fset, file) {
+			if slices.Contains(args, "-push") {
+				t.Errorf("%s: RunVerify must never be driven with --push from a test; "+
+					"assert on parseVerifyArgs instead", site)
+			}
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("scanned no _test.go files — the guard is looking in the wrong place")
+	}
+}
+
+// TestAcquireVerifyLock_NoHomeRunsUnserialized covers the branch that gives up
+// on locking entirely: with no user home there is nowhere to put the lock file,
+// and acquireVerifyLock returns a no-op unlock and no error rather than
+// refusing to run.
+//
+// That is a deliberate degradation, and worth a test precisely because it is
+// silent — on such a host two concurrent verifies interleave over the same
+// caches with nothing to say so. The contract pinned here is narrow: the caller
+// still gets a usable unlock function (calling it must not panic), so the
+// deferred release at every call site stays safe.
+func TestAcquireVerifyLock_NoHomeRunsUnserialized(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "") // os.UserHomeDir on Windows
+
+	unlock, err := acquireVerifyLock(t.TempDir(), 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("a host with no home must still run, got: %v", err)
+	}
+	if unlock == nil {
+		t.Fatal("unlock must never be nil — every caller defers it")
+	}
+	// A second acquire proves nothing was actually taken: on a host with a home
+	// this would block or time out.
+	second, err := acquireVerifyLock(t.TempDir(), 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+	second()
+	unlock()
 }

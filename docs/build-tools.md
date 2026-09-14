@@ -93,6 +93,32 @@ Oversubscription here was never buying wall time — it was spending it. On a
 12-core host with a cold test cache, the compiler suite ran 247s at the defaults
 (156 concurrent processes, 9.4 GB) and 210s bounded (40 processes, 5.6 GB).
 
+## Test Sandboxing
+
+A tools test builds its own world — a temp root, a redirected `HOME`, a
+redirected `GOCACHE` — and touches neither the host's Promise home nor the
+shared Go caches. The tools are the one package whose subject *is* the machine's
+global state, so a test that runs them for real spends the host's state to
+assert on a flag.
+
+- **Proving a flag parses is a pure-parse test** (`parseVerifyArgs`,
+  `parseCleanArgs`), never a pipeline run. `--shared --clean` resolves to the
+  real `~/.promise` and removes it — the installed toolchain on `PATH` included;
+  `--push` pushes.
+- **`go clean -testcache` is host-global.** It stamps `$GOCACHE/testexpire.txt`,
+  and cmd/go then treats every test result saved before that moment as expired —
+  in every module, and in every clone sharing the cache. A test that reaches it
+  points `GOCACHE` at a throwaway directory first; the repo-local `.promise-home`
+  and a temp `compiler/go.mod` do not scope it.
+- **`TestMain` in `tools/build/common` snapshots both** — the top-level listing of
+  `~/.promise` and the expiry stamp — and fails the package if either moved, even
+  when every test passed. A test that reaches machine-global state reddens
+  immediately instead of silently costing every clone on the host its caches.
+
+`HOME` and `GOCACHE` are deliberately not redirected for the whole package: the
+tests that shell out to `go` would lose the warm build and module caches, which
+is most of what makes the suite fast.
+
 ## Which Repository a Tool Acts On
 
 A tool acts on exactly one repository: the one it was built for. `./make` stamps

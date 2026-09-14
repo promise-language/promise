@@ -92,17 +92,24 @@ func realFlagsForSubcommand(t *testing.T, root, sub string) map[string]bool {
 	return flags
 }
 
-// captureStderr redirects os.Stderr to a pipe for the duration of fn and returns
-// what was written. The flag package's usage printer resolves os.Stderr lazily,
-// so the redirect captures it.
-func captureStderr(t *testing.T, fn func()) string {
+// captureStream redirects one of the process's standard streams to a pipe for
+// the duration of fn and returns what was written, including what any child
+// process started by fn wrote (RunIn hands them the stream as it is at spawn
+// time). A real pipe rather than a buffer is what makes that work, and it is
+// why the reader has to run concurrently: a child writing more than a pipe
+// buffer would otherwise block until fn returned, which it never would.
+//
+// The stream is passed by address because the redirect is the assignment to
+// os.Stdout / os.Stderr itself — callers like the flag package's usage printer
+// resolve those lazily, so replacing the variable is what they see.
+func captureStream(t *testing.T, stream **os.File, fn func()) string {
 	t.Helper()
-	orig := os.Stderr
+	orig := *stream
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
-	os.Stderr = w
+	*stream = w
 	done := make(chan string, 1)
 	go func() {
 		var sb strings.Builder
@@ -120,10 +127,22 @@ func captureStderr(t *testing.T, fn func()) string {
 	}()
 	fn()
 	_ = w.Close()
-	os.Stderr = orig
+	*stream = orig
 	out := <-done
 	_ = r.Close()
 	return out
+}
+
+// captureStderr returns what fn wrote to os.Stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	return captureStream(t, &os.Stderr, fn)
+}
+
+// captureStdout returns what fn wrote to os.Stdout.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	return captureStream(t, &os.Stdout, fn)
 }
 
 // TestReleaseWorkflowInvocationsMatchCLI is the static integrity gate for T0774's

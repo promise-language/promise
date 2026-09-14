@@ -28,6 +28,62 @@ var ErrLockTimeout = errors.New("verify lock acquisition timed out")
 // waiting under a bounded --lock-timeout.
 const lockRetryDelay = 500 * time.Millisecond
 
+// verifyOptions is bin/verify's command line, parsed.
+type verifyOptions struct {
+	shared  bool
+	wasm    bool
+	wasmWeb bool
+	clean   bool
+	push    bool
+	// lockTimeout bounds how long to wait for the host verify lock. 0 (the
+	// default, flag absent) waits UNBOUNDED — bin/verify is run on a variety of
+	// machines where any hardcoded timeout would be wrong; bounding the wait is
+	// the caller's choice via --lock-timeout (the tracker runner sets it so a
+	// lost turn can be retried).
+	lockTimeout time.Duration
+}
+
+// parseVerifyArgs parses bin/verify's flags and does nothing else — no lock, no
+// filesystem, no subprocess. It is separate from RunVerify so that flag coverage
+// can be a pure unit test: proving a flag parsed used to mean running the whole
+// pipeline, and for `--shared --clean` that meant deleting the host's ~/.promise
+// (T2084).
+func parseVerifyArgs(args []string) (verifyOptions, error) {
+	args = NormalizeArgs(args)
+	var opts verifyOptions
+
+	// --lock-timeout takes a duration value (NormalizeArgs has already split
+	// --lock-timeout=10m into "-lock-timeout" "10m").
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-local":
+		case "-shared":
+			opts.shared = true
+		case "-wasm":
+			opts.wasm = true
+		case "-wasm-web":
+			opts.wasmWeb = true
+		case "-clean":
+			opts.clean = true
+		case "-push":
+			opts.push = true
+		case "-lock-timeout":
+			if i+1 >= len(args) {
+				return verifyOptions{}, fmt.Errorf("-lock-timeout requires a duration value (e.g. --lock-timeout=10m)")
+			}
+			i++
+			d, err := time.ParseDuration(args[i])
+			if err != nil || d < 0 {
+				return verifyOptions{}, fmt.Errorf("-lock-timeout: invalid duration %q (use Go duration syntax, e.g. 10m)", args[i])
+			}
+			opts.lockTimeout = d
+		default:
+			return verifyOptions{}, fmt.Errorf("usage: bin/verify [--shared] [--wasm] [--wasm-web] [--clean] [--push] [--lock-timeout=<dur>]")
+		}
+	}
+	return opts, nil
+}
+
 // RunVerify orchestrates the full pre-commit verification pipeline:
 // format → build → vet → test. All steps are internal calls (no subprocess).
 // Flags: -shared (use ~/.promise), -wasm (include wasm32-wasi),
@@ -35,47 +91,13 @@ const lockRetryDelay = 500 * time.Millisecond
 // -push (git push on success).
 // Default cache is local (.promise-home/); -local is accepted for clarity.
 func RunVerify(root string, args []string) error {
-	args = NormalizeArgs(args)
-	var shared, wasm, wasmWeb, clean, push bool
-	// lockTimeout bounds how long to wait for the host verify lock. 0 (the
-	// default, flag absent) waits UNBOUNDED — bin/verify is run on a variety of
-	// machines where any hardcoded timeout would be wrong; bounding the wait is
-	// the caller's choice via --lock-timeout (the tracker runner sets it so a
-	// lost turn can be retried).
-	var lockTimeout time.Duration
-
-	// Parse args. --lock-timeout takes a duration value (NormalizeArgs has
-	// already split --lock-timeout=10m into "-lock-timeout" "10m").
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-local":
-		case "-shared":
-			shared = true
-		case "-wasm":
-			wasm = true
-		case "-wasm-web":
-			wasmWeb = true
-		case "-clean":
-			clean = true
-		case "-push":
-			push = true
-		case "-lock-timeout":
-			if i+1 >= len(args) {
-				return fmt.Errorf("-lock-timeout requires a duration value (e.g. --lock-timeout=10m)")
-			}
-			i++
-			d, err := time.ParseDuration(args[i])
-			if err != nil || d < 0 {
-				return fmt.Errorf("-lock-timeout: invalid duration %q (use Go duration syntax, e.g. 10m)", args[i])
-			}
-			lockTimeout = d
-		default:
-			return fmt.Errorf("usage: bin/verify [--shared] [--wasm] [--wasm-web] [--clean] [--push] [--lock-timeout=<dur>]")
-		}
+	opts, err := parseVerifyArgs(args)
+	if err != nil {
+		return err
 	}
 
 	// Acquire global lock to serialize concurrent verify runs.
-	unlock, err := acquireVerifyLock(root, lockTimeout)
+	unlock, err := acquireVerifyLock(root, opts.lockTimeout)
 	if err != nil {
 		if errors.Is(err, ErrLockTimeout) {
 			return err
@@ -95,14 +117,14 @@ func RunVerify(root string, args []string) error {
 	// Clean caches first if requested. Done before SetupLocalCache so that
 	// the local home is recreated empty, and before any build/test work so
 	// the run starts from a known state.
-	if clean {
-		if err := cleanLocked(root, CleanOptions{Shared: shared}); err != nil {
+	if opts.clean {
+		if err := cleanLocked(root, CleanOptions{Shared: opts.shared}); err != nil {
 			return fmt.Errorf("clean: %w", err)
 		}
 	}
 
 	// Default to local cache; -shared opts into ~/.promise
-	if !shared {
+	if !opts.shared {
 		if err := SetupLocalCache(root); err != nil {
 			return fmt.Errorf("setup local cache: %w", err)
 		}
@@ -153,7 +175,7 @@ func RunVerify(root string, args []string) error {
 	// 5. (Cache clearing now happens up front via Clean.)
 
 	// 6-8b. Go suites, then (only if they all passed) the Promise suites.
-	res, err := runVerifyTestPhases(root, wasm, wasmWeb, verifySuites{
+	res, err := runVerifyTestPhases(root, opts.wasm, opts.wasmWeb, verifySuites{
 		goTests:      RunGoTests,
 		toolsTests:   RunToolsGoTests,
 		flowsTests:   RunFlowsGoTests,
@@ -198,7 +220,7 @@ func RunVerify(root string, args []string) error {
 	} else {
 		Progress().Printf("  Flows tests:  passed\n")
 	}
-	if wasm {
+	if opts.wasm {
 		if res.promiseSkipped {
 			Progress().Printf("  WASM tests:   not run (go tests failed)\n")
 		} else if slices.Contains(failures, "promise tests (wasm32-wasi)") {
@@ -207,7 +229,7 @@ func RunVerify(root string, args []string) error {
 			Progress().Printf("  WASM tests:   passed (%s)\n", wasmElapsed.Round(time.Millisecond))
 		}
 	}
-	if wasmWeb {
+	if opts.wasmWeb {
 		if res.promiseSkipped {
 			Progress().Printf("  WASM-web:     not run (go tests failed)\n")
 		} else if slices.Contains(failures, "promise tests (wasm32-web)") {
@@ -229,12 +251,12 @@ func RunVerify(root string, args []string) error {
 		if s := ExtractFailedSection(hostOutput); s != "" {
 			sections = append(sections, failureSection{hostTarget, s})
 		}
-		if wasm {
+		if opts.wasm {
 			if s := ExtractFailedSection(wasmOutput); s != "" {
 				sections = append(sections, failureSection{"wasm32-wasi", s})
 			}
 		}
-		if wasmWeb {
+		if opts.wasmWeb {
 			if s := ExtractFailedSection(wasmWebOutput); s != "" {
 				sections = append(sections, failureSection{"wasm32-web", s})
 			}
@@ -264,14 +286,14 @@ func RunVerify(root string, args []string) error {
 		gv.Values["host_leak_count"] = float64(s.Leaked)
 		gv.Values["host_test_failures"] = float64(s.Failed)
 	}
-	if wasm {
+	if opts.wasm {
 		if s := ParseTestSummaryLine(wasmOutput); s != nil {
 			gv.Values["wasm_test_count"] = float64(s.Passed)
 			gv.Values["wasm_leak_count"] = float64(s.Leaked)
 			gv.Values["wasm_test_failures"] = float64(s.Failed)
 		}
 	}
-	if wasmWeb {
+	if opts.wasmWeb {
 		if s := ParseTestSummaryLine(wasmWebOutput); s != nil {
 			gv.Values["wasm_web_test_count"] = float64(s.Passed)
 			gv.Values["wasm_web_leak_count"] = float64(s.Leaked)
@@ -294,7 +316,7 @@ func RunVerify(root string, args []string) error {
 		return fmt.Errorf("record verified tree: %w", err)
 	}
 
-	if push {
+	if opts.push {
 		Progress().Println("Pushing to remote...")
 		if err := RunIn(root, "git", "push"); err != nil {
 			return err

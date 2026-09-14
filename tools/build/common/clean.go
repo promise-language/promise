@@ -78,9 +78,12 @@ func cleanLocked(root string, opts CleanOptions) error {
 	return nil
 }
 
-// RunClean is the bin/clean CLI entry. Defaults to the repo-local
-// .promise-home/. Pass --shared to operate on ~/.promise instead.
-func RunClean(root string, args []string) error {
+// parseCleanArgs parses bin/clean's flags and does nothing else — no lock, no
+// filesystem, no subprocess. It is separate from RunClean so that flag coverage
+// can be a pure unit test rather than a real clean: `--shared` resolves to the
+// host's ~/.promise and removes it, and every clean runs a host-global
+// `go clean -testcache` (T2084).
+func parseCleanArgs(args []string) (CleanOptions, error) {
 	args = NormalizeArgs(args)
 	var opts CleanOptions
 	for _, arg := range args {
@@ -92,8 +95,18 @@ func RunClean(root string, args []string) error {
 		case "-quiet":
 			opts.Quiet = true
 		default:
-			return fmt.Errorf("usage: bin/clean [--local|--shared] [--quiet]")
+			return CleanOptions{}, fmt.Errorf("usage: bin/clean [--local|--shared] [--quiet]")
 		}
+	}
+	return opts, nil
+}
+
+// RunClean is the bin/clean CLI entry. Defaults to the repo-local
+// .promise-home/. Pass --shared to operate on ~/.promise instead.
+func RunClean(root string, args []string) error {
+	opts, err := parseCleanArgs(args)
+	if err != nil {
+		return err
 	}
 	return Clean(root, opts)
 }

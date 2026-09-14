@@ -23,6 +23,31 @@ func bindEpoch() string {
 	return epoch
 }
 
+// runBindSelfCheck type-checks the project bind just wrote to outDir, for the
+// target it generated for, and exits non-zero if it doesn't resolve
+// (docs/wasm-web-callbacks.md §16). Frontend only — no subprocess, no LLVM,
+// no linker: parse → merge std → sema → embeds → ownership, the same pipeline
+// `promise build` runs, reusing the exact discovery (discoverProject) and
+// frontend (compileProjectFrontend) entry points build already uses, so a
+// project that fails here would have failed identically one command later at
+// `promise build` — the #25 review's "undefined type: EventListener" gap this
+// closes. compileProjectFrontend itself os.Exit(1)s with the sema/ownership
+// errors printed, so success here just means "returned" — the target passed
+// in is bind's own `-target` (default web / wasi — see runBindWebIdl/
+// runBindWit), always web/wasi-flavored, so the triple is always "wasm32-<target>".
+func runBindSelfCheck(outDir, target string) {
+	cfg, files, err := discoverProject(outDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: bind self-check: %v\n", err)
+		os.Exit(1)
+	}
+	dir := outDir
+	if cfg != nil {
+		dir = cfg.Dir
+	}
+	compileProjectFrontend(dir, files, "wasm32-"+target)
+}
+
 func runBind(args []string) {
 	if len(args) == 0 {
 		printBindUsage(os.Stderr)
@@ -61,6 +86,7 @@ func runBindWit(args []string) {
 		moduleName   = ""
 		target       = "wasi"
 		canonicalABI = false
+		noCheck      = false
 		files        []string
 	)
 
@@ -89,6 +115,8 @@ func runBindWit(args []string) {
 			target = args[i]
 		case "-canonical-abi":
 			canonicalABI = true
+		case "-no-check":
+			noCheck = true
 		default:
 			files = append(files, args[i])
 		}
@@ -101,6 +129,7 @@ func runBindWit(args []string) {
 		fmt.Fprintln(os.Stderr, "  -o <dir>        output directory (default: .)")
 		fmt.Fprintln(os.Stderr, "  -name <name>    module name (default: derived from WIT package)")
 		fmt.Fprintln(os.Stderr, "  -target <t>     target annotation: wasi, web (default: wasi)")
+		fmt.Fprintln(os.Stderr, "  -no-check       skip type-checking the generated output (§16)")
 		os.Exit(1)
 	}
 
@@ -198,6 +227,10 @@ func runBindWit(args []string) {
 		os.Exit(1)
 	}
 	fmt.Println(tomlPath)
+
+	if !noCheck {
+		runBindSelfCheck(outDir, target)
+	}
 }
 
 func runBindWebIdl(args []string) {
@@ -205,6 +238,7 @@ func runBindWebIdl(args []string) {
 		outDir     = "."
 		moduleName = ""
 		target     = "web"
+		noCheck    = false
 		files      []string
 	)
 
@@ -231,6 +265,8 @@ func runBindWebIdl(args []string) {
 				os.Exit(1)
 			}
 			target = args[i]
+		case "-no-check":
+			noCheck = true
 		default:
 			files = append(files, args[i])
 		}
@@ -243,6 +279,7 @@ func runBindWebIdl(args []string) {
 		fmt.Fprintln(os.Stderr, "  -o <dir>        output directory (default: .)")
 		fmt.Fprintln(os.Stderr, "  -name <name>    module name (default: derived from first interface)")
 		fmt.Fprintln(os.Stderr, "  -target <t>     target annotation: web, wasi (default: web)")
+		fmt.Fprintln(os.Stderr, "  -no-check       skip type-checking the generated output (§16)")
 		os.Exit(1)
 	}
 
@@ -357,4 +394,8 @@ func runBindWebIdl(args []string) {
 		os.Exit(1)
 	}
 	fmt.Println(tomlPath)
+
+	if !noCheck {
+		runBindSelfCheck(outDir, target)
+	}
 }

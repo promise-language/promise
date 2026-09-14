@@ -2849,8 +2849,23 @@ func (c *Compiler) wrapMainWithScheduler() {
 	g0 := entry.NewCall(c.funcs["promise_g_new"], handle)
 	entry.NewCall(c.funcs["promise_sched_enqueue"], g0)
 
-	if c.isWasm {
-		// WASM: cooperative run loop (single-threaded, no M threads)
+	if c.isWasmWeb {
+		// wasm32-web: run the unbounded initial drain (docs/wasm-web-callbacks.md
+		// §4, §4.1). Its i8 result (0 = drained clean, terminate; 1 = reactor
+		// stays alive) is threaded through @main's own i32 return so
+		// emitWasmStart can decide exit-vs-return without calling pal_exit
+		// itself — see emitWasmStart's isWasmWeb branch.
+		drainResult := entry.NewCall(c.funcs["promise_web_reactor_drain"])
+		stayAlive := entry.NewZExt(drainResult, irtypes.I32)
+		// Terminates the block here — the shared Windows/ret tail below does
+		// not apply (isWasmWeb implies isWasm, so isWindows && !isWasm is
+		// always false for this path anyway) and must not also terminate
+		// `entry`.
+		entry.NewRet(stayAlive)
+		return
+	} else if c.isWasm {
+		// wasm32-wasi: cooperative run loop (single-threaded, no M threads),
+		// run to completion exactly as today.
 		entry.NewCall(c.funcs["promise_sched_coop_run"])
 	} else {
 		entry.NewCall(c.funcs["promise_sched_run_until_main"], g0)

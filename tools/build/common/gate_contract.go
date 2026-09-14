@@ -8,9 +8,12 @@ package common
 // and when the subject is a change written by an agent, the agent can edit it.
 // The thresholds live in thresholds.json and only bin/run reads them (judge.go).
 //
-// A gate also never modifies its subject, the tracked tree. It may write
-// elsewhere — bin/, .promise-home/, a build cache — which is why `integration`
-// may build before it measures but must never format, repair or stage.
+// A gate also never REPAIRS its subject: no formatting, no staging. It does
+// bring the build up to date first (gate_build.go), because a measurement of
+// artifacts nobody produced is a measurement of a tree nobody proposed — and
+// where that build regenerates the tracked parser, the runner's tracked-tree
+// diff reports it, correctly, against the change that moved the grammar
+// without regenerating.
 //
 // `--envelope` and `--list` are flags of the bin/gate BINARY, not part of any
 // gate's name and not modifiers of one: the runner appends --envelope when it
@@ -153,6 +156,11 @@ type contractGateDef struct {
 	summary string
 	measure func(root string) ([]Metric, string, error)
 	parts   []string
+	// measuresMachine marks the gate whose subject is the HOST rather than the
+	// tree, and which therefore does not build first (gate_build.go). The
+	// default — build — is the safe one, so a gate added later inherits it
+	// rather than silently measuring whatever artifacts happen to be on disk.
+	measuresMachine bool
 }
 
 // contractGates is CLOSED, and holds only gates. A name absent here is refused
@@ -224,8 +232,9 @@ var contractGates = map[string]contractGateDef{
 	// all. Deliberately NOT part of integration — a machine that cannot build
 	// is not a change that may not land.
 	"fit": {
-		summary: "free space where this project's work writes",
-		measure: measureFit,
+		summary:         "free space where this project's work writes",
+		measure:         measureFit,
+		measuresMachine: true,
 	},
 }
 
@@ -261,6 +270,16 @@ func MeasureContractGate(root, name string) (Envelope, error) {
 	def, ok := contractGates[name]
 	if !ok {
 		return Envelope{}, unknownContractGate(name)
+	}
+	// Every gate but the machine one measures the tree AS IT IS NOW, so the
+	// build comes first — gate_build.go says why, and RunBuild's own quick
+	// check makes it cost about 0.1s on an already-built tree. The outcome is
+	// not consulted here: each measurement that reads build artifacts asks
+	// ensureGateBuild again (it is idempotent) and reports the failure as a
+	// number or a reason of its own, rather than having it swallowed here as
+	// "could not measure".
+	if !def.measuresMachine {
+		_ = ensureGateBuild(root)
 	}
 	if def.measure != nil {
 		metrics, incomplete, err := def.measure(root)
@@ -462,3 +481,48 @@ func countPrefixed(s, prefix string) int {
 // Parsing go vet output is ParseGoDiagnostics, in check.go, beside the rule for
 // which of those diagnostics this project acts on. Counting them is not a
 // separate thing from reading them.
+
+// toolchainNotices are the progress lines `go` writes to stderr before it says
+// anything about the code.
+var toolchainNotices = []string{
+	"go: downloading ", "go: finding ", "go: extracting ",
+	"go: added ", "go: upgraded ", "go: downgraded ",
+}
+
+// isToolchainNotice reports whether line is one of them.
+func isToolchainNotice(line string) bool {
+	for _, prefix := range toolchainNotices {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// firstRealLine is firstLine, past the toolchain's progress notices.
+//
+// A failed `go` run routinely leads with a download notice, so the first line
+// of its stderr is not what went wrong: "go build in …: exit status 1: go:
+// downloading github.com/antlr4-go/antlr/v4" is what "pattern resources/*: no
+// matching files found" looked like from the outside, and it sent the reader
+// to the network rather than to the missing file (T2102).
+//
+// When every line is a notice, the notice IS the diagnostic and is returned —
+// nothing is ever dropped to nothing.
+func firstRealLine(s string) string {
+	first := ""
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if first == "" {
+			first = line
+		}
+		if isToolchainNotice(line) {
+			continue
+		}
+		return line
+	}
+	return first
+}

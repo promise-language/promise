@@ -114,10 +114,15 @@ func GoCheckUnits(root string) ([]GoCheckUnit, string, error) {
 }
 
 // checkedGoPackages lists one module's packages, minus the generated ones.
+//
+// The listing is CAPTURED rather than streamed, so its diagnostic reaches the
+// error rather than only the terminal: `go list` is where a package that cannot
+// be loaded stops both modes, and "go list ./...: exit status 1" on its own
+// names nothing to act on (T2102).
 func checkedGoPackages(dir string) ([]string, error) {
-	out, err := RunOutputIn(dir, "go", "list", "./...")
+	out, stderr, err := captureSplit(dir, "go", "list", "./...")
 	if err != nil {
-		return nil, fmt.Errorf("go list in %s: %w", dir, err)
+		return nil, fmt.Errorf("go list in %s: %w: %s", dir, err, firstRealLine(stderr))
 	}
 	pkgs := excludeGeneratedGoPackages(out)
 	if len(pkgs) == 0 {

@@ -216,6 +216,9 @@ func writeTrivialModule(t *testing.T, dir, pkg string, pass bool) {
 //
 // A temp root, never the repository: `go test ./...` here would be this suite.
 func TestTestedGo_CountsRealGoTestOutput(t *testing.T) {
+	// measureTestedGo builds before it measures, and this fixture is not a tree
+	// anything could build. What is under test is how `go test` output is read.
+	stubGateBuild(t, &fakeBuild{})
 	root := t.TempDir()
 	writeTrivialModule(t, filepath.Join(root, "compiler"), "compiler", true)
 	writeTrivialModule(t, filepath.Join(root, "tools", "build"), "build", false)
@@ -264,6 +267,10 @@ func TestCheckedGo_CountsExactlyWhatBinCheckReports(t *testing.T) {
 	if err != nil {
 		t.Skip("not inside the promise repo:", err)
 	}
+	// checked:go builds before it measures (T2102); what is under test is that
+	// the two modes agree, not the build. The stub keeps this from compiling the
+	// repository from inside its own `go test ./...`.
+	stubGateBuild(t, &fakeBuild{})
 
 	findings, toolIncomplete, err := GoCheckFindings(root, captureSplit)
 	if err != nil {
@@ -289,6 +296,7 @@ func TestCheckedGo_CountsExactlyWhatBinCheckReports(t *testing.T) {
 // it has not measured. Reporting 0 there would read as a clean tree and let a
 // change land on a number nobody produced.
 func TestCheckedGo_ARunThatCouldNotHappenIsNotZeroFindings(t *testing.T) {
+	stubGateBuild(t, &fakeBuild{})
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "compiler"), 0o755); err != nil {
 		t.Fatal(err)
@@ -307,6 +315,7 @@ func TestCheckedGo_IsWhatTheContractGateMeasures(t *testing.T) {
 	if err != nil {
 		t.Skip("not inside the promise repo:", err)
 	}
+	stubGateBuild(t, &fakeBuild{})
 	env, err := MeasureContractGate(root, "checked:go")
 	if err != nil {
 		t.Fatalf("MeasureContractGate: %v", err)
@@ -330,6 +339,7 @@ func TestCheckedGo_IsWhatTheContractGateMeasures(t *testing.T) {
 // one of them could not be measured — a complete-looking envelope from a partial
 // sweep is what moves a baseline it should not.
 func TestBuilds_NamesAModuleItCouldNotMeasure(t *testing.T) {
+	stubGateBuild(t, &fakeBuild{})
 	root := t.TempDir()
 	write := func(dir, name, body string) {
 		t.Helper()
@@ -363,6 +373,7 @@ func TestBuilds_NamesAModuleItCouldNotMeasure(t *testing.T) {
 // And the complementary half: a tree with every module it has is COMPLETE, so
 // the baseline may move from it.
 func TestBuilds_AWholeSweepIsComplete(t *testing.T) {
+	stubGateBuild(t, &fakeBuild{})
 	root := t.TempDir()
 	compiler := filepath.Join(root, "compiler")
 	if err := os.MkdirAll(compiler, 0o755); err != nil {

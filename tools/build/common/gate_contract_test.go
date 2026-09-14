@@ -208,10 +208,9 @@ func TestContractGates_PartGraphTerminates(t *testing.T) {
 // minutes of compiling and testing for a list that changes a few times a year.
 var integrationMetrics = []string{
 	"unformatted_go_files", "unformatted_promise_files",
-	"unbuildable_go_packages", "vet_findings",
+	"unbuildable_go_packages", "build_failures", "vet_findings",
 	"go_test_failures", "go_test_packages_failed",
 	"host_test_failures", "host_leak_count",
-	"stale_generated_files",
 }
 
 // Every metric integration's parts report must carry a term — a person-edited

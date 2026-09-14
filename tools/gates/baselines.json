@@ -1,5 +1,10 @@
 {
   "darwin-arm64": {
+    "build_failures": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-14"
+    },
     "go_coverage_pct": {
       "direction": "up"
     },
@@ -142,6 +147,11 @@
     }
   },
   "linux-amd64": {
+    "build_failures": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-14"
+    },
     "go_coverage_pct": {
       "direction": "up"
     },
@@ -275,6 +285,11 @@
     }
   },
   "linux-arm64": {
+    "build_failures": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-14"
+    },
     "go_test_failures": {
       "value": 0,
       "direction": "exact",
@@ -334,6 +349,11 @@
     }
   },
   "windows-amd64": {
+    "build_failures": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-14"
+    },
     "go_test_failures": {
       "value": 0,
       "direction": "exact",

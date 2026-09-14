@@ -378,10 +378,16 @@ func initBareGitRepo(t *testing.T) string {
 	return root
 }
 
+// The address these two use must be @example.com, the domain RFC 2606 reserves
+// for documentation, and never a realistic consumer one. The only property
+// under test is "not @users.noreply.github.com" — the domain is incidental —
+// but a scanner looking for a leaked personal address in committed content
+// cannot tell a realistic fixture from a real leak, and refuses the commit. A
+// `…@gmail.com` here made every change touching this file unlandable.
 func TestCheckNoreplyIdentity_RejectsNonNoreplyAuthorEmail(t *testing.T) {
 	root := initBareGitRepo(t)
 
-	t.Setenv("GIT_AUTHOR_EMAIL", "personal@gmail.com")
+	t.Setenv("GIT_AUTHOR_EMAIL", "personal@example.com")
 	t.Setenv("GIT_AUTHOR_NAME", "test")
 	t.Setenv("GIT_COMMITTER_EMAIL", "1+test@users.noreply.github.com")
 	t.Setenv("GIT_COMMITTER_NAME", "test")
@@ -396,7 +402,7 @@ func TestCheckNoreplyIdentity_RejectsNonNoreplyCommitterEmail(t *testing.T) {
 
 	t.Setenv("GIT_AUTHOR_EMAIL", "1+test@users.noreply.github.com")
 	t.Setenv("GIT_AUTHOR_NAME", "test")
-	t.Setenv("GIT_COMMITTER_EMAIL", "personal@gmail.com")
+	t.Setenv("GIT_COMMITTER_EMAIL", "personal@example.com")
 	t.Setenv("GIT_COMMITTER_NAME", "test")
 
 	if err := checkNoreplyIdentity(root); err == nil {

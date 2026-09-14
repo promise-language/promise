@@ -19,10 +19,13 @@ package common
 // tree that was repaired first is not an answer about the tree anyone proposed.
 // The SDK enforces this: it diffs the tracked tree around every gate run and
 // reports any difference as the gate breaking its contract.
+//
+// Each measurement below runs BEHIND a shared build of the tree in front of it
+// — gate_build.go, which explains why, and what each one does when that build
+// does not complete.
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 )
 
@@ -37,11 +40,20 @@ func measureFormattedGo(root string) ([]Metric, string, error) {
 }
 
 // measureFormattedPromise counts .pr files `promise format` would rewrite. The
-// formatter lives in the compiler, so without a built one this measures
-// nothing and says so.
+// formatter lives in the compiler, so this measures the formatter the tree in
+// front of it builds: the build is what makes bin/promise exist, and what makes
+// it the CURRENT one rather than whichever source it was last built from.
 func measureFormattedPromise(root string) ([]Metric, string, error) {
+	if err := ensureGateBuild(root); err != nil {
+		return []Metric{}, buildDidNotComplete("Promise formatting was not measured", err), nil
+	}
+	// The build having completed, bin/promise exists — but UnformattedPromiseFiles
+	// answers "no files need formatting" for a missing formatter exactly as it
+	// does for a clean tree, so a build that somehow left no binary would be
+	// reported here as a clean zero. Checked rather than assumed: a number about
+	// nothing is the failure this whole gate is being fixed for.
 	if !Exists(filepath.Join(root, "bin", BinaryName())) {
-		return []Metric{}, "bin/promise is not built, so Promise formatting was not measured", nil
+		return []Metric{}, "the build reported success but left no " + BinaryName() + ", so Promise formatting was not measured", nil
 	}
 	files, err := UnformattedPromiseFiles(root)
 	if err != nil {
@@ -50,22 +62,31 @@ func measureFormattedPromise(root string) ([]Metric, string, error) {
 	return []Metric{Count("unformatted_promise_files", len(files))}, "", nil
 }
 
-// measureBuilds counts Go packages that fail to compile, and generated sources
-// that no longer match what generated them. `go build` prefixes each failing
-// package with a "# " header line on stderr, so the headers are the count.
+// measureBuilds reports whether the build completed, and how many Go packages
+// fail to compile. `go build` prefixes each failing package with a "# " header
+// line on stderr, so the headers are the count.
 //
-// Staleness is MEASURED here rather than repaired anywhere, and that placement
-// is the point. compiler/internal/parser/*.go is generated from the grammar and
-// is TRACKED, so a change that edits PromiseParser.g4 without regenerating
-// leaves the two disagreeing. Any gate that then builds would rewrite tracked
-// files, and the runner — which diffs the tracked tree around every gate —
-// reports that as the gate breaking its contract: a defect attributed to the
-// gate, sending the reader to the gate's code rather than to their own
-// uncommitted grammar change, and spending the worktree for the whole
-// transition. Reported as a number instead, the same situation fails `builds`
-// by name, and the remedy (`bin/build`, then commit the regenerated parser
-// alongside the grammar) follows from what the metric says.
+// The BUILD is measured, not merely performed, because a build that does not
+// complete is a fact about this tree and not a gate that could not answer:
+// "did not measure anything" reads as broken infrastructure and sends the
+// reader to the gate's code, while build_failures = 1 reads as what it is. It
+// is a metric of its own rather than an increment of unbuildable_go_packages
+// because RunBuild can fail at parser generation, resource embedding or LLVM
+// detection — none of which is a Go package failing to compile, and naming the
+// wrong subsystem is the whole defect T2102 is about.
 func measureBuilds(root string) ([]Metric, string, error) {
+	return measureBuildsWith(root, captureSplit)
+}
+
+// measureBuildsWith is measureBuilds with the child call as a parameter, so a
+// test can pin how a failing `go build` is reported without spawning one.
+func measureBuildsWith(root string, capture captureFunc) ([]Metric, string, error) {
+	if err := ensureGateBuild(root); err != nil {
+		// The sweep is OMITTED rather than reported as zero: it did not run,
+		// and a zero here would be a number about nothing.
+		return []Metric{Count("build_failures", 1)},
+			buildDidNotComplete("the per-package sweep did not run", err), nil
+	}
 	n := 0
 	dirs, incomplete := GoModules(root)
 	for _, dir := range dirs {
@@ -73,31 +94,19 @@ func measureBuilds(root string) ([]Metric, string, error) {
 		// code is excluded from being CHECKED because a diagnostic in it is not
 		// the author's to act on, but it still has to COMPILE like anything
 		// else. Excluding it here would hide a broken build.
-		_, stderr, err := captureSplit(dir, "go", "build", "./...")
+		_, stderr, err := capture(dir, "go", "build", "./...")
 		found := countPrefixed(stderr, "# ")
 		if err != nil && found == 0 {
 			// It failed and named no package: the failure is about the
 			// toolchain or the module, not a package in this tree.
-			return nil, "", fmt.Errorf("go build in %s: %w: %s", dir, err, firstLine(stderr))
+			return nil, "", fmt.Errorf("go build in %s: %w: %s", dir, err, firstRealLine(stderr))
 		}
 		n += found
 	}
 	return []Metric{
 		Count("unbuildable_go_packages", n),
-		Count("stale_generated_files", staleGeneratedFiles(root)),
+		Count("build_failures", 0),
 	}, incomplete, nil
-}
-
-// staleGeneratedFiles reports how many generated-and-tracked sources no longer
-// match their input. Today that is one thing — the ANTLR parser against the
-// grammar — so the count is 0 or 1.
-func staleGeneratedFiles(root string) int {
-	grammarDir := filepath.Join(root, "compiler", "grammar")
-	parserPkg := filepath.Join(root, "compiler", "internal", "parser")
-	if !Exists(grammarDir) || parserUpToDate(grammarDir, parserPkg) {
-		return 0
-	}
-	return 1
 }
 
 // measureCheckedGo counts the go vet findings bin/check reports. Counting is
@@ -115,6 +124,9 @@ func measureCheckedGo(root string) ([]Metric, string, error) {
 // measureCheckedGoWith is measureCheckedGo with the child call as a parameter,
 // the seam a test uses to stand in for `go vet` rather than spawn it.
 func measureCheckedGoWith(root string, capture captureFunc) ([]Metric, string, error) {
+	if err := ensureGateBuild(root); err != nil {
+		return []Metric{}, buildDidNotComplete("go vet was not run", err), nil
+	}
 	findings, incomplete, err := GoCheckFindings(root, capture)
 	if err != nil {
 		return nil, "", err
@@ -132,6 +144,16 @@ func measureCheckedGoWith(root string, capture captureFunc) ([]Metric, string, e
 // that bin/verify fails on tools/build — a landing decision made on a smaller
 // subject than the one that has to hold.
 func measureTestedGo(root string) ([]Metric, string, error) {
+	// Here rather than in measureTestedGoWith, unlike the three measurements
+	// above: that seam predates the build step and its tests drive it directly
+	// with fixture roots, none of which is a tree anything could build.
+	//
+	// The build itself is not optional here — the compiler's own suite reads the
+	// EMBEDDED std (testutil's stdAll), so without it the Go tests describe
+	// whichever std was embedded last rather than the one in the tree.
+	if err := ensureGateBuild(root); err != nil {
+		return []Metric{}, buildDidNotComplete("the Go suites did not run", err), nil
+	}
 	return measureTestedGoWith(root, captureSplit)
 }
 
@@ -156,9 +178,9 @@ func measureTestedGoWith(root string, capture captureFunc) ([]Metric, string, er
 			// often. That is not "zero failing tests". go reports that kind of
 			// failure on stderr; a failing TEST reaches stdout, which is what
 			// the two counts above read.
-			detail := firstLine(stderr)
+			detail := firstRealLine(stderr)
 			if detail == "" {
-				detail = firstLine(stdout)
+				detail = firstRealLine(stdout)
 			}
 			return nil, "", fmt.Errorf("go test in %s: %w: %s", dir, testErr, detail)
 		}
@@ -171,37 +193,34 @@ func measureTestedGoWith(root string, capture captureFunc) ([]Metric, string, er
 	}, incomplete, nil
 }
 
-// measureTestedPromise runs the host Promise suite. It builds the compiler
-// first, because there is no suite to measure without one. The build writes to
-// bin/ and .promise-home/, both untracked — and it regenerates
-// compiler/internal/parser/, which IS tracked, whenever the grammar has moved
-// since that parser was generated. That is the one way this gate could modify
-// its subject, so it refuses to build in that state rather than risk it.
+// measureTestedPromise runs the host Promise suite. There is no suite to
+// measure without a compiler, and no correct suite to measure without the
+// CURRENT one — so, like every other gate here, it measures behind the shared
+// build (gate_build.go) rather than one of its own.
 func measureTestedPromise(root string) ([]Metric, string, error) {
-	// Refuse to build over a stale generated parser: the build would rewrite
-	// tracked files, which the runner reports as this gate breaking its
-	// contract. `builds` reports the staleness as a number, so the tree is
-	// already failing by a name that says what to do.
-	if staleGeneratedFiles(root) > 0 {
-		return []Metric{}, "the generated parser is stale (the grammar changed since compiler/internal/parser was generated), so the Promise suite did not run: run bin/build and commit the regenerated parser with the grammar change", nil
-	}
-	// Build progress would otherwise reach this process's stdout, which carries
-	// the envelope and nothing else.
-	savedStdout := os.Stdout
-	os.Stdout = os.Stderr
-	buildErr := RunBuild(root, nil)
-	os.Stdout = savedStdout
-	if buildErr != nil {
-		return []Metric{}, "the compiler did not build, so the Promise suite did not run: " + firstLine(buildErr.Error()), nil
-	}
-
 	// Capture, never tee to stdout: RunPromiseTests forwards the suite's own
 	// output to OUR stdout, which carries the envelope and nothing else — the
 	// summary line landing there makes the whole stream unparseable, and the
 	// runner reports that as this gate breaking its contract. The Capture form
 	// sends progress to stderr, where a person watching a four-minute suite can
 	// still see it.
-	output, _ := RunPromiseTestsCapture(root, "")
+	return measureTestedPromiseWith(root, RunPromiseTestsCapture)
+}
+
+// suiteRunner is RunPromiseTestsCapture's shape as a parameter: the seam a test
+// uses to stand in for the host Promise suite, which takes minutes to run and
+// needs a built compiler.
+type suiteRunner func(root, target string) (string, error)
+
+// measureTestedPromiseWith is measureTestedPromise with the suite as a
+// parameter, so which summary field becomes which metric can be pinned without
+// running eleven thousand tests to find out.
+func measureTestedPromiseWith(root string, runSuite suiteRunner) ([]Metric, string, error) {
+	if err := ensureGateBuild(root); err != nil {
+		return []Metric{}, buildDidNotComplete("the Promise suite did not run", err), nil
+	}
+
+	output, _ := runSuite(root, "")
 	summary := ParseTestSummaryLine(output)
 	if summary == nil {
 		return nil, "", fmt.Errorf("the Promise suite printed no summary line, so nothing was measured")

@@ -2,39 +2,10 @@ package common
 
 import "testing"
 
-// The coverage gate measures authored compiler source, not the 30k lines the
-// ANTLR generator writes — the same exclusion bin/vet applies.
-func TestFilterCoveragePackagesDropsGeneratedParser(t *testing.T) {
-	const goList = `github.com/promise-language/promise/compiler/cmd/promise
-github.com/promise-language/promise/compiler/internal/codegen
-github.com/promise-language/promise/compiler/internal/codegen/tests/drop1
-github.com/promise-language/promise/compiler/internal/parser
-github.com/promise-language/promise/compiler/internal/sema
-`
-	got := filterCoveragePackages(goList)
-	want := []string{
-		"github.com/promise-language/promise/compiler/cmd/promise",
-		"github.com/promise-language/promise/compiler/internal/codegen",
-		"github.com/promise-language/promise/compiler/internal/codegen/tests/drop1",
-		"github.com/promise-language/promise/compiler/internal/sema",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("got %d packages %v, want %d %v", len(got), got, len(want), want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("package %d = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
-// A blank or empty listing must not silently produce an empty -coverpkg (which
-// go test would read as "instrument nothing").
-func TestFilterCoveragePackagesEmpty(t *testing.T) {
-	if got := filterCoveragePackages("\n  \n"); len(got) != 0 {
-		t.Fatalf("got %v, want none", got)
-	}
-}
+// The coverage gate and bin/coverage measure authored compiler source, not the
+// 30k lines the ANTLR generator writes. The exclusion itself is
+// excludeGeneratedGoPackages, tested beside the rest of the check selection in
+// check_test.go — one rule, one home, one test.
 
 // coverageStream is a `promise test --json -coverage` stream: coverage records
 // and test records interleaved, as the runner emits them per file.

@@ -88,7 +88,7 @@ func parseVerifyArgs(args []string) (verifyOptions, error) {
 }
 
 // RunVerify orchestrates the full pre-commit verification pipeline:
-// format → build → vet → test. All steps are internal calls (no subprocess).
+// format → build → check → test. All steps are internal calls (no subprocess).
 // Flags: -shared (use ~/.promise), -wasm (include wasm32-wasi),
 // -wasm-web (include wasm32-web via Node), -clean (wipe .promise-home and run
 // the Go suites uncached; refused with -shared), -push (git push on success).
@@ -166,10 +166,10 @@ func RunVerify(root string, args []string) error {
 		return errInterrupted
 	}
 
-	// 4. Vet
-	Progress().Println("Vetting go...")
-	if err := RunVet(root); err != nil {
-		return fmt.Errorf("vet: %w", err)
+	// 4. Check
+	Progress().Println("Checking go...")
+	if err := RunCheck(root); err != nil {
+		return fmt.Errorf("check: %w", err)
 	}
 	if Interrupted() {
 		return errInterrupted
@@ -182,7 +182,7 @@ func RunVerify(root string, args []string) error {
 	res, err := runVerifyTestPhases(root, opts.wasm, opts.wasmWeb, verifySuites{
 		goTests:      func(root string) error { return RunGoTests(root, goFlags...) },
 		toolsTests:   func(root string) error { return RunToolsGoTests(root, goFlags...) },
-		flowsTests:   RunFlowsGoTests,
+		flowsTests:   func(root string) (bool, error) { return RunFlowsGoTests(root, goFlags...) },
 		promiseTests: RunPromiseTests,
 	})
 	if err != nil {

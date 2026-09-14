@@ -32,7 +32,7 @@ func (f *fakeGoTest) capture(dir, name string, args ...string) (string, string, 
 }
 
 // goModulesRoot builds a tree shaped like this repository — a compiler module
-// and a tools/build module — and returns it beside the directories goModules
+// and a tools/build module — and returns it beside the directories GoModules
 // reports for it, which is what a run must visit.
 //
 // The fixture is checked for having produced more than one module, because
@@ -51,7 +51,7 @@ func goModulesRoot(t *testing.T) (root string, modules []string) {
 			t.Fatal(err)
 		}
 	}
-	modules = goModules(root)
+	modules, _ = GoModules(root)
 	if len(modules) < 2 {
 		t.Fatalf("the fixture produced %d module(s) %v, so every pin here would be vacuous", len(modules), modules)
 	}
@@ -62,9 +62,9 @@ const passingGoTest = "ok  \texample.com/x\t0.010s\n"
 
 // A gate that measured one module would report honest numbers about part of its
 // subject — `./...` is module-scoped, so a change breaking the tools suite would
-// pass a gate bin/verify fails. The expectation is goModules' own answer rather
+// pass a gate bin/verify fails. The expectation is GoModules' own answer rather
 // than a spelled pair, so a third module added there later cannot be dropped
-// here silently: that is the trap goModules' comment warns about.
+// here silently: that is the trap GoModules' comment warns about.
 func TestTestedGo_MeasuresEveryGoModule(t *testing.T) {
 	root, modules := goModulesRoot(t)
 	fake := &fakeGoTest{stdout: map[string]string{}}
@@ -76,7 +76,7 @@ func TestTestedGo_MeasuresEveryGoModule(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Equal(fake.dirs, modules) {
-		t.Errorf("tested:go visited %v, want every module goModules reports: %v", fake.dirs, modules)
+		t.Errorf("tested:go visited %v, want every module GoModules reports: %v", fake.dirs, modules)
 	}
 }
 
@@ -247,5 +247,140 @@ func TestTestedGo_ARunThatDidNotHappenFallsBackToStdout(t *testing.T) {
 	_, _, err := measureTestedGoWith(root, fake.capture)
 	if err == nil || !strings.Contains(err.Error(), "build constraints exclude all Go files") {
 		t.Fatalf("err = %v, want the stdout detail", err)
+	}
+}
+
+// vet_findings is the SIZE of the list bin/check prints, over the real
+// repository — not a second count reached its own way. Asserted through the two
+// entry points a person and a runner actually use, so a future change that gave
+// either mode a measurement of its own fails here.
+//
+// A hand-spelled expectation would not do: it is a third spelling, and would go
+// on passing while the two it claims to describe drifted apart. That is exactly
+// what happened — the tool excluded the generated parser, the gate did not, and
+// the gate's verdict came to depend on the host's Go release (T2104).
+func TestCheckedGo_CountsExactlyWhatBinCheckReports(t *testing.T) {
+	root, err := RootForTests()
+	if err != nil {
+		t.Skip("not inside the promise repo:", err)
+	}
+
+	findings, toolIncomplete, err := GoCheckFindings(root, captureSplit)
+	if err != nil {
+		t.Fatalf("bin/check mode: %v", err)
+	}
+	metrics, gateIncomplete, err := measureCheckedGoWith(root, captureSplit)
+	if err != nil {
+		t.Fatalf("checked:go mode: %v", err)
+	}
+
+	if len(metrics) != 1 || metrics[0].Name != "vet_findings" {
+		t.Fatalf("checked:go reported %+v, want one vet_findings metric", metrics)
+	}
+	if got, want := metrics[0].Int, int64(len(findings)); got != want {
+		t.Errorf("vet_findings = %d, but bin/check reports %d findings: %v", got, want, findings)
+	}
+	if toolIncomplete != gateIncomplete {
+		t.Errorf("bin/check says incomplete %q, checked:go says %q", toolIncomplete, gateIncomplete)
+	}
+}
+
+// A gate that cannot list a module's packages has not measured zero findings —
+// it has not measured. Reporting 0 there would read as a clean tree and let a
+// change land on a number nobody produced.
+func TestCheckedGo_ARunThatCouldNotHappenIsNotZeroFindings(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "compiler"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metrics, _, err := measureCheckedGoWith(root, vetSaying(""))
+	if err == nil {
+		t.Fatalf("got metrics %+v, want an error: the module could not be listed", metrics)
+	}
+}
+
+// checked:go reaches this measurement through the contract registry, which is
+// the path bin/gate takes. Without this, every pin on the measurement could hold
+// while the gate name resolved somewhere else entirely.
+func TestCheckedGo_IsWhatTheContractGateMeasures(t *testing.T) {
+	root, err := RootForTests()
+	if err != nil {
+		t.Skip("not inside the promise repo:", err)
+	}
+	env, err := MeasureContractGate(root, "checked:go")
+	if err != nil {
+		t.Fatalf("MeasureContractGate: %v", err)
+	}
+	if env.Gate != "checked:go" {
+		t.Errorf("gate = %q", env.Gate)
+	}
+	if len(env.Metrics) != 1 || env.Metrics[0].Name != "vet_findings" {
+		t.Fatalf("metrics = %+v, want one vet_findings", env.Metrics)
+	}
+	findings, _, err := GoCheckFindings(root, captureSplit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := env.Metrics[0].Int, int64(len(findings)); got != want {
+		t.Errorf("the gate reported %d, bin/check reports %d findings: %v", got, want, findings)
+	}
+}
+
+// builds sweeps the same module list, so it inherits the same duty to say when
+// one of them could not be measured — a complete-looking envelope from a partial
+// sweep is what moves a baseline it should not.
+func TestBuilds_NamesAModuleItCouldNotMeasure(t *testing.T) {
+	root := t.TempDir()
+	write := func(dir, name, body string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	compiler := filepath.Join(root, "compiler")
+	write(compiler, "go.mod", "module example.com/compiler\n\ngo 1.25.6\n")
+	write(compiler, "x.go", "package compiler\n\nfunc F() {}\n")
+	// flows/ with no flow-sdk/ beside it: present, unresolvable, left out.
+	write(filepath.Join(root, "flows"), "go.mod", "module example.com/flows\n\ngo 1.21\n")
+
+	metrics, incomplete, err := measureBuilds(root)
+	if err != nil {
+		t.Fatalf("measureBuilds: %v", err)
+	}
+	if incomplete == "" || !strings.Contains(incomplete, "flows/") {
+		t.Errorf("incomplete = %q, want it to name flows/", incomplete)
+	}
+	for _, m := range metrics {
+		if m.Int != 0 {
+			t.Errorf("%s = %d, want 0 for a tree that builds", m.Name, m.Int)
+		}
+	}
+}
+
+// And the complementary half: a tree with every module it has is COMPLETE, so
+// the baseline may move from it.
+func TestBuilds_AWholeSweepIsComplete(t *testing.T) {
+	root := t.TempDir()
+	compiler := filepath.Join(root, "compiler")
+	if err := os.MkdirAll(compiler, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"go.mod": "module example.com/compiler\n\ngo 1.25.6\n",
+		"x.go":   "package compiler\n\nfunc F() {}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(compiler, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, incomplete, err := measureBuilds(root)
+	if err != nil {
+		t.Fatalf("measureBuilds: %v", err)
+	}
+	if incomplete != "" {
+		t.Errorf("incomplete = %q, want empty: every module was measured", incomplete)
 	}
 }

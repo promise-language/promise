@@ -459,21 +459,6 @@ func countPrefixed(s, prefix string) int {
 	return n
 }
 
-// countDiagnostics counts go vet findings: the lines naming a file and a
-// position, as distinct from the "# package" headers that group them.
-func countDiagnostics(s string) int {
-	n := 0
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		// file:line:col: message — a diagnostic names a position.
-		if parts := strings.SplitN(line, ":", 3); len(parts) == 3 {
-			if _, err := strconv.Atoi(parts[1]); err == nil {
-				n++
-			}
-		}
-	}
-	return n
-}
+// Parsing go vet output is ParseGoDiagnostics, in check.go, beside the rule for
+// which of those diagnostics this project acts on. Counting them is not a
+// separate thing from reading them.

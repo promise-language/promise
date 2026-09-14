@@ -636,3 +636,201 @@ func TestFindPromiseFilesExcludesGeneratedAndHiddenDirs(t *testing.T) {
 		t.Errorf("findPromiseFiles = %v, want %v", got, want)
 	}
 }
+
+// --- FormatGo: the repair mode of the formatted:go pair ---
+//
+// UnformattedGoFiles, its measure mode, is covered in precommit_test.go. These
+// cover the half that WRITES: what it produces, what it leaves alone, and that
+// the two modes agree about which files are subject to formatting at all.
+
+// goSourceRoot writes files under compiler/, which is where goFileDirs looks.
+func goSourceRoot(t *testing.T, files map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	for rel, body := range files {
+		full := filepath.Join(root, "compiler", filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// What the repair mode does: rewrite exactly the files gofmt would change, and
+// touch nothing else. A formatter that rewrote an already-formatted file would
+// show up as a spurious diff on every run.
+func TestFormatGo_RewritesOnlyWhatNeedsIt(t *testing.T) {
+	const formatted = "package a\n\nfunc F() {}\n"
+	root := goSourceRoot(t, map[string]string{
+		"a.go":         formatted,
+		"b.go":         "package b\nfunc  G(){}\n",
+		"vendor/c.go":  "package c\nfunc  H(){}\n",
+		"notes.txt":    "func  not_go(){}\n",
+		"unparsed.go":  "package d\nfunc  {{{\n",
+		".hidden/e.go": "package e\nfunc  I(){}\n",
+	})
+
+	if err := FormatGo(root); err != nil {
+		t.Fatalf("FormatGo: %v", err)
+	}
+
+	at := func(rel string) string { return filepath.Join(root, "compiler", filepath.FromSlash(rel)) }
+	if got := readFile(t, at("b.go")); got != "package b\n\nfunc G() {}\n" {
+		t.Errorf("b.go = %q, want it reformatted", got)
+	}
+	// Everything else is byte-for-byte what it was.
+	for rel, want := range map[string]string{
+		"a.go":         formatted,
+		"vendor/c.go":  "package c\nfunc  H(){}\n",
+		"notes.txt":    "func  not_go(){}\n",
+		"unparsed.go":  "package d\nfunc  {{{\n",
+		".hidden/e.go": "package e\nfunc  I(){}\n",
+	} {
+		if got := readFile(t, at(rel)); got != want {
+			t.Errorf("%s = %q, want it untouched (%q)", rel, got, want)
+		}
+	}
+}
+
+// On Windows git is often configured with core.autocrlf=true, so a CRLF file
+// rewritten with LF endings is a whole-file diff that nobody asked for. The
+// formatter compares line-ending-agnostically and writes back the endings it
+// found.
+func TestFormatGo_PreservesCRLF(t *testing.T) {
+	root := goSourceRoot(t, map[string]string{"b.go": "package b\r\nfunc  G(){}\r\n"})
+	if err := FormatGo(root); err != nil {
+		t.Fatalf("FormatGo: %v", err)
+	}
+	got := readFile(t, filepath.Join(root, "compiler", "b.go"))
+	if want := "package b\r\n\r\nfunc G() {}\r\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// The file's mode is the author's, not the formatter's: rewriting must not
+// quietly widen or narrow it.
+func TestFormatGo_PreservesFileMode(t *testing.T) {
+	root := goSourceRoot(t, map[string]string{"b.go": "package b\nfunc  G(){}\n"})
+	path := filepath.Join(root, "compiler", "b.go")
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := FormatGo(root); err != nil {
+		t.Fatalf("FormatGo: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode = %v, want 0600", got)
+	}
+}
+
+// A directory the tree does not have is not an error. bin/verify runs this over
+// real repositories and tests run it over temp roots that have only some of the
+// directories; one mode tolerating that and the other not is how the pair came
+// to disagree once already.
+func TestFormatGo_MissingDirectoryIsNotAnError(t *testing.T) {
+	root := t.TempDir() // no compiler/, no tools/build/
+	if err := FormatGo(root); err != nil {
+		t.Errorf("FormatGo: %v", err)
+	}
+	files, err := UnformattedGoFiles(root)
+	if err != nil {
+		t.Errorf("UnformattedGoFiles: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("got %v, want none", files)
+	}
+}
+
+// The pair property, over one tree: the files the gate NAMES are exactly the
+// files the tool REWRITES, and once it has, the gate names none. Compared by
+// driving both rather than by spelling a list here — a hand-written expectation
+// is a third answer, and would go on passing while the two it describes drifted
+// (T2104).
+func TestFormatGo_RewritesExactlyWhatUnformattedGoFilesNames(t *testing.T) {
+	root := goSourceRoot(t, map[string]string{
+		"a.go":           "package a\n\nfunc F() {}\n",
+		"b.go":           "package b\nfunc  G(){}\n",
+		"deep/c.go":      "package c\nfunc   H()  {}\n",
+		"deep/more/d.go": "package d\n\nfunc I() {}\n",
+		"unparseable.go": "package e\nfunc  {{{\n",
+		"vendor/skip.go": "package f\nfunc  J(){}\n",
+	})
+
+	named, err := UnformattedGoFiles(root)
+	if err != nil {
+		t.Fatalf("UnformattedGoFiles: %v", err)
+	}
+	if len(named) == 0 {
+		t.Fatal("the fixture produced no unformatted files, so every pin here would be vacuous")
+	}
+
+	before := map[string]string{}
+	for _, rel := range named {
+		before[rel] = readFile(t, filepath.Join(root, rel))
+	}
+
+	if err := FormatGo(root); err != nil {
+		t.Fatalf("FormatGo: %v", err)
+	}
+
+	// Every named file changed...
+	for rel, was := range before {
+		if readFile(t, filepath.Join(root, rel)) == was {
+			t.Errorf("%s was named unformatted but FormatGo left it alone", rel)
+		}
+	}
+	// ...and nothing is named any more.
+	after, err := UnformattedGoFiles(root)
+	if err != nil {
+		t.Fatalf("UnformattedGoFiles: %v", err)
+	}
+	if len(after) != 0 {
+		t.Errorf("after FormatGo the gate still names %v", after)
+	}
+	// Running the repair mode again is a no-op, which is what makes it safe for
+	// bin/verify to run it before every measurement.
+	if err := FormatGo(root); err != nil {
+		t.Fatalf("second FormatGo: %v", err)
+	}
+	if again, _ := UnformattedGoFiles(root); len(again) != 0 {
+		t.Errorf("a second FormatGo made work for the gate: %v", again)
+	}
+}
+
+// A walk that could not read part of the tree has not found zero unformatted
+// files — it has not looked. Both modes must fail rather than report a clean
+// tree, which is the same false-clean the checked:go pair was fixed for (T2104).
+func TestFormatGo_AnUnreadableDirectoryIsAnErrorNotACleanTree(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permissions do not restrict the walk")
+	}
+	root := goSourceRoot(t, map[string]string{"deep/b.go": "package b\nfunc  G(){}\n"})
+	locked := filepath.Join(root, "compiler", "deep")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) }) // so t.TempDir can clean up
+
+	if _, err := UnformattedGoFiles(root); err == nil {
+		t.Error("the gate reported a tree it could not read as having nothing unformatted")
+	}
+	if err := FormatGo(root); err == nil {
+		t.Error("the tool reported a tree it could not read as formatted")
+	}
+}

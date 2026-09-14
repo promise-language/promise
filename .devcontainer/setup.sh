@@ -35,4 +35,4 @@ fi
 
 echo "==> done. Next:"
 echo "    bin/build         # fetches pinned LLVM + musl CRT on first run (~1 GB cache)"
-echo "    bin/verify --wasm # format + vet + full suite"
+echo "    bin/verify --wasm # format + check + full suite"

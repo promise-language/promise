@@ -192,6 +192,11 @@ func FormatPromiseFiles(root, promiseBin string) error {
 
 // goFileDirs returns the directories to scan for Go source files.
 // flows/ is included only when flows/go.mod is present (feature branch).
+//
+// Deliberately NOT GoModules: formatting reads files and never resolves a
+// module, so flows/ is formattable on its own go.mod, where being CHECKED or
+// TESTED additionally needs flow-sdk/ beside it. Two predicates because the two
+// operations genuinely need different things — not two spellings of one.
 func goFileDirs(root string) []string {
 	dirs := []string{
 		filepath.Join(root, "compiler"),
@@ -203,11 +208,24 @@ func goFileDirs(root string) []string {
 	return dirs
 }
 
-// FormatGo formats all Go files under compiler/, tools/build/, and flows/ (when present)
-// using go/format.Source(). On Windows, it preserves original line endings to avoid
-// spurious diffs when git is configured with core.autocrlf=true.
-func FormatGo(root string) error {
+// eachGoFileNeedingFormat walks the Go sources under compiler/, tools/build/
+// and flows/ (when present) and calls fn once per file gofmt would rewrite,
+// handing over the formatted bytes.
+//
+// This is the one implementation the formatted:go pair shares: FormatGo writes
+// what it yields, UnformattedGoFiles records the path. A second copy of this
+// walk is how the tool and the gate come to disagree about which files are
+// subject to formatting — the two copies this replaced had already drifted, one
+// tolerating a missing directory and the other not.
+//
+// Comparison is line-ending-agnostic (CRLF normalized to LF first): on Windows
+// git is often configured with core.autocrlf=true, and a file that differs only
+// in line endings is not unformatted.
+func eachGoFileNeedingFormat(root string, fn func(path string, formatted []byte, hadCRLF bool) error) error {
 	for _, dir := range goFileDirs(root) {
+		if !Exists(dir) {
+			continue // skip missing dirs (e.g. a test temp repo without all dirs)
+		}
 		if err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -228,7 +246,6 @@ func FormatGo(root string) error {
 				return err
 			}
 
-			// Normalize CRLF→LF before formatting so comparison is line-ending-agnostic.
 			hasCRLF := bytes.Contains(src, []byte("\r\n"))
 			srcLF := bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
 
@@ -237,26 +254,32 @@ func FormatGo(root string) error {
 				// Skip files that don't parse (e.g., generated code with build tags)
 				return nil
 			}
-
 			if bytes.Equal(out, srcLF) {
 				return nil // already formatted
 			}
-
-			// If original had CRLF, restore CRLF in output so git doesn't see a diff.
-			if hasCRLF {
-				out = bytes.ReplaceAll(out, []byte("\n"), []byte("\r\n"))
-			}
-
-			perm := os.FileMode(0644)
-			if fi, e := os.Stat(path); e == nil {
-				perm = fi.Mode().Perm()
-			}
-			return os.WriteFile(path, out, perm)
+			return fn(path, out, hasCRLF)
 		}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// FormatGo formats all Go files under compiler/, tools/build/, and flows/ (when
+// present) using go/format.Source(). This is the REPAIR mode of the pair whose
+// measure mode is UnformattedGoFiles — same walk, same selection, same engine.
+func FormatGo(root string) error {
+	return eachGoFileNeedingFormat(root, func(path string, formatted []byte, hadCRLF bool) error {
+		// If original had CRLF, restore CRLF in output so git doesn't see a diff.
+		if hadCRLF {
+			formatted = bytes.ReplaceAll(formatted, []byte("\n"), []byte("\r\n"))
+		}
+		perm := os.FileMode(0644)
+		if fi, e := os.Stat(path); e == nil {
+			perm = fi.Mode().Perm()
+		}
+		return os.WriteFile(path, formatted, perm)
+	})
 }
 
 // EmbedFormattedResources re-embeds resources after formatting so the next
@@ -268,53 +291,21 @@ func EmbedFormattedResources(root string) error {
 
 // UnformattedGoFiles returns the repo-relative paths of Go files under
 // compiler/, tools/build/, and flows/ (when present) that gofmt would reformat,
-// WITHOUT modifying them. It runs the same go/format pass as FormatGo entirely
-// in-process — no subprocess, no exit-code inspection — and just compares the
-// result instead of writing it.
+// WITHOUT modifying them. This is the MEASURE mode of FormatGo: the same walk,
+// entirely in-process — no subprocess, no exit-code inspection — recording the
+// path instead of writing the bytes.
 //
-// The pre-commit gate uses this to reject commits that contain unformatted Go.
-// Otherwise unformatted code reaches origin and shows up as a spurious diff the
-// next time someone runs bin/verify (which reformats in place). Comparison is
-// line-ending-agnostic (CRLF normalized to LF first), matching FormatGo.
+// The pre-commit gate and formatted:go use this to reject a tree that contains
+// unformatted Go. Otherwise unformatted code reaches origin and shows up as a
+// spurious diff the next time someone runs bin/verify (which reformats in place).
 func UnformattedGoFiles(root string) ([]string, error) {
 	var unformatted []string
-	for _, dir := range goFileDirs(root) {
-		if !Exists(dir) {
-			continue // skip missing dirs (e.g. a test temp repo without all dirs)
-		}
-		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				name := d.Name()
-				if name == "vendor" || name == ".git" || strings.HasPrefix(name, ".") {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if !strings.HasSuffix(d.Name(), ".go") {
-				return nil
-			}
-
-			src, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			srcLF := bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
-			out, err := format.Source(srcLF)
-			if err != nil {
-				return nil // unparseable (e.g. generated code) — skip, mirrors FormatGo
-			}
-			if !bytes.Equal(out, srcLF) {
-				rel, _ := filepath.Rel(root, path)
-				unformatted = append(unformatted, rel)
-			}
-			return nil
-		})
-		if err != nil {
-			return nil, err
-		}
+	if err := eachGoFileNeedingFormat(root, func(path string, _ []byte, _ bool) error {
+		rel, _ := filepath.Rel(root, path)
+		unformatted = append(unformatted, rel)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return unformatted, nil
 }

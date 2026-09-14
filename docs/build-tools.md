@@ -19,10 +19,10 @@ The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries i
 | Binary | Purpose |
 |--------|---------|
 | `bin/build` | Build the compiler binary (`bin/promise`). Handles ANTLR parser generation, resource embedding, LLVM detection, and Go compilation. |
-| `bin/verify` | Pre-commit verification: format, vet, build, and test. Supports `--shared`, `--wasm`, `--clean`. |
+| `bin/verify` | Pre-commit verification: format, build, check, and test. Supports `--shared`, `--wasm`, `--clean`. |
 | `bin/test` | Run test suites. Modes: `go`, `promise`, `all`. Supports `--wasm`, `--clean`. |
 | `bin/format` | Format Go code (`gofmt`) and Promise code (`promise format`). |
-| `bin/vet` | Run `go vet` on compiler packages (excluding generated parser). |
+| `bin/check` | Run `go vet` over every Go module, reporting the findings this project's authors can act on — diagnostics in the generated parser are excluded. The same implementation the `checked:go` gate measures; `go vet` has no general `-fix`, so this is the check-only form of the pair. |
 | `bin/coverage` | Test coverage analysis for Go packages and Promise tests. |
 | `bin/stress` | Stress testing for flaky test detection. |
 | `bin/precommit` | The `pre-commit` git hook body: identity, staged-file, baseline-ratchet, formatting, and documentation checks. |
@@ -267,7 +267,7 @@ The verify tool orchestrates the full pre-commit check:
 0. **Clear the blessing** — delete `.workspace/verified-tree` (see below)
 1. **Format** — `gofmt -w .` in compiler/, then `promise format` on all `.pr` files
 2. **Build** — full build pipeline (see above)
-3. **Vet** — `go vet ./...` excluding `internal/parser` (auto-generated)
+3. **Check** — `bin/check`'s own implementation: `go vet` over every Go module's packages, with the generated `internal/parser` excluded from the package list *and* from the findings. Both exclusions are needed — `go vet` reports diagnostics in a package's dependencies, so naming the packages alone does not keep the generated ones out of the answer.
 4. **Go tests** — `go test ./...` in compiler/, then tools/build, then flows/
 5. **Promise tests (host)** — `promise test tests/... modules/... examples/...`
 6. **Promise tests (WASM)** — if `--wasm` flag, same with `-target wasm32-wasi`

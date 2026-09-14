@@ -508,35 +508,22 @@ func runGateCoverage(root string, args []string) error {
 }
 
 // goCoveragePackages lists the compiler packages whose statements the coverage
-// gate measures: every package except the ANTLR-generated parser, which is
-// machine output rather than authored source (bin/vet excludes it for the same
-// reason) and whose 30k generated lines would swamp the signal. The per-area
-// test packages under .../tests/ carry no non-test statements, so naming them
-// costs nothing and keeps the rule to a single exception.
+// gate and bin/coverage measure: every package except the generated one, whose
+// 30k machine-written lines would swamp the signal. The exclusion is
+// excludeGeneratedGoPackages — the same one bin/check and checked:go apply, from
+// the one place it is spelled. The per-area test packages under .../tests/ carry
+// no non-test statements, so naming them costs nothing.
 func goCoveragePackages(compilerDir string) ([]string, error) {
 	out, err := RunOutputIn(compilerDir, "go", "list", "./...")
 	if err != nil {
 		return nil, fmt.Errorf("go list: %w", err)
 	}
 
-	pkgs := filterCoveragePackages(out)
+	pkgs := excludeGeneratedGoPackages(out)
 	if len(pkgs) == 0 {
 		return nil, fmt.Errorf("no packages found to measure")
 	}
 	return pkgs, nil
-}
-
-// filterCoveragePackages drops the generated parser from `go list ./...`
-// output, preserving order.
-func filterCoveragePackages(goList string) []string {
-	var pkgs []string
-	for _, pkg := range strings.Split(goList, "\n") {
-		pkg = strings.TrimSpace(pkg)
-		if pkg != "" && !strings.HasSuffix(pkg, "/internal/parser") {
-			pkgs = append(pkgs, pkg)
-		}
-	}
-	return pkgs
 }
 
 // --- Parser helpers ---

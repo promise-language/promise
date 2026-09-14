@@ -80,7 +80,7 @@ Prerequisites: Go 1.22+, Java (for ANTLR4 code generation), clang, LLVM 22+.
 bin/build             # generate parser + embed resources + build → bin/promise
 bin/build --release   # release build with embedded LLVM tools
 bin/test              # build + run all tests (Go + Promise)
-bin/verify --wasm     # format + vet + full test suite (pre-commit check)
+bin/verify --wasm     # format + check + full test suite (pre-commit check)
 ```
 
 **Important:** Always use `bin/build` to build the compiler. Never run `go build` directly — it skips resource embedding and produces a broken binary.

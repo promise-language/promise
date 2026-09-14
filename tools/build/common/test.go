@@ -155,10 +155,9 @@ func goTestConcurrencyArgs() []string {
 	return []string{"-p", strconv.Itoa(p), "-parallel", strconv.Itoa(parallel)}
 }
 
-// goTestArgs is the whole `go test` command the compiler and tools suites run —
-// verify's two phases below and the tested:go gate alike. One spelling, so the
-// gate cannot come to measure something narrower than what verify requires.
-// (RunFlowsGoTests keeps its own, without the concurrency bound.)
+// goTestArgs is the whole `go test` command every Go module's suite runs —
+// verify's phases below and the tested:go gate alike. One spelling, so the gate
+// cannot come to measure something narrower than what verify requires.
 //
 // -timeout 30m: see RunTests — the codegen package exceeds Go's default
 // 10m per-package limit on slow runners (GitHub windows-amd64).
@@ -200,7 +199,13 @@ func RunToolsGoTests(root string, extra ...string) error {
 
 // RunFlowsGoTests runs Go unit tests for the flows module.
 // Returns (skipped=true, nil) when flows/go.mod or flow-sdk/go.mod is absent.
-func RunFlowsGoTests(root string) (skipped bool, err error) {
+//
+// The same argv as the other two, from goTestArgs, and the same extra flags:
+// tested:go sweeps flows/ when this clone has one, and a module that quietly ran
+// a different command than its siblings is the drift this file's one-spelling
+// rule exists to prevent. Without `extra` here, a --clean run would force the
+// compiler and tools suites to re-run while flows replayed cached results.
+func RunFlowsGoTests(root string, extra ...string) (skipped bool, err error) {
 	if !Exists(filepath.Join(root, "flows", "go.mod")) {
 		return true, nil
 	}
@@ -209,7 +214,7 @@ func RunFlowsGoTests(root string) (skipped bool, err error) {
 		return true, nil
 	}
 	flowsDir := filepath.Join(root, "flows")
-	return false, runInRendered(flowsDir, Progress(), isGoTestPassLine, "go", "test", "-timeout", "30m", "./...")
+	return false, runInRendered(flowsDir, Progress(), isGoTestPassLine, "go", goTestArgs(extra...)...)
 }
 
 // promiseTestTimeoutArgs returns the per-test timeout flags for the given target
@@ -236,6 +241,14 @@ func promiseTestProgressArgs() []string {
 	return []string{"-progress", Progress().Mode().String()}
 }
 
+// promiseSuiteTargets is WHAT "the host Promise suite" is, spelled once. verify
+// runs it, bin/test runs it and the tested:promise gate measures it, so a target
+// added to one is added to all three — the tool and the gate cannot come to
+// disagree about the subject.
+func promiseSuiteTargets() []string {
+	return []string{"tests/...", "modules/...", "examples/...", "tools/stub/..."}
+}
+
 // RunPromiseTests runs Promise tests for the given target (empty = host).
 // Returns captured stdout (even on failure) and any error.
 func RunPromiseTests(root, target string) (string, error) {
@@ -245,7 +258,7 @@ func RunPromiseTests(root, target string) (string, error) {
 	if target != "" {
 		args = append(args, "-target", target)
 	}
-	args = append(args, "tests/...", "modules/...", "examples/...", "tools/stub/...")
+	args = append(args, promiseSuiteTargets()...)
 	// The child owns the transient line for the duration of the run; drop ours
 	// first so the two never fight over the same screen row.
 	Progress().Clear()
@@ -261,7 +274,7 @@ func RunPromiseTestsCapture(root, target string) (string, error) {
 	if target != "" {
 		args = append(args, "-target", target)
 	}
-	args = append(args, "tests/...", "modules/...", "examples/...", "tools/stub/...")
+	args = append(args, promiseSuiteTargets()...)
 	Progress().Clear()
 	return RunTeeStderr(root, promiseBin, args...)
 }
@@ -278,6 +291,6 @@ func RunPromiseTestsJSON(root, target string) (string, error) {
 	if target != "" {
 		args = append(args, "-target", target)
 	}
-	args = append(args, "tests/...", "modules/...", "examples/...", "tools/stub/...")
+	args = append(args, promiseSuiteTargets()...)
 	return RunCaptureStdout(root, promiseBin, args...)
 }

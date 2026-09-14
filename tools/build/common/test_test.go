@@ -246,3 +246,36 @@ func indexOfArg(args []string, want string) int {
 	}
 	return -1
 }
+
+// TestRunFlowsGoTests_TakesTheSameExtraFlags is the third module's half of the
+// one-spelling rule. Before this, verify's --clean run passed -count=1 to the
+// compiler and tools suites but not to flows, so flows alone replayed cached
+// results on a run whose whole point was not to — a divergence in the same
+// family as the one T2104 removed between bin/check and checked:go.
+func TestRunFlowsGoTests_TakesTheSameExtraFlags(t *testing.T) {
+	root := t.TempDir()
+	flowsDir := filepath.Join(root, "flows")
+	for _, mod := range []string{"flows", "flow-sdk"} {
+		dir := filepath.Join(root, mod)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/"+mod+"\n\ngo 1.21\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := "package flows\n\nimport \"testing\"\n\nfunc TestNoop(t *testing.T) { t.Log(\"noop\") }\n"
+	if err := os.WriteFile(filepath.Join(flowsDir, "noop_test.go"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The flags a --clean run passes reach `go test` here too: a stale spelling
+	// would make go reject the argv, or silently drop the flag.
+	skipped, err := RunFlowsGoTests(root, goTestFlags(true)...)
+	if err != nil {
+		t.Fatalf("RunFlowsGoTests: %v", err)
+	}
+	if skipped {
+		t.Error("flows/ and flow-sdk/ are both present, so the suite must not be skipped")
+	}
+}

@@ -26,18 +26,6 @@ import (
 	"path/filepath"
 )
 
-// goModules are the Go modules in this repository. `./...` is module-scoped, so
-// one invocation at the root would silently skip the other module — honest
-// numbers about part of the subject, which is an incomplete run that does not
-// know it is incomplete.
-func goModules(root string) []string {
-	dirs := []string{filepath.Join(root, "compiler")}
-	if tools := filepath.Join(root, "tools", "build"); Exists(filepath.Join(tools, "go.mod")) {
-		dirs = append(dirs, tools)
-	}
-	return dirs
-}
-
 // measureFormattedGo counts Go files gofmt would rewrite, without rewriting
 // them.
 func measureFormattedGo(root string) ([]Metric, string, error) {
@@ -79,7 +67,12 @@ func measureFormattedPromise(root string) ([]Metric, string, error) {
 // alongside the grammar) follows from what the metric says.
 func measureBuilds(root string) ([]Metric, string, error) {
 	n := 0
-	for _, dir := range goModules(root) {
+	dirs, incomplete := GoModules(root)
+	for _, dir := range dirs {
+		// `./...`, deliberately, where checked:go names its packages: generated
+		// code is excluded from being CHECKED because a diagnostic in it is not
+		// the author's to act on, but it still has to COMPILE like anything
+		// else. Excluding it here would hide a broken build.
 		_, stderr, err := captureSplit(dir, "go", "build", "./...")
 		found := countPrefixed(stderr, "# ")
 		if err != nil && found == 0 {
@@ -92,7 +85,7 @@ func measureBuilds(root string) ([]Metric, string, error) {
 	return []Metric{
 		Count("unbuildable_go_packages", n),
 		Count("stale_generated_files", staleGeneratedFiles(root)),
-	}, "", nil
+	}, incomplete, nil
 }
 
 // staleGeneratedFiles reports how many generated-and-tracked sources no longer
@@ -107,19 +100,26 @@ func staleGeneratedFiles(root string) int {
 	return 1
 }
 
-// measureCheckedGo counts go vet diagnostics — the lines naming a file and a
-// position, as distinct from the "# package" headers that group them.
+// measureCheckedGo counts the go vet findings bin/check reports. Counting is
+// this mode's ONLY addition: GoCheckFindings is the answer, and the tool's only
+// addition to the same call is printing it and exiting non-zero.
+//
+// The two used to reach that answer separately, and the gate's spelling had no
+// exclusion at all — so it counted diagnostics in the generated parser that
+// bin/check had always left out, and the verdict came to depend on which Go
+// release (and which build cache) the host had (T2104).
 func measureCheckedGo(root string) ([]Metric, string, error) {
-	n := 0
-	for _, dir := range goModules(root) {
-		_, stderr, err := captureSplit(dir, "go", "vet", "./...")
-		found := countDiagnostics(stderr)
-		if err != nil && found == 0 {
-			return nil, "", fmt.Errorf("go vet in %s: %w: %s", dir, err, firstLine(stderr))
-		}
-		n += found
+	return measureCheckedGoWith(root, captureSplit)
+}
+
+// measureCheckedGoWith is measureCheckedGo with the child call as a parameter,
+// the seam a test uses to stand in for `go vet` rather than spawn it.
+func measureCheckedGoWith(root string, capture captureFunc) ([]Metric, string, error) {
+	findings, incomplete, err := GoCheckFindings(root, capture)
+	if err != nil {
+		return nil, "", err
 	}
-	return []Metric{Count("vet_findings", n)}, "", nil
+	return []Metric{Count("vet_findings", len(findings))}, incomplete, nil
 }
 
 // measureTestedGo counts failing Go tests and failing packages, across every Go
@@ -146,7 +146,8 @@ func measureTestedGoWith(root string, capture captureFunc) ([]Metric, string, er
 	argv := goTestArgs()
 
 	failedTests, failedPackages := 0, 0
-	for _, dir := range goModules(root) {
+	dirs, incomplete := GoModules(root)
+	for _, dir := range dirs {
 		stdout, stderr, testErr := capture(dir, "go", argv...)
 		tests := countPrefixed(stdout, "--- FAIL:")
 		packages := countPrefixed(stdout, "FAIL\t")
@@ -167,7 +168,7 @@ func measureTestedGoWith(root string, capture captureFunc) ([]Metric, string, er
 	return []Metric{
 		Count("go_test_failures", failedTests),
 		Count("go_test_packages_failed", failedPackages),
-	}, "", nil
+	}, incomplete, nil
 }
 
 // measureTestedPromise runs the host Promise suite. It builds the compiler

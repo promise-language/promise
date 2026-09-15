@@ -643,6 +643,16 @@ Discovers: `Scrt1.o` (PIE entry), `crti.o`/`crtn.o` (init/fini sections), `crtbe
 
 Library search paths (`-L`) are derived from the CRT locations plus standard paths.
 
+This is the one host probe "nothing from `PATH`" does not cover, and it is not an
+exception to the principle so much as a consequence of what was asked for: a
+glibc *dynamic* link is a non-default target the caller names explicitly
+(`--target x86_64-unknown-linux-gnu`), and linking against the host's glibc means
+linking against the host's glibc CRT. Those objects are the requested target's own
+runtime, not a toolchain that could be pinned — the `[binaries.musl]` prebuilt
+(T0530) is the *musl* CRT and cannot stand in for them. The call site carries a
+`// path-ok:` marker saying so; every other lookup in the compiler is subject to
+the rule ([build-tools.md](build-tools.md) §4).
+
 ### Linux Linker Invocation
 
 **Default: musl static** (Phase 7b') — target triple `x86_64-unknown-linux-musl`:
@@ -778,7 +788,7 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 | `useClangPipeline(target)` | Returns true for non-Linux or `PROMISE_USE_CLANG=1` |
 | `compileAndLinkLLVM()` | `opt -O1` → `llc -filetype=obj` → `ld.lld` (musl static or glibc dynamic) |
 | `compileAndLinkClang()` | Old clang driver path (fallback for non-Linux) |
-| `findLLVMTool(name)` | Discovers `opt`/`llc`/`ld.lld` — sibling → env → versioned PATH → unversioned PATH |
+| `findLLVMTool(name)` | Resolves `opt`/`llc`/`ld.lld` from three sources — env override, sibling of the binary, pinned toolchain view. Never `PATH` (T2108) |
 | `llvmToolVersion(path)` | Parses `LLVM version X` or `LLD X` from `--version` output |
 | `checkLLVMToolVersion(path)` | Enforces LLVM 22+ minimum |
 | `findMuslCRT(target)` | Locates musl CRT — sibling → installed → cache → CAS view → extract from embedded |

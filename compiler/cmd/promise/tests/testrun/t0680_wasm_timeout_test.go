@@ -29,7 +29,7 @@ import (
 // binary cannot be executed without it).
 func requireWasmtime(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("wasmtime"); err != nil {
+	if _, err := exec.LookPath("wasmtime"); err != nil { // path-ok: skips for the absent runtime itself, which is the legitimate form
 		t.Skip("wasmtime not installed — skipping wasm32-wasi runtime timeout test")
 	}
 }

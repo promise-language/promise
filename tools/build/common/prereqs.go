@@ -25,7 +25,7 @@ func RunPrereqs(root string, _ []string) error {
 	}
 
 	// Java (for ANTLR) — java -version writes to stderr
-	if path := Which("java"); path != "" {
+	if path := Which("java"); path != "" { // path-ok: bin/prereqs reports host state — that is its whole subject
 		ver, _ := RunOutputCombined("java", "-version")
 		fmt.Printf("✅ java:     %s\n", firstLine(ver))
 	} else {
@@ -58,7 +58,7 @@ func RunPrereqs(root string, _ []string) error {
 	}
 
 	// wasmtime (optional)
-	if path := Which("wasmtime"); path != "" {
+	if path := Which("wasmtime"); path != "" { // path-ok: bin/prereqs reports host state — that is its whole subject
 		ver, _ := RunOutputQuiet("wasmtime", "--version")
 		fmt.Printf("✅ wasmtime: %s\n", ver)
 	} else {
@@ -74,7 +74,7 @@ func RunPrereqs(root string, _ []string) error {
 	}
 
 	// node (optional, for --target wasm32-web tests)
-	if path := Which("node"); path != "" {
+	if path := Which("node"); path != "" { // path-ok: bin/prereqs reports host state — that is its whole subject
 		ver, _ := RunOutputQuiet("node", "--version")
 		fmt.Printf("✅ node:     %s\n", ver)
 	} else {

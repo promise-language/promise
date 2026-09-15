@@ -291,8 +291,13 @@ func RunOutputQuiet(name string, args ...string) (string, error) {
 }
 
 // Which finds an executable in PATH, returning its full path or empty string.
+//
+// It answers "does this host have X", which is a question about the machine, not
+// about the tree. No toolchain binary may be resolved this way — those come from
+// the pinned prebuilts, a PROMISE_* override or a test's own stub (T2108/T2116,
+// enforced by CheckHostToolLookups). Every caller carries a `// path-ok:` reason.
 func Which(name string) string {
-	path, err := exec.LookPath(name)
+	path, err := exec.LookPath(name) // path-ok: the one implementation of the host probe itself
 	if err != nil {
 		return ""
 	}

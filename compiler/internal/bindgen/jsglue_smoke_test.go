@@ -13,7 +13,7 @@ import (
 // the generated glue with a real JS engine, so there's no meaningful fallback.
 func requireNode(t *testing.T) string {
 	t.Helper()
-	nodePath, err := exec.LookPath("node")
+	nodePath, err := exec.LookPath("node") // path-ok: skips for the absent runtime itself, which is the legitimate form
 	if err != nil {
 		t.Skip("node not found on PATH; skipping JS-glue smoke test")
 	}

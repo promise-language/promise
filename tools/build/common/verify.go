@@ -431,7 +431,7 @@ func runVerifyTestPhases(root string, wasm, wasmWeb bool, s verifySuites) (verif
 
 	// 8. Promise tests (wasm)
 	if wasm {
-		if Which("wasmtime") == "" {
+		if Which("wasmtime") == "" { // path-ok: the documented wasm32-wasi test runtime
 			return res, fmt.Errorf("wasmtime not found — install from https://wasmtime.dev/ or: winget install BytecodeAlliance.Wasmtime")
 		}
 		Progress().Println("\nRunning promise tests (wasm32-wasi)...")
@@ -446,7 +446,7 @@ func runVerifyTestPhases(root string, wasm, wasmWeb bool, s verifySuites) (verif
 
 	// 8b. Promise tests (wasm32-web via Node)
 	if wasmWeb {
-		if Which("node") == "" {
+		if Which("node") == "" { // path-ok: the documented wasm32-web test runtime (Node 20+)
 			return res, fmt.Errorf("node not found — install Node.js 20+ (https://nodejs.org/)")
 		}
 		Progress().Println("\nRunning promise tests (wasm32-web)...")

@@ -1099,7 +1099,7 @@ func TestCheckTestSleeps_ErrorsWhenGitCannotList(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when git cannot list the index, got nil")
 	}
-	if !strings.Contains(err.Error(), "list tracked Promise files") {
+	if !strings.Contains(err.Error(), "list tracked *.pr files") {
 		t.Errorf("error should name the failing step, got: %v", err)
 	}
 }
@@ -1325,7 +1325,7 @@ func TestCheckTestTempPaths_ErrorsWhenGitCannotList(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when git cannot list the index, got nil")
 	}
-	if !strings.Contains(err.Error(), "list tracked Promise files") {
+	if !strings.Contains(err.Error(), "list tracked *.pr files") {
 		t.Errorf("error should name the failing step, got: %v", err)
 	}
 }

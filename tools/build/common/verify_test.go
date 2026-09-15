@@ -306,30 +306,13 @@ func TestRunVerifyTestPhases_ToolsOrFlowsFailureSkipsPromise(t *testing.T) {
 	}
 }
 
-// TestRunVerifyTestPhases_CleanGoRunReachesPromise is the other half: with the
-// Go suites green the Promise phases run exactly as before, once per target.
-func TestRunVerifyTestPhases_CleanGoRunReachesPromise(t *testing.T) {
-	if Which("wasmtime") == "" || Which("node") == "" {
-		t.Skip("wasmtime/node not installed — the wasm phases would abort early")
-	}
-	var c verifyPhaseCounts
-	res, err := runVerifyTestPhases(t.TempDir(), true, true, stubSuites(&c, nil, nil, nil))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res.promiseSkipped {
-		t.Error("promiseSkipped must be false when the Go suites pass")
-	}
-	if len(res.failures) != 0 {
-		t.Errorf("failures = %v, want none", res.failures)
-	}
-	if c.promiseN != 3 {
-		t.Errorf("promise tests ran %d times; want 3 (host, wasm32-wasi, wasm32-web)", c.promiseN)
-	}
-	if res.hostOutput == "" || res.wasmOutput == "" || res.wasmWebOutput == "" {
-		t.Errorf("per-target output was not captured: %+v", res)
-	}
-}
+// The "Go suites green → all three Promise phases run" half is covered by
+// TestRunVerifyTestPhases_AllTargetsRunWhenGoIsGreen below, which asserts
+// strictly more (per-target ordering and exact per-target output) and satisfies
+// the runtime probes with stubs. A second copy gated on
+// `Which("wasmtime") || Which("node")` lived here until T2116 removed it: it ran
+// on some machines and skipped on others, which is the property this file's
+// tests exist to eliminate.
 
 // TestRunVerifyTestPhases_HostOnlyRunsOnePromisePhase covers the default
 // (no --wasm/--wasm-web) path.

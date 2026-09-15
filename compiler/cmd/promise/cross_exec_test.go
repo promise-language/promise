@@ -281,7 +281,7 @@ func TestCrossExecCommandWasmArgs(t *testing.T) {
 // binary rather than fail one test. A test states its own world.
 func skipWithoutNode(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("node"); err != nil {
+	if _, err := exec.LookPath("node"); err != nil { // path-ok: skips for the absent runtime itself, which is the legitimate form
 		t.Skip("node not installed; wasm32-web command construction needs it")
 	}
 }

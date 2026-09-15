@@ -512,7 +512,7 @@ func doctorCheckPromiseHome() doctorCheck {
 func doctorCheckJava() doctorCheck {
 	c := makeDoctorCheck("Java (optional — compiler development only)", doctorOK, false)
 
-	path, err := exec.LookPath("java")
+	path, err := exec.LookPath("java") // path-ok: promise doctor reports host state — that is its whole subject
 	if err != nil {
 		c.Status = doctorWarn.String()
 		c.Summary = "Not found on PATH"
@@ -538,7 +538,7 @@ func doctorCheckJava() doctorCheck {
 func doctorCheckWasmtime() doctorCheck {
 	c := makeDoctorCheck("wasmtime (optional — wasm32-wasi target)", doctorOK, false)
 
-	path, err := exec.LookPath("wasmtime")
+	path, err := exec.LookPath("wasmtime") // path-ok: promise doctor reports host state — that is its whole subject
 	if err != nil {
 		c.Status = doctorWarn.String()
 		c.Summary = "Not found on PATH"
@@ -557,7 +557,7 @@ func doctorCheckWasmtime() doctorCheck {
 func doctorCheckNode() doctorCheck {
 	c := makeDoctorCheck("node (optional — wasm32-web target tests)", doctorOK, false)
 
-	path, err := exec.LookPath("node")
+	path, err := exec.LookPath("node") // path-ok: promise doctor reports host state — that is its whole subject
 	if err != nil {
 		c.Status = doctorWarn.String()
 		c.Summary = "Not found on PATH"

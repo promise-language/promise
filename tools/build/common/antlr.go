@@ -67,6 +67,16 @@ func GenerateParser(root string, force bool) error {
 		return nil
 	}
 
+	// The grammar is the input, so require it before fetching the tool that
+	// consumes it. Over a root that is not a checkout — a test's temp dir, a
+	// trimmed tree — the old order reached DownloadAntlr first and made an
+	// outbound request to antlr.org (and then wanted a JVM) to generate a parser
+	// from no grammar at all, from inside the mandatory pre-commit gate (T2116).
+	// A build that cannot succeed must say why before it costs the network 2 MB.
+	if _, err := grammarHash(grammarDir); err != nil {
+		return fmt.Errorf("%w — cannot generate a parser without the grammar", err)
+	}
+
 	if err := DownloadAntlr(root); err != nil {
 		return err
 	}

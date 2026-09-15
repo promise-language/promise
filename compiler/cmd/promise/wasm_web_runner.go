@@ -90,7 +90,7 @@ func nodeMissingError() error {
 // wasmtime-missing failures are surfaced today (the existing wasmtime path
 // just lets exec.LookPath fail at exec time).
 func runWasmWeb(ctx context.Context, binaryPath string) *exec.Cmd {
-	nodePath, err := exec.LookPath("node")
+	nodePath, err := exec.LookPath("node") // path-ok: the documented wasm32-web runtime — it runs the module, it does not build it
 	if err != nil {
 		fmt.Fprintln(os.Stderr, nodeMissingError())
 		os.Exit(1)

@@ -163,7 +163,10 @@ func runGateWasmTests(root string, args []string) error {
 		}
 	}
 
-	if Which("wasmtime") == "" {
+	// The runtime executes the built module; it contributes nothing to it, and
+	// docs/gate-system.md takes it from PATH. Absent, the gate fails loudly
+	// rather than reporting a measurement it did not make.
+	if Which("wasmtime") == "" { // path-ok: the documented wasm32-wasi test runtime
 		return fmt.Errorf("wasmtime not found — install with: bin/prereqs -wasm")
 	}
 
@@ -235,7 +238,7 @@ func runGateWasmWebTests(root string, args []string) error {
 		}
 	}
 
-	if Which("node") == "" {
+	if Which("node") == "" { // path-ok: the documented wasm32-web test runtime (Node 20+)
 		return fmt.Errorf("node not found — install Node.js 20+ (https://nodejs.org/)")
 	}
 

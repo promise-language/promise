@@ -99,7 +99,7 @@ func RunTest(root string, args []string) error {
 		}
 
 		if wasm {
-			if Which("wasmtime") == "" {
+			if Which("wasmtime") == "" { // path-ok: the documented wasm32-wasi test runtime
 				return fmt.Errorf("wasmtime not found — install with: bin/prereqs --wasm")
 			}
 			Progress().Println("\nRunning promise tests (wasm32-wasi)...")
@@ -110,7 +110,7 @@ func RunTest(root string, args []string) error {
 		}
 
 		if wasmWeb {
-			if Which("node") == "" {
+			if Which("node") == "" { // path-ok: the documented wasm32-web test runtime (Node 20+)
 				return fmt.Errorf("node not found — install Node.js 20+ (see bin/prereqs)")
 			}
 			Progress().Println("\nRunning promise tests (wasm32-web)...")

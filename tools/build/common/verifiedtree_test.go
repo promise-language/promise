@@ -298,8 +298,15 @@ func TestRecordOutsideGitCheckout(t *testing.T) {
 // contract must never produce — the guard would honour a record describing
 // content that no longer exists.
 //
-// The run is driven over an empty temp root, so it reddens on the very first
-// step — which is the point: the clear has to precede even that one.
+// The run is driven over an empty temp root. It does NOT redden on the first
+// step — formatting an empty tree succeeds — it reddens in the build, where
+// GenerateParser finds no grammar. That is still after every step the clear has
+// to precede, so the contract holds; what matters is that the failure is the
+// same one on every machine. It was not: the build used to reach DownloadAntlr
+// and this test passed on whichever accident the host supplied — a failed fetch,
+// a missing JVM, or a full ANTLR run — which is how a live request to antlr.org
+// came to be made by every bin/verify (T2116). Both assertions below pin that:
+// the error names the missing grammar, and no jar is fetched into the root.
 // HOME is redirected so acquireVerifyLock takes a private lock rather than the
 // host's ~/.promise/verify.lock, which an outer bin/verify holds while these
 // tests run — otherwise the run would return ErrLockTimeout before reaching
@@ -312,8 +319,15 @@ func TestRunVerifyRedRunLeavesNothingBlessed(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, ".workspace/verified-tree", "stale-blessing\n")
 
-	if err := RunVerify(dir, []string{"--shared", "--lock-timeout=30s"}); err == nil {
+	err := RunVerify(dir, []string{"--shared", "--lock-timeout=30s"})
+	if err == nil {
 		t.Fatal("verify over an empty root should fail")
+	}
+	if !strings.Contains(err.Error(), "no .g4 files") {
+		t.Errorf("verify should fail on the absent grammar, got: %v", err)
+	}
+	if Exists(AntlrJarPath(dir)) {
+		t.Errorf("verify fetched the ANTLR jar into %s — no build path may reach the network (T2116)", dir)
 	}
 	if Exists(filepath.Join(dir, ".workspace", "verified-tree")) {
 		t.Error("a red run must leave nothing blessed — the stale record survived")

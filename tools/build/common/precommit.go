@@ -125,8 +125,7 @@ func sleepCallLines(data []byte) []int {
 		if !containsSleepCall(code) {
 			continue
 		}
-		if k := strings.Index(comment, sleepOKMarker); k >= 0 &&
-			strings.TrimSpace(comment[k+len(sleepOKMarker):]) != "" {
+		if markedOK(comment, sleepOKMarker) {
 			continue // annotated with a reason — permitted
 		}
 		lines = append(lines, i+1)
@@ -139,6 +138,14 @@ func sleepCallLines(data []byte) []int {
 // re-permit every future fixed path in a file that earned its entry for one
 // honest use. The marker must carry a reason.
 const tempDirOKMarker = "// temp-dir-ok:"
+
+// markedOK reports whether a line's comment carries marker followed by a
+// non-empty reason. Every structural guard in this file works this way, so the
+// rule that a bare marker does not excuse anything is written once.
+func markedOK(comment, marker string) bool {
+	k := strings.Index(comment, marker)
+	return k >= 0 && strings.TrimSpace(comment[k+len(marker):]) != ""
+}
 
 // containsIdent reports whether code contains name as a whole identifier. Both
 // boundaries are required, so `os.temp_dir` is a hit (the leading '.' is not an
@@ -268,8 +275,7 @@ func tempDirLines(data []byte) []int {
 		if containsIdent(code, "process_id") {
 			continue // per-process by construction — the point of the rule
 		}
-		if k := strings.Index(comment, tempDirOKMarker); k >= 0 &&
-			strings.TrimSpace(comment[k+len(tempDirOKMarker):]) != "" {
+		if markedOK(comment, tempDirOKMarker) {
 			continue // annotated with a reason — permitted
 		}
 		lines = append(lines, i+1)
@@ -277,15 +283,15 @@ func tempDirLines(data []byte) []int {
 	return lines
 }
 
-// scanTrackedPr walks every tracked .pr file the scope predicate admits and
-// returns one "  path:line" entry per line that flag reports, in index order.
-// It reads the full index rather than the staged set so a violation committed on
-// a previous turn is caught on the next invocation — the property both guards
-// built on it depend on.
-func scanTrackedPr(root string, scope func(string) bool, flag func([]byte) []int) ([]string, error) {
-	out, err := RunOutputIn(root, "git", "ls-files", "-z", "*.pr")
+// scanTracked walks every tracked file matching glob that the scope predicate
+// admits and returns one "  path:line" entry per line that flag reports, in
+// index order. It reads the full index rather than the staged set so a violation
+// committed on a previous turn is caught on the next invocation — the property
+// every guard built on it depends on.
+func scanTracked(root, glob string, scope func(string) bool, flag func([]byte) []int) ([]string, error) {
+	out, err := RunOutputIn(root, "git", "ls-files", "-z", glob)
 	if err != nil {
-		return nil, fmt.Errorf("list tracked Promise files: %w", err)
+		return nil, fmt.Errorf("list tracked %s files: %w", glob, err)
 	}
 
 	// git ls-files emits paths in sorted index order, and each flag function
@@ -319,7 +325,7 @@ func CheckTestTempPaths(root string) error {
 	inScope := func(rel string) bool {
 		return isTestPrFile(rel) || strings.HasPrefix(rel, "examples/")
 	}
-	violations, err := scanTrackedPr(root, inScope, tempDirLines)
+	violations, err := scanTracked(root, "*.pr", inScope, tempDirLines)
 	if err != nil {
 		return err
 	}
@@ -337,7 +343,7 @@ func CheckTestTempPaths(root string) error {
 // CheckTestSleeps scans all tracked Promise test files and returns an error
 // naming every unannotated sleep() call site.
 func CheckTestSleeps(root string) error {
-	violations, err := scanTrackedPr(root, isTestPrFile, sleepCallLines)
+	violations, err := scanTracked(root, "*.pr", isTestPrFile, sleepCallLines)
 	if err != nil {
 		return err
 	}
@@ -379,6 +385,14 @@ func RunPreCommit(root string) error {
 	// test .pr files and examples (T1963). Same full-index sweep as the sleep
 	// guard, and for the same reason.
 	if err := CheckTestTempPaths(root); err != nil {
+		return err
+	}
+
+	// Structural anti-regression guard: reject resolving a toolchain binary
+	// through the host's PATH, in product code and in tests alike (T2108/T2116).
+	// Same full-index sweep, same reason — and this one had to be written
+	// because the rule previously existed only as prose in a commit message.
+	if err := CheckHostToolLookups(root); err != nil {
 		return err
 	}
 

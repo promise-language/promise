@@ -4698,10 +4698,19 @@ func findCRT(target string) (*crtInfo, error) {
 		{"crtendS.o", &info.crtendS},
 	}
 
-	// Find a system C compiler for -print-file-name
+	// Find a system C compiler for -print-file-name.
+	//
+	// This is the one host probe the "nothing from PATH" rule does not cover, and
+	// deliberately so (T2116). It runs only for a glibc *dynamic* link — a target
+	// the user has to ask for explicitly (`--target x86_64-unknown-linux-gnu`),
+	// since every default is musl-static (HostTargetTriple), Windows MSVC, macOS
+	// or WASM. Linking against the host's glibc means linking against the host's
+	// glibc CRT: those objects are the requested target's own runtime, not a
+	// toolchain we could pin. T0530's prebuilt is the *musl* CRT and cannot stand
+	// in for them. See docs/runtime-architecture.md §"CRT Object Discovery".
 	ccPath := ""
 	for _, name := range []string{"cc", "gcc"} {
-		if p, err := exec.LookPath(name); err == nil {
+		if p, err := exec.LookPath(name); err == nil { // path-ok: the host's own glibc CRT, for an explicitly requested glibc target
 			ccPath = p
 			break
 		}
@@ -5834,6 +5843,11 @@ func componentWrap(coreWasm, outputFile, adaptPath string) {
 
 // findWasmTools locates the wasm-tools binary.
 // Checks PROMISE_WASM_TOOLS env var first, then PATH.
+//
+// Reachable only from `--component`, an opt-in Component Model wrap that no
+// suite and no default build performs, and which has no pinned blob: the
+// alternative to the host copy is not a pinned one, it is refusing the flag
+// (T2116). PROMISE_WASM_TOOLS is the explicit form, checked first.
 func findWasmTools() (string, error) {
 	if env := os.Getenv("PROMISE_WASM_TOOLS"); env != "" {
 		if _, err := os.Stat(env); err == nil {
@@ -5841,7 +5855,7 @@ func findWasmTools() (string, error) {
 		}
 		return "", fmt.Errorf("PROMISE_WASM_TOOLS=%q: file not found", env)
 	}
-	path, err := exec.LookPath("wasm-tools")
+	path, err := exec.LookPath("wasm-tools") // path-ok: --component only, after the PROMISE_WASM_TOOLS override
 	if err != nil {
 		return "", fmt.Errorf("wasm-tools not found in PATH")
 	}

@@ -71,7 +71,11 @@ var ghAuthCached bool
 // times every file) before reaching a source that would have worked.
 var ghAuthAvailable = func() bool {
 	ghAuthOnce.Do(func() {
-		if _, err := exec.LookPath("gh"); err != nil {
+		// path-ok below: gh is a transport for content-addressed blobs, not a
+		// toolchain binary. Whichever copy answers, the bytes it returns are
+		// accepted only if they hash to the pinned SHA256 — provenance comes
+		// from the catalog, never from which gh ran (T2108/T2116).
+		if _, err := exec.LookPath("gh"); err != nil { // path-ok: blob transport, output verified by SHA256
 			return
 		}
 		cmd := exec.Command("gh", "auth", "status")

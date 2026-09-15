@@ -225,6 +225,21 @@ happens to have, so two developers build differently and neither is told; when
 nothing is pinned and nothing is overridden, the build fails with a diagnostic
 naming the missing pinned toolchain.
 
+**The rule binds the tests as well as the build.** A test needing a toolchain
+binary gets it the same three ways — pinned prebuilts, an explicit `PROMISE_*`
+override, or a stub it writes itself — and one that cannot skips *for that
+reason*, never on a `PATH` probe. A suite that asks the host what it has runs a
+different check on every machine, which is how a green CI and a red trunk came
+to describe the same commit (T2116). The exceptions are narrow and each is
+annotated at its site: tools that report host state (`bin/prereqs`,
+`promise doctor`), the test runtimes `wasmtime` and `node` that *execute* a built
+module without contributing to it (see [gate-system.md](gate-system.md)), and an
+explicitly requested non-default target linking against the host's own runtime
+(see [runtime-architecture.md](runtime-architecture.md) §"CRT Object Discovery").
+`common.CheckHostToolLookups` enforces this over the tracked Go sources — it runs
+in the pre-commit hook and in the tools test suite, so the rule no longer lives
+only in a commit message.
+
 Using an override is announced on every run, and `bin/gate` refuses to emit a
 measurement under one — a verdict has to describe the tree, not the machine (see
 [gate-system.md](gate-system.md)).
@@ -394,9 +409,10 @@ check here is cheap enough to run on each commit — the expensive suites live i
    - **Catalog coverage.** Every directory under `modules/` needs a `[modules.<name>]` entry in `catalog.toml` (entries with a `url` key are remote and exempt from needing a directory), and every catalog module that actually ships source — a non-`_test.pr` file with at least one non-comment line — must be named as `modules/<name>/` in both `CLAUDE.md` and `docs/standard-library.md`.
 
    These verify link targets, index reachability, and module-name *presence* only, never prose accuracy. `README.md` is deliberately out of scope for catalog coverage: its module list lives in an ASCII box-drawing tree using bare directory names, and a matcher robust enough to read that would produce false positives. README stays human-reviewed.
-3. **Staged files** — rejects compiled binaries (`bin/promise`, …), stray `.log` files, and non-ASCII filenames. A commit with nothing staged stops here; the remaining checks have nothing to look at.
-4. **Baseline ratchet** — when `tools/gates/baselines.json` is staged, compares it against `HEAD` and rejects any metric that moved the wrong way.
-5. **Formatting** — rejects the commit if `bin/format` would change anything. Go is checked in-process via `go/format`; Promise by shelling out to `bin/promise format -check`.
+3. **Host-tool lookups** (`common.CheckHostToolLookups`, T2116) — rejects any tracked Go source that resolves a program through the host's `PATH` (`Which`, `exec.LookPath`, or `exec.Command` naming a toolchain binary bare) without a `// path-ok: <reason>` marker on that line. Full-tree sweep like the documentation checks, and tests are in scope with product code: the regression it exists for was a *test* that probed `PATH` for `llvm-dlltool` after the resolver had stopped honouring it. The permitted reasons are the ones §4 names — host-state reporters (`bin/prereqs`, `promise doctor`), the documented test runtimes, and an explicitly requested non-default target. See [code-style.md](code-style.md) for the marker convention.
+4. **Staged files** — rejects compiled binaries (`bin/promise`, …), stray `.log` files, and non-ASCII filenames. A commit with nothing staged stops here; the remaining checks have nothing to look at.
+5. **Baseline ratchet** — when `tools/gates/baselines.json` is staged, compares it against `HEAD` and rejects any metric that moved the wrong way.
+6. **Formatting** — rejects the commit if `bin/format` would change anything. Go is checked in-process via `go/format`; Promise by shelling out to `bin/promise format -check`.
 
 ## Staleness Check
 

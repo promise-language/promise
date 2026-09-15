@@ -25,11 +25,35 @@ func writeTestDef(t *testing.T, dir, base, dll, export string) {
 	}
 }
 
-func TestRunReleaseWinlinkGenerates(t *testing.T) {
-	if Which("llvm-dlltool") == "" {
-		t.Skip("llvm-dlltool not on PATH")
+// writeDllToolStub writes the compiled llvm-dlltool stub to its own directory
+// under root and returns the path, ready to pass as --llvm-dlltool.
+func writeDllToolStub(t *testing.T, root string) string {
+	t.Helper()
+	bin := dllToolStub(t) // build the stub before anything narrows the environment
+	dir := filepath.Join(root, "stubbin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
 	}
+	path := filepath.Join(dir, "llvm-dlltool"+ExeSuffix())
+	if err := os.WriteFile(path, bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestRunReleaseWinlinkGenerates covers the generation loop: every .def becomes
+// a .lib in the output dir, created by the tool this run was told to use.
+//
+// The tool is the compiled stub, named explicitly. It used to be whatever
+// llvm-dlltool the host happened to have, gated by a `Which("llvm-dlltool")`
+// skip — so the test ran on some machines and not others, and once T2108 stopped
+// the resolver honouring PATH the guard said "run" while the resolver refused,
+// failing every host that had one installed (T2116). Nothing here may depend on
+// what is installed: the stub writes the ar magic plus a SLIM marker, so the
+// assertions also prove *this* binary produced the output.
+func TestRunReleaseWinlinkGenerates(t *testing.T) {
 	root := t.TempDir()
+	tool := writeDllToolStub(t, root)
 	defDir := filepath.Join(root, "def")
 	outDir := filepath.Join(root, "out")
 	if err := os.MkdirAll(defDir, 0o755); err != nil {
@@ -38,7 +62,7 @@ func TestRunReleaseWinlinkGenerates(t *testing.T) {
 	writeTestDef(t, defDir, "kernel32", "kernel32.dll", "ExitProcess")
 	writeTestDef(t, defDir, "advapi32", "advapi32.dll", "GetUserNameA")
 
-	if err := runReleaseWinlink(root, []string{"--def-dir", defDir, "--out", outDir}); err != nil {
+	if err := runReleaseWinlink(root, []string{"--llvm-dlltool", tool, "--def-dir", defDir, "--out", outDir}); err != nil {
 		t.Fatalf("runReleaseWinlink: %v", err)
 	}
 
@@ -52,9 +76,39 @@ func TestRunReleaseWinlinkGenerates(t *testing.T) {
 		if !strings.HasPrefix(string(data), "!<arch>\n") {
 			t.Errorf("%s is not a valid ar archive (bad magic)", name)
 		}
-		if len(data) == 0 {
-			t.Errorf("%s is empty", name)
+		// The marker proves the named tool ran, not one found elsewhere.
+		if string(data) != "!<arch>\nSLIM" {
+			t.Errorf("%s was not produced by the named stub (got %q)", name, string(data))
 		}
+	}
+}
+
+// TestRunReleaseWinlinkToolProducesNothing covers the stat-after-success branch:
+// the tool exited 0 but wrote no .lib. A run that reported "generated" there
+// would embed a link surface that does not exist, and the failure would surface
+// far away — at link time in someone else's build.
+func TestRunReleaseWinlinkToolProducesNothing(t *testing.T) {
+	root := t.TempDir()
+	tool := filepath.Join(root, "silent"+ExeSuffix())
+	if err := os.WriteFile(tool, buildStub(t, "silent", dllToolSilentStubSource), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defDir := filepath.Join(root, "def")
+	if err := os.MkdirAll(defDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestDef(t, defDir, "kernel32", "kernel32.dll", "ExitProcess")
+
+	err := runReleaseWinlink(root, []string{
+		"--llvm-dlltool", tool,
+		"--def-dir", defDir,
+		"--out", filepath.Join(root, "out"),
+	})
+	if err == nil {
+		t.Fatal("expected an error when the tool writes no .lib")
+	}
+	if !strings.Contains(err.Error(), "stat") {
+		t.Errorf("error should name the missing output, got: %v", err)
 	}
 }
 
@@ -76,23 +130,11 @@ func TestRunReleaseWinlinkMissingTool(t *testing.T) {
 	}
 }
 
-func TestRunReleaseWinlinkNoDefs(t *testing.T) {
-	if Which("llvm-dlltool") == "" {
-		t.Skip("llvm-dlltool not on PATH")
-	}
-	root := t.TempDir()
-	emptyDef := filepath.Join(root, "def")
-	if err := os.MkdirAll(emptyDef, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	err := runReleaseWinlink(root, []string{"--def-dir", emptyDef, "--out", filepath.Join(root, "out")})
-	if err == nil {
-		t.Fatal("expected error when no .def files are present")
-	}
-	if !strings.Contains(err.Error(), "no .def files") {
-		t.Errorf("error = %v, want 'no .def files'", err)
-	}
-}
+// The "no .def files" branch is covered hermetically by
+// TestRunReleaseWinlinkEmptyDefDir below. A second, PATH-gated copy of it lived
+// here until T2116 removed it: it skipped or failed according to whether the
+// host had an llvm-dlltool installed, and proved nothing the deterministic one
+// does not.
 
 func TestRunReleaseWinlinkBadFlag(t *testing.T) {
 	if err := runReleaseWinlink(t.TempDir(), []string{"--nonexistent-flag"}); err == nil {
@@ -128,8 +170,8 @@ func winlinkDefRoot(t *testing.T) string {
 
 // TestEnsureWinlinkLibsNoOpWhenLibsPresent guards the fast path: when the .lib
 // already exist, ensureWinlinkLibs returns nil without resolving or fetching a
-// tool (so a steady-state incremental build pays no cost). We point both the
-// prebuilts cache and PATH at empty dirs — if the fast path were skipped and a
+// tool (so a steady-state incremental build pays no cost). We point the
+// prebuilts cache at an empty dir — if the fast path were skipped and a
 // fetch/resolve were attempted, it would error instead of returning nil.
 func TestEnsureWinlinkLibsNoOpWhenLibsPresent(t *testing.T) {
 	root := winlinkDefRoot(t)
@@ -141,7 +183,6 @@ func TestEnsureWinlinkLibsNoOpWhenLibsPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
-	t.Setenv("PATH", t.TempDir())
 	if err := ensureWinlinkLibs(root); err != nil {
 		t.Fatalf("ensureWinlinkLibs with libs present should be a no-op, got: %v", err)
 	}
@@ -156,15 +197,14 @@ func TestEnsureWinlinkLibsNoOpWhenLibsPresent(t *testing.T) {
 func TestEnsureWinlinkLibsNoOpWhenDefDirMissing(t *testing.T) {
 	root := t.TempDir() // no tools/build/winlink/def
 	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
-	t.Setenv("PATH", t.TempDir())
 	if err := ensureWinlinkLibs(root); err != nil {
 		t.Fatalf("ensureWinlinkLibs with no def dir should be a no-op, got: %v", err)
 	}
 }
 
 // TestEnsureWinlinkLibsSeedsSlimCache is the regression test for T0840: when the
-// .lib are absent and llvm-dlltool is resolvable neither from the slim cache nor
-// PATH, ensureWinlinkLibs must SEED the slim LLVM cache (which hosts the
+// .lib are absent and the slim cache holds no llvm-dlltool yet,
+// ensureWinlinkLibs must SEED the slim LLVM cache (which hosts the
 // build-only llvm-dlltool, T0833) and use the fetched copy to generate the libs.
 // Before the fix this errored with "llvm-dlltool not found" on a prebuilt-only
 // host even though the blob was published.
@@ -199,7 +239,6 @@ func TestEnsureWinlinkLibsSeedsSlimCache(t *testing.T) {
 	}
 
 	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
-	t.Setenv("PATH", t.TempDir()) // no system llvm-dlltool → force the seed path
 	prev := defaultBlobFetcher
 	defaultBlobFetcher = &countingBlobFetcher{assets: map[string][]byte{sha + ".br": br}}
 	t.Cleanup(func() { defaultBlobFetcher = prev })
@@ -244,43 +283,75 @@ func main() {
 }
 `
 
+// dllToolSilentStubSource is the same stand-in with the one difference that
+// matters to the error path: it exits 0 and writes nothing, the way a broken
+// toolchain reports success without producing the lib.
+const dllToolSilentStubSource = `package main
+
+func main() {}
+`
+
+// stubBuild is one compiled stub, or the error that compiling it produced.
+type stubBuild struct {
+	bin []byte
+	err error
+}
+
 var (
-	dllToolStubOnce  sync.Once
-	dllToolStubBytes []byte
-	dllToolStubErr   error
+	stubBuildMu sync.Mutex
+	stubBuilds  = map[string]stubBuild{}
 )
 
-// dllToolStub compiles dllToolStubSource to a host-native executable and returns
-// its bytes, ready to be written to a file named "llvm-dlltool"+ExeSuffix(). The
-// compile is cached so it happens once per test binary regardless of how many
-// tests use the stub. Callers must chmod the written file executable (0o755).
-func dllToolStub(t *testing.T) []byte {
+// buildStub compiles source to a host-native executable and returns its bytes.
+// Each distinct stub is compiled once per test binary and cached by name, so a
+// file that uses several pays for each only once.
+//
+// A real executable rather than a `#!/bin/sh` script because Windows cannot
+// fork/exec a shell script — the script form failed the winlink cache tests on
+// the windows-amd64 runner with "This version of %1 is not compatible with the
+// version of Windows you're running" (T1225).
+func buildStub(t *testing.T, name, source string) []byte {
 	t.Helper()
-	dllToolStubOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "dlltoolstub-")
+	stubBuildMu.Lock()
+	defer stubBuildMu.Unlock()
+	if b, ok := stubBuilds[name]; ok {
+		if b.err != nil {
+			t.Fatalf("build %s stub: %v", name, b.err)
+		}
+		return b.bin
+	}
+	b := func() stubBuild {
+		dir, err := os.MkdirTemp("", "prstub-")
 		if err != nil {
-			dllToolStubErr = err
-			return
+			return stubBuild{err: err}
 		}
 		defer os.RemoveAll(dir)
 		src := filepath.Join(dir, "main.go")
-		if err := os.WriteFile(src, []byte(dllToolStubSource), 0o644); err != nil {
-			dllToolStubErr = err
-			return
+		if err := os.WriteFile(src, []byte(source), 0o644); err != nil {
+			return stubBuild{err: err}
 		}
-		exe := filepath.Join(dir, "dlltool"+ExeSuffix())
+		exe := filepath.Join(dir, name+ExeSuffix())
 		cmd := exec.Command("go", "build", "-o", exe, src)
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			dllToolStubErr = fmt.Errorf("go build stub: %w", err)
-			return
+			return stubBuild{err: fmt.Errorf("go build stub: %w", err)}
 		}
-		dllToolStubBytes, dllToolStubErr = os.ReadFile(exe)
-	})
-	if dllToolStubErr != nil {
-		t.Fatalf("build llvm-dlltool stub: %v", dllToolStubErr)
+		bin, err := os.ReadFile(exe)
+		return stubBuild{bin: bin, err: err}
+	}()
+	stubBuilds[name] = b
+	if b.err != nil {
+		t.Fatalf("build %s stub: %v", name, b.err)
 	}
-	return dllToolStubBytes
+	return b.bin
+}
+
+// dllToolStub compiles dllToolStubSource to a host-native executable and returns
+// its bytes, ready to be written to a file named "llvm-dlltool"+ExeSuffix().
+// Callers must chmod the written file executable (0o755).
+func dllToolStub(t *testing.T) []byte {
+	t.Helper()
+	return buildStub(t, "dlltool", dllToolStubSource)
 }
 
 // writeHostLLVMPrebuilts writes a prebuilts.toml whose [binaries.llvm] resolves
@@ -311,16 +382,15 @@ func writeHostLLVMPrebuilts(t *testing.T, root, target string, withTarget bool) 
 
 // TestEnsureWinlinkLibsUsesSlimCacheTool covers the slim-cache-hit branch of
 // resolveWinlinkDllTool: when llvm-dlltool is already present in the slim LLVM
-// cache, ensureWinlinkLibs must use it directly and NOT trigger a fetch. PATH is
-// empty and no catalog/blob fetcher is wired, so the only way the lib can be
-// generated is via the slim-cache copy.
+// cache, ensureWinlinkLibs must use it directly and NOT trigger a fetch. No
+// catalog/blob fetcher is wired, so the only way the lib can be generated is
+// via the slim-cache copy.
 func TestEnsureWinlinkLibsUsesSlimCacheTool(t *testing.T) {
 	root := winlinkDefRoot(t)
 	target := CurrentBuildTarget()
 	writeHostLLVMPrebuilts(t, root, target, true)
 
 	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
-	t.Setenv("PATH", t.TempDir()) // no system llvm-dlltool
 
 	dir, ok := SlimLLVMCacheDir(root, target)
 	if !ok {
@@ -365,7 +435,6 @@ func TestEnsureWinlinkLibsRegeneratesWhenDefStale(t *testing.T) {
 	writeHostLLVMPrebuilts(t, root, target, true)
 
 	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
-	t.Setenv("PATH", t.TempDir()) // no system llvm-dlltool
 
 	dir, ok := SlimLLVMCacheDir(root, target)
 	if !ok {
@@ -516,7 +585,6 @@ func TestEnsureWinlinkLibsFetchError(t *testing.T) {
 	writeHostLLVMPrebuilts(t, root, CurrentBuildTarget(), false)
 
 	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
-	t.Setenv("PATH", t.TempDir()) // no system llvm-dlltool → force the seed path
 
 	err := ensureWinlinkLibs(root)
 	if err == nil {
@@ -530,10 +598,11 @@ func TestEnsureWinlinkLibsFetchError(t *testing.T) {
 // TestRunReleaseWinlinkMkdirFails covers the mkdir error path in runReleaseWinlink
 // (line 67-69). This can happen if the output parent directory is not writable or
 // the path is invalid/inaccessible.
+//
+// --llvm-dlltool names a path that does not exist, which is all this branch
+// needs: mkdir runs before the tool is ever executed. No real (or stubbed) tool
+// is involved, so the test says the same thing on every host (T2116).
 func TestRunReleaseWinlinkMkdirFails(t *testing.T) {
-	if Which("llvm-dlltool") == "" {
-		t.Skip("llvm-dlltool not on PATH")
-	}
 	root := t.TempDir()
 	defDir := filepath.Join(root, "def")
 	if err := os.MkdirAll(defDir, 0o755); err != nil {
@@ -554,6 +623,7 @@ func TestRunReleaseWinlinkMkdirFails(t *testing.T) {
 	outDir := filepath.Join(blocker, "nested")
 
 	err := runReleaseWinlink(root, []string{
+		"--llvm-dlltool", filepath.Join(root, "nonexistent-tool"),
 		"--def-dir", defDir,
 		"--out", outDir,
 	})
@@ -617,9 +687,10 @@ func TestWinlinkLibsFreshStatError(t *testing.T) {
 }
 
 // TestResolveWinlinkDllToolNotFoundAnywhere covers the branch where llvm-dlltool
-// is not found in the slim cache, not on PATH, and the fetch fails (line 119),
-// returning an empty string so the caller surfaces a clear error. This test
-// ensures the error propagation is correct.
+// is not in the slim cache and the fetch fails (line 119), returning an empty
+// string so the caller surfaces a clear error. This test ensures the error
+// propagation is correct. The host is never a source — a machine with an
+// llvm-dlltool installed must reach the same verdict as one without (T2108).
 func TestResolveWinlinkDllToolNotFoundAnywhere(t *testing.T) {
 	root := t.TempDir()
 	target := CurrentBuildTarget()
@@ -628,7 +699,6 @@ func TestResolveWinlinkDllToolNotFoundAnywhere(t *testing.T) {
 	writeHostLLVMPrebuilts(t, root, target, false)
 
 	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
-	t.Setenv("PATH", t.TempDir()) // no system llvm-dlltool
 
 	// resolveWinlinkDllTool should return "" when nothing is found.
 	tool := resolveWinlinkDllTool(root)

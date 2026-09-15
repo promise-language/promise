@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -99,6 +100,72 @@ func renameRetrying(rename func(src, dst string) error, retryable func(error) bo
 		}
 	}
 	return err
+}
+
+// symlinkNameAttempts bounds the search for an unused sibling name in
+// ensureSymlink's replace path. A collision needs another process to pick the
+// same pid+random name in the same directory, so one attempt effectively always
+// wins; the bound exists only so a pathological directory cannot spin forever.
+const symlinkNameAttempts = 8
+
+// ensureSymlink makes path a symlink to target, idempotently and atomically:
+// two processes materializing the same link concurrently both succeed, and a
+// wrong or stale entry is replaced rather than silently kept (T2120). The
+// Readlink fast path is the steady state; os.Symlink is the cold path; the
+// replace below covers both a lost EEXIST race against a *different* target and
+// a stale entry left by an older layout.
+//
+// Nothing here is check-then-act: symlink(2) and rename(2) are each atomic and
+// each tells us which one of two racing processes won, so the answer is always
+// read from the syscall rather than from a preceding Stat.
+func ensureSymlink(target, path string) error {
+	if got, err := os.Readlink(path); err == nil && got == target {
+		return nil
+	}
+	err := os.Symlink(target, path)
+	if err == nil {
+		return nil
+	}
+	if !os.IsExist(err) {
+		return err
+	}
+	// Lost the race. A concurrent process producing the identical link is the
+	// expected outcome, not an error.
+	if got, rerr := os.Readlink(path); rerr == nil && got == target {
+		return nil
+	}
+	// Something else is at path — a link to the wrong target, or a leftover file.
+	return replaceSymlinkRetrying(os.Symlink, target, path)
+}
+
+// replaceSymlinkRetrying is the testable core of ensureSymlink's replace path
+// with the symlink syscall injected, so the name-collision retry and its
+// exhaustion — unreachable in practice, since a collision needs another process
+// to draw the same pid+random name in the same directory — can be exercised.
+// (Factored for the same reason as renameRetrying above.)
+//
+// A symlink cannot be created over an existing entry, so the new link is built
+// under an unused sibling name and renamed on: rename(2) over an existing entry
+// is atomic, so a concurrent reader sees the old entry or the new link, never an
+// absent one. symlink(2) is itself the create-if-absent primitive, so EEXIST on
+// the sibling just means that name was taken — no Stat, no check-then-act.
+func replaceSymlinkRetrying(symlink func(target, name string) error, target, path string) error {
+	dir, base := filepath.Dir(path), filepath.Base(path)
+	for attempt := 0; attempt < symlinkNameAttempts; attempt++ {
+		tmpName := filepath.Join(dir, fmt.Sprintf(".tmp-%s.%d.%x", base, os.Getpid(), rand.Uint32()))
+		if err := symlink(target, tmpName); err != nil {
+			if os.IsExist(err) {
+				continue // name taken — draw another
+			}
+			return err
+		}
+		if err := renameWithRetry(tmpName, path); err != nil {
+			os.Remove(tmpName)
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("no unused temporary name available in %s after %d attempts", dir, symlinkNameAttempts)
 }
 
 // writeStubAndSidecar atomically installs the embedded stub binary and its

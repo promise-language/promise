@@ -297,3 +297,79 @@ func TestCopyFileContentAndPerm(t *testing.T) {
 		t.Fatalf("expected exactly 2 files (src, dst; no temp leftovers), got %d", len(entries))
 	}
 }
+
+// TestReplaceSymlinkRetryingDrawsANewNameOnCollision: when the sibling name is
+// already taken, the loop must draw a *different* name and go on — a retry that
+// reuses the same name would spin pointlessly and then fail. The collision needs
+// two processes to draw the same pid+random name, so it is injected here rather
+// than provoked (T2120).
+func TestReplaceSymlinkRetryingDrawsANewNameOnCollision(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "libSystem.tbd")
+	if err := os.WriteFile(path, []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var names []string
+	symlink := func(target, name string) error {
+		names = append(names, name)
+		if len(names) < 3 { // the first two names are "taken"
+			return os.ErrExist
+		}
+		return os.Symlink(target, name)
+	}
+
+	if err := replaceSymlinkRetrying(symlink, "libSystem.B.tbd", path); err != nil {
+		t.Fatalf("expected success once a free name is found, got %v", err)
+	}
+	if len(names) != 3 {
+		t.Fatalf("expected 3 name attempts, got %d", len(names))
+	}
+	if names[0] == names[1] || names[1] == names[2] {
+		t.Errorf("retry reused a name: %v", names)
+	}
+	if got, err := os.Readlink(path); err != nil || got != "libSystem.B.tbd" {
+		t.Fatalf("link = %q (err %v), want libSystem.B.tbd", got, err)
+	}
+}
+
+// TestReplaceSymlinkRetryingExhausts: when every name collides, the loop gives up
+// after exactly symlinkNameAttempts tries with a clear error, leaves the existing
+// entry untouched, and leaves no temp entry behind — it never spins forever and
+// never destroys what is already there.
+func TestReplaceSymlinkRetryingExhausts(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "libSystem.tbd")
+	if err := os.Symlink("wrong.tbd", path); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	symlink := func(target, name string) error {
+		calls++
+		return os.ErrExist
+	}
+
+	err := replaceSymlinkRetrying(symlink, "libSystem.B.tbd", path)
+	if err == nil {
+		t.Fatal("expected an error when every name collides")
+	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Errorf("error should name the directory, got %v", err)
+	}
+	if calls != symlinkNameAttempts {
+		t.Fatalf("expected exactly %d attempts on exhaustion, got %d", symlinkNameAttempts, calls)
+	}
+	if got, lerr := os.Readlink(path); lerr != nil || got != "wrong.tbd" {
+		t.Errorf("existing entry must be left untouched, got %q (err %v)", got, lerr)
+	}
+	entries, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if len(entries) != 1 {
+		t.Errorf("expected only the original entry, got %d", len(entries))
+	}
+}

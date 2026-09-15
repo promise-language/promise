@@ -4959,6 +4959,11 @@ exports:
 // path (T0178, made exclusive by T1609) — no host Xcode/CLT is ever consulted,
 // so the host's Xcode version, CLT version and license state never affect
 // whether a Promise program links.
+//
+// Every promise process sharing a PROMISE_HOME runs this and nothing serializes
+// them, so each step is idempotent and atomic rather than check-then-act (T2120):
+// concurrent processes never abort on an EEXIST they caused themselves, and a
+// concurrent ld64.lld never reads a half-written stub.
 func ensureBundledSDK() (*macOSSDKInfo, error) {
 	home, err := module.PromiseHome()
 	if err != nil {
@@ -4978,17 +4983,15 @@ func ensureBundledSDK() (*macOSSDKInfo, error) {
 	// Write TBD file (skip if already exists with correct size).
 	content := []byte(bundledLibSystemTBD)
 	if info, err := os.Stat(tbdPath); err != nil || info.Size() != int64(len(content)) {
-		if err := os.WriteFile(tbdPath, content, 0644); err != nil {
+		if err := writeFileAtomic(tbdPath, content, 0644); err != nil {
 			return nil, fmt.Errorf("cannot write bundled libSystem.tbd: %w", err)
 		}
 	}
 
 	// Create symlink libSystem.tbd → libSystem.B.tbd (ld64.lld resolves -lSystem
 	// to libSystem.tbd in the sysroot).
-	if _, err := os.Lstat(symlinkPath); err != nil {
-		if err := os.Symlink("libSystem.B.tbd", symlinkPath); err != nil {
-			return nil, fmt.Errorf("cannot create libSystem.tbd symlink: %w", err)
-		}
+	if err := ensureSymlink("libSystem.B.tbd", symlinkPath); err != nil {
+		return nil, fmt.Errorf("cannot create libSystem.tbd symlink: %w", err)
 	}
 
 	// Framework stubs for the TLS backend (T1599). -framework Security resolves
@@ -5005,7 +5008,7 @@ func ensureBundledSDK() (*macOSSDKInfo, error) {
 		fwPath := filepath.Join(fwDir, fw.name+".tbd")
 		body := []byte(fw.content)
 		if info, err := os.Stat(fwPath); err != nil || info.Size() != int64(len(body)) {
-			if err := os.WriteFile(fwPath, body, 0644); err != nil {
+			if err := writeFileAtomic(fwPath, body, 0644); err != nil {
 				return nil, fmt.Errorf("cannot write bundled %s.tbd: %w", fw.name, err)
 			}
 		}

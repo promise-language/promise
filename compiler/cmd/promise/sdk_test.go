@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -218,5 +221,168 @@ func TestBuildDarwinLinkArgsPlatformVersionUsesDeploymentTarget(t *testing.T) {
 	got := strings.Join(buildDarwinLinkArgs("arm64-apple-macosx14.0.0", "/tmp/x.o", "/tmp/x", false), " ")
 	if !strings.Contains(got, want) {
 		t.Errorf("platform_version args = %q, want to contain %q", got, want)
+	}
+}
+
+// TestEnsureBundledSDKConcurrentCallers is the regression guard for T2120: every
+// promise process sharing a PROMISE_HOME materializes the bundled SDK stub, and
+// nothing serializes them, so the three check-then-act sequences in
+// ensureBundledSDK each raced. The symlink one aborted the losing process's whole
+// compile with "file exists"; the TBD writes were worse but quieter — os.WriteFile
+// truncates in place, so a concurrent ld64.lld could read an empty or short stub.
+//
+// The window is a few instructions wide, so one round fires only ~half the time.
+// The loop runs several rounds against a *fresh* home each — the cold-materialize
+// path is the contended one, and a warm home never enters it — which makes the
+// pre-fix failure reliable rather than occasional. A subprocess-based repro cannot
+// do this: the interleaving is not controllable from outside (see the item's notes).
+func TestEnsureBundledSDKConcurrentCallers(t *testing.T) {
+	root := t.TempDir()
+	full := len(bundledLibSystemTBD)
+
+	for round := 0; round < 8; round++ {
+		home := filepath.Join(root, fmt.Sprintf("home%d", round))
+		if err := os.MkdirAll(home, 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PROMISE_HOME", home) // forbids t.Parallel
+		tbdPath := filepath.Join(home, "cache", "sdk", "macos", "usr", "lib", "libSystem.B.tbd")
+
+		// Readers stand in for a concurrent linker opening the stub: any read that
+		// succeeds must see the whole file, never a truncation window.
+		//
+		// This half asserts a POSIX property — a rename onto a path is invisible
+		// to a reader already holding the old file open — and runs on Unix only.
+		// On Windows os.ReadFile opens without FILE_SHARE_DELETE, so a reader
+		// spinning on the destination would block MoveFileEx itself and make the
+		// *harness* the thing that fails; renameWithRetry is the Windows answer
+		// there and is pinned by TestRenameRetrying*. The writer half below — the
+		// EEXIST symlink race this item reports — runs on every platform.
+		pollTornReads := runtime.GOOS != "windows"
+		var torn atomic.Int64
+		stop := make(chan struct{})
+		var readers sync.WaitGroup
+		for i := 0; pollTornReads && i < 4; i++ {
+			readers.Add(1)
+			go func() {
+				defer readers.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if data, err := os.ReadFile(tbdPath); err == nil && len(data) != full {
+						torn.Add(1)
+					}
+				}
+			}()
+		}
+
+		const writers = 16
+		start := make(chan struct{})
+		errs := make(chan error, writers)
+		var wg sync.WaitGroup
+		for i := 0; i < writers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start // release them together, as the LLVM-view lock does
+				if _, err := ensureBundledSDK(); err != nil {
+					errs <- err
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(stop)
+		readers.Wait()
+		close(errs)
+
+		for err := range errs {
+			t.Errorf("round %d: concurrent ensureBundledSDK failed: %v", round, err)
+		}
+		if n := torn.Load(); n != 0 {
+			t.Errorf("round %d: %d reads of libSystem.B.tbd saw a partial file", round, n)
+		}
+
+		target, err := os.Readlink(filepath.Join(home, "cache", "sdk", "macos", "usr", "lib", "libSystem.tbd"))
+		if err != nil {
+			t.Fatalf("round %d: symlink not created: %v", round, err)
+		}
+		if target != "libSystem.B.tbd" {
+			t.Fatalf("round %d: symlink target = %q, want %q", round, target, "libSystem.B.tbd")
+		}
+	}
+}
+
+// TestEnsureBundledSDKReplacesWrongSymlink covers the repair branch for the link
+// (T2120): before the fix, *anything* at libSystem.tbd was left alone forever, so
+// a link pointing at the wrong file wedged every subsequent build with no way out
+// short of deleting the cache. The TBD file beside it already self-healed on a
+// size mismatch; the link now behaves the same way.
+func TestEnsureBundledSDKReplacesWrongSymlink(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	libDir := filepath.Join(tmp, "cache", "sdk", "macos", "usr", "lib")
+	if err := os.MkdirAll(libDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(libDir, "libSystem.tbd")
+	if err := os.Symlink("wrong.tbd", symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ensureBundledSDK(); err != nil {
+		t.Fatalf("ensureBundledSDK failed: %v", err)
+	}
+
+	target, err := os.Readlink(symlinkPath)
+	if err != nil {
+		t.Fatalf("symlink missing after repair: %v", err)
+	}
+	if target != "libSystem.B.tbd" {
+		t.Errorf("symlink target = %q, want %q", target, "libSystem.B.tbd")
+	}
+}
+
+// TestEnsureBundledSDKReplacesNonSymlinkAtLinkPath is the same repair for a
+// non-symlink entry — a plain file left by an interrupted or older layout. This
+// is the path that goes through the temp-symlink + rename replace, so it also
+// pins that a stray .tmp-* sibling is not left behind.
+func TestEnsureBundledSDKReplacesNonSymlinkAtLinkPath(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	libDir := filepath.Join(tmp, "cache", "sdk", "macos", "usr", "lib")
+	if err := os.MkdirAll(libDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(libDir, "libSystem.tbd")
+	if err := os.WriteFile(symlinkPath, []byte("not a symlink"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ensureBundledSDK(); err != nil {
+		t.Fatalf("ensureBundledSDK failed: %v", err)
+	}
+
+	target, err := os.Readlink(symlinkPath)
+	if err != nil {
+		t.Fatalf("regular file was not replaced by the symlink: %v", err)
+	}
+	if target != "libSystem.B.tbd" {
+		t.Errorf("symlink target = %q, want %q", target, "libSystem.B.tbd")
+	}
+
+	entries, err := os.ReadDir(libDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			t.Errorf("temp entry %q left behind after the replace", e.Name())
+		}
 	}
 }

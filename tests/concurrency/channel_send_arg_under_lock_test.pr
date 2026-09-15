@@ -1,0 +1,284 @@
+// T2107: `ch.send(expr)` must evaluate `expr` BEFORE acquiring the channel's
+// mutex. Evaluating it under the lock holds the mutex across arbitrary work,
+// and a goroutine blocked in pal_mutex_lock keeps its P — only pal_cond_wait
+// has the T1685 syscall handoff. Senders queued behind one slow argument
+// therefore consume every P, leaving no thread to run the goroutine the slow
+// argument is waiting on: a permanent deadlock once num_p <= the number of
+// concurrent senders. That is why it was invisible on an 8-core dev box and
+// 100% reproducible on the 3-core darwin CI runner.
+//
+// wasm32 has one P and a cooperative scheduler, so the deadlock itself cannot
+// occur there — but these still run on wasm, because the same hoisted code feeds
+// the `emitWasmCoopWaitPump` wait-full branch and the value/ownership contract is
+// target-independent. Only the closed-channel leak probe is excluded, below.
+//
+// _gated_value is an ordinary (non-coroutine) function, so its recv takes the
+// thread-blocking path with the syscall handoff — the shape a real blocking
+// argument has (`out.send(_do_http_request(port))`). It returns the value the
+// caller then sends.
+_gated_value(channel[bool] gate, int value) int {
+  if open := <-gate {
+  }
+  return value;
+}
+
+// One sender wins the channel mutex; the rest must not pile up behind it
+// holding Ps. `senders` is derived from the live P count so the test exercises
+// the exhaustion condition on any host — a fixed small count would be a no-op
+// on a many-core machine, which is exactly how this survived undetected.
+test_channel_send_argument_does_not_hold_the_channel_lock() `test(timeout: "20s") {
+  int procs = set_max_procs(0); // query-only, like GOMAXPROCS(0)
+  int senders = procs + 2; // > one lock winner + one blocker per P
+
+  // Unbuffered: a sender's argument cannot complete until the feeder runs, so
+  // "the argument blocks on a goroutine that needs a P" holds structurally
+  // rather than by scheduling luck.
+  channel[bool] gate = channel[bool](capacity: 0);
+  channel[int] out = channel[int](capacity: senders);
+  channel[bool] feeder_done = channel[bool](capacity: 1);
+
+  int spawned = 0;
+  while spawned < senders {
+    go {
+      out.send(_gated_value(gate, 1));
+    };
+    spawned = spawned + 1;
+  }
+
+  // Spawned last, so every sender is ahead of it in the run queue. Before the
+  // fix this goroutine never runs at all: the senders own every P.
+  go {
+    int released = 0;
+    while released < senders {
+      gate.send(true);
+      released = released + 1;
+    }
+    feeder_done.send(true);
+  };
+
+  int total = 0;
+  int received = 0;
+  while received < senders {
+    if v := <-out {
+      total = total + v;
+    }
+    received = received + 1;
+  }
+  assert(total == senders, "every sender delivered its value, got " + total.to_string());
+
+  if d := <-feeder_done {
+  }
+}
+
+// Records every evaluation so the hoist can be shown to evaluate the argument
+// exactly once, not zero or twice.
+_counted_value(channel[bool] calls, int value) int {
+  calls.send(true);
+  return value;
+}
+
+// The hoist splits the argument's evaluation (now above the lock) from its
+// ownership transfer (still at the write block), so guard the observable
+// contract that spans both: the expression is evaluated exactly once, and its
+// value is what the receiver gets.
+test_channel_send_evaluates_its_argument_exactly_once() `test {
+  channel[bool] calls = channel[bool](capacity: 4);
+  channel[int] out = channel[int](capacity: 1);
+
+  out.send(_counted_value(calls, 41) + 1);
+
+  if v := <-out {
+    assert(v == 42, "the receiver gets the evaluated expression, got " + v.to_string());
+  }
+
+  calls.close();
+  int evaluations = 0;
+  for c in calls {
+    evaluations = evaluations + 1;
+  }
+  assert(evaluations == 1, "argument evaluated exactly once, got " + evaluations.to_string());
+}
+
+// Hoisting the evaluation above the lock puts the two `send on closed channel`
+// panic blocks between the value being materialised and its ownership reaching
+// the channel buffer. emitPanicReturn's cleanup is drop-flag-guarded, so the
+// transfer has to stay at the write block or the value is owned by nobody on
+// those paths. A go block recovers the panic, so the process survives to be
+// leak-checked; the goroutine needs no join because the harness drains every
+// outstanding goroutine before it reads alloc_count (T1639).
+//
+// wasm-excluded for real: `promise_test_run` there has no per-test recovery, and
+// nothing forces the goroutine to be scheduled before the test body ends, so the
+// probe would either kill the process or pass without ever having sent.
+_repeated_string() string {
+  return "abc".repeat(8);
+}
+
+test_send_on_closed_channel_does_not_leak_the_value() `test(exclude: wasm, timeout: "10s") {
+  channel[string] ch = channel[string](capacity: 1);
+  ch.close();
+
+  go {
+    ch.send(_repeated_string());
+  };
+
+  // Race-free whichever order these run in: the channel is closed, so the send
+  // always panics and can never deliver. The leak check is the real assertion.
+  if delivered := <-ch {
+    assert(false, "a send on a closed channel delivered " + delivered);
+  }
+}
+
+// The same hoist also moves a failable argument's propagation out of the locked
+// region. Evaluating `_may_fail()?^` under the mutex meant the raise returned
+// from inside the critical section and left the channel locked forever, so the
+// next send on it would block for good.
+_may_fail!(bool ok) int {
+  if !ok {
+    raise error(message: "argument failed");
+  }
+  return 7;
+}
+
+_send_failable!(channel[int] ch, bool ok) {
+  ch.send(_may_fail(ok)?^);
+}
+
+test_failable_send_argument_leaves_the_channel_unlocked() `test(timeout: "10s") {
+  channel[int] ch = channel[int](capacity: 1);
+
+  _send_failable(ch, false)? e {
+  };
+
+  // Would block forever if the raise had returned while holding ch's mutex.
+  ch.send(1);
+  if v := <-ch {
+    assert(v == 1, "the channel is still usable after a failable argument raised");
+  }
+}
+
+// Evaluating before the lock means the value now lives across the wait-full
+// coro.suspend that a full buffered channel parks a sender on, so it has to be
+// spilled into the coroutine frame rather than held in a register. Pre-filling
+// the one-slot channel and gating the drain on a ready signal makes the sender
+// park on a value it must still hold correctly when it resumes.
+_sized_string(int n) string {
+  return "x".repeat(n);
+}
+
+test_send_value_survives_waitfull_park() `test(timeout: "10s") {
+  channel[string] ch = channel[string](capacity: 1);
+  channel[bool] ready = channel[bool](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
+
+  ch.send("first");
+
+  go {
+    ready.send(true);
+    ch.send(_sized_string(64));
+    done.send(true);
+  };
+
+  if r := <-ready {
+  }
+  if a := <-ch {
+    assert(a == "first", "the pre-filled value comes out first");
+  }
+  if b := <-ch {
+    assert(b.len == 64, "the parked value survived the suspend, got " + b.len.to_string());
+  }
+  if d := <-done {
+  }
+}
+
+// A string is one pointer. A heap user type and a closure are the multi-word
+// shapes, and their ownership transfer (claimHeapTemp / claimEnvTemp, the latter
+// extracting the env from the fat pointer at runtime) now runs in the write block
+// — on the far side of the park. Both must come back intact and be freed once.
+type _Payload {
+  int id;
+  string label;
+}
+
+test_heap_value_survives_waitfull_park() `test(timeout: "10s") {
+  channel[_Payload] ch = channel[_Payload](capacity: 1);
+  channel[bool] ready = channel[bool](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
+
+  ch.send(_Payload(id: 1, label: "first"));
+
+  go {
+    ready.send(true);
+    ch.send(_Payload(id: 2, label: "parked"));
+    done.send(true);
+  };
+
+  if r := <-ready {
+  }
+  if a := <-ch {
+    assert(a.id == 1, "the pre-filled payload comes out first");
+  }
+  if b := <-ch {
+    assert(b.id == 2, "the parked payload survived the suspend, got " + b.id.to_string());
+    assert(b.label == "parked", "its heap field survived too, got " + b.label);
+  }
+  if d := <-done {
+  }
+}
+
+test_closure_value_survives_waitfull_park() `test(timeout: "10s") {
+  channel[(int) -> int] ch = channel[(int) -> int](capacity: 1);
+  channel[bool] ready = channel[bool](capacity: 1);
+  channel[bool] done = channel[bool](capacity: 1);
+
+  int first_base = 1;
+  ch.send(move |int x| -> x + first_base);
+
+  go {
+    ready.send(true);
+    int parked_base = 40;
+    ch.send(move |int x| -> x + parked_base);
+    done.send(true);
+  };
+
+  if r := <-ready {
+  }
+  // Received through the var-decl form on purpose: an `if`-binding receive of a
+  // closure leaks its env (T1656), which is a receive-side defect this send-side
+  // test must not be entangled with.
+  a := (<-ch)!;
+  assert(a(1) == 2, "the pre-filled closure comes out first");
+  b := (<-ch)!;
+  assert(b(2) == 42, "the parked closure and its env survived the suspend, got " + b(2).to_string());
+  if d := <-done {
+  }
+}
+
+// The coroutine wait-full park above has a sibling: a sender that is an ordinary
+// thread rather than a goroutine takes the emitBlockingCondWait branch instead,
+// where the value waits in a plain stack alloca. Filling the channel first and
+// letting a goroutine drain it puts the test body itself on that branch.
+//
+// Which branch the body takes depends on whether the draining goroutine has been
+// scheduled yet, so this asserts the outcome rather than the path — it is correct
+// either way and exercises the blocking branch whenever the goroutine has not run.
+test_send_value_survives_thread_blocking_waitfull() `test(timeout: "10s") {
+  channel[string] ch = channel[string](capacity: 1);
+  channel[string] drained = channel[string](capacity: 1);
+
+  ch.send("first");
+
+  go {
+    a := (<-ch)!;
+    drained.send(move a);
+  };
+
+  ch.send(_sized_string(64));
+
+  if first := <-drained {
+    assert(first == "first", "the goroutine drained the pre-filled value, got " + first);
+  }
+  if b := <-ch {
+    assert(b.len == 64, "the blocked value survived the wait, got " + b.len.to_string());
+  }
+}

@@ -1723,3 +1723,66 @@ func TestErrorHandlerDiscardBindingBeforeGoBlock(t *testing.T) {
 		t.Error("goroutine captures error-typed parameter from discard handler (T1605)")
 	}
 }
+
+// T2107: `ch.send(f())` must evaluate f() BEFORE acquiring the channel mutex.
+// Evaluating it under the lock holds the mutex across arbitrary work, and a
+// goroutine blocked in pal_mutex_lock keeps its P (only pal_cond_wait has the
+// T1685 syscall handoff), so senders queued behind one slow argument consume
+// every P and deadlock the scheduler once num_p <= the number of senders. This
+// asserts the emitted order directly: the argument call, then the lock.
+func TestChannelSendEvaluatesArgumentBeforeLock(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		_make_value() int { return 7; }
+		main() {
+			channel[int] ch = channel[int](capacity: 1);
+			ch.send(_make_value());
+		}
+	`)
+
+	fn := codegentest.ExtractDefine(ir, ".goroutine.main")
+	if fn == "" {
+		t.Fatal("expected .goroutine.main in IR")
+	}
+	assertArgBeforeLock(t, ".goroutine.main", fn)
+}
+
+// T2107: the deadlock only bites in coroutine mode, so cover a send whose
+// argument is a call from inside a `go` block too.
+func TestChannelSendInGoBlockEvaluatesArgumentBeforeLock(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		_make_value() int { return 7; }
+		main() {
+			channel[int] ch = channel[int](capacity: 1);
+			go {
+				ch.send(_make_value());
+			};
+			if got := <-ch {
+			}
+		}
+	`)
+
+	fn := codegentest.ExtractDefine(ir, ".goroutine.0")
+	if fn == "" {
+		t.Fatal("expected .goroutine.0 in IR")
+	}
+	assertArgBeforeLock(t, ".goroutine.0", fn)
+}
+
+// assertArgBeforeLock fails unless the call producing the sent value precedes
+// the first channel-mutex acquisition in fn.
+func assertArgBeforeLock(t *testing.T, fnName, fn string) {
+	t.Helper()
+	argIdx := strings.Index(fn, "@__user._make_value")
+	if argIdx < 0 {
+		t.Fatalf("%s: expected a call to @__user._make_value", fnName)
+	}
+	lockIdx := strings.Index(fn, "@pal_mutex_lock")
+	if lockIdx < 0 {
+		t.Fatalf("%s: expected a call to @pal_mutex_lock", fnName)
+	}
+	if argIdx > lockIdx {
+		t.Errorf("%s: sent expression is evaluated under the channel mutex (T2107) — "+
+			"@__user._make_value at %d comes after @pal_mutex_lock at %d",
+			fnName, argIdx, lockIdx)
+	}
+}

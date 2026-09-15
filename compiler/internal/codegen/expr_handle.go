@@ -745,8 +745,51 @@ func (c *Compiler) emitWasmCoopWaitPump(recheck *ir.Block) {
 }
 
 // genChannelSend generates code for ch.send(value).
-// lock → wait-if-full → memcpy to buffer → signal → rendezvous wait if unbuffered → unlock
+// evaluate value → lock → wait-if-full → memcpy to buffer → signal → rendezvous
+// wait if unbuffered → unlock
 func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr value.Value, chanType *irtypes.StructType, elemType types.Type, elemLLVM irtypes.Type, elemSize int64) value.Value {
+	// T2107: the sent expression is evaluated BEFORE the channel mutex is taken.
+	// `ch.send(f())` must not run f() under the lock: f() may block (network IO,
+	// another channel), and a goroutine blocked in pal_mutex_lock keeps its P —
+	// only pal_cond_wait has the syscall handoff (T1685). Enough senders queued
+	// behind one slow argument therefore consume every P and wedge the scheduler,
+	// deterministically once num_p <= the number of concurrent senders. Evaluating
+	// first also matches the ordinary rule that an argument is evaluated before the
+	// operation it feeds, and keeps every channel-mutex hold O(1).
+	//
+	// Only the evaluation moves up here. The ownership transfer (drop-flag clears
+	// and temp claims) stays at the write block below, because both `send on closed
+	// channel` panic blocks sit between the two and their emitPanicReturn cleanup is
+	// drop-flag-guarded — transferring here would leave the already-materialised
+	// value owned by nobody on those paths.
+	//
+	// Alloca value and store (entry-block alloca to avoid stack growth in loops)
+	// T1221: send takes ownership (`T move value`) but memcpy's the raw value with
+	// no clone. When the arg is a field read on a droppable owner (out.send(this.label)
+	// / out.send(b.label)), the buffered pointer aliases the owner's inner buffer — the
+	// owner's drop then frees a value the channel still owns → UAF/double-free. Arm the
+	// same dup-on-read the general `~`/move-param call path uses (T0366), then clear the
+	// flags (mirrors genCallArgsWithMutRef). For a plain owned local this is a no-op, so
+	// the existing move-and-clear behavior below is preserved.
+	c.maybeEnableDupForMutRefArg(e.Args[0].Value, elemType)
+	argVal := c.genCallArgExpr(e.Args[0].Value)
+	c.dupStringFieldAccess = false
+	c.dupContainerFieldAccess = false
+	c.dupHeapUserFieldAccess = false
+	// T1174 parity: deep-clone a match-borrowed Optional[heap-user] payload alias.
+	argVal, _ = c.dupBorrowedHeapUserPayload(e.Args[0].Value, argVal)
+	// T1221: when the arg is an Optional[string]/Optional[container] field dup
+	// (out.send(this.maybe_label)), the inner dup pointer is tracked separately.
+	// Capture it now and hand it to the transfer point below — the generating
+	// expression is done with it, and nothing between here and there may claim it.
+	optionalStringDup := c.optionalStringDup
+	optionalContainerDup := c.optionalContainerDup
+	c.optionalStringDup = nil
+	c.optionalContainerDup = nil
+	argAlloca := c.createEntryAlloca(elemLLVM)
+	c.block.NewStore(argVal, argAlloca)
+	argAsI8 := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
+
 	// Load mutex
 	mtxFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
@@ -857,24 +900,12 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	c.block.NewCall(c.funcs["promise_panic"], panicMsg2)
 	c.emitPanicReturn()
 
-	// write: memcpy value into buffer[tail * elem_size]
+	// write: memcpy value into buffer[tail * elem_size]. The value was evaluated
+	// and spilled to argAlloca before the lock (T2107); this block is where its
+	// ownership actually transfers to the channel, so the drop-flag clears and temp
+	// claims happen here — reaching this block is what makes the transfer real.
 	c.block = writeBlock
 
-	// Alloca value and store (entry-block alloca to avoid stack growth in loops)
-	// T1221: send takes ownership (`T move value`) but memcpy's the raw value with
-	// no clone. When the arg is a field read on a droppable owner (out.send(this.label)
-	// / out.send(b.label)), the buffered pointer aliases the owner's inner buffer — the
-	// owner's drop then frees a value the channel still owns → UAF/double-free. Arm the
-	// same dup-on-read the general `~`/move-param call path uses (T0366), then clear the
-	// flags (mirrors genCallArgsWithMutRef). For a plain owned local this is a no-op, so
-	// the existing move-and-clear behavior below is preserved.
-	c.maybeEnableDupForMutRefArg(e.Args[0].Value, elemType)
-	argVal := c.genCallArgExpr(e.Args[0].Value)
-	c.dupStringFieldAccess = false
-	c.dupContainerFieldAccess = false
-	c.dupHeapUserFieldAccess = false
-	// T1174 parity: deep-clone a match-borrowed Optional[heap-user] payload alias.
-	argVal, _ = c.dupBorrowedHeapUserPayload(e.Args[0].Value, argVal)
 	// Clear drop flag: value is moved into the channel buffer
 	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
 		c.clearDropFlag(ident.Name)
@@ -890,21 +921,15 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	c.claimHeapTemp(argVal)
 	// T1655: claim env temp — ownership of closure env transfers to channel buffer
 	c.claimEnvTemp(argVal)
-	// T1221: when the arg is an Optional[string]/Optional[container] field dup
-	// (out.send(this.maybe_label)), the inner dup pointer is tracked separately —
-	// claim it so the caller's statement cleanup doesn't double-free the value the
-	// channel now owns. Mirrors genCallArgsWithMutRef's move-param handling (T0522).
-	if c.optionalStringDup != nil {
-		c.claimStringTemp(c.optionalStringDup)
-		c.optionalStringDup = nil
+	// T1221: claim the Optional inner dup captured above, so the caller's statement
+	// cleanup doesn't double-free the value the channel now owns. Mirrors
+	// genCallArgsWithMutRef's move-param handling (T0522).
+	if optionalStringDup != nil {
+		c.claimStringTemp(optionalStringDup)
 	}
-	if c.optionalContainerDup != nil {
-		c.claimStringTemp(c.optionalContainerDup)
-		c.optionalContainerDup = nil
+	if optionalContainerDup != nil {
+		c.claimStringTemp(optionalContainerDup)
 	}
-	argAlloca := c.createEntryAlloca(elemLLVM)
-	c.block.NewStore(argVal, argAlloca)
-	argAsI8 := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
 
 	// Calculate dest = buffer + tail * elem_size
 	bufPtr := c.block.NewGetElementPtr(chanType, chPtr,

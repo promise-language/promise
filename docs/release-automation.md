@@ -142,13 +142,9 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version-file: compiler/go.mod, cache: true, cache-dependency-path: compiler/go.sum }
       # No Java/ANTLR step: the generated parser (compiler/internal/parser/*.go) is committed.
-      - name: Install LLVM (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
-      - name: Install LLVM (Windows)
-        if: runner.os == 'Windows'
-        run: choco install llvm -y   # 22+; windows-latest already ships VS Build Tools (MSVC + Windows SDK)
+      # No LLVM install step either: the toolchain is the pinned prebuilt blobs,
+      # staged by bin/build and resolved by the compiler from the content-addressed
+      # store. Nothing is taken from the runner's PATH (T2108).
       - name: Install wasmtime (runtime for the wasm32-wasi tests)
         uses: bytecodealliance/actions/wasmtime/setup@v1   # cross-platform; puts wasmtime on PATH
       # bin/ is gitignored — bootstrap the forge dev tools (bin/build, bin/test, …) before using them.
@@ -182,7 +178,7 @@ jobs:
 - **refuses a multi-platform dispatch** (`bin/release ci linux darwin`) outright — those would be N runs on one ref, each cancelling the previous. Use `bin/release ci all` (the whole matrix in ONE run) or dispatch one platform at a time. No override: self-cancellation is never intended.
 - **refuses to dispatch onto a ref that already has a queued/in-progress run**, naming the run and the ref rather than silently cancelling it. `--cancel-running` cancels it and dispatches anyway. Two pins at *different* commits are distinct refs and never collide. `cut`'s own dispatch (gate 7) applies the same guard, except that a live run *at the target SHA* is joined rather than refused — it is the run `cut` would have asked for. `cut` defines no `--cancel-running`, so its refusal points at `gh run cancel <id>` instead.
 
-**Platform notes:** **Bootstrap first.** `bin/` is gitignored — the dev tools (`bin/build`, `bin/gate`, `bin/release`) are [forge](https://github.com/promise-language/forge) tools compiled by `./make` (`.\make.cmd` on Windows), which also bakes the repo root into each binary and refuses to run a stale/un-bootstrapped tool. So every job runs `./make` before invoking any `bin/*` tool (see [build-tools.md](build-tools.md)). **No Java/ANTLR step** — the generated parser (`compiler/internal/parser/*.go`) is committed, so neither CI nor a release regenerates it. Whoever edits the grammar (`grammar/*.g4`) regenerates and commits the generated source in the same change (rare now). Linux installs LLVM 22 from `apt.llvm.org` (the musl CRT is a fetched prebuilt, not a system package — T0530). macOS uses `PROMISE_USE_CLANG=1` (Xcode clang as driver) to skip a ~5 min `brew install llvm` — same frontend/codegen, only the backend driver differs. **wasmtime** is installed on every runner (via the bytecode-alliance setup action) to run the `wasm32-wasi` tests. **Windows is a full matrix member** (no longer gated on validation): it builds with the native MSVC toolchain (`opt` → `llc` → `lld-link`, no clang), LLVM 22 via `choco`, with VS Build Tools (MSVC + Windows SDK) preinstalled on `windows-latest`, and passes the full suite (`bin/test --wasm all`) — see [windows-support.md](windows-support.md).
+**Platform notes:** **Bootstrap first.** `bin/` is gitignored — the dev tools (`bin/build`, `bin/gate`, `bin/release`) are [forge](https://github.com/promise-language/forge) tools compiled by `./make` (`.\make.cmd` on Windows), which also bakes the repo root into each binary and refuses to run a stale/un-bootstrapped tool. So every job runs `./make` before invoking any `bin/*` tool (see [build-tools.md](build-tools.md)). **No Java/ANTLR step** — the generated parser (`compiler/internal/parser/*.go`) is committed, so neither CI nor a release regenerates it. Whoever edits the grammar (`grammar/*.g4`) regenerates and commits the generated source in the same change (rare now). **No LLVM install step on any runner** — the toolchain is the pinned prebuilt blobs, staged by `bin/build` and resolved by the compiler from the content-addressed store; nothing is taken from the runner's `PATH` (T2108). The musl CRT is a fetched prebuilt too, not a system package (T0530). **wasmtime** is installed on every runner (via the bytecode-alliance setup action) to run the `wasm32-wasi` tests. **Windows is a full matrix member** (no longer gated on validation): it builds with the native MSVC toolchain (`opt` → `llc` → `lld-link`, no clang) from the same pinned blobs, needs neither VS Build Tools nor the Windows SDK (the link surface is self-generated — T0772), and passes the full suite (`bin/test --wasm all`) — see [windows-support.md](windows-support.md).
 
 ---
 
@@ -213,10 +209,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      # The as-built job also installs the host LLVM toolchain here (apt.llvm.org /
-      # choco / PROMISE_USE_CLANG on macOS) — phase B compiles the stub via
-      # `promise build -release`, which needs a backend; the forge prebuilts cache
-      # is a DIFFERENT cache and does not satisfy it. ${{ matrix.ext }} is '' / '.exe'.
+      # Phase B compiles the stub via `promise build -release`, which needs a
+      # backend: it re-fetches any missing blobs from deps-<dep>-<version> through
+      # the runtime resolver into its own CAS. That is a DIFFERENT cache from the
+      # forge prebuilts cache, and no host toolchain is installed for it (T2108).
+      # ${{ matrix.ext }} is '' / '.exe'.
       - name: Project per-epoch manifest from blobs catalog
         # No blobs need to be staged here. The runtime manifest is a projection
         # of `tools/build/blobs.json` for the epoch's pinned dep version. NO --tag

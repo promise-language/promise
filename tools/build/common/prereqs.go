@@ -33,19 +33,13 @@ func RunPrereqs(root string, _ []string) error {
 		ok = false
 	}
 
-	// LLVM
+	// LLVM — the pinned toolchain, fetched on demand. Never a system install:
+	// no package manager is suggested here, because installing one would not
+	// affect the build (T2108).
 	llvm, err := FindLLVM(root)
 	if err != nil {
-		fmt.Printf("❌ llvm:     NOT FOUND — %v\n", err)
+		fmt.Printf("❌ llvm:     NOT AVAILABLE — %v\n", err)
 		ok = false
-		switch runtime.GOOS {
-		case "darwin":
-			fmt.Println("            Install: brew install llvm")
-		case "linux":
-			fmt.Println("            Install: sudo apt-get install llvm-22 lld-22")
-		case "windows":
-			fmt.Println("            Install: download from https://github.com/llvm/llvm-project/releases")
-		}
 	} else {
 		fmt.Printf("✅ llvm:     %d (opt: %s)\n", llvm.Version, llvm.OptPath)
 		fmt.Printf("✅ lld:      %s\n", llvm.LLDPath)

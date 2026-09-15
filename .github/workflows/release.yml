@@ -114,9 +114,9 @@ jobs:
       # to phase B (bootstrap compiler stub compilation). Phase B re-fetches
       # missing blobs from `deps-llvm-<version>` via the runtime resolver into
       # its own CAS at ~/.promise/cache/blobs/sha256/, honoring PROMISE_OPT/
-      # PROMISE_LLC/PROMISE_LLD environment variables if set. This is NOT the
-      # PROMISE_LLVM build-tool env nor the forge prebuilts cache — phase B has
-      # its own, self-contained fetching path populated by the embedded manifest.
+      # PROMISE_LLC/PROMISE_LLD environment variables if set. That CAS is NOT the
+      # forge prebuilts cache — phase B has its own, self-contained fetching path
+      # populated by the embedded manifest.
       # The maintainer pre-stages blobs locally on a dep bump via `bin/release
       # publish-blobs`; nothing in this job has to install or extract a 700 MB
       # upstream tarball.

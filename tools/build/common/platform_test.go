@@ -4,21 +4,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
+	"reflect"
 	"strings"
 	"testing"
 )
 
-// platform_test.go covers FindLLVM's three-tier lookup (T0798): PROMISE_LLVM
-// override, system discovery (left unmodified — exercised implicitly by the
-// bin/build path), and slim-fetch fallback.
+// platform_test.go covers FindLLVM's two sources (T2108): the pinned LLVM blob
+// cache, and the per-tool PROMISE_* overrides overlaid on it. The host is not a
+// source — the tests below assert a toolchain reachable only via PATH or
+// Homebrew is never resolved.
 
 // stubLLVMDir creates a directory containing dummy `opt`/`llc`/`lld` executable
-// files so llvmInfoFromDir can resolve them. Used to exercise the PROMISE_LLVM
-// override and the slim-fetch fallback's return path without actually running
-// the real LLVM toolchain. parseLLVMVersion will fail on these (they aren't
-// real binaries), so the returned LLVMInfo.Version is 0; tests assert on path
-// resolution, not on version parsing.
+// files so llvmInfoFromDir can resolve them. parseLLVMVersion will fail on these
+// (they aren't real binaries), so the returned LLVMInfo.Version is 0; tests
+// assert on path resolution, not on version parsing.
 func stubLLVMDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -26,8 +25,7 @@ func stubLLVMDir(t *testing.T) string {
 	for _, name := range []string{"opt", "llc", "lld"} {
 		path := filepath.Join(dir, name+suffix)
 		// Real executable so parseLLVMVersion's exec.Command succeeds (its
-		// version parser returns 0 on no-version output, which is fine here —
-		// FindLLVM accepts the LLVMInfo regardless of Version).
+		// version parser returns 0 on no-version output, which is fine here).
 		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -35,23 +33,12 @@ func stubLLVMDir(t *testing.T) string {
 	return dir
 }
 
-// hideSystemLLVM redirects every path that platform-specific LLVM discovery
-// probes (PATH, Homebrew on macOS, Program Files / USERPROFILE on Windows) so
-// that FindLLVM's step-2 system search always fails, letting tests drive the
-// step-3 slim-fetch fallback in isolation without a real LLVM install.
-func hideSystemLLVM(t *testing.T) {
+// clearToolchainOverrides unsets every override so a test starts from the
+// pinned configuration regardless of the developer's shell.
+func clearToolchainOverrides(t *testing.T) {
 	t.Helper()
-	t.Setenv("PATH", "")
-	switch runtime.GOOS {
-	case "darwin":
-		// findLLVMDarwin probes Homebrew paths directly (not via PATH) so
-		// redirecting HOMEBREW_PREFIX to an empty temp dir is also required.
-		t.Setenv("HOMEBREW_PREFIX", t.TempDir())
-	case "windows":
-		// findLLVMWindows probes %ProgramFiles%\LLVM\bin and
-		// %USERPROFILE%\LLVM\bin directly, so both must be redirected.
-		t.Setenv("ProgramFiles", t.TempDir())
-		t.Setenv("USERPROFILE", t.TempDir())
+	for _, name := range toolchainOverrideVars {
+		t.Setenv(name, "")
 	}
 }
 
@@ -118,89 +105,190 @@ func seedSlimCatalogForTarget(t *testing.T, root, target string, contents map[st
 	return brs
 }
 
-func TestFindLLVM_PromiseLLVMOverride(t *testing.T) {
-	dir := stubLLVMDir(t)
-	t.Setenv("PROMISE_LLVM", dir)
+// TestFindLLVM_NeverConsultsHost is the T2108 invariant for the build tool: a
+// complete LLVM reachable only through PATH or Homebrew is not resolved. Build
+// inputs are pinned, not discovered — otherwise `bin/build` compiles against
+// whatever the machine happens to have, and two developers build differently
+// with neither being told.
+func TestFindLLVM_NeverConsultsHost(t *testing.T) {
+	clearToolchainOverrides(t)
+
+	// A PATH, a Homebrew prefix and a Program Files layout that all hold a
+	// plausible, complete toolchain.
+	host := t.TempDir()
+	suffix := ExeSuffix()
+	pathDir := filepath.Join(host, "bin")
+	if err := os.MkdirAll(pathDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stub := []byte("#!/bin/sh\necho \"LLVM version 22.1.0\"\n")
+	for _, n := range []string{"opt", "llc", "lld", "ld.lld", "ld64.lld", "lld-link", "opt-22", "opt-25", "llc-25", "ld.lld-25"} {
+		if err := os.WriteFile(filepath.Join(pathDir, n+suffix), stub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, formula := range []string{"llvm", "llvm@22", "llvm@25", "lld"} {
+		binDir := filepath.Join(host, "brew", formula, "bin")
+		if err := os.MkdirAll(binDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range []string{"opt", "llc", "ld64.lld"} {
+			if err := os.WriteFile(filepath.Join(binDir, n), stub, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Setenv("PATH", pathDir)
+	t.Setenv("HOMEBREW_PREFIX", filepath.Join(host, "brew"))
+	t.Setenv("ProgramFiles", host)
+	t.Setenv("USERPROFILE", host)
+	// No pinned toolchain anywhere: an empty prebuilts cache and a root with no
+	// prebuilts.toml, so the only thing that could answer is the host.
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
 
 	info, err := FindLLVM(t.TempDir())
-	if err != nil {
-		t.Fatalf("FindLLVM with PROMISE_LLVM=%s: %v", dir, err)
-	}
-	suffix := ExeSuffix()
-	if info.OptPath != filepath.Join(dir, "opt"+suffix) {
-		t.Errorf("OptPath = %q, want %q", info.OptPath, filepath.Join(dir, "opt"+suffix))
-	}
-	if info.LLDPath != filepath.Join(dir, "lld"+suffix) {
-		t.Errorf("LLDPath = %q, want %q", info.LLDPath, filepath.Join(dir, "lld"+suffix))
-	}
-}
-
-func TestFindLLVM_PromiseLLVMOverride_MissingOpt(t *testing.T) {
-	// Directory with no opt — the override must fail loudly rather than
-	// silently fall through to system discovery (the override is the user's
-	// explicit signal that this is the toolchain to use).
-	dir := t.TempDir()
-	t.Setenv("PROMISE_LLVM", dir)
-	_, err := FindLLVM(t.TempDir())
 	if err == nil {
-		t.Fatal("PROMISE_LLVM pointing at a directory with no opt must error")
+		t.Fatalf("resolved a toolchain with nothing pinned: opt=%s lld=%s — the host must never answer",
+			info.OptPath, info.LLDPath)
 	}
-	if !strings.Contains(err.Error(), "PROMISE_LLVM") {
-		t.Errorf("error should name PROMISE_LLVM, got: %v", err)
+	// The message may say the host is never consulted; what it must never do is
+	// send the reader to a package manager, since installing one changes nothing.
+	for _, unwanted := range []string{"brew install", "apt install", "apt-get install", "install LLVM"} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("error must not suggest a system LLVM (%q), got: %v", unwanted, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "pinned") {
+		t.Errorf("error should name the missing pinned toolchain, got: %v", err)
 	}
 }
 
-// TestFindLLVM_FallsThroughToSlim exercises the slim-fetch fallback. Stub the
-// blob fetcher and pre-seed blobs.json + a tiny prebuilts.toml so the host
-// (linux-amd64 in fakeReleaseRoot) resolves via the slim path. We do NOT
-// suppress the system PATH search — but linux-amd64 in CI generally does have
-// system LLVM, which would short-circuit step 2. So this test runs only on
-// linux/CI hosts where we can override PATH to be empty.
-func TestFindLLVM_FallsThroughToSlim(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("PATH-stripping is awkward on Windows; the slim fallback is exercised on other hosts")
-	}
-	root, _ := fakeReleaseRoot(t, nil)
-	// T0530 made FindLLVM probe the fetched `opt` with `--version` before
-	// accepting it, so the stub has to be an executable that answers that probe
-	// (blobs land in the cache with mode 0755). A plain text stub would fail to
-	// exec and be rejected as an unrunnable prebuilt.
-	optStub := "#!/bin/sh\necho \"LLVM version 22.1.0\"\n"
-	_, brs := seedSlimCatalog(t, root, map[string]string{"opt": optStub, "llc": "LLC_SLIM"})
+// TestFindLLVM_FullOverrideSkipsPinnedFetch covers the bringup case: the
+// operator has named every binary the build needs, so the pinned set is not
+// consulted at all (it may not even exist for the LLVM being brought up).
+func TestFindLLVM_FullOverrideSkipsPinnedFetch(t *testing.T) {
+	clearToolchainOverrides(t)
+	dir := stubLLVMDir(t)
+	suffix := ExeSuffix()
+	opt := filepath.Join(dir, "opt"+suffix)
+	lld := filepath.Join(dir, "lld"+suffix)
+	t.Setenv("PROMISE_OPT", opt)
+	t.Setenv("PROMISE_LLC", filepath.Join(dir, "llc"+suffix))
+	t.Setenv(linkerOverrideVar(), lld)
 
-	// fakeReleaseRoot's prebuilts.toml omits `lld` (only opt+llc). FindLLVM's
-	// llvmInfoFromDir requires lld too — so extend the catalog and the
-	// prebuilts.toml to include it.
-	rawLld := []byte("LLD_SLIM")
-	sha := sha256Hex(rawLld)
-	br := brotliBytes(t, rawLld)
-	cat, err := LoadBlobsCatalog(root)
+	// root == "" — no prebuilts.toml to read, so resolving here proves the
+	// pinned path was not needed.
+	info, err := FindLLVM("")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("fully-overridden resolution: %v", err)
 	}
-	if err := cat.Upsert(BlobEntry{
-		Dependency: "llvm", Version: "22.1.0", Target: "linux-amd64", Name: "lld",
-		SHA256: sha, Size: int64(len(rawLld)),
-		Compression: compressionBrotli, CompressedSize: int64(len(br)), CompressedSHA256: sha256Hex(br),
-	}); err != nil {
-		t.Fatal(err)
+	if info.OptPath != opt {
+		t.Errorf("OptPath = %q, want %q", info.OptPath, opt)
 	}
-	if err := WriteBlobsCatalog(root, cat); err != nil {
-		t.Fatal(err)
+	if info.LLDPath != lld {
+		t.Errorf("LLDPath = %q, want %q", info.LLDPath, lld)
 	}
-	brs[sha+".br"] = br
-	prebuiltsPath := filepath.Join(root, "tools", "build", "prebuilts.toml")
-	cur, err := os.ReadFile(prebuiltsPath)
+}
+
+// TestFindLLVM_PerToolOverrideSubstitutesOnlyThatTool: a lone PROMISE_OPT
+// replaces opt and nothing else. One variable naming one binary is the point of
+// the per-tool vocabulary — a directory-wide override silently swaps several
+// tools at once and never says which.
+func TestFindLLVM_PerToolOverrideSubstitutesOnlyThatTool(t *testing.T) {
+	clearToolchainOverrides(t)
+	root := seedPinnedToolchain(t)
+
+	customDir := stubLLVMDir(t)
+	custom := filepath.Join(customDir, "opt")
+	t.Setenv("PROMISE_OPT", custom)
+
+	info, err := FindLLVM(root)
 	if err != nil {
+		t.Fatalf("FindLLVM: %v", err)
+	}
+	if info.OptPath != custom {
+		t.Errorf("OptPath = %q, want the override %q", info.OptPath, custom)
+	}
+	if filepath.Dir(info.LLDPath) == customDir {
+		t.Errorf("LLDPath = %q — an override of opt must not move lld", info.LLDPath)
+	}
+	if filepath.Dir(info.LLCPath) == customDir {
+		t.Errorf("LLCPath = %q — an override of opt must not move llc", info.LLCPath)
+	}
+	if info.LLDPath == "" || info.LLCPath == "" {
+		t.Errorf("the non-overridden tools must still resolve from the pinned set (llc=%q lld=%q)", info.LLCPath, info.LLDPath)
+	}
+}
+
+// TestFindLLVM_PerToolOverride_LlcAndLinker covers the other two overlay slots.
+// `opt` alone is not the whole contract: a lone PROMISE_LLC must move llc while
+// opt and lld stay pinned, and a lone linker override must move the linker while
+// opt stays pinned — and neither may take the fully-overridden shortcut, which
+// would skip the pinned set for tools nobody overrode.
+func TestFindLLVM_PerToolOverride_LlcAndLinker(t *testing.T) {
+	t.Run("llc only", func(t *testing.T) {
+		clearToolchainOverrides(t)
+		root := seedPinnedToolchain(t)
+		custom := filepath.Join(stubLLVMDir(t), "llc")
+		t.Setenv("PROMISE_LLC", custom)
+
+		info, err := FindLLVM(root)
+		if err != nil {
+			t.Fatalf("FindLLVM: %v", err)
+		}
+		if info.LLCPath != custom {
+			t.Errorf("LLCPath = %q, want the override %q", info.LLCPath, custom)
+		}
+		if !strings.Contains(info.OptPath, "llvm-slim") || !strings.Contains(info.LLDPath, "llvm-slim") {
+			t.Errorf("an override of llc must leave opt and lld pinned (opt=%q lld=%q)", info.OptPath, info.LLDPath)
+		}
+	})
+
+	t.Run("linker only", func(t *testing.T) {
+		clearToolchainOverrides(t)
+		root := seedPinnedToolchain(t)
+		custom := filepath.Join(stubLLVMDir(t), "lld")
+		t.Setenv(linkerOverrideVar(), custom)
+
+		info, err := FindLLVM(root)
+		if err != nil {
+			t.Fatalf("FindLLVM: %v", err)
+		}
+		if info.LLDPath != custom {
+			t.Errorf("LLDPath = %q, want the override %q", info.LLDPath, custom)
+		}
+		if !strings.Contains(info.OptPath, "llvm-slim") {
+			t.Errorf("an override of the linker must leave opt pinned, got %q", info.OptPath)
+		}
+	})
+}
+
+// TestFindLLVM_PinnedToolCannotRun keeps the T0530 guard alive: a staged prebuilt
+// that cannot exec on this host (the upstream Linux tarballs are glibc-linked, so
+// every tool fails on Alpine) must stop the build with an explanation. Without it
+// the build "succeeds" and ships a compiler that dies at the first `opt`
+// invocation, far from the cause — and with the host no longer searched there is
+// no accidental second toolchain to paper over it.
+func TestFindLLVM_PinnedToolCannotRun(t *testing.T) {
+	if IsWindows() {
+		t.Skip("exec-failure shape differs on Windows")
+	}
+	clearToolchainOverrides(t)
+
+	target := CurrentBuildTarget()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "catalog.toml"), []byte("epoch = \"2026.0\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Append an `lld` file entry to the linux-amd64 target list. The simplest
-	// way is to rewrite the file with all three entries.
-	prebuilts := `schema = 1
+	toolsBuild := filepath.Join(root, "tools", "build")
+	if err := os.MkdirAll(toolsBuild, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prebuilts := fmt.Sprintf(`schema = 1
 [binaries.llvm]
 version = "22.1.0"
 bundle_dir = "compiler/cmd/promise/resources/llvm"
-[binaries.llvm.targets.linux-amd64]
+[binaries.llvm.targets.%s]
 url = "https://example.test/LLVM.tar.xz"
 sha256 = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0"
 files = [
@@ -208,180 +296,172 @@ files = [
   { src = "bin/llc", out = "llc" },
   { src = "bin/lld", out = "lld" },
 ]
-`
-	_ = cur
-	if err := os.WriteFile(prebuiltsPath, []byte(prebuilts), 0o644); err != nil {
+`, target)
+	if err := os.WriteFile(filepath.Join(toolsBuild, "prebuilts.toml"), []byte(prebuilts), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	cacheRoot := t.TempDir()
-	t.Setenv("PROMISE_PREBUILTS_CACHE", cacheRoot)
-	t.Setenv("PROMISE_LLVM", "") // make sure no override is set
-	// Hide system LLVM by stripping PATH.
-	t.Setenv("PATH", "")
-
+	// All three stage, but `opt` is not a runnable image — the same observable
+	// state as a glibc binary on a musl host.
+	brs := seedSlimCatalogForTarget(t, root, target, map[string]string{
+		"opt": "NOT_AN_EXECUTABLE_IMAGE",
+		"llc": "LLC_SLIM",
+		"lld": "LLD_SLIM",
+	})
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
 	prev := defaultBlobFetcher
 	defaultBlobFetcher = &countingBlobFetcher{assets: brs}
 	t.Cleanup(func() { defaultBlobFetcher = prev })
-
-	// On non-linux hosts, fakeReleaseRoot's linux-amd64 entry is not the host
-	// target — FindLLVM dispatches against CurrentBuildTarget(). Skip on
-	// non-linux: the slim fallback is exercised by TestEnsureLLVMBlobs_CatalogHit
-	// without going through FindLLVM, and end-to-end coverage happens in CI.
-	if CurrentBuildTarget() != "linux-amd64" {
-		t.Skipf("slim-fallback test pinned to linux-amd64 (CurrentBuildTarget=%s)", CurrentBuildTarget())
-	}
-
-	info, err := FindLLVM(root)
-	if err != nil {
-		t.Fatalf("FindLLVM with no system LLVM and slim catalog hit: %v", err)
-	}
-	wantDir := filepath.Join(cacheRoot, "llvm-slim", "22.1.0", "linux-amd64")
-	if info.Dir != wantDir {
-		t.Errorf("info.Dir = %q, want %q", info.Dir, wantDir)
-	}
-}
-
-// TestFindLLVM_EmptyRoot_NoSystem_NoSlimFallback covers the case where the
-// slim-fetch fallback is intentionally bypassed (root=""). PATH is also
-// stripped so system discovery fails. The bottom error must complain about
-// missing opt and reference both PATH and PROMISE_LLVM (the only remaining
-// resolution paths a developer can choose).
-func TestFindLLVM_EmptyRoot_NoSystem_NoSlimFallback(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("PATH-stripping is awkward on Windows")
-	}
-	t.Setenv("PROMISE_LLVM", "")
-	t.Setenv("PATH", "")
-	t.Setenv("HOMEBREW_PREFIX", t.TempDir()) // empty prefix → hide a macOS Homebrew LLVM (probed directly, not via PATH)
-	_, err := FindLLVM("")                   // root=="" → skip slim fallback
-	if err == nil {
-		t.Fatal("expected error: no system LLVM and no slim fallback")
-	}
-	// The message must guide the developer toward at least one remediation.
-	msg := err.Error()
-	if !strings.Contains(msg, "PROMISE_LLVM") && !strings.Contains(msg, "Homebrew") && !strings.Contains(msg, "PATH") {
-		t.Errorf("error should suggest a remediation, got: %v", err)
-	}
-}
-
-// TestFindLLVM_SlimFetchError_WrapsCleanly covers the slim-fallback failure
-// path: when EnsureLLVMBlobs errors (here, because no prebuilts.toml exists
-// at root), FindLLVM must wrap that error rather than silently fall through
-// to a generic "not found" — otherwise a misconfigured tree produces a
-// useless error that doesn't tell the developer what went wrong.
-func TestFindLLVM_SlimFetchError_WrapsCleanly(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("PATH-stripping is awkward on Windows")
-	}
-	t.Setenv("PROMISE_LLVM", "")
-	t.Setenv("PATH", "")
-	t.Setenv("HOMEBREW_PREFIX", t.TempDir()) // hide a macOS Homebrew LLVM (probed directly, not via PATH)
-	// Pass a root that has no tools/build/prebuilts.toml → LoadPrebuiltsManifest
-	// inside EnsureLLVMBlobs fails, so FindLLVM hits the slim-fetch error branch.
-	_, err := FindLLVM(t.TempDir())
-	if err == nil {
-		t.Fatal("expected error from slim-fetch failure")
-	}
-	if !strings.Contains(err.Error(), "slim-blob fetch failed") {
-		t.Errorf("error should be wrapped as 'slim-blob fetch failed', got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "PROMISE_LLVM") {
-		t.Errorf("error should still suggest PROMISE_LLVM as an escape hatch, got: %v", err)
-	}
-}
-
-// TestFindLLVM_SlimSuccessButMissingLLD exercises the silent-fallthrough fix
-// (T1062): EnsureLLVMBlobs succeeds (opt+llc fetched, tools.ok written) but
-// llvmInfoFromDir returns (nil, false) because lld is absent from the
-// prebuilts.toml files list. FindLLVM must return an error that names the
-// cache directory and the missing file ("slim-fetch populated" / "lld"),
-// rather than falling through to the generic "LLVM not found in PATH" message.
-func TestFindLLVM_SlimSuccessButMissingLLD(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("PATH-stripping is awkward on Windows")
-	}
-	root, _ := fakeReleaseRoot(t, nil)
-	// fakeReleaseRoot's default prebuilts.toml already has only opt+llc (no lld).
-	// Seed the catalog to match: only opt and llc blobs.
-	_, brs := seedSlimCatalog(t, root, map[string]string{"opt": "OPT_SLIM", "llc": "LLC_SLIM"})
-
-	cacheRoot := t.TempDir()
-	t.Setenv("PROMISE_PREBUILTS_CACHE", cacheRoot)
-	t.Setenv("PROMISE_LLVM", "")
-	// Hide system LLVM so discovery fails and we reach the slim fallback.
-	t.Setenv("PATH", "")
-	t.Setenv("HOMEBREW_PREFIX", t.TempDir())
-
-	prev := defaultBlobFetcher
-	defaultBlobFetcher = &countingBlobFetcher{assets: brs}
-	t.Cleanup(func() { defaultBlobFetcher = prev })
-
-	if CurrentBuildTarget() != "linux-amd64" {
-		t.Skipf("slim-fallback test pinned to linux-amd64 (CurrentBuildTarget=%s)", CurrentBuildTarget())
-	}
 
 	_, err := FindLLVM(root)
 	if err == nil {
-		t.Fatal("expected error: slim-fetch succeeded but lld absent from prebuilts.toml")
+		t.Fatal("expected an error: the staged opt cannot run on this host")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "slim-fetch populated") {
-		t.Errorf("error should mention 'slim-fetch populated', got: %v", err)
+	if !strings.Contains(msg, "cannot run on this host") {
+		t.Errorf("error should say the prebuilt cannot run, got: %v", err)
 	}
-	if !strings.Contains(msg, "lld") {
-		t.Errorf("error should name the missing file 'lld', got: %v", err)
+	if !strings.Contains(msg, "PROMISE_OPT") {
+		t.Errorf("error should name the explicit way out, got: %v", err)
 	}
-	// Must NOT look like the generic "LLVM not found" bottom message.
-	if strings.Contains(msg, "need opt in PATH") || strings.Contains(msg, "slim-blob fetch failed") {
-		t.Errorf("error should not be the generic fallback message, got: %v", err)
-	}
-}
-
-// TestFindLLVM_PromiseLLVMOverride_PartialDir covers a directory that has
-// opt+llc but no lld — the override must reject, since the build pipeline
-// can't link without lld and the override is a "use exactly this" signal.
-func TestFindLLVM_PromiseLLVMOverride_PartialDir(t *testing.T) {
-	dir := t.TempDir()
-	suffix := ExeSuffix()
-	for _, name := range []string{"opt", "llc"} { // intentionally omit lld
-		if err := os.WriteFile(filepath.Join(dir, name+suffix), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("PROMISE_LLVM", dir)
-	_, err := FindLLVM(t.TempDir())
-	if err == nil {
-		t.Fatal("PROMISE_LLVM with no lld must error")
-	}
-	if !strings.Contains(err.Error(), "PROMISE_LLVM") {
-		t.Errorf("error should name PROMISE_LLVM, got: %v", err)
+	// It must not read as "no toolchain found" — that would send the reader
+	// looking for one rather than at a toolchain that is present and unusable.
+	if strings.Contains(msg, "no pinned LLVM toolchain") {
+		t.Errorf("a present-but-unrunnable toolchain must not report as missing, got: %v", err)
 	}
 }
 
-// TestFindLLVM_PromiseLLVMOverride_TrimsWhitespace covers the
-// strings.TrimSpace on PROMISE_LLVM: a value of "   " must be treated as
-// unset, not as a literal whitespace path that fails llvmInfoFromDir. This
-// prevents a confusing error from a shell variable that expanded to an
-// empty/whitespace value.
-func TestFindLLVM_PromiseLLVMOverride_TrimsWhitespace(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("PATH-stripping is awkward on Windows")
-	}
-	t.Setenv("PROMISE_LLVM", "   ")
-	t.Setenv("PATH", "")                     // force system discovery to fail
-	t.Setenv("HOMEBREW_PREFIX", t.TempDir()) // hide a macOS Homebrew LLVM (probed directly, not via PATH)
-	// Use a non-existent root so the slim fallback also fails — we want to
-	// reach the bottom of FindLLVM and confirm the whitespace-only override
-	// didn't shortcut us with a PROMISE_LLVM-specific error.
+// TestFindLLVM_NoRootNoOverride covers the one remaining way to have nothing:
+// no override and no repo root to read the pinned manifest from. It must fail
+// naming the pinned toolchain and the bringup variables — never fall through to
+// a host scan, which is what used to answer here.
+func TestFindLLVM_NoRootNoOverride(t *testing.T) {
+	clearToolchainOverrides(t)
 	_, err := FindLLVM("")
 	if err == nil {
-		t.Fatal("expected error: no system LLVM, no override, no slim fallback")
+		t.Fatal("expected an error with no override and no root")
 	}
-	// The whitespace-only env var should be ignored → the error must NOT
-	// mention PROMISE_LLVM="..." (the override-specific error path).
-	if strings.Contains(err.Error(), `PROMISE_LLVM="   "`) {
-		t.Errorf("whitespace-only PROMISE_LLVM should be treated as unset; got override error: %v", err)
+	msg := err.Error()
+	if !strings.Contains(msg, "no pinned LLVM toolchain") {
+		t.Errorf("error should name the missing pinned toolchain, got: %v", err)
+	}
+	if !strings.Contains(msg, "PROMISE_OPT") || !strings.Contains(msg, linkerOverrideVar()) {
+		t.Errorf("error should name the per-tool bringup variables, got: %v", err)
+	}
+	for _, unwanted := range []string{"brew install", "apt install", "apt-get install", "install LLVM"} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("error must not suggest a system LLVM (%q), got: %v", unwanted, err)
+		}
+	}
+}
+
+// TestFindLLVM_ResolvesFromPinnedCache is the ordinary path: no overrides, the
+// toolchain comes from the pinned blobs.
+func TestFindLLVM_ResolvesFromPinnedCache(t *testing.T) {
+	clearToolchainOverrides(t)
+	root := seedPinnedToolchain(t)
+
+	info, err := FindLLVM(root)
+	if err != nil {
+		t.Fatalf("FindLLVM with a pinned catalog hit: %v", err)
+	}
+	if !strings.Contains(info.Dir, filepath.Join("llvm-slim", "22.1.0", CurrentBuildTarget())) {
+		t.Errorf("info.Dir = %q, want the pinned slim cache dir", info.Dir)
+	}
+	if info.Version != 22 {
+		t.Errorf("Version = %d, want 22 probed from the staged opt", info.Version)
+	}
+}
+
+// TestToolchainOverrides covers the helper both the build and the gate path
+// read: every override in effect, and nothing when the build is pinned.
+func TestToolchainOverrides(t *testing.T) {
+	clearToolchainOverrides(t)
+	if got := ToolchainOverrides(); len(got) != 0 {
+		t.Fatalf("expected no overrides, got %v", got)
+	}
+	t.Setenv("PROMISE_OPT", "/custom/opt")
+	t.Setenv("PROMISE_USE_CLANG", "1")
+	got := ToolchainOverrides()
+	want := []string{"PROMISE_OPT=/custom/opt", "PROMISE_USE_CLANG=1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ToolchainOverrides() = %v, want %v", got, want)
+	}
+	// Whitespace-only is not an override — it is an env var that expanded to
+	// nothing, and treating it as one produces a baffling error.
+	t.Setenv("PROMISE_OPT", "   ")
+	t.Setenv("PROMISE_USE_CLANG", "")
+	if got := ToolchainOverrides(); len(got) != 0 {
+		t.Errorf("whitespace-only override should count as unset, got %v", got)
+	}
+}
+
+// seedPinnedLinuxToolchain builds a repo root whose blob catalog serves a
+// complete linux-amd64 opt/llc/lld with the fetcher stubbed, and points the
+// prebuilts cache at a temp dir. Returns the root.
+func seedPinnedToolchain(t *testing.T) string {
+	t.Helper()
+	// The `opt` stub has to answer `--version`, because FindLLVM probes the
+	// staged opt before accepting it (T0530). A `#!/bin/sh` stub is not
+	// executable on Windows, so the fixture is POSIX-only; the Windows path is
+	// covered by TestFindLLVM_PinnedStagedButMissingFile, which never reaches
+	// the probe.
+	if IsWindows() {
+		t.Skip("shell-script tool stubs are not executable on Windows")
+	}
+	target := CurrentBuildTarget()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "catalog.toml"), []byte("epoch = \"2026.0\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toolsBuild := filepath.Join(root, "tools", "build")
+	if err := os.MkdirAll(toolsBuild, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prebuilts := fmt.Sprintf(`schema = 1
+[binaries.llvm]
+version = "22.1.0"
+bundle_dir = "compiler/cmd/promise/resources/llvm"
+[binaries.llvm.targets.%s]
+url = "https://example.test/LLVM.tar.xz"
+sha256 = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0"
+files = [
+  { src = "bin/opt", out = "opt" },
+  { src = "bin/llc", out = "llc" },
+  { src = "bin/lld", out = "lld" },
+]
+`, target)
+	if err := os.WriteFile(filepath.Join(toolsBuild, "prebuilts.toml"), []byte(prebuilts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	brs := seedSlimCatalogForTarget(t, root, target, map[string]string{
+		"opt": "#!/bin/sh\necho \"LLVM version 22.1.0\"\n",
+		"llc": "LLC_SLIM",
+		"lld": "LLD_SLIM",
+	})
+
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
+	prev := defaultBlobFetcher
+	defaultBlobFetcher = &countingBlobFetcher{assets: brs}
+	t.Cleanup(func() { defaultBlobFetcher = prev })
+	return root
+}
+
+// TestFindLLVM_PinnedFetchError_WrapsCleanly: when the pinned blobs cannot be
+// staged (here, no prebuilts.toml at root), FindLLVM must wrap that error rather
+// than fall through — there is nothing left to fall through to, and a generic
+// "not found" would hide what actually went wrong.
+func TestFindLLVM_PinnedFetchError_WrapsCleanly(t *testing.T) {
+	clearToolchainOverrides(t)
+	_, err := FindLLVM(t.TempDir())
+	if err == nil {
+		t.Fatal("expected error when the pinned toolchain cannot be staged")
+	}
+	if !strings.Contains(err.Error(), "no pinned LLVM toolchain") {
+		t.Errorf("error should name the missing pinned toolchain, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "PROMISE_OPT") {
+		t.Errorf("error should name the explicit bringup path, got: %v", err)
 	}
 }
 
@@ -454,17 +534,13 @@ func TestLLVMInfoFromDir_Dlltool(t *testing.T) {
 	}
 }
 
-// TestFindLLVM_SlimSuccessButMissingFile_CrossPlatform exercises the T1062 fix
-// on the current host platform (linux-amd64, darwin-arm64, or windows-amd64):
-// EnsureLLVMBlobs succeeds (opt + llc fetched into the slim cache) but lld is
-// absent from the prebuilts.toml files list, so FindLLVM must return the
-// specific "slim-fetch populated … required file is missing" error rather than
-// the generic "LLVM not found in PATH / Homebrew" fallthrough.
-//
-// This is the cross-platform companion to TestFindLLVM_SlimSuccessButMissingLLD
-// (which is pinned to linux-amd64 via fakeReleaseRoot). Together they verify
-// the fix on every CI host.
-func TestFindLLVM_SlimSuccessButMissingFile_CrossPlatform(t *testing.T) {
+// TestFindLLVM_PinnedStagedButMissingFile exercises the T1062 fix on the current
+// host platform (linux-amd64, darwin-arm64, or windows-amd64): the pinned blobs
+// stage (opt + llc fetched) but lld is absent from the prebuilts.toml files
+// list, so FindLLVM must return the specific "required file is missing" error
+// naming the cache dir — silence or a generic "not found" would send the reader
+// looking for a toolchain rather than at an incomplete manifest.
+func TestFindLLVM_PinnedStagedButMissingFile(t *testing.T) {
 	target := CurrentBuildTarget()
 	root := fakeReleaseRootForTarget(t, target)
 	suffix := ExeSuffix()
@@ -477,8 +553,7 @@ func TestFindLLVM_SlimSuccessButMissingFile_CrossPlatform(t *testing.T) {
 	})
 
 	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
-	t.Setenv("PROMISE_LLVM", "")
-	hideSystemLLVM(t)
+	clearToolchainOverrides(t)
 
 	prev := defaultBlobFetcher
 	defaultBlobFetcher = &countingBlobFetcher{assets: brs}
@@ -486,36 +561,27 @@ func TestFindLLVM_SlimSuccessButMissingFile_CrossPlatform(t *testing.T) {
 
 	_, err := FindLLVM(root)
 	if err == nil {
-		t.Fatal("expected error: slim-fetch succeeded but lld absent from prebuilts.toml files list")
+		t.Fatal("expected error: pinned blobs staged but lld absent from prebuilts.toml files list")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "slim-fetch populated") {
-		t.Errorf("error should contain 'slim-fetch populated', got: %v", err)
+	if !strings.Contains(msg, "pinned toolchain staged into") {
+		t.Errorf("error should name the staged cache dir, got: %v", err)
 	}
 	if !strings.Contains(msg, "lld") {
 		t.Errorf("error should name the missing file 'lld', got: %v", err)
 	}
-	// Must NOT be the generic fallback message, confirming the fix did not
-	// silently fall through.
-	if strings.Contains(msg, "need opt in PATH") || strings.Contains(msg, "slim-blob fetch failed") {
-		t.Errorf("error should not be the generic fallback message, got: %v", err)
-	}
 }
 
-// TestFindLLVM_SlimSuccessButMissingOpt_CrossPlatform covers the less common
-// variant of the T1062 fix where opt itself is absent from the slim cache (not
-// just lld). In this case llvmInfoFromDir returns (nil,false) on the first
-// check, and the error message should name opt rather than lld.
-// TestFindLLVM_SlimSuccessButMissingOpt covers the less common variant of the
-// T1062 fix where opt itself is absent from the slim cache (not just lld).
-// llvmInfoFromDir returns (nil,false) on the first check, and the new T1062
-// detection logic in FindLLVM should name opt (not lld) in the error.
+// TestFindLLVM_PinnedStagedButMissingOpt covers the less common variant of the
+// T1062 fix where opt itself is absent from the staged cache (not just lld).
+// llvmInfoFromDir returns (nil,false) on the first check, and the detection
+// logic in FindLLVM should name opt (not lld) in the error.
 //
 // Driving "opt absent after successful EnsureLLVMBlobs" via FindLLVM end-to-end
 // requires a catalog entry pointing to a tarball server (no slim entry causes a
 // tarball fallback), so we unit-test the detection logic directly using the same
 // Exists-branch that FindLLVM executes.
-func TestFindLLVM_SlimSuccessButMissingOpt(t *testing.T) {
+func TestFindLLVM_PinnedStagedButMissingOpt(t *testing.T) {
 	suffix := ExeSuffix()
 	// Cache dir with only llc (no opt) — simulates a partial fetch where opt
 	// was not listed in prebuilts.toml at all.

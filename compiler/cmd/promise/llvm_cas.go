@@ -158,9 +158,9 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 	if !allowFetch {
 		// No-fetch probe: only usable if every blob is already cached or can be
 		// materialized from the host-stable prebuilts cache (neither hits the
-		// network). Serving prebuilts here — ahead of Homebrew/PATH in findLLVMTool
-		// — keeps the toolchain deterministic on a machine that has built the
-		// compiler.
+		// network). Serving prebuilts here keeps the toolchain deterministic on a
+		// machine that has built the compiler — the prebuilts cache holds the same
+		// pinned release, so it is a local copy of the toolchain, not a host find.
 		for _, e := range entries {
 			if store.Has(e.SHA256) {
 				continue
@@ -300,10 +300,9 @@ var (
 // the toolchain view from local disk instead of downloading it — the whole point
 // of the prebuilts cache is that these tools already live "outside promise home".
 //
-// The prebuilt is trusted the same way findLLVMTool already trusts a matching
-// LLVM on PATH/Homebrew: it is the LLVM release this compiler build was pinned to
-// (bin/build wrote tools.ok only after verifying the upstream archive sha), and
-// the copy placed into the view is re-signed on macOS.
+// The prebuilt is pinned, not discovered: it is the LLVM release this compiler
+// build was pinned to (bin/build wrote tools.ok only after verifying the upstream
+// archive sha), and the copy placed into the view is re-signed on macOS.
 func prebuiltToolPath(toolName string) string {
 	if toolName == "" {
 		return ""
@@ -329,8 +328,7 @@ func findPrebuiltTool(toolName string) string {
 	target := runtime.GOOS + "-" + runtime.GOARCH
 	// Any llvm-slim version dir for this target. When several are cached from
 	// different checkouts, prefer the newest — all are the pinned major and
-	// functionally interchangeable (the same trust model findLLVMTool already
-	// applies to any matching LLVM on PATH/Homebrew).
+	// functionally interchangeable.
 	matches, _ := filepath.Glob(filepath.Join(root, "llvm-slim", "*", target, toolName))
 	best, bestVer := "", ""
 	for _, p := range matches {

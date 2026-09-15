@@ -54,6 +54,12 @@ func RunBuild(root string, args []string) error {
 		}
 	}
 
+	// A hand-pointed toolchain is announced by whoever builds under it, before
+	// anything it could affect (T2108). Note it changes what the compiler
+	// resolves at compile time, not what a release build bundles — bundling is
+	// always the pinned blobs.
+	announceToolchainOverrides()
+
 	// Default to local cache when called as CLI (args != nil).
 	// When called internally by verify/test (args == nil), caller handles cache.
 	if args != nil {
@@ -153,18 +159,22 @@ func RunBuild(root string, args []string) error {
 		}
 	}
 
-	// 6. Verify LLVM (host scan still used by debug runtime; T0520 will retire this)
-	fmt.Println("Detecting LLVM...")
-	llvm, err := FindLLVM(root)
-	if err != nil {
-		if !release {
-			return err
+	// 6. Stage the pinned LLVM toolchain into the host-stable prebuilts cache.
+	// Nothing in this build execs it — the compiler resolves its own toolchain
+	// at compile time — but staging it here is what lets that resolution
+	// materialize the view from local disk instead of downloading it again.
+	// Announce nothing on the ordinary path: a "detected LLVM" line that names a
+	// toolchain the build never uses is a confident wrong answer (T2108).
+	//
+	// Best-effort for a debug build: the compiler it produces resolves from the
+	// content-addressed store at compile time, so a host with a warm view and a
+	// cold prebuilts cache is a legitimate state and must not fail the build.
+	// The release path below re-fetches and is fatal — it embeds these bytes.
+	if !release {
+		if _, err := EnsureLLVMBlobs(root, target); err != nil {
+			fmt.Printf("  note: pinned LLVM toolchain not staged (%v)\n", err)
+			fmt.Println("  the compiler will resolve it from the content-addressed store on first compile")
 		}
-		// Release builds don't need a host LLVM — they fetch the pinned
-		// upstream tarball / slim blobs into the prebuilts cache. Continue.
-		fmt.Printf("  no host LLVM found (%v); release build will use prebuilts\n", err)
-	} else {
-		fmt.Printf("  LLVM %d: opt=%s lld=%s\n", llvm.Version, llvm.OptPath, llvm.LLDPath)
 	}
 
 	// 7. Release: fetch + bundle LLVM tools. Prefer the slim brotli blobs

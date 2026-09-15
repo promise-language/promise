@@ -236,10 +236,15 @@ func doctorCheckLLVM() doctorCheck {
 		tools = append(tools, toolInfo{"ld.lld", "linker"})
 	}
 
-	if hasEmbeddedLLVM {
+	// An override is reported as the source it is, not hidden behind the pinned
+	// one: a doctor that says "pinned" while the build uses a hand-pointed
+	// toolchain describes the wrong machine state (T2108).
+	if overrides := toolchainOverridesInEffect(); len(overrides) > 0 {
+		c.Details = append(c.Details, "Source: toolchain override in effect ("+strings.Join(overrides, ", ")+") — NOT the pinned toolchain")
+	} else if hasEmbeddedLLVM {
 		c.Details = append(c.Details, "Source: embedded")
 	} else {
-		c.Details = append(c.Details, "Source: system PATH")
+		c.Details = append(c.Details, "Source: pinned toolchain (content-addressed store)")
 	}
 
 	var missing []string
@@ -266,7 +271,10 @@ func doctorCheckLLVM() doctorCheck {
 			if v < minLLVMMajor {
 				c.Status = doctorErr.String()
 				c.Summary = fmt.Sprintf("%s version %d is too old (minimum: %d)", tool.name, v, minLLVMMajor)
-				c.Fix = fmt.Sprintf("Install LLVM %d+", minLLVMMajor)
+				// Not "install LLVM": the pinned toolchain is LLVM 22+, so a tool
+				// this old came from an override or a stale view, and installing
+				// one on the host would change nothing (T2108).
+				c.Fix = fmt.Sprintf("Unset any PROMISE_* toolchain override, or run `promise doctor --repair` to restage the pinned LLVM %d+ toolchain", minLLVMMajor)
 			}
 		} else {
 			c.Details = append(c.Details, fmt.Sprintf("%s: %s", tool.label, path))
@@ -276,11 +284,7 @@ func doctorCheckLLVM() doctorCheck {
 	if len(missing) > 0 {
 		c.Status = doctorErr.String()
 		c.Summary = "Missing LLVM tools: " + strings.Join(missing, ", ")
-		if runtime.GOOS == "darwin" {
-			c.Fix = fmt.Sprintf("brew install llvm lld (LLVM %d+)", minLLVMMajor)
-		} else {
-			c.Fix = fmt.Sprintf("Install LLVM %d+ or use a release build with embedded LLVM", minLLVMMajor)
-		}
+		c.Fix = "Run `promise install` while online to stage the pinned toolchain, or `promise doctor --repair` to restage it"
 	} else if c.Status == doctorOK.String() {
 		c.Summary = "All tools found"
 	}

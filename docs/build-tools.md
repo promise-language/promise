@@ -205,25 +205,32 @@ Also computes `resources/.sources.sha256` — a sorted list of SHA256 hashes for
 
 **Linux only:** Stages the compiler-rt builtins archive (`libclang_rt.builtins.a`) into `resources/compiler-rt/<musl-arch>/` the same way, from the pinned `[binaries.compiler-rt]` prebuilt (T1676). Like the CRT and unlike OpenSSL this step is **fatal** on failure: the archive is spliced onto every musl link line, so a build that skipped it would produce a compiler that cannot link.
 
-### 4. LLVM detection
+### 4. LLVM staging
 
-The compiler requires LLVM 22-25. The build tool searches for `opt` and `lld` in this order:
+The compiler requires LLVM 22+. The toolchain is **pinned, not detected**: `FindLLVM`
+resolves `opt`, `llc` and `lld` from exactly two sources, and the host is not one
+of them (T2108).
 
-**macOS (Homebrew):**
-1. Versioned: `/opt/homebrew/opt/llvm@25` down to `@22`, then `/usr/local/opt/llvm@25` down to `@22`
-2. Unversioned: `/opt/homebrew/opt/llvm`, `/usr/local/opt/llvm`
-3. Versioned in PATH: `opt-25` down to `opt-22`
-4. Unversioned in PATH: `opt`
+1. **The pinned blobs** — staged into the host-stable prebuilts cache from
+   `tools/build/prebuilts.toml` + `blobs.json` (§6), fetched on demand.
+2. **Per-tool overrides layered on top** — `PROMISE_OPT`, `PROMISE_LLC`, and the
+   platform linker's `PROMISE_LLD` (Linux/Windows) or `PROMISE_LD64LLD` (macOS).
+   Each names one binary, so an override of `opt` leaves `llc` and `lld` pinned;
+   naming both `opt` and the linker skips the pinned set entirely, which is what
+   bringing Promise up on a new LLVM version needs.
 
-**Linux:**
-1. Versioned in PATH: `opt-25` down to `opt-22`
-2. Unversioned in PATH: `opt` (version checked)
+`PATH`, Homebrew and `Program Files` are never searched. A toolchain picked up
+from incidental host state makes `bin/build` compile against whatever a machine
+happens to have, so two developers build differently and neither is told; when
+nothing is pinned and nothing is overridden, the build fails with a diagnostic
+naming the missing pinned toolchain.
 
-**Windows:**
-1. `C:\Program Files\LLVM\bin`
-2. `%USERPROFILE%\LLVM\bin`
+Using an override is announced on every run, and `bin/gate` refuses to emit a
+measurement under one — a verdict has to describe the tree, not the machine (see
+[gate-system.md](gate-system.md)).
 
-The linker (`lld`) follows the same search pattern. On macOS it looks for `ld64.lld`, on Linux `ld.lld`, on Windows `lld-link`.
+`bin/build` prints nothing about the toolchain on the ordinary path: a "detected
+LLVM" line naming a toolchain the build does not use is a confident wrong answer.
 
 ### 5. Go compilation
 

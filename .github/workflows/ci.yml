@@ -112,8 +112,10 @@ jobs:
       # pre-staged locally (T0798). The blobs are content-addressed brotli-11
       # slices — ~3-4× smaller than the upstream tarball, cached in the
       # host-stable prebuilts cache, and used identically by debug + release
-      # builds. The `PROMISE_LLVM` env var still works for offline / air-gapped
-      # CI; the fallback path in FindLLVM honors it before any network access.
+      # builds. Nothing is taken from the runner's PATH: for an air-gapped run,
+      # point at each binary explicitly with PROMISE_OPT / PROMISE_LLC / the
+      # platform linker's PROMISE_LLD or PROMISE_LD64LLD (T2108). Note that a
+      # gate refuses to report a measurement made under such an override.
 
       # No musl-dev install: the CRT for static-linked Linux output is a pinned
       # prebuilt fetched by `bin/build` like LLVM itself (T0530). Nothing in the

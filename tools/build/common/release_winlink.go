@@ -40,7 +40,7 @@ const winlinkResDir = "compiler/cmd/promise/resources/winlink/windows-amd64"
 // runReleaseWinlink regenerates the Windows import libraries from the .def files.
 func runReleaseWinlink(root string, args []string) error {
 	fs := flag.NewFlagSet("winlink", flag.ContinueOnError)
-	dllTool := fs.String("llvm-dlltool", "", "path to llvm-dlltool (default: found on PATH)")
+	dllTool := fs.String("llvm-dlltool", "", "path to llvm-dlltool (default: the pinned slim LLVM cache)")
 	defDir := fs.String("def-dir", filepath.Join(root, filepath.FromSlash(winlinkDefDir)), "directory of .def symbol lists")
 	outDir := fs.String("out", filepath.Join(root, filepath.FromSlash(winlinkResDir)), "output directory for generated import libs")
 	if err := fs.Parse(args); err != nil {
@@ -52,7 +52,9 @@ func runReleaseWinlink(root string, args []string) error {
 		tool = resolveWinlinkDllTool(root)
 	}
 	if tool == "" {
-		return fmt.Errorf("llvm-dlltool not found; pass --llvm-dlltool <path> or put it on PATH")
+		return fmt.Errorf("llvm-dlltool not found: the pinned slim LLVM blobs are not staged for %s and could not be fetched\n"+
+			"  it is never taken from PATH — these import libs are embedded in the shipped compiler (T2108)\n"+
+			"  pass --llvm-dlltool <path> to point at one explicitly", CurrentBuildTarget())
 	}
 
 	defs, err := filepath.Glob(filepath.Join(*defDir, "*.def"))
@@ -89,13 +91,12 @@ func runReleaseWinlink(root string, args []string) error {
 }
 
 // resolveWinlinkDllTool locates llvm-dlltool for build-time import-lib
-// generation. It prefers an already-populated slim LLVM prebuilt cache, then a
-// PATH/system install, and finally fetches the slim blobs (T0833 ships
-// llvm-dlltool in the slim set for every host) so a prebuilt-only host with no
-// system LLVM still resolves it. The fetch is necessary because winlink
-// generation runs during EmbedResources, *before* FindLLVM populates the slim
-// cache — so a non-fetching probe would spuriously fail on such hosts.
-// Best-effort: returns "" when nothing is found and the fetch fails, so the
+// generation. It uses an already-populated slim LLVM prebuilt cache, and
+// otherwise fetches the slim blobs (T0833 ships llvm-dlltool in the slim set for
+// every host). The host is never scanned for one: the .lib files this generates
+// are embedded into the shipped compiler, so a stray host llvm-dlltool would put
+// bytes of unknown provenance into the artifact (T2108).
+// Best-effort: returns "" when the cache is empty and the fetch fails, so the
 // caller surfaces a clear error.
 func resolveWinlinkDllTool(root string) string {
 	target := CurrentBuildTarget()
@@ -104,11 +105,8 @@ func resolveWinlinkDllTool(root string) string {
 			return p
 		}
 	}
-	if p := Which("llvm-dlltool"); p != "" {
-		return p
-	}
-	// Nothing cached and not on PATH — fetch the slim blobs (includes the
-	// build-only llvm-dlltool) and re-check the cache.
+	// Nothing cached — fetch the slim blobs (includes the build-only
+	// llvm-dlltool) and re-check the cache.
 	if root != "" {
 		if dir, err := EnsureLLVMBlobs(root, target); err == nil {
 			if p := filepath.Join(dir, "llvm-dlltool"+ExeSuffix()); Exists(p) {
@@ -140,7 +138,7 @@ func ensureWinlinkLibs(root string) error {
 	}
 	// Stale or absent → clear the embed dir and regenerate. resolveWinlinkDllTool
 	// (invoked by runReleaseWinlink) seeds the slim LLVM cache with the build-only
-	// llvm-dlltool (T0833/T0840) when it isn't already on PATH or in the cache.
+	// llvm-dlltool (T0833/T0840) when the cache does not already hold it.
 	os.RemoveAll(outDir)
 	return runReleaseWinlink(root, nil)
 }

@@ -190,7 +190,7 @@ func TestBundledLibSystemLinkFailsOnMissingSymbol(t *testing.T) {
 	if err != nil {
 		t.Skipf("llc unavailable: %v", err)
 	}
-	linker, _, err := findDarwinLinker()
+	linker, err := findDarwinLinker()
 	if err != nil {
 		t.Skipf("ld64.lld unavailable: %v", err)
 	}

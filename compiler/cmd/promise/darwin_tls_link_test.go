@@ -209,7 +209,7 @@ func TestDarwinTLSLinksWithoutXcode(t *testing.T) {
 	if err != nil {
 		t.Skipf("llc unavailable: %v", err)
 	}
-	linker, _, err := findDarwinLinker()
+	linker, err := findDarwinLinker()
 	if err != nil {
 		t.Skipf("ld64.lld unavailable: %v", err)
 	}
@@ -296,9 +296,13 @@ func TestDarwinTLSLinksWithoutXcode(t *testing.T) {
 // Verifying darwin IR needs no darwin host — only the verifier — so this runs
 // everywhere and skips only when the tool itself is missing.
 func TestDarwinTLSIRVerifies(t *testing.T) {
-	llvmAs, err := findLLVMTool("llvm-as")
+	// `opt` rather than `llvm-as`: both parse .ll and run the module verifier,
+	// but only `opt` is part of the pinned toolchain — llvm-as was only ever
+	// resolvable from a system LLVM, so once the host is no longer searched
+	// (T2108) this check would skip forever.
+	optPath, err := findLLVMTool("opt")
 	if err != nil {
-		t.Skipf("llvm-as unavailable: %v", err)
+		t.Skipf("opt unavailable: %v", err)
 	}
 
 	for _, triple := range []string{"arm64-apple-macosx26.0.0", "x86_64-apple-macosx10.15.0"} {
@@ -314,9 +318,9 @@ func TestDarwinTLSIRVerifies(t *testing.T) {
 		if err := os.WriteFile(llPath, []byte(module.String()), 0644); err != nil {
 			t.Fatal(err)
 		}
-		// llvm-as parses and runs the module verifier; -o /dev/null keeps the
+		// opt parses the module and runs the verifier; -disable-output keeps the
 		// bitcode off disk since only the diagnostics matter.
-		out, err := exec.Command(llvmAs, llPath, "-o", os.DevNull).CombinedOutput()
+		out, err := runLLVMCmd(optPath, "-passes=verify", "-disable-output", llPath).CombinedOutput()
 		if err != nil {
 			t.Errorf("%s: Secure Transport IR does not verify:\n%s", triple, out)
 		}

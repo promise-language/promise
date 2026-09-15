@@ -178,6 +178,39 @@ func TestDoctorCheckLLVM(t *testing.T) {
 	}
 }
 
+// TestDoctorCheckLLVMReportsOverride pins what doctor says about WHERE the
+// toolchain came from. A hand-pointed toolchain must be reported as one: a
+// "Source: pinned toolchain" line printed while the build actually uses
+// /opt/homebrew/... describes a machine state that is not this machine's, which
+// is the class of wrong answer T2108 removed.
+func TestDoctorCheckLLVMReportsOverride(t *testing.T) {
+	for _, v := range llvmToolOverrideVars {
+		t.Setenv(v, "")
+	}
+
+	c := doctorCheckLLVM()
+	for _, d := range c.Details {
+		if strings.HasPrefix(d, "Source:") && strings.Contains(d, "override") {
+			t.Fatalf("no override is set, but doctor reported one: %q", d)
+		}
+	}
+
+	t.Setenv("PROMISE_OPT", "/custom/opt")
+	c = doctorCheckLLVM()
+	found := ""
+	for _, d := range c.Details {
+		if strings.HasPrefix(d, "Source:") {
+			found = d
+		}
+	}
+	if !strings.Contains(found, "PROMISE_OPT") {
+		t.Errorf("source line should name the override in effect, got %q", found)
+	}
+	if !strings.Contains(found, "NOT the pinned toolchain") {
+		t.Errorf("source line should say the build is not pinned, got %q", found)
+	}
+}
+
 func TestDoctorCheckMuslCRT(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("musl CRT check is Linux-only")

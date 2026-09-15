@@ -36,6 +36,19 @@ func RunGate(root string, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-web-test  run only wasm32-web target tests (via Node) and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values\n  install     run the end-to-end install gate (--variant {thin|full} [--channel {next|stable|<epoch>}] [--system])\n  latest-invariant  assert `releases/latest` resolves to an epoch-* release (fails fast otherwise)\n  schema      print the test-output JSON schema (see docs/gate-system.md)\n  fit         measure whether this machine may be given work (judge it with bin/run fit)\n\nListing:\n  --list      print the gates this project provides, one name per line\n  --list --json  print the gate manifest as JSON")
 	}
+	// A gate measures the tree on the pinned toolchain. Under a hand-pointed one
+	// the measurement describes the operator's machine instead, and cannot stand
+	// as evidence about a (commit, platform, check) triple — so it is refused as
+	// a verdict source rather than allowed to masquerade as a pinned result
+	// (T2108). The error path prints nothing at all, so a reader gets one
+	// envelope or none. Building and testing by hand under an override is still
+	// fine: bin/build, bin/test and bin/verify announce it and proceed.
+	if overrides := ToolchainOverrides(); len(overrides) > 0 {
+		return fmt.Errorf("refusing to measure under a toolchain override: %s\n"+
+			"  a gate reports what the tree does on the pinned toolchain; this run would report what this machine does\n"+
+			"  unset the variable(s) and re-run, or use bin/test / bin/verify for a by-hand run",
+			strings.Join(overrides, " "))
+	}
 	// Flow-contract gates take the whole argv (`fit --envelope`), because the
 	// runner appends --envelope after the name and nothing else may be accepted.
 	if IsContractGate(args[0]) {

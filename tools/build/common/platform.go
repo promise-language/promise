@@ -10,104 +10,176 @@ import (
 	"strings"
 )
 
-const (
-	LLVMMinVersion = 22
-	LLVMMaxVersion = 25
-)
+// LLVMMinVersion is the minimum LLVM major the generated IR requires
+// (llvm.coro.end returns void from 22 on). It is not a search range: the
+// toolchain is whatever the pinned blobs hold, not whatever a host happens to
+// have (T2108).
+const LLVMMinVersion = 22
 
-// LLVMInfo holds the discovered LLVM tool paths and version.
+// LLVMInfo holds the resolved LLVM tool paths and version.
 type LLVMInfo struct {
 	Version int    // e.g., 23
 	OptPath string // path to opt
 	LLCPath string // path to llc (may be empty on non-Windows)
 	LLDPath string // path to lld/ld.lld/ld64.lld/lld-link
-	// DlltoolPath is the path to llvm-dlltool when resolved from the slim cache /
-	// PROMISE_LLVM override (the prebuilts.toml build-only entry, T0833). Empty
-	// when not present — it is optional (only the winlink import-lib generator
-	// needs it) and never required for the (info, true) resolution contract.
+	// DlltoolPath is the path to llvm-dlltool when resolved from the pinned slim
+	// cache (the prebuilts.toml build-only entry, T0833). Empty when not present
+	// — it is optional (only the winlink import-lib generator needs it) and never
+	// required for the (info, true) resolution contract.
 	DlltoolPath string
 	Dir         string // LLVM base directory (for bundling)
 }
 
-// FindLLVM searches for LLVM tools on the current platform. The lookup order
-// is: (1) explicit PROMISE_LLVM directory override, (2) system discovery
-// (Homebrew/PATH/Program Files), (3) fetch the pinned LLVM from the slim
-// blob catalog into the host-stable prebuilts cache (T0798). `root` is the
-// repo root, used by the slim-fetch fallback to read prebuilts.toml +
-// blobs.json. When the slim fetch fails (no network, no catalog entry, …) the
-// error message lists every path tried so a developer can see why.
+// toolchainOverrideVars lists the environment variables that point at a single
+// LLVM binary each. Setting one is the only way a toolchain from outside the
+// pinned set enters a build, and it is the supported path for bringing Promise
+// up on a new LLVM version (T2108).
+//
+// This is the same vocabulary the compiler uses (llvmToolEnvVars in
+// compiler/cmd/promise/main.go). The compiler and the build tools are separate
+// Go modules, so the small, stable list is spelled once per module rather than
+// imported; keep the two in step.
+var toolchainOverrideVars = []string{
+	"PROMISE_OPT",
+	"PROMISE_LLC",
+	"PROMISE_LLD",
+	"PROMISE_LD64LLD",
+	"PROMISE_WASM_LD",
+	"PROMISE_CLANG",
+	"PROMISE_USE_CLANG",
+}
+
+// ToolchainOverrides returns every toolchain override in effect as
+// "NAME=value", in declaration order, or nil when the build is on the pinned
+// toolchain. Callers that measure the tree (gates) refuse to report under one;
+// callers that build announce it and continue.
+func ToolchainOverrides() []string {
+	var out []string
+	for _, name := range toolchainOverrideVars {
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			out = append(out, name+"="+v)
+		}
+	}
+	return out
+}
+
+// announceToolchainOverrides prints every override in effect. Unconditional and
+// not gated on a verbosity flag: an override left in a shell profile would
+// otherwise silently build against a different toolchain while the operator
+// believes they are on the pinned one (T2108).
+func announceToolchainOverrides() {
+	overrides := ToolchainOverrides()
+	if len(overrides) == 0 {
+		return
+	}
+	// Same shape as the compiler's banner (announceToolchainOverride in
+	// compiler/cmd/promise/main.go): the consequence heads it, the variables
+	// that caused it are listed under it.
+	fmt.Fprintln(os.Stderr, "warning: LLVM toolchain override in effect — this build does NOT use the pinned toolchain:")
+	for _, o := range overrides {
+		fmt.Fprintf(os.Stderr, "warning:   %s\n", o)
+	}
+}
+
+// linkerOverrideVar returns the override variable naming this platform's linker
+// binary, so a per-tool override substitutes exactly one tool.
+func linkerOverrideVar() string {
+	if IsDarwin() {
+		return "PROMISE_LD64LLD"
+	}
+	return "PROMISE_LLD"
+}
+
+// FindLLVM resolves the LLVM tools from the two sources a build may take them
+// from (T2108):
+//
+//  1. The pinned LLVM blobs, fetched into the host-stable prebuilts cache
+//     (T0798). `root` is the repo root, used to read prebuilts.toml + blobs.json.
+//  2. Per-tool environment overrides (PROMISE_OPT, PROMISE_LLC, and the
+//     platform linker's PROMISE_LLD / PROMISE_LD64LLD), overlaid on top — the
+//     explicit new-LLVM-bringup path, announced whenever it is in effect.
+//
+// PATH, Homebrew and Program Files are never consulted. A toolchain discovered
+// from incidental host state makes the build depend on what the machine happens
+// to have installed; absent a pinned toolchain the build fails and says so.
 func FindLLVM(root string) (*LLVMInfo, error) {
-	// 1. Explicit override — PROMISE_LLVM points at a directory holding the
-	// per-prebuilts.toml `out` files (opt/llc/lld[.exe]). Wins outright so a
-	// developer can run against an air-gapped toolchain or a corporate
-	// prebuild without touching code.
-	if dir := strings.TrimSpace(os.Getenv("PROMISE_LLVM")); dir != "" {
-		if info, ok := llvmInfoFromDir(dir); ok {
-			return info, nil
+	announceToolchainOverrides()
+
+	suffix := ExeSuffix()
+	optOverride := strings.TrimSpace(os.Getenv("PROMISE_OPT"))
+	llcOverride := strings.TrimSpace(os.Getenv("PROMISE_LLC"))
+	lldOverride := strings.TrimSpace(os.Getenv(linkerOverrideVar()))
+
+	// Fully overridden: the operator named every binary the build needs, so the
+	// pinned set is not consulted at all (the bringup case, where the pinned
+	// blobs may not exist for the LLVM being brought up).
+	if optOverride != "" && lldOverride != "" {
+		info := &LLVMInfo{
+			OptPath: optOverride,
+			LLCPath: llcOverride,
+			LLDPath: lldOverride,
+			Dir:     filepath.Dir(optOverride),
+			Version: parseLLVMVersion(optOverride),
 		}
-		return nil, fmt.Errorf("PROMISE_LLVM=%q: no opt/llc/lld found under that directory", dir)
+		return info, nil
 	}
 
-	// 2. System discovery — Homebrew, /usr/lib/llvm-N, Program Files.
-	info := &LLVMInfo{}
-	switch runtime.GOOS {
-	case "darwin":
-		findLLVMDarwin(info)
-	case "windows":
-		findLLVMWindows(info)
-	default: // linux and others
-		findLLVMLinux(info)
-	}
-	if info.OptPath != "" {
-		if info.LLDPath == "" {
-			info.LLDPath = findLLD(info)
-		}
-		if info.LLDPath != "" {
-			return info, nil
-		}
+	if root == "" {
+		return nil, fmt.Errorf("no pinned LLVM toolchain: no repo root to read tools/build/prebuilts.toml from\n"+
+			"  PATH and Homebrew are never consulted — build inputs are pinned, not discovered\n"+
+			"  bringing Promise up on a new LLVM version? point at it explicitly: PROMISE_OPT=… PROMISE_LLC=… %s=…",
+			linkerOverrideVar())
 	}
 
-	// 3. Slim blob fallback — fetch pinned LLVM into the host-stable prebuilts
-	// cache. This is what removes the "system LLVM required" setup step.
-	if root != "" {
-		if cacheDir, err := EnsureLLVMBlobs(root, CurrentBuildTarget()); err == nil {
-			if info, ok := llvmInfoFromDir(cacheDir); ok {
-				// A fetched toolchain is not automatically a usable one: the
-				// upstream Linux tarballs are dynamically linked against glibc,
-				// so on a musl host (Alpine) every tool fails to exec. Probe it
-				// here — otherwise the build "succeeds" and ships a compiler
-				// that dies at the first `opt` invocation, far from the cause.
-				if _, verr := probeLLVMVersion(info.OptPath); verr != nil {
-					return nil, fmt.Errorf("fetched LLVM prebuilt for %s cannot run on this host: %w\n"+
-						"  probed: %s --version\n"+
-						"  the upstream LLVM release binaries are dynamically linked against glibc "+
-						"(ld-linux, libc.so.6, libstdc++.so.6); a musl host such as Alpine cannot execute them\n"+
-						"  fix: build on a glibc host, or set PROMISE_LLVM=<dir> to an LLVM %d-%d built for this host",
-						CurrentBuildTarget(), verr, info.OptPath, LLVMMinVersion, LLVMMaxVersion)
-				}
-				return info, nil
-			}
-			suffix := ExeSuffix()
-			missing := filepath.Join(cacheDir, "opt"+suffix)
-			if Exists(missing) {
-				missing = filepath.Join(cacheDir, "lld"+suffix)
-			}
-			return nil, fmt.Errorf("slim-fetch populated %q but required file is missing: %s (the prebuilts.toml files list for this target may be incomplete)", cacheDir, missing)
-		} else {
-			return nil, fmt.Errorf("LLVM %d-%d not found in system search and slim-blob fetch failed: %w (set PROMISE_LLVM=<dir> to point at a local install)", LLVMMinVersion, LLVMMaxVersion, err)
-		}
+	cacheDir, err := EnsureLLVMBlobs(root, CurrentBuildTarget())
+	if err != nil {
+		return nil, fmt.Errorf("no pinned LLVM toolchain for %s: %w\n"+
+			"  PATH and Homebrew are never consulted — build inputs are pinned, not discovered\n"+
+			"  bringing Promise up on a new LLVM version? point at it explicitly: PROMISE_OPT=… PROMISE_LLC=… %s=…",
+			CurrentBuildTarget(), err, linkerOverrideVar())
 	}
 
-	if info.OptPath == "" {
-		return nil, fmt.Errorf("LLVM %d-%d not found (need opt in PATH, Homebrew, or set PROMISE_LLVM)", LLVMMinVersion, LLVMMaxVersion)
+	info, ok := llvmInfoFromDir(cacheDir)
+	if !ok {
+		missing := filepath.Join(cacheDir, "opt"+suffix)
+		if Exists(missing) {
+			missing = filepath.Join(cacheDir, "lld"+suffix)
+		}
+		return nil, fmt.Errorf("pinned toolchain staged into %q but a required file is missing: %s (the prebuilts.toml files list for this target may be incomplete)", cacheDir, missing)
 	}
-	return nil, fmt.Errorf("lld not found (need lld in PATH or Homebrew, or set PROMISE_LLVM)")
+
+	// A fetched toolchain is not automatically a usable one: the upstream Linux
+	// tarballs are dynamically linked against glibc, so on a musl host (Alpine)
+	// every tool fails to exec. Probe it here — otherwise the build "succeeds"
+	// and ships a compiler that dies at the first `opt` invocation, far from the
+	// cause.
+	if _, verr := probeLLVMVersion(info.OptPath); verr != nil {
+		return nil, fmt.Errorf("pinned LLVM prebuilt for %s cannot run on this host: %w\n"+
+			"  probed: %s --version\n"+
+			"  the upstream LLVM release binaries are dynamically linked against glibc "+
+			"(ld-linux, libc.so.6, libstdc++.so.6); a musl host such as Alpine cannot execute them\n"+
+			"  fix: build on a glibc host, or point at an LLVM %d+ built for this host: PROMISE_OPT=… PROMISE_LLC=… %s=…",
+			CurrentBuildTarget(), verr, info.OptPath, LLVMMinVersion, linkerOverrideVar())
+	}
+
+	// Per-tool overlay: an override substitutes exactly that one binary, so the
+	// variable itself states which tool is not the pinned one.
+	if optOverride != "" {
+		info.OptPath = optOverride
+		info.Version = parseLLVMVersion(optOverride)
+	}
+	if llcOverride != "" {
+		info.LLCPath = llcOverride
+	}
+	if lldOverride != "" {
+		info.LLDPath = lldOverride
+	}
+	return info, nil
 }
 
 // llvmInfoFromDir builds an LLVMInfo from a flat directory containing the
 // per-prebuilts.toml `out` names (opt/llc/lld, plus the `.exe` variants on
-// Windows, and the optional build-only llvm-dlltool). Used by both the
-// PROMISE_LLVM override and the slim-fetch fallback. Returns (nil, false) when
+// Windows, and the optional build-only llvm-dlltool). Returns (nil, false) when
 // opt or lld isn't present so the caller can surface a clear error.
 //
 // llvm-dlltool is optional: it only ships as a build-only slim-cache entry on a
@@ -137,239 +209,6 @@ func llvmInfoFromDir(dir string) (*LLVMInfo, bool) {
 		return nil, false
 	}
 	return info, true
-}
-
-// darwinBrewPrefixes returns the Homebrew "opt" prefixes to probe for LLVM/lld.
-// Honors HOMEBREW_PREFIX (exported by `brew shellenv`) so non-standard installs
-// resolve — and so a test can point it at an empty dir to simulate "no system
-// LLVM" (these paths are probed directly, bypassing PATH, so stripping PATH
-// alone does not hide a Homebrew LLVM). Unset → the standard Apple-silicon and
-// Intel locations.
-func darwinBrewPrefixes() []string {
-	if p := strings.TrimSpace(os.Getenv("HOMEBREW_PREFIX")); p != "" {
-		return []string{filepath.Join(p, "opt")}
-	}
-	return []string{"/opt/homebrew/opt", "/usr/local/opt"}
-}
-
-func findLLVMDarwin(info *LLVMInfo) {
-	brewPrefixes := darwinBrewPrefixes()
-
-	// Try versioned Homebrew installs (highest first)
-	for v := LLVMMaxVersion; v >= LLVMMinVersion; v-- {
-		for _, prefix := range brewPrefixes {
-			dir := filepath.Join(prefix, fmt.Sprintf("llvm@%d", v))
-			opt := filepath.Join(dir, "bin", "opt")
-			if Exists(opt) {
-				info.OptPath = opt
-				info.Dir = dir
-				info.Version = v
-				info.LLCPath = filepath.Join(dir, "bin", "llc")
-				// Check for lld in the same LLVM install
-				lld := filepath.Join(dir, "bin", "ld64.lld")
-				if Exists(lld) {
-					info.LLDPath = lld
-				}
-				return
-			}
-		}
-	}
-
-	// Try unversioned Homebrew
-	for _, prefix := range brewPrefixes {
-		dir := filepath.Join(prefix, "llvm")
-		opt := filepath.Join(dir, "bin", "opt")
-		if Exists(opt) {
-			ver := parseLLVMVersion(opt)
-			if ver >= LLVMMinVersion && ver <= LLVMMaxVersion {
-				info.OptPath = opt
-				info.Dir = dir
-				info.Version = ver
-				info.LLCPath = filepath.Join(dir, "bin", "llc")
-				lld := filepath.Join(dir, "bin", "ld64.lld")
-				if Exists(lld) {
-					info.LLDPath = lld
-				}
-				return
-			}
-		}
-	}
-
-	// Fallback: versioned in PATH
-	findLLVMVersionedInPATH(info)
-}
-
-func findLLVMLinux(info *LLVMInfo) {
-	// Versioned in PATH (highest first)
-	for v := LLVMMaxVersion; v >= LLVMMinVersion; v-- {
-		name := fmt.Sprintf("opt-%d", v)
-		if path := Which(name); path != "" {
-			info.OptPath = path
-			info.Version = v
-			info.LLCPath = Which(fmt.Sprintf("llc-%d", v))
-			info.Dir = fmt.Sprintf("/usr/lib/llvm-%d", v)
-			lld := Which(fmt.Sprintf("ld.lld-%d", v))
-			if lld != "" {
-				info.LLDPath = lld
-			}
-			return
-		}
-	}
-
-	// Unversioned
-	if path := Which("opt"); path != "" {
-		ver := parseLLVMVersion(path)
-		if ver >= LLVMMinVersion && ver <= LLVMMaxVersion {
-			info.OptPath = path
-			info.Version = ver
-			info.LLCPath = Which("llc")
-			return
-		}
-	}
-}
-
-func findLLVMWindows(info *LLVMInfo) {
-	searchDirs := []string{
-		filepath.Join(os.Getenv("ProgramFiles"), "LLVM", "bin"),
-		filepath.Join(os.Getenv("USERPROFILE"), "LLVM", "bin"),
-	}
-	for _, dir := range searchDirs {
-		opt := filepath.Join(dir, "opt.exe")
-		if Exists(opt) {
-			ver := parseLLVMVersion(opt)
-			if ver >= LLVMMinVersion && ver <= LLVMMaxVersion {
-				info.OptPath = opt
-				info.Dir = filepath.Dir(dir) // parent of bin/
-				info.Version = ver
-				info.LLCPath = filepath.Join(dir, "llc.exe")
-				lld := filepath.Join(dir, "lld-link.exe")
-				if Exists(lld) {
-					info.LLDPath = lld
-				}
-				return
-			}
-		}
-	}
-
-	// Fallback: PATH
-	if path := Which("opt"); path != "" {
-		ver := parseLLVMVersion(path)
-		if ver >= LLVMMinVersion && ver <= LLVMMaxVersion {
-			info.OptPath = path
-			info.Version = ver
-			info.LLCPath = Which("llc")
-			return
-		}
-	}
-}
-
-func findLLVMVersionedInPATH(info *LLVMInfo) {
-	for v := LLVMMaxVersion; v >= LLVMMinVersion; v-- {
-		name := fmt.Sprintf("opt-%d", v)
-		if path := Which(name); path != "" {
-			info.OptPath = path
-			info.Version = v
-			info.LLCPath = Which(fmt.Sprintf("llc-%d", v))
-			return
-		}
-	}
-
-	// Unversioned fallback
-	if path := Which("opt"); path != "" {
-		ver := parseLLVMVersion(path)
-		if ver >= LLVMMinVersion && ver <= LLVMMaxVersion {
-			info.OptPath = path
-			info.Version = ver
-			info.LLCPath = Which("llc")
-			return
-		}
-	}
-}
-
-func findLLD(info *LLVMInfo) string {
-	switch runtime.GOOS {
-	case "darwin":
-		return findLLDDarwin(info)
-	case "windows":
-		return findLLDWindows(info)
-	default:
-		return findLLDLinux(info)
-	}
-}
-
-func findLLDDarwin(info *LLVMInfo) string {
-	brewPrefixes := darwinBrewPrefixes()
-
-	// Check if lld is in the LLVM directory we already found
-	if info.Dir != "" {
-		lld := filepath.Join(info.Dir, "bin", "ld64.lld")
-		if Exists(lld) {
-			return lld
-		}
-	}
-
-	// Separate lld package
-	for _, prefix := range brewPrefixes {
-		lld := filepath.Join(prefix, "lld", "bin", "ld64.lld")
-		if Exists(lld) {
-			return lld
-		}
-		// Also check under llvm
-		lld = filepath.Join(prefix, "llvm", "bin", "ld64.lld")
-		if Exists(lld) {
-			return lld
-		}
-	}
-
-	// Versioned in PATH
-	for v := LLVMMaxVersion; v >= LLVMMinVersion; v-- {
-		for _, name := range []string{
-			fmt.Sprintf("ld64.lld-%d", v),
-			fmt.Sprintf("lld-%d", v),
-		} {
-			if path := Which(name); path != "" {
-				return path
-			}
-		}
-	}
-
-	// Unversioned
-	if path := Which("ld64.lld"); path != "" {
-		return path
-	}
-	return Which("lld")
-}
-
-func findLLDLinux(info *LLVMInfo) string {
-	// Versioned
-	for v := LLVMMaxVersion; v >= LLVMMinVersion; v-- {
-		for _, name := range []string{
-			fmt.Sprintf("ld.lld-%d", v),
-			fmt.Sprintf("lld-%d", v),
-		} {
-			if path := Which(name); path != "" {
-				return path
-			}
-		}
-	}
-	// Unversioned
-	if path := Which("ld.lld"); path != "" {
-		return path
-	}
-	return Which("lld")
-}
-
-func findLLDWindows(info *LLVMInfo) string {
-	if info.Dir != "" {
-		lld := filepath.Join(info.Dir, "bin", "lld-link.exe")
-		if Exists(lld) {
-			return lld
-		}
-	}
-	if path := Which("lld-link"); path != "" {
-		return path
-	}
-	return Which("lld")
 }
 
 var versionRe = regexp.MustCompile(`version (\d+)\.`)

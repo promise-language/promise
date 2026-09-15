@@ -614,3 +614,42 @@ func TestRunTeeStderr_ErrorWrapsCommandName(t *testing.T) {
 		t.Errorf("error %q does not mention command name", err.Error())
 	}
 }
+
+// TestRunGate_RefusesUnderToolchainOverride pins the T2108 decision about what a
+// verdict is allowed to describe. A gate reports what the tree does on the
+// pinned toolchain; run under a hand-pointed one it would report what this
+// machine does, which cannot stand as evidence about a (commit, platform, check)
+// triple. So it is refused outright rather than allowed to masquerade as a
+// pinned result — and refused before any subcommand dispatch, so no measurement
+// starts and no envelope is produced.
+func TestRunGate_RefusesUnderToolchainOverride(t *testing.T) {
+	for _, envVar := range []string{"PROMISE_OPT", "PROMISE_LD64LLD", "PROMISE_USE_CLANG"} {
+		t.Run(envVar, func(t *testing.T) {
+			clearToolchainOverrides(t)
+			t.Setenv(envVar, "/custom/tool")
+
+			// `test` is a real measurement gate: it must not begin.
+			err := RunGate("", []string{"test", "--envelope"})
+			if err == nil {
+				t.Fatal("expected refusal when a toolchain override is in effect")
+			}
+			if !strings.Contains(err.Error(), "toolchain override") {
+				t.Errorf("error should name the override, got: %v", err)
+			}
+			if !strings.Contains(err.Error(), envVar) {
+				t.Errorf("error should name the variable in effect (%s), got: %v", envVar, err)
+			}
+		})
+	}
+}
+
+// TestRunGate_ListWorksUnderToolchainOverride: --list answers "which gates does
+// this project provide?", which is a property of the repo, not a measurement of
+// it. An override must not make the gate inventory unreadable.
+func TestRunGate_ListWorksUnderToolchainOverride(t *testing.T) {
+	clearToolchainOverrides(t)
+	t.Setenv("PROMISE_OPT", "/custom/opt")
+	if err := RunGate("", []string{"--list"}); err != nil {
+		t.Errorf("--list must still work under an override: %v", err)
+	}
+}

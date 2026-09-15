@@ -42,7 +42,7 @@ There is no C runtime. Every runtime function is codegen-emitted LLVM IR or pure
 
 **LLVM optimizer attributes** on all externs: `noalias`, `nocapture`, `noundef`, `nounwind`, `willreturn`, `readonly`, `argmemonly` (as applicable).
 
-**Build pipeline**: No C compilation — the `.ll` file contains everything. On Linux, `opt -O1` + `llc` + `ld.lld` compile and link with bundled musl CRT (Phase 7b/7b'). On macOS, `opt -O1` + `llc` + system `ld` (or `ld64.lld`) with `-lSystem -syslibroot` (Phase 7c). On WASM, `opt -O1` + `llc` + `wasm-ld` with custom bump allocator and cooperative scheduler — no libc dependency (Phases 4b/5d/7a). On other platforms (or `PROMISE_USE_CLANG=1`), clang acts as driver. Requires LLVM 22+.
+**Build pipeline**: No C compilation — the `.ll` file contains everything. On Linux, `opt -O1` + `llc` + `ld.lld` compile and link with bundled musl CRT (Phase 7b/7b'). On macOS, `opt -O1` + `llc` + `ld64.lld` with `-lSystem -syslibroot` (Apple's system `ld` cannot read LLVM 22+ bitcode, so it is never used). On WASM, `opt -O1` + `llc` + `wasm-ld` with custom bump allocator and cooperative scheduler — no libc dependency (Phases 4b/5d/7a). On other platforms (or `PROMISE_USE_CLANG=1`), clang acts as driver. Requires LLVM 22+.
 
 ---
 
@@ -552,7 +552,7 @@ Windows uses the native object pipeline because MSVC COFF LTO is not yet wired u
 - `compileAndLinkLLVM()` — the `opt → .bc → linker --lto-O1` pipeline (non-Windows) or `opt → llc → .o → lld-link` (Windows)
 - `compileLLToBC(irText, prefix, optPath)` — runs `opt -O1` on IR text, returns `.bc` temp file path
 - `compileAndLinkClang()` — the old clang driver path (fallback)
-- `findLLVMTool(name)` — discovers `opt`/`llc`/`ld.lld` (sibling of binary → env override → versioned PATH → unversioned PATH)
+- `findLLVMTool(name)` — resolves `opt`/`llc`/`ld.lld` from the three pinned sources (env override → sibling of binary → pinned toolchain view); never from the host
 - `findCRT(target)` — discovers system glibc CRT objects via `cc -print-file-name` with fallback path probing
 - `buildLinuxLinkArgs()` — builds the full `ld.lld` argument list (includes `--lto-O1`)
 
@@ -560,57 +560,78 @@ Windows uses the native object pipeline because MSVC COFF LTO is not yet wired u
 
 ### Prerequisites
 
-**Linux** (building from source):
+**Build inputs are pinned and explicit — nothing is discovered from the host.**
+Building the compiler from source needs Go (and a JRE only to regenerate the
+parser after a grammar change, which is rare — the generated parser is
+committed). It does **not** need a system LLVM on any platform:
+
 ```bash
-# Automated (installs LLVM 22+, musl-dev, adds apt.llvm.org if needed):
-sudo bin/install-prereqs.sh
-
-# Or manually — Debian/Ubuntu (use highest available LLVM >= 22):
-sudo apt install llvm-23 lld-23 musl-dev   # from apt.llvm.org
-
-# Fedora
-sudo dnf install llvm lld musl-devel
-
-# Arch
-sudo pacman -S llvm lld musl
+./make        # compile the build tools into bin/
+bin/build     # generate + embed + build -> bin/promise
 ```
 
-Provides: `opt`, `llc`, `ld.lld` (LLVM 22+ tools). Both of these are optional conveniences — `bin/build` fetches LLVM from the pinned prebuilt blobs when the host has none, and the musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`) are **always** fetched from the `[binaries.musl]` prebuilt, so `musl-dev` is no longer required on the build host at all (T0530). The `build-essential` package is not required either (glibc CRT is only used with `PROMISE_USE_CLANG=1`). The LLVM apt repository ([apt.llvm.org](https://apt.llvm.org)) is needed on Ubuntu/Debian if you do want a system LLVM, since stock repos may not have LLVM 22+.
+`bin/build` stages the LLVM toolchain (`opt`, `llc`, `lld`) from the pinned
+prebuilt blobs declared in `tools/build/prebuilts.toml`, and the compiler
+resolves that same pinned toolchain at compile time from the content-addressed
+store. The musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`) are fetched
+from the `[binaries.musl]` prebuilt the same way, so `musl-dev` is not required
+on a Linux build host (T0530), and neither is `build-essential` (the glibc CRT is
+only used with `PROMISE_USE_CLANG=1`). On Windows the link surface is
+self-generated, so no Visual Studio Build Tools and no Windows SDK are needed
+(see [windows-support.md](windows-support.md)).
 
-**macOS** (Phase 7c — opt + llc + ld64.lld):
-```bash
-brew install llvm lld    # provides opt + llc + ld64.lld (LLVM 22+)
-```
-No Xcode/CommandLineTools needed — linking uses a bundled `libSystem.tbd` stub,
-not the host SDK (see "macOS — SDK sysroot requirement" below).
+An LLVM found by scanning `PATH`, Homebrew or Program Files would make the build
+depend on what a machine happens to have installed — one developer's green run
+becoming everyone else's red trunk — so no toolchain is ever taken from the host.
+Absent a pinned toolchain the build fails and says so; it does not go looking for
+a substitute.
 
-**Windows** (clang fallback, Phase 7d pending):
+**Bringing Promise up on a new LLVM version** is the one case for a local LLVM,
+and it is explicit: point at each binary by name. Every override announces itself
+on every run, and gates refuse to report a measurement made under one (see
+[gate-system.md](gate-system.md)).
+
 ```bash
-choco install llvm   # or winget install llvm
-# + Visual Studio Build Tools for CRT libs
+PROMISE_OPT=/path/to/opt PROMISE_LLC=/path/to/llc PROMISE_LD64LLD=/path/to/ld64.lld bin/build
 ```
+
+On macOS, no Xcode/CommandLineTools is needed — linking uses a bundled
+`libSystem.tbd` stub, not the host SDK (see "macOS — SDK sysroot requirement"
+below).
 
 ### Environment Variables
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `PROMISE_USE_CLANG` | Set to `1` to force the clang pipeline instead of opt+llc+lld | (unset — use LLVM pipeline on Linux) |
-| `PROMISE_OPT` | Override path to `opt` binary | Auto-discover |
-| `PROMISE_LLC` | Override path to `llc` binary | Auto-discover |
-| `PROMISE_LLD` | Override path to `ld.lld` binary | Auto-discover |
-| `PROMISE_CLANG` | Override path to `clang` binary (fallback pipeline) | Auto-discover |
+| `PROMISE_OPT` | Point at an `opt` binary explicitly | the pinned toolchain |
+| `PROMISE_LLC` | Point at an `llc` binary explicitly | the pinned toolchain |
+| `PROMISE_LLD` | Point at an `ld.lld` / `lld-link` binary explicitly | the pinned toolchain |
+| `PROMISE_LD64LLD` | Point at an `ld64.lld` binary explicitly (macOS) | the pinned toolchain |
+| `PROMISE_WASM_LD` | Point at a `wasm-ld` binary explicitly | the pinned toolchain |
+| `PROMISE_CLANG` | Point at a `clang` binary explicitly (fallback pipeline) | `clang` |
 | `PROMISE_DUMP_IR` | Write generated LLVM IR to this path (debugging) | (unset — disabled) |
 
-### LLVM Tool Discovery Order
+Each `PROMISE_*` toolchain variable names exactly **one** binary, so the override
+states which tool is not the pinned one and the rest still come from the pinned
+set. Setting any of them leaves the supported configuration, so it is announced
+on every run, and a gate run under one is refused rather than reported.
 
-`findLLVMTool(name)` searches in this order:
-1. **Sibling of binary**: `{promise_dir}/opt`, `{promise_dir}/llc`, `{promise_dir}/ld.lld`
-2. **Environment override**: `$PROMISE_OPT`, `$PROMISE_LLC`, `$PROMISE_LLD`
-3. **Homebrew LLVM** (macOS): `/opt/homebrew/opt/llvm/bin`, `/usr/local/opt/llvm/bin`
-4. **Versioned PATH**: `opt-25`, `opt-24`, ..., `opt-22` (newest to oldest, LLVM 22+ only)
-5. **Unversioned PATH**: `opt`, `llc`, `ld.lld`
+### LLVM Tool Sources
 
-Sibling-first means a bundled Promise installation always uses its own tools regardless of system PATH.
+`findLLVMTool(name)` takes a tool from exactly three places:
+1. **Environment override**: `$PROMISE_OPT`, `$PROMISE_LLC`, `$PROMISE_LLD`, `$PROMISE_LD64LLD`, `$PROMISE_WASM_LD` — the explicit bringup path, announced whenever it is in effect
+2. **Sibling of binary**: `{promise_dir}/opt`, `{promise_dir}/llvm/opt`, … — the shipped install layout
+3. **Pinned toolchain view**: materialized from the content-addressed store, fetching the pinned blobs if this host has not cached them
+
+This is a source list, not a fallback chain. `PATH`, Homebrew and Program Files
+are never consulted, and when none of the three provides the tool the build fails
+with a diagnostic naming the missing pinned toolchain rather than substituting
+whatever else is on the machine.
+
+The override is checked first so an explicit request is never silently outranked
+by a shipped install; with no override, an installed Promise always uses its own
+tools.
 
 ### CRT Object Discovery
 
@@ -772,7 +793,7 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 | `emulationMode(target)` | Returns `elf_x86_64` or `aarch64linux` |
 | `findMacOSSDK()` | Discovers macOS SDK sysroot via `xcrun --show-sdk-path` |
 | `parseDarwinTriple(target)` | Extracts arch + version from macOS target triple |
-| `findDarwinLinker()` | Locates `ld64.lld` or system `ld` for Mach-O linking |
+| `findDarwinLinker()` | Locates `ld64.lld` for Mach-O linking |
 | `buildDarwinLinkArgs(target, obj, out)` | Builds linker args with `-lSystem -syslibroot -platform_version` |
 | `linkDarwin(obj, target, out)` | Runs macOS Mach-O linker (ld64.lld or system ld) |
 | `linkLinux(obj, target, out)` | Runs Linux ELF linker (ld.lld with glibc or musl) |
@@ -819,7 +840,7 @@ Validated: `promise test -stress 20 tests/concurrency/...` — 71 tests, 100% pa
 - **macOS arm64 + amd64**: Self-contained (~71MB). Embeds opt, llc, lld, libLLVM.dylib + liblld*.dylib + transitive deps (libz3, libzstd). Links `-lSystem` against a bundled stub sysroot (§"macOS — SDK sysroot requirement" below) — no Xcode CLT required.
 
 **Build modes**:
-- `make build` / `./build` — dev build (~14-16MB), uses system LLVM tools
+- `make build` / `./build` — dev build (~14-16MB); resolves the pinned toolchain from the content-addressed store at compile time
 - `make release` / `./build --release` — release build, embeds LLVM tools (dev/slim path: gzip; dist-CAS publish path: brotli `.br`)
 
 **Embedded LLVM tools** (gated by `-tags embed_llvm`):
@@ -838,15 +859,11 @@ Validated: `promise test -stress 20 tests/concurrency/...` — 71 tests, 100% pa
 
 **`make llvm-bundle-darwin`** bundles from Homebrew: finds `llvm` and `lld` formulas separately, discovers transitive non-system deps via `otool -L`, gzip-compresses all files.
 
-**Tool discovery order** (implemented in `findLLVMTool()`):
-1. **Sibling directory**: `{promise_dir}/opt`, `{promise_dir}/llvm/opt` (install layout)
-2. **Env override**: `PROMISE_OPT`, `PROMISE_LLC`, `PROMISE_LLD`, `PROMISE_LD64LLD` (for development/testing)
-3. **Embedded cache**: `~/.promise/cache/llvm/<platform>/` (extracted from embedded on first access)
-4. **Homebrew LLVM** (macOS): `/opt/homebrew/opt/llvm/bin`, `/usr/local/opt/llvm/bin`, `/opt/homebrew/opt/lld/bin`, `/usr/local/opt/lld/bin`
-5. **Versioned PATH**: `opt-25` down to `opt-22`, `llc-25` down to `llc-22`, etc.
-6. **Unversioned PATH**: `opt`, `llc`, `ld.lld`
-
-Looking next to the binary first means an installed Promise always finds its own tools, regardless of system PATH changes or Homebrew upgrades. The embedded cache fallback means a release binary works on a fresh machine with zero LLVM installation.
+**Tool sources** (implemented in `findLLVMTool()`): the explicit `PROMISE_*`
+override, the sibling install layout, then the pinned toolchain view — and
+nothing else; see "LLVM Tool Sources" above. A release binary works on a fresh
+machine with zero LLVM installation because its toolchain ships with it, not
+because it can find one.
 
 ### Bundled musl libc
 

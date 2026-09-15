@@ -228,6 +228,10 @@ func printVersion() {
 }
 
 func main() {
+	// A hand-pointed toolchain is announced before anything else it could
+	// affect, for every command (T2108).
+	announceToolchainOverrides()
+
 	if len(os.Args) < 2 {
 		// If stdin is piped, treat as inline exec
 		if info, err := os.Stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice == 0 {
@@ -4112,10 +4116,6 @@ func useClangPipeline(target string) bool {
 // Applies to both the opt/llc/linker pipeline and the clang fallback.
 const minLLVMMajor = 22
 
-// maxLLVMSearch is the highest LLVM version to probe when searching PATH for
-// versioned tool names (e.g. opt-25, opt-24, ..., opt-20).
-const maxLLVMSearch = 25
-
 // findClang returns the path to a clang binary.
 // Prefers Homebrew LLVM over Apple clang.
 func findClang() string {
@@ -4251,26 +4251,46 @@ func llvmEmbeddedFiles() []string {
 
 // --- LLVM tool pipeline ---
 
-// findLLVMTool locates an LLVM tool (opt, llc, ld.lld, ld64.lld) by searching:
-//  1. Sibling directory of the promise binary
-//  2. Environment variable override (PROMISE_OPT, PROMISE_LLC, PROMISE_LLD, PROMISE_LD64LLD)
-//  3. Content-addressed store — a pre-staged toolchain view (CAS hit only, no
-//     network), preferred over a system LLVM so full builds stay deterministic
-//  4. Homebrew LLVM (macOS)
-//  5. Versioned names on PATH (e.g., opt-22, llc-22, ld.lld-22) from newest to minLLVMMajor
-//  6. Unversioned names on PATH (e.g., opt, llc, ld.lld)
-//  7. Content-addressed store — fetch the host toolchain on demand (last resort;
-//     surfaces the §4.4 offline / broken-release error)
-func findLLVMTool(name string) (string, error) {
-	envMap := map[string]string{
-		"opt":      "PROMISE_OPT",
-		"llc":      "PROMISE_LLC",
-		"ld.lld":   "PROMISE_LLD",
-		"ld64.lld": "PROMISE_LD64LLD",
-		"wasm-ld":  "PROMISE_WASM_LD",
-		"lld-link": "PROMISE_LLD",
-	}
+// llvmToolEnvVars maps an LLVM tool name to the environment variable that
+// points at it explicitly. Setting one is the ONLY way a toolchain from outside
+// the pinned set enters a build (T2108), and it is the supported path for
+// bringing Promise up on a new LLVM version. Using one is announced — see
+// announceToolchainOverride.
+//
+// The build tools spell the same vocabulary in toolchainOverrideVars
+// (tools/build/common/platform.go), which is what `bin/build` announces and what
+// `bin/gate` refuses to measure under. They are separate Go modules, so this
+// short, stable list lives once per module rather than being imported; a
+// variable added here belongs there too.
+var llvmToolEnvVars = map[string]string{
+	"opt":      "PROMISE_OPT",
+	"llc":      "PROMISE_LLC",
+	"ld.lld":   "PROMISE_LLD",
+	"ld64.lld": "PROMISE_LD64LLD",
+	"wasm-ld":  "PROMISE_WASM_LD",
+	"lld-link": "PROMISE_LLD",
+}
 
+// findLLVMTool locates an LLVM tool (opt, llc, ld.lld, ld64.lld) from the three
+// sources a build is allowed to take one from:
+//
+//  1. Environment override (PROMISE_OPT, PROMISE_LLC, PROMISE_LLD,
+//     PROMISE_LD64LLD, PROMISE_WASM_LD) — the explicit new-LLVM-bringup path.
+//     First, because an explicit request that a shipped install could silently
+//     outrank is an explicit request dropped.
+//  2. Sibling directory of the promise binary (and `llvm/` beside it) — the
+//     shipped install layout.
+//  3. Content-addressed store — the toolchain view materialized from the pinned
+//     blobs, fetching them if they are not cached yet (a fetch failure surfaces
+//     the §4.4 offline / broken-release error verbatim).
+//
+// This is a source list, not a fallback chain: PATH, Homebrew, Program Files and
+// every other property of the host are never consulted. A toolchain discovered
+// from incidental host state makes a build's result depend on what the machine
+// happens to have installed, which is how one developer's green run becomes
+// everyone else's red trunk (T2108). Absent a pinned toolchain the build fails
+// and says so rather than finding something else.
+func findLLVMTool(name string) (string, error) {
 	// On Windows, tools have .exe extension — try with suffix first, then bare name.
 	// On other platforms, just search the bare name.
 	searchNames := []string{name}
@@ -4278,13 +4298,23 @@ func findLLVMTool(name string) (string, error) {
 		searchNames = []string{name + ".exe", name}
 	}
 
-	// 1. Sibling of promise binary (also check llvm/ subdirectory for install layout)
+	// 1. Env override — the operator pointing at a toolchain by hand.
+	envName := llvmToolEnvVars[name]
+	if envName != "" {
+		if p := strings.TrimSpace(os.Getenv(envName)); p != "" {
+			announceToolchainOverride(envName, p)
+			return p, nil
+		}
+	}
+
+	// 2. Sibling of promise binary (also check llvm/ subdirectory for install layout)
+	siblingDir := ""
 	if execPath, err := os.Executable(); err == nil {
-		dir := filepath.Dir(execPath)
+		siblingDir = filepath.Dir(execPath)
 		for _, n := range searchNames {
 			for _, candidate := range []string{
-				filepath.Join(dir, n),
-				filepath.Join(dir, "llvm", n),
+				filepath.Join(siblingDir, n),
+				filepath.Join(siblingDir, "llvm", n),
 			} {
 				if _, err := os.Stat(candidate); err == nil {
 					return candidate, nil
@@ -4293,75 +4323,126 @@ func findLLVMTool(name string) (string, error) {
 		}
 	}
 
-	// 2. Env override
-	if envName, ok := envMap[name]; ok {
-		if p := os.Getenv(envName); p != "" {
-			return p, nil
-		}
-	}
-
-	// 3. Content-addressed store — pre-staged toolchain view, CAS hit only (no
-	//    network). Prefer it over a system LLVM so full builds are deterministic.
-	if viewDir, _ := resolveLLVMView(false); viewDir != "" {
+	// 3. The pinned toolchain view, materialized from the content-addressed
+	//    store (fetching the blobs if this host has not cached them yet).
+	viewDir, verr := resolveLLVMView(true)
+	if viewDir != "" {
 		for _, n := range searchNames {
 			p := filepath.Join(viewDir, n)
 			if _, err := os.Stat(p); err == nil {
 				return p, nil
 			}
 		}
+	} else if verr != nil {
+		return "", verr
 	}
 
-	// 4. Homebrew LLVM/LLD (macOS only)
-	if runtime.GOOS == "darwin" {
-		for _, prefix := range []string{
-			"/opt/homebrew/opt/llvm/bin",
-			"/usr/local/opt/llvm/bin",
-			"/opt/homebrew/opt/lld/bin",
-			"/usr/local/opt/lld/bin",
-		} {
-			p := filepath.Join(prefix, name)
-			if _, err := os.Stat(p); err == nil {
-				return p, nil
-			}
-		}
-	}
+	return "", missingPinnedToolchainError(name, envName, siblingDir, viewDir)
+}
 
-	// 5. Versioned names on PATH (try newest to oldest)
-	for v := maxLLVMSearch; v >= minLLVMMajor; v-- {
-		versioned := fmt.Sprintf("%s-%d", name, v)
-		if path, err := exec.LookPath(versioned); err == nil {
-			return path, nil
-		}
+// missingPinnedToolchainError reports that no pinned toolchain provides a tool,
+// naming each source that was consulted and the explicit path out. It must never
+// suggest installing a system LLVM: "install LLVM and we will find it" is the
+// behaviour T2108 removed.
+func missingPinnedToolchainError(name, envName, siblingDir, viewDir string) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s not found: no pinned LLVM toolchain provides it\n", name)
+	if envName != "" {
+		fmt.Fprintf(&b, "  $%s: unset\n", envName)
 	}
-
-	// 6. Unversioned on PATH
-	if path, err := exec.LookPath(name); err == nil {
-		return path, nil
+	if siblingDir != "" {
+		fmt.Fprintf(&b, "  next to the promise binary: no %s in %s\n", name, siblingDir)
 	}
-
-	// 7. Content-addressed store — fetch the host toolchain from the manifest
-	//    sources (last resort). A fetch failure surfaces the §4.4 offline /
-	//    broken-release error directly.
-	if viewDir, ferr := resolveLLVMView(true); viewDir != "" {
-		for _, n := range searchNames {
-			p := filepath.Join(viewDir, n)
-			if _, err := os.Stat(p); err == nil {
-				return p, nil
-			}
-		}
-	} else if ferr != nil {
-		return "", ferr
-	}
-
-	envName := envMap[name]
-	hint := fmt.Sprintf("%s not found\n  searched: sibling of promise binary, $%s, dependency cache, Homebrew LLVM, PATH (%s-{%d..%d}, %s)\n  install LLVM %d+",
-		name, envName, name, maxLLVMSearch, minLLVMMajor, name, minLLVMMajor)
-	if runtime.GOOS == "darwin" {
-		hint += " (brew install llvm lld)"
+	if viewDir == "" {
+		b.WriteString("  pinned toolchain view: not staged for this host\n")
 	} else {
-		hint += " or set PROMISE_USE_CLANG=1 to use clang"
+		fmt.Fprintf(&b, "  pinned toolchain view: no %s in %s\n", name, viewDir)
 	}
-	return "", fmt.Errorf("%s", hint)
+	b.WriteString("  PATH and Homebrew are never consulted — build inputs are pinned, not discovered\n")
+	b.WriteString("  offline? run `promise install` while online, or use the -full build\n")
+	b.WriteString("  bringing Promise up on a new LLVM version? point at it explicitly:\n")
+	fmt.Fprintf(&b, "    PROMISE_OPT=… PROMISE_LLC=… %s=… promise build …", platformLinkerEnvVar())
+	return errors.New(b.String())
+}
+
+// platformLinkerEnvVar returns the override variable for this platform's linker,
+// so the bringup hint names the one the reader actually needs.
+func platformLinkerEnvVar() string {
+	if runtime.GOOS == "darwin" {
+		return "PROMISE_LD64LLD"
+	}
+	return "PROMISE_LLD"
+}
+
+// toolchainOverrideAnnounced dedups the override banner within a process:
+// findLLVMTool is called several times per build, and the banner is a statement
+// about the configuration, not a per-lookup progress line.
+var toolchainOverrideAnnounced sync.Map
+
+// toolchainWarnW is where the override banner goes. A variable so a test can
+// read what was announced without swapping the process's stderr.
+var toolchainWarnW io.Writer = os.Stderr
+
+// announceToolchainOverride prints that a hand-pointed toolchain is in use.
+// Unconditional and not gated on a verbosity flag: an override left in a shell
+// profile would otherwise reproduce the exact defect T2108 removes — building
+// against a different toolchain while believing you are on the pinned one.
+// Silent only in a test child, whose output the parent parses and whose command
+// already announced the override once.
+func announceToolchainOverride(envName, path string) {
+	if runningUnderTestParent() {
+		return
+	}
+	if _, seen := toolchainOverrideAnnounced.LoadOrStore(envName, true); seen {
+		return
+	}
+	// The consequence heads the banner and is stated once; the variables that
+	// caused it are listed under it, one per line, however many are set and
+	// whether they are announced together at startup or one at a time as each
+	// tool is resolved.
+	if _, said := toolchainOverrideAnnounced.LoadOrStore(toolchainBannerSaid, true); !said {
+		fmt.Fprintln(toolchainWarnW, "warning: LLVM toolchain override in effect — this build does NOT use the pinned toolchain:")
+	}
+	fmt.Fprintf(toolchainWarnW, "warning:   %s=%s\n", envName, path)
+}
+
+// toolchainBannerSaid is the sentinel key under which the banner's heading
+// records that it has been printed. It is not an environment variable name, so
+// it cannot collide with one.
+const toolchainBannerSaid = "\x00banner-said"
+
+// toolchainOverridesInEffect returns the name of every toolchain override
+// variable that is set, in a stable order (sorted, not map order: the same
+// configuration must read the same way every run). Empty when the build is on
+// the pinned toolchain. One answer to "is this build pinned?", so the banner and
+// `promise doctor` cannot disagree about it.
+func toolchainOverridesInEffect() []string {
+	names := []string{"PROMISE_CLANG", "PROMISE_USE_CLANG"}
+	seen := map[string]bool{}
+	for _, envName := range llvmToolEnvVars {
+		if !seen[envName] {
+			seen[envName] = true
+			names = append(names, envName)
+		}
+	}
+	sort.Strings(names)
+	var inEffect []string
+	for _, envName := range names {
+		if strings.TrimSpace(os.Getenv(envName)) != "" {
+			inEffect = append(inEffect, envName)
+		}
+	}
+	return inEffect
+}
+
+// announceToolchainOverrides announces every override in effect. Called once at
+// startup so the banner appears even for a command that resolves no tool itself
+// (the multi-file test runner only spawns children), and so it is the first
+// thing printed rather than buried in the build output.
+func announceToolchainOverrides() {
+	for _, envName := range toolchainOverridesInEffect() {
+		announceToolchainOverride(envName, strings.TrimSpace(os.Getenv(envName)))
+	}
 }
 
 // runLLVMCmd creates an exec.Cmd for an LLVM tool, setting the platform-appropriate
@@ -4584,11 +4665,8 @@ func checkLLVMToolVersion(toolPath string) {
 	if v < minLLVMMajor {
 		fmt.Fprintf(os.Stderr, "error: LLVM version %d is too old (minimum required: %d)\n", v, minLLVMMajor)
 		fmt.Fprintf(os.Stderr, "  tool path: %s\n", toolPath)
-		if runtime.GOOS == "darwin" {
-			fmt.Fprintf(os.Stderr, "  install LLVM %d+ (brew install llvm lld)\n", minLLVMMajor)
-		} else {
-			fmt.Fprintf(os.Stderr, "  install LLVM %d+ or set PROMISE_USE_CLANG=1 to use clang\n", minLLVMMajor)
-		}
+		fmt.Fprintf(os.Stderr, "  the pinned toolchain is LLVM %d+; this tool came from an override or a stale view\n", minLLVMMajor)
+		fmt.Fprintln(os.Stderr, "  run `promise doctor --repair` to restage the pinned toolchain")
 		os.Exit(1)
 	}
 }
@@ -4971,26 +5049,15 @@ func parseDarwinTriple(target string) darwinTripleInfo {
 // Apple's system ld bundles its own LLVM version which cannot read bitcode from
 // newer LLVM versions (e.g., system ld has LLVM 17 but opt produces LLVM 22 bitcode),
 // so we require ld64.lld (which is version-matched to the LLVM toolchain).
-// Release builds embed lld; dev builds need it installed (e.g., brew install lld).
-// Returns (path, isLLD, error).
-func findDarwinLinker() (string, bool, error) {
-	// 1. Try ld64.lld via standard LLVM tool discovery
-	if path, err := findLLVMTool("ld64.lld"); err == nil {
-		return path, true, nil
+// It comes from the same pinned sources as every other tool — PROMISE_LD64LLD is
+// the one explicit spelling (T2108).
+func findDarwinLinker() (string, error) {
+	path, err := findLLVMTool("ld64.lld")
+	if err != nil {
+		return "", fmt.Errorf("%w\n  (required for macOS linking: Apple's system ld cannot process LLVM %d+ bitcode)",
+			err, minLLVMMajor)
 	}
-
-	// 2. Environment override
-	if p := os.Getenv("PROMISE_LD"); p != "" {
-		return p, false, nil
-	}
-
-	hint := "ld64.lld not found (required for macOS linking)\n"
-	hint += "  Apple's system ld cannot process LLVM 22+ bitcode\n"
-	hint += "\n"
-	hint += "  fix: install lld to get a version-matched LLVM linker\n"
-	hint += "    brew install lld\n"
-	hint += "  or: run bin/install-prereqs.sh"
-	return "", false, fmt.Errorf("%s", hint)
+	return path, nil
 }
 
 // isDarwinTarget returns true if the target triple is macOS/Darwin.
@@ -5031,7 +5098,7 @@ func isTestExcluded(target string, excludes []string) bool {
 }
 
 // buildDarwinLinkArgs builds the linker argument list for macOS Mach-O linking.
-// Works with ld64.lld and PROMISE_LD override linkers. needsTLS adds the two
+// needsTLS adds the two
 // frameworks the Secure Transport backend needs (T1599); programs that do not
 // import the tls module link exactly as before.
 func buildDarwinLinkArgs(target, objFile, outputFile string, needsTLS bool) []string {
@@ -5640,67 +5707,26 @@ func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode, needsTLS
 
 // linkDarwin runs ld64.lld for macOS Mach-O linking.
 // Accepts LLVM bitcode (.bc) or native object (.o) as input.
-// Uses --lto-O1 for LTO when useLTO is true. The !isLLD path is only reachable via PROMISE_LD override.
+// Uses --lto-O1 for LTO when useLTO is true.
 func linkDarwin(bcOrObjFile, target, outputFile string, useLTO, needsTLS bool) error {
-	linkerPath, isLLD, err := findDarwinLinker()
+	linkerPath, err := findDarwinLinker()
 	if err != nil {
 		return fmt.Errorf("error: %w", err)
 	}
-	if isLLD {
-		checkLLVMToolVersion(linkerPath)
-	}
+	checkLLVMToolVersion(linkerPath)
 
-	fileToLink := bcOrObjFile
-	// PROMISE_LD override: non-LLD linker cannot process LLVM bitcode — run llc first.
-	if !isLLD && strings.HasSuffix(bcOrObjFile, ".bc") {
-		llcPath, lerr := findLLVMTool("llc")
-		if lerr != nil {
-			return fmt.Errorf("error: PROMISE_LD linker requires native object but llc not found: %w", lerr)
-		}
-		nativeObj, nerr := os.CreateTemp("", "promise-darwin-*.o")
-		if nerr != nil {
-			return fmt.Errorf("error creating temp file: %w", nerr)
-		}
-		nativeObj.Close()
-		defer os.Remove(nativeObj.Name())
-		llcArgs := []string{
-			"-mtriple=" + target, "-filetype=obj",
-			"-function-sections", "-relocation-model=pic",
-			bcOrObjFile, "-o", nativeObj.Name(),
-		}
-		if err := runResilient(func() *exec.Cmd {
-			c := runLLVMCmd(llcPath, llcArgs...)
-			c.Stderr = os.Stderr
-			return c
-		}); err != nil {
-			return fmt.Errorf("error running llc for PROMISE_LD linker: %w", err)
-		}
-		fileToLink = nativeObj.Name()
-	}
-
-	linkArgs := buildDarwinLinkArgs(target, fileToLink, outputFile, needsTLS)
-	if !useLTO {
+	linkArgs := buildDarwinLinkArgs(target, bcOrObjFile, outputFile, needsTLS)
+	if useLTO {
+		linkArgs = append([]string{"--lto-O1"}, linkArgs...)
+	} else {
 		linkArgs = append([]string{"-dead_strip"}, linkArgs...) // DCE for non-LTO object files
 	}
-	if isLLD && useLTO {
-		linkArgs = append([]string{"--lto-O1"}, linkArgs...)
-	}
 	if err := runResilient(func() *exec.Cmd {
-		var c *exec.Cmd
-		if isLLD {
-			c = runLLVMCmd(linkerPath, linkArgs...)
-		} else {
-			c = exec.Command(linkerPath, linkArgs...)
-			detachFromConsole(c)
-		}
+		c := runLLVMCmd(linkerPath, linkArgs...)
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {
-		linkerName := "ld"
-		if isLLD {
-			linkerName = "ld64.lld"
-		}
-		return fmt.Errorf("error linking (%s): %w", linkerName, err)
+		return fmt.Errorf("error linking (ld64.lld): %w", err)
 	}
 	return nil
 }
@@ -6069,13 +6095,11 @@ func linkLinux(objFile, target, outputFile string, useLTO, needsTLS bool) error 
 
 // linkDarwinMulti links multiple .o/.bc files on macOS.
 func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO, needsTLS bool) error {
-	linkerPath, isLLD, err := findDarwinLinker()
+	linkerPath, err := findDarwinLinker()
 	if err != nil {
 		return fmt.Errorf("error: %w", err)
 	}
-	if isLLD {
-		checkLLVMToolVersion(linkerPath)
-	}
+	checkLLVMToolVersion(linkerPath)
 
 	sdk, err := findMacOSSDK()
 	if err != nil {
@@ -6095,29 +6119,17 @@ func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO, needs
 	if needsTLS {
 		linkArgs = append(linkArgs, "-framework", "Security", "-framework", "CoreFoundation")
 	}
-	if !useLTO {
+	if useLTO {
+		linkArgs = append([]string{"--lto-O1"}, linkArgs...)
+	} else {
 		linkArgs = append([]string{"-dead_strip"}, linkArgs...) // DCE for non-LTO object files
 	}
-
-	if isLLD && useLTO {
-		linkArgs = append([]string{"--lto-O1"}, linkArgs...)
-	}
 	if err := runResilient(func() *exec.Cmd {
-		var c *exec.Cmd
-		if isLLD {
-			c = runLLVMCmd(linkerPath, linkArgs...)
-		} else {
-			c = exec.Command(linkerPath, linkArgs...)
-			detachFromConsole(c)
-		}
+		c := runLLVMCmd(linkerPath, linkArgs...)
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {
-		linkerName := "ld"
-		if isLLD {
-			linkerName = "ld64.lld"
-		}
-		return fmt.Errorf("error linking (%s): %w", linkerName, err)
+		return fmt.Errorf("error linking (ld64.lld): %w", err)
 	}
 	return nil
 }

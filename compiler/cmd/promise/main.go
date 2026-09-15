@@ -4775,18 +4775,26 @@ func tryCRTFallback(info *crtInfo, missing []string, target string) {
 
 // --- macOS (Phase 7c) ---
 
-// macOSSDKInfo holds discovered macOS SDK information for linking.
+// macOSSDKInfo holds the bundled macOS SDK stub information for linking.
 type macOSSDKInfo struct {
-	sysroot    string // SDK path from xcrun --show-sdk-path
-	sdkVersion string // SDK version from xcrun --show-sdk-version (e.g. "15.2")
+	sysroot string // bundled SDK stub path (cache/sdk/macos)
 }
 
 // bundledLibSystemTBD is a minimal hand-crafted TAPI TBD v4 stub describing
 // /usr/lib/libSystem.B.dylib with only the symbols Promise programs reference.
-// This allows linking without Xcode Command Line Tools installed. The TBD tells
-// the linker these symbols exist; at runtime dyld resolves them from the real
-// system dylib. Symbol list derived from PAL source audit + nm -u on compiled
-// binaries. (T0178)
+// This is macOS's entire link surface (T1609) — no host SDK is ever consulted,
+// so this stub must be complete on its own. The TBD tells the linker these
+// symbols exist; at runtime dyld resolves them from the real system dylib.
+//
+// The symbol list is not meant to be hand-maintained from here on: it is
+// checked by TestBundledLibSystemLinksRepresentativePrograms
+// (darwin_libsystem_link_test.go), which actually links a representative
+// program set (every catalog module as its own test binary — std, io, net, os,
+// tls, http, time, json, crypto — plus a plain `test`-tagged binary) against
+// nothing but this stub, rather than trusting a frozen list. A link is the
+// ground truth a source/IR sweep can't be: some of these symbols (e.g.
+// `_memmove`, `___sincos_stret`) are injected by opt/llc lowering, not
+// referenced by name anywhere in PAL source (T1609).
 const bundledLibSystemTBD = `--- !tapi-tbd
 tbd-version:     4
 targets:         [ x86_64-macos, arm64-macos ]
@@ -4794,7 +4802,7 @@ install-name:    '/usr/lib/libSystem.B.dylib'
 current-version: 1000
 exports:
   - targets:     [ x86_64-macos, arm64-macos ]
-    symbols:     [ _malloc, _free, _realloc, _malloc_size, _memset, _memcpy,
+    symbols:     [ _malloc, _free, _realloc, _malloc_size, _memset, _bzero, _memcpy,
                    _memcmp, _strlen, _write, _read, _exit, __exit,
                    _pthread_create, _pthread_join, _pthread_attr_init,
                    _pthread_attr_destroy, _pthread_attr_setstacksize,
@@ -4804,18 +4812,21 @@ exports:
                    _pthread_cond_wait, _pthread_cond_signal,
                    _pthread_cond_broadcast, _pthread_cond_destroy,
                    _open, _close, _lseek, _unlink, _access, _mkdir, _rmdir,
-                   _stat, _lstat,
+                   _stat, _lstat, _fstat, _rename, _fsync, _ftruncate, _flock,
                    _fcntl, _opendir, _closedir, _readdir,
-                   _fork, _execvp, _dup2, _pipe, _waitpid, _kill, _getpid,
+                   _fork, _execv, _execvp, _dup2, _pipe, _waitpid, _kill,
+                   _getpid, _setpgid, _proc_pidinfo,
                    _socket, _bind, _listen, _accept, _connect, _send, _recv,
                    _shutdown, _getsockname, _getsockopt, _setsockopt,
-                   _getaddrinfo, _freeaddrinfo, _inet_pton,
+                   _getaddrinfo, _freeaddrinfo, _inet_pton, _inet_ntop,
                    _signal, _sigaction, _sigaltstack,
                    _getenv, _setenv, _unsetenv, _environ,
                    _getcwd, _chdir, _getuid, _getpwuid, _gethostname,
+                   _getentropy,
                    _sysconf, _kqueue, _kevent, _nanosleep, _usleep,
+                   _clock_gettime, _memmove,
                    _sin, _cos, _exp, _log, _pow, _sqrt, _fabs, _floor,
-                   _ceil, _round, ___error, __tlv_bootstrap,
+                   _ceil, _round, ___sincos_stret, ___error, __tlv_bootstrap,
                    dyld_stub_binder ]
 ...
 `
@@ -4866,8 +4877,10 @@ exports:
 `
 
 // ensureBundledSDK writes the bundled libSystem TBD stub to the Promise cache
-// directory and returns an SDK info pointing to it. Used as fallback when
-// xcrun is unavailable (no Xcode CLT installed). (T0178)
+// directory and returns an SDK info pointing to it. This is the only macOS SDK
+// path (T0178, made exclusive by T1609) — no host Xcode/CLT is ever consulted,
+// so the host's Xcode version, CLT version and license state never affect
+// whether a Promise program links.
 func ensureBundledSDK() (*macOSSDKInfo, error) {
 	home, err := module.PromiseHome()
 	if err != nil {
@@ -4923,25 +4936,13 @@ func ensureBundledSDK() (*macOSSDKInfo, error) {
 	return &macOSSDKInfo{sysroot: sdkDir}, nil
 }
 
-// findMacOSSDK discovers the macOS SDK sysroot. First tries xcrun (fast path
-// when Xcode CLT is installed), then falls back to bundled libSystem TBD
-// stubs so linking works without any external SDK. (T0178)
+// findMacOSSDK returns the macOS SDK sysroot for linking: the bundled
+// libSystem TBD stubs, always. No SDK discovery (T1609, mirroring T0772's
+// removal of findWindowsSDK()'s probe): a host's Xcode version, CommandLineTools
+// version, and Xcode license state are never build inputs, so a machine with no
+// Xcode installed, an unlicensed Xcode, or an Xcode whose SDK our vendored lld
+// cannot parse (Xcode 27's `arm64e.x1` target spelling) all link identically.
 func findMacOSSDK() (*macOSSDKInfo, error) {
-	// 1. Try xcrun (fast path — CLT installed).
-	if sysroot, err := exec.Command("xcrun", "--show-sdk-path").Output(); err == nil {
-		sysrootPath := strings.TrimSpace(string(sysroot))
-		if sysrootPath != "" {
-			if _, err := os.Stat(sysrootPath); err == nil {
-				info := &macOSSDKInfo{sysroot: sysrootPath}
-				if sdkVer, err := exec.Command("xcrun", "--show-sdk-version").Output(); err == nil {
-					info.sdkVersion = strings.TrimSpace(string(sdkVer))
-				}
-				return info, nil
-			}
-		}
-	}
-
-	// 2. Fall back to bundled SDK stubs.
 	return ensureBundledSDK()
 }
 
@@ -5042,15 +5043,9 @@ func buildDarwinLinkArgs(target, objFile, outputFile string, needsTLS bool) []st
 
 	tri := parseDarwinTriple(target)
 
-	// Use SDK version for -platform_version if available, otherwise deployment target.
-	sdkVersion := tri.minVersion
-	if sdk.sdkVersion != "" {
-		sdkVersion = sdk.sdkVersion
-	}
-
 	args := []string{
 		"-arch", tri.arch,
-		"-platform_version", "macos", tri.minVersion, sdkVersion,
+		"-platform_version", "macos", tri.minVersion, tri.minVersion,
 		"-syslibroot", sdk.sysroot,
 		"-o", outputFile,
 		objFile,
@@ -6088,14 +6083,10 @@ func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO, needs
 	}
 
 	tri := parseDarwinTriple(target)
-	sdkVersion := tri.minVersion
-	if sdk.sdkVersion != "" {
-		sdkVersion = sdk.sdkVersion
-	}
 
 	linkArgs := []string{
 		"-arch", tri.arch,
-		"-platform_version", "macos", tri.minVersion, sdkVersion,
+		"-platform_version", "macos", tri.minVersion, tri.minVersion,
 		"-syslibroot", sdk.sysroot,
 		"-o", outputFile,
 	}

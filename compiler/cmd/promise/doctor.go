@@ -89,9 +89,6 @@ func runDoctor(args []string) {
 		doctorCheckEpochs(),
 		doctorCheckCAS(flags),
 	)
-	if runtime.GOOS == "darwin" {
-		checks = append(checks, doctorCheckXcodeCLT())
-	}
 	// Dev-only checks (compiler development / non-native targets) are gated behind
 	// -dev. They are never required to build/run/test native Promise programs from a
 	// release binary, so a fresh end-user install should not warn about them (T0819).
@@ -705,24 +702,6 @@ func doctorCheckCAS(flags doctorFlags) doctorCheck {
 		c.Details = append(c.Details, fmt.Sprintf("corrupt %s %s", ce.Kind, ce.Hash))
 	}
 	c.Fix = "promise doctor --repair"
-	return c
-}
-
-func doctorCheckXcodeCLT() doctorCheck {
-	c := makeDoctorCheck("Xcode Command Line Tools", doctorOK, true)
-
-	cmd := exec.Command("xcode-select", "-p")
-	out, err := cmd.Output()
-	if err != nil {
-		c.Status = doctorErr.String()
-		c.Summary = "Not installed"
-		c.Fix = "xcode-select --install"
-		return c
-	}
-
-	path := strings.TrimSpace(string(out))
-	c.Summary = "Installed: " + path
-
 	return c
 }
 

@@ -24,15 +24,21 @@ func TestBundledLibSystemTBDContent(t *testing.T) {
 		t.Error("TBD should reference libSystem.B.dylib")
 	}
 
-	// Verify essential symbol categories are present.
+	// Verify essential symbol categories are present. This is a cheap smoke
+	// check, not the source of truth — TestBundledLibSystemLinksRepresentativePrograms
+	// (darwin_libsystem_link_test.go) derives the actual requirement by linking
+	// real compiled programs and is what catches drift (T1609).
 	essentialSymbols := []string{
 		"_malloc", "_free", "_realloc", // memory
 		"_pthread_create", "_pthread_join", // threading
 		"_write", "_read", "_exit", // I/O
-		"_stat", "_lstat", // file metadata
+		"_stat", "_lstat", "_fstat", "_rename", "_fsync", "_ftruncate", "_flock", // file metadata/ops
 		"_socket", "_bind", "_listen", // networking
+		"_inet_ntop", "_getentropy", // networking / entropy
 		"_kqueue", "_kevent", // macOS events
-		"_sin", "_cos", "_sqrt", // math
+		"_clock_gettime", "_memmove", "_bzero", // timing / backend-injected
+		"_execv", "_setpgid", "_proc_pidinfo", // process
+		"_sin", "_cos", "_sqrt", "___sincos_stret", // math
 		"___error",         // errno
 		"dyld_stub_binder", // dynamic linker
 	}
@@ -56,9 +62,6 @@ func TestEnsureBundledSDKFresh(t *testing.T) {
 	expectedSysroot := filepath.Join(tmp, "cache", "sdk", "macos")
 	if info.sysroot != expectedSysroot {
 		t.Errorf("sysroot = %q, want %q", info.sysroot, expectedSysroot)
-	}
-	if info.sdkVersion != "" {
-		t.Errorf("sdkVersion should be empty for bundled SDK, got %q", info.sdkVersion)
 	}
 
 	// Verify TBD file was written.
@@ -162,10 +165,24 @@ func TestEnsureBundledSDKSkipsWriteWhenCurrent(t *testing.T) {
 	}
 }
 
-func TestFindMacOSSDKSucceeds(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS != "darwin" {
-		t.Skip("macOS-only test")
+// TestFindMacOSSDKNeverConsultsXcrun is the regression guard for T1609: no host
+// Xcode/CommandLineTools state is a build input any more, so findMacOSSDK must
+// always return the bundled stub — even on a host where xcrun is present,
+// licensed and would happily report a real (or, per T1609, unparseable) SDK.
+// A fake xcrun that succeeds is planted on PATH; if findMacOSSDK is ever changed
+// to consult it again, this test's sysroot check fails instead of the regression
+// waiting for another Xcode release to surface it.
+func TestFindMacOSSDKNeverConsultsXcrun(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	if runtime.GOOS != "windows" {
+		fakeDir := t.TempDir()
+		fakeXcrun := filepath.Join(fakeDir, "xcrun")
+		if err := os.WriteFile(fakeXcrun, []byte("#!/bin/sh\necho /fake/xcode/sdk\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
 
 	info, err := findMacOSSDK()
@@ -173,41 +190,33 @@ func TestFindMacOSSDKSucceeds(t *testing.T) {
 		t.Fatalf("findMacOSSDK failed: %v", err)
 	}
 
-	if info.sysroot == "" {
-		t.Error("sysroot should not be empty")
+	if !strings.Contains(info.sysroot, filepath.Join("cache", "sdk", "macos")) {
+		t.Errorf("findMacOSSDK must always return the bundled sysroot, got %q", info.sysroot)
 	}
-	if _, err := os.Stat(info.sysroot); err != nil {
-		t.Errorf("sysroot path does not exist: %s", info.sysroot)
-	}
-}
-
-func TestFindMacOSSDKFallback(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("macOS-only test")
-	}
-
-	tmp := t.TempDir()
-	t.Setenv("PROMISE_HOME", tmp)
-
-	// Make xcrun unfindable by clearing PATH.
-	t.Setenv("PATH", "/nonexistent")
-
-	info, err := findMacOSSDK()
-	if err != nil {
-		t.Fatalf("findMacOSSDK should fall back to bundled SDK: %v", err)
-	}
-
-	// Should have used bundled SDK (sysroot in our temp PROMISE_HOME).
-	if !strings.Contains(info.sysroot, "cache/sdk/macos") {
-		t.Errorf("expected bundled SDK sysroot, got %q", info.sysroot)
-	}
-	if info.sdkVersion != "" {
-		t.Errorf("bundled SDK should have empty sdkVersion, got %q", info.sdkVersion)
+	if info.sysroot == "/fake/xcode/sdk" {
+		t.Fatal("findMacOSSDK invoked xcrun from PATH — the host SDK must never be consulted (T1609)")
 	}
 
 	// Verify the TBD file exists.
 	tbdPath := filepath.Join(info.sysroot, "usr", "lib", "libSystem.B.tbd")
 	if _, err := os.Stat(tbdPath); err != nil {
 		t.Errorf("bundled TBD file not created: %v", err)
+	}
+}
+
+// TestBuildDarwinLinkArgsPlatformVersionUsesDeploymentTarget pins that, with no
+// SDK version ever available (T1609 — the bundled stub reports none), both
+// -platform_version arguments fall back to the same deployment-target value
+// rather than one of them silently going empty. linkDarwinMulti builds this
+// argument the same way from the same two (tri.minVersion, tri.minVersion)
+// values, so this one pure-function call covers both call sites.
+func TestBuildDarwinLinkArgsPlatformVersionUsesDeploymentTarget(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	want := "-platform_version macos 14.0.0 14.0.0"
+	got := strings.Join(buildDarwinLinkArgs("arm64-apple-macosx14.0.0", "/tmp/x.o", "/tmp/x", false), " ")
+	if !strings.Contains(got, want) {
+		t.Errorf("platform_version args = %q, want to contain %q", got, want)
 	}
 }

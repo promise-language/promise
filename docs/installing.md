@@ -30,8 +30,10 @@ Verify with `promise version`, and keep it current with `promise update`.
 
 - **Supported platforms:** macOS Apple Silicon (arm64), Linux x86_64 and arm64, Windows x86_64.
   Intel Macs (x86_64) are not supported.
-- **macOS** also needs the Xcode Command Line Tools (`xcode-select --install`) for
-  now; a bundled SDK stub is on the way.
+- **macOS needs no prerequisites** — no Xcode, no Command Line Tools. Promise
+  links against its own bundled `libSystem` stub (see
+  [distribution.md](distribution.md) §5.1); the host's Xcode/CLT installation,
+  version, or license state never affects whether a Promise program links.
 - **Pin an epoch** instead of the latest stable:
   `curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh -s -- --epoch 2026.0`
 - **No-script install** (direct binary download + checksum verify) is

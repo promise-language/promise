@@ -577,11 +577,12 @@ sudo pacman -S llvm lld musl
 
 Provides: `opt`, `llc`, `ld.lld` (LLVM 22+ tools). Both of these are optional conveniences — `bin/build` fetches LLVM from the pinned prebuilt blobs when the host has none, and the musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`) are **always** fetched from the `[binaries.musl]` prebuilt, so `musl-dev` is no longer required on the build host at all (T0530). The `build-essential` package is not required either (glibc CRT is only used with `PROMISE_USE_CLANG=1`). The LLVM apt repository ([apt.llvm.org](https://apt.llvm.org)) is needed on Ubuntu/Debian if you do want a system LLVM, since stock repos may not have LLVM 22+.
 
-**macOS** (Phase 7c — opt + llc + system ld):
+**macOS** (Phase 7c — opt + llc + ld64.lld):
 ```bash
-brew install llvm    # provides opt + llc (LLVM 22+)
-xcode-select --install  # provides macOS SDK + system ld
+brew install llvm lld    # provides opt + llc + ld64.lld (LLVM 22+)
 ```
+No Xcode/CommandLineTools needed — linking uses a bundled `libSystem.tbd` stub,
+not the host SDK (see "macOS — SDK sysroot requirement" below).
 
 **Windows** (clang fallback, Phase 7d pending):
 ```bash
@@ -809,13 +810,13 @@ Validated: `promise test -stress 20 tests/concurrency/...` — 71 tests, 100% pa
 
 ### Distribution
 
-**Goal**: once `promise` is installed, it has zero external dependencies. No system LLVM, no Homebrew, no Xcode CLT (except macOS `-lSystem`). A fresh machine with the Promise tarball can compile and link.
+**Goal**: once `promise` is installed, it has zero external dependencies. No system LLVM, no Homebrew, no Xcode CLT. A fresh machine with the Promise tarball can compile and link.
 
 **Phase 7f (Done)**: LLVM tools are compressed and embedded in the Go binary via `go:embed` for release builds. Platform-specific embed files select the correct tools per OS/arch combination. The codec is self-describing via the file extension — the dist-CAS publish path embeds the brotli `<sha>.br` directly (T0807), the dev/slim + Homebrew paths embed `.gz`; the runtime dispatches on the extension (`decompressEmbeddedLLVM`).
 
 **Supported platforms**:
 - **Linux x86_64**: Fully self-contained (~61MB). Embeds opt, llc, lld, libLLVM.so + musl CRT. Produces fully static binaries.
-- **macOS arm64 + amd64**: Self-contained (~71MB). Embeds opt, llc, lld, libLLVM.dylib + liblld*.dylib + transitive deps (libz3, libzstd). Requires Xcode CLT for macOS SDK sysroot (`-lSystem`).
+- **macOS arm64 + amd64**: Self-contained (~71MB). Embeds opt, llc, lld, libLLVM.dylib + liblld*.dylib + transitive deps (libz3, libzstd). Links `-lSystem` against a bundled stub sysroot (§"macOS — SDK sysroot requirement" below) — no Xcode CLT required.
 
 **Build modes**:
 - `make build` / `./build` — dev build (~14-16MB), uses system LLVM tools
@@ -894,16 +895,24 @@ These objects are built once per musl release and checked into the Promise relea
 
 ### macOS — SDK sysroot requirement
 
-macOS is the one platform where a full zero-dependency bundle isn't possible. Apple requires linking against `-lSystem` from the macOS SDK, which is part of Xcode or CommandLineTools. This is unavoidable — even Zig and Go require it on macOS.
-
-Mitigation: the Promise installer can check for CommandLineTools and prompt `xcode-select --install` if missing. This is a one-time setup that most Mac developer machines already have.
+Apple requires linking against `-lSystem`, which normally means the macOS SDK
+sysroot from Xcode or CommandLineTools. Promise does not consult either: it
+links against a bundled, hand-authored `libSystem.tbd` stub instead (see
+[distribution.md](distribution.md) §5.1, `findMacOSSDK`/`ensureBundledSDK` in
+`compiler/cmd/promise/main.go`), the same zero-dependency approach as the
+Windows self-generated import libs (§3.3-equivalent, T0772) and Linux's vendored
+musl. No host Xcode/CommandLineTools installation, version, or license state is
+a build input (T1609) — the alternative, pinning to a specific host SDK, breaks
+on the next machine that ships only a newer one, which is exactly how this
+project ended up needing the bundled stub in the first place (Xcode 27's SDK
+introduced a TBD target spelling, `arm64e.x1`, our vendored `lld` cannot parse).
 
 **macOS linker command**:
 ```bash
 llc -O1 -mtriple=arm64-apple-macosx14.0.0 -filetype=obj promise.ll -o promise.o
 ld64.lld promise.o -o output \
   -lSystem \
-  -syslibroot $(xcrun --show-sdk-path) \
+  -syslibroot <bundled-sdk-stub-dir> \
   -arch arm64 \
   -platform_version macos 14.0.0 14.0.0
 ```
@@ -938,7 +947,7 @@ The bundled-binaries approach (Phase 7) is the pragmatic first step. The long-te
 | Platform | Build pipeline | External deps (source build) |
 |----------|---------------|------|
 | **Linux** | `opt` + `llc` + `ld.lld` + bundled musl CRT → **fully static** | LLVM 22+ (`opt`, `llc`, `lld`), `musl-dev` (embedded at compile time) |
-| **macOS** | `opt` + `llc` + system `ld` (or `ld64.lld`) | LLVM 22+ (`opt`, `llc`), Xcode CommandLineTools (SDK + `ld`) |
+| **macOS** | `opt` + `llc` + `ld64.lld` against a bundled SDK stub | LLVM 22+ (`opt`, `llc`, `ld64.lld`) — no Xcode CommandLineTools |
 | **Windows** | clang (fallback) | clang 22+ |
 | **WASM** | `opt` + `llc` + `wasm-ld` (no CRT, bump allocator, coop scheduler) | LLVM 22+ (`opt`, `llc`, `wasm-ld`) |
 
@@ -947,7 +956,7 @@ The bundled-binaries approach (Phase 7) is the pragmatic first step. The long-te
 | Platform | Release install includes | External deps |
 |----------|----------------------|---------------|
 | **Linux** | `promise` + `opt` + `llc` + `lld` + musl CRT | **None** — fully static binaries |
-| **macOS** | `promise` + `opt` + `llc` + `lld` | Xcode CommandLineTools (for `-lSystem`) |
+| **macOS** | `promise` + `opt` + `llc` + `lld` + bundled `libSystem.tbd` stub | **None** — no Xcode CommandLineTools |
 | **Windows** | `promise` + `opt` + `llc` + `lld` | VS Build Tools (for CRT libs) |
 | **WASM** | `promise` + `opt` + `llc` + `wasm-ld` | **None** — no CRT needed |
 

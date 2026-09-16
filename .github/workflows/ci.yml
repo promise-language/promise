@@ -139,6 +139,32 @@ jobs:
         shell: bash
         run: bin/build
 
+      # Windows only: run the suite under a %TEMP% that carries an 8.3 short
+      # component (…\PROMIS~1) — the shape of the runner's own
+      # C:\Users\RUNNER~1 that reddened trunk in T2094. The GitHub image happens
+      # to satisfy this today, which is exactly the complaint: stating it here
+      # means the coverage does not vanish silently if the image's user or TEMP
+      # ever changes (T2125). Placed immediately before the test step so nothing
+      # else in the job is affected. The suite's own standing reproduction does
+      # NOT depend on this step — clitest.ShortNameDir builds the short/long pair
+      # itself, so the case also runs on every local bin/verify.
+      # pwsh, not powershell: PowerShell 7's `>>` writes UTF-8 without a BOM,
+      # which is what GITHUB_ENV parses. Windows PowerShell 5.1 defaults to
+      # UTF-16LE there and the assignments are silently ignored.
+      - name: Pin the 8.3 short-path case (Windows)
+        if: ${{ inputs.run_tests && runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $long = 'C:\t\promise-8dot3-temp'
+          New-Item -ItemType Directory -Force $long | Out-Null
+          $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($long).ShortPath
+          if ($short -eq $long) {
+            throw "8dot3 name creation is disabled on C: - this step would be a silent no-op (T2125)"
+          }
+          Write-Host "TMP/TEMP -> $short"
+          "TMP=$short"  >> $env:GITHUB_ENV
+          "TEMP=$short" >> $env:GITHUB_ENV
+
       - name: Test — Go + Promise
         if: ${{ inputs.run_tests }}
         shell: bash

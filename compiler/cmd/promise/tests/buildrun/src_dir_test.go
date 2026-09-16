@@ -75,23 +75,46 @@ func probeField(t *testing.T, out, key string) string {
 // filepath.EvalSymlinks happens to expand 8.3 components on Windows - incidental
 // to a function named for symlinks. os.SameFile asserts the property directly and
 // requires no spelling to be canonical.
+//
+// The two failure paths differ deliberately: a got that does not stat is a
+// product failure, a want that does not stat is a broken fixture.
 func assertSameDir(t *testing.T, got, want, what string) {
 	t.Helper()
-	if got == want {
+	same, gotErr, wantErr := sameDir(got, want)
+	if same {
 		return
+	}
+	switch {
+	case gotErr != nil:
+		t.Errorf("%s = %q, want the directory %q (and %q does not stat: %v)", what, got, want, got, gotErr)
+	case wantErr != nil:
+		t.Fatalf("test setup is broken: %s expects directory %q, which does not stat: %v", what, want, wantErr)
+	default:
+		t.Errorf("%s = %q, want the directory %q - two different directories, not two spellings of one", what, got, want)
+	}
+}
+
+// sameDir reports whether got and want name one directory rather than two, and
+// which side failed to stat when it cannot tell.
+//
+// It is the whole comparison assertSameDir makes, separated from the reporting so
+// that it can be exercised against a genuine 8.3 short/long pair (T2125): a
+// helper whose only output is a *testing.T failure can be shown to accept the
+// right answer, but never to reject a wrong one, and a comparison that accepted
+// everything would read as coverage. short_path_test.go holds both halves.
+func sameDir(got, want string) (same bool, gotErr, wantErr error) {
+	if got == want {
+		return true, nil, nil
 	}
 	gotInfo, err := os.Stat(got)
 	if err != nil {
-		t.Errorf("%s = %q, want the directory %q (and %q does not stat: %v)", what, got, want, got, err)
-		return
+		return false, err, nil
 	}
 	wantInfo, err := os.Stat(want)
 	if err != nil {
-		t.Fatalf("test setup is broken: %s expects directory %q, which does not stat: %v", what, want, err)
+		return false, nil, err
 	}
-	if !os.SameFile(gotInfo, wantInfo) {
-		t.Errorf("%s = %q, want the directory %q - two different directories, not two spellings of one", what, got, want)
-	}
+	return os.SameFile(gotInfo, wantInfo), nil, nil
 }
 
 // writeProbe writes the probe program into dir under name and returns its path.

@@ -85,7 +85,7 @@ type progressRun struct {
 	args, env      []string
 	stdout, stderr string
 	err            error
-	exitCode       int // -1: killed by a signal, or never started
+	exitCode       int // -1: killed by the deadline, or never started
 	timedOut       bool
 	budget         time.Duration // the deadline this run was given
 	elapsed        time.Duration
@@ -153,14 +153,26 @@ func runProgressWithin(t *testing.T, bin string, env []string, budget time.Durat
 	cmd.WaitDelay = 5 * time.Second
 	start := time.Now()
 	err := cmd.Run()
+	timedOut := ctx.Err() != nil
 	code := -1
 	if cmd.ProcessState != nil {
 		code = cmd.ProcessState.ExitCode()
 	}
+	// A child killed by the deadline has no exit status of its own, and the two
+	// platforms disagree about how to say so. Unix reports the SIGKILL as -1:
+	// the child was signalled, never exited. Windows has no signals, so Kill()
+	// is TerminateProcess(h, 1) and the child genuinely *exits* 1 — the very
+	// code a suite that reported failures exits with, which is what
+	// runProgressFailing below reads as "reported a failure". Normalize, so -1
+	// means "no status of its own" on every platform and an exit-1 expectation
+	// can never be satisfied by a corpse (T2122).
+	if timedOut {
+		code = -1
+	}
 	return progressRun{
 		args: args, env: env,
 		stdout: out.String(), stderr: errb.String(),
-		err: err, exitCode: code, timedOut: ctx.Err() != nil,
+		err: err, exitCode: code, timedOut: timedOut,
 		budget: budget, elapsed: time.Since(start),
 	}
 }
@@ -185,9 +197,11 @@ func runProgressOK(t *testing.T, bin string, env []string, args ...string) progr
 }
 
 // runProgressFailing requires exit code 1 — `promise test` reports a failing
-// suite, and a usage error, with exactly that. A signal (-1), a Go panic (2) or
-// a memory-limit abort (134) is a dead child rather than a reported failure, and
-// must not satisfy a test that only asked for "non-zero".
+// suite, and a usage error, with exactly that. A killed child (-1, normalized
+// by runProgressWithin so Windows' TerminateProcess exit 1 cannot masquerade as
+// a reported failure), a Go panic (2) or a memory-limit abort (134) is a dead
+// child rather than a reported failure, and must not satisfy a test that only
+// asked for "non-zero".
 func runProgressFailing(t *testing.T, bin string, env []string, args ...string) progressRun {
 	t.Helper()
 	return runProgressExpectingExit(t, bin, env, 1, args...)

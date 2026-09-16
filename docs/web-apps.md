@@ -50,7 +50,7 @@ on every target. The callback *value* needs no new language work.
 **Goroutines on WASM.** Green threads multiplexed onto the single physical
 thread are fully functional. Verified:
 
-```
+```promise
 main() `test(expected: "in goroutine\ngot 42\n") {
   t := go { print_line("in goroutine"); 42 };
   v := <-t;
@@ -101,7 +101,7 @@ Today's `wasm32-web` build assumes the exact opposite, in two places.
 (`sched.go:2710-2758`) loops on `promise_sched_coop_step`; when no G is
 runnable it exits only if `main_done`, and otherwise aborts. Verified:
 
-```
+```promise
 main() `test(expected: "before recv\n") {
   ch := channel[int](0);
   print_line("before recv");
@@ -309,10 +309,10 @@ the poller, which is why the signal shape fits and the netpoll shape does not.
 
 This is the highest-leverage API decision in the design. Two candidates:
 
-```
+```promise
 // (a) registration
 main() {
-  web.on(canvas, "mousedown", (MouseEvent e) { ... });
+  web.on(canvas, "mousedown", |MouseEvent e| { ... });
 }
 
 // (b) event channel
@@ -404,7 +404,7 @@ subscriptions, and the design does not pretend to offer one.
 
 Within the loop, the remaining choice is how each event is handled:
 
-```
+```promise
 for e in events {
   match e.kind {
     MouseMove => dispatch(e),             // inline: cheap, strictly ordered
@@ -541,12 +541,12 @@ Layer 1 is a language capability, not bindgen plumbing that happens to be
 reachable. The acceptance test is a hand-written program with no generated
 bindings anywhere in it:
 
-```
+```promise
 use web;
 
 main() {
   clicks := web.events(web.document.body, ["click"]);
-  mut count := 0;
+  count := 0;
   for e in clicks {
     count = count + 1;
     web.console.log("click " + count.to_string());

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -371,5 +372,125 @@ func TestReplaceSymlinkRetryingExhausts(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Errorf("expected only the original entry, got %d", len(entries))
+	}
+}
+
+// TestCopyFileAtomicMultiBufferPayload pins copyFileAtomic's contract over a
+// payload larger than one io.Copy buffer: byte-exact, right permissions, and
+// still atomic — no staging file survives.
+//
+// Whether the implementation streams is not observable from out here (a
+// whole-file read produces the same bytes); that it must is stated where the
+// function is, and is why it replaced copyFile's os.ReadFile — a ~200 MB
+// allocation per toolchain blob on the path a cold PROMISE_HOME takes before it
+// can compile anything (T2133). What this catches is a chunked copy that drops
+// or reorders a buffer, which is the way that change could have gone wrong.
+func TestCopyFileAtomicMultiBufferPayload(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "blob")
+	// Several io.Copy buffers (32 KiB each) of a position-dependent pattern, so
+	// a copy that dropped or reordered a chunk cannot pass.
+	payload := make([]byte, 300*1024)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+	if err := os.WriteFile(src, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "opt")
+	if err := copyFileAtomic(src, dst, 0o755); err != nil {
+		t.Fatalf("copyFileAtomic: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("copied %d bytes, want the source's %d, byte-identical", len(got), len(payload))
+	}
+	if runtime.GOOS != "windows" { // Windows does not model Unix permission bits.
+		info, err := os.Stat(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o755 {
+			t.Errorf("perm = %v, want 0755", info.Mode().Perm())
+		}
+	}
+	// Atomic: the staging file is renamed into place, never left behind.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			t.Errorf("staging file %q left behind", e.Name())
+		}
+	}
+}
+
+// TestCopyFileAtomicMissingSourceReports: a copy that cannot start returns the
+// error rather than creating an empty destination. copyFile turns this into an
+// exit; the view materializer turns it into a failed publish, and neither may
+// be handed a truncated tool.
+func TestCopyFileAtomicMissingSourceReports(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "opt")
+	if err := copyFileAtomic(filepath.Join(dir, "absent"), dst, 0o755); err == nil {
+		t.Fatal("copyFileAtomic of a missing source returned nil")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("a failed copy left %q behind: %v", dst, err)
+	}
+}
+
+// TestCopyFileAtomicNoDestinationDirReports: the staging file is created beside
+// the destination, so a view dir that vanished underneath — a concurrent clean,
+// a publish that was rolled back — must surface as an error rather than as a
+// silently missing tool the linker discovers later.
+func TestCopyFileAtomicNoDestinationDirReports(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "blob")
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "gone", "opt")
+	if err := copyFileAtomic(src, dst, 0o755); err == nil {
+		t.Fatal("copyFileAtomic into a missing directory returned nil")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("a failed copy left %q behind: %v", dst, err)
+	}
+}
+
+// TestCopyFileAtomicUnreadableSourceReports: a source that opens but cannot be
+// read through — a blob path that is a directory — must fail the copy and clean
+// up its staging file, never publish a truncated tool.
+func TestCopyFileAtomicUnreadableSourceReports(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "not-a-blob")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "opt")
+	if err := copyFileAtomic(src, dst, 0o755); err == nil {
+		t.Fatal("copyFileAtomic of a directory returned nil")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("a failed copy published %q: %v", dst, err)
+	}
+	// And the staging file it opened is gone, so a retry is not blocked by it.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			t.Errorf("a failed copy left the staging file %q behind", e.Name())
+		}
 	}
 }

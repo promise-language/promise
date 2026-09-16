@@ -2,13 +2,11 @@ package testrun
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
@@ -47,21 +45,20 @@ func TestStuckGoroutineReportsNamedTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := time.Now()
 	// -progress full: the follow-on test's `pass` line is asserted below, and
 	// pass lines are suppressed by default when stdout is a pipe (T1888).
-	out, runErr := exec.Command(promiseBin, "test", "-progress", "full", "-timeout", "2s", src).CombinedOutput()
-	elapsed := time.Since(start)
-	combined := string(out)
+	//
+	// The child is bounded by clitest's backstop rather than measured against a
+	// wall clock. The old form asserted elapsed < 3m and, when a saturated
+	// runner blew it, reported "the drain deadline did not bound the wedge" —
+	// naming the drain when the drain was never involved (T2133). What the
+	// deadline really did is what the TIMEOUT assertions below read, and those
+	// hold only if it fired.
+	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", "-timeout", "2s", src).RequireRan(t)
+	combined := r.Combined()
 
-	if runErr == nil {
-		t.Fatalf("expected non-zero exit for a timed-out test.\nOutput:\n%s", combined)
-	}
-	// The whole point: this used to cost the full 10-minute compile backstop.
-	// The budget here is compile + 2s drain + slack, not a timing assertion on
-	// the deadline itself.
-	if elapsed > 3*time.Minute {
-		t.Errorf("run took %s — the drain deadline did not bound the wedge.\nOutput:\n%s", elapsed, combined)
+	if r.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit for a timed-out test:%s", r.Detail())
 	}
 	if !strings.Contains(combined, "TIMEOUT (") {
 		t.Errorf("expected a TIMEOUT outcome.\nOutput:\n%s", combined)
@@ -113,10 +110,10 @@ func TestStuckGoroutineWordingAndFailPrecedence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, runErr := exec.Command(promiseBin, "test", "-timeout", "2s", src).CombinedOutput()
-	combined := string(out)
-	if runErr == nil {
-		t.Fatalf("expected non-zero exit.\nOutput:\n%s", combined)
+	r := clitest.Run(t, promiseBin, nil, "test", "-timeout", "2s", src).RequireRan(t)
+	combined := r.Combined()
+	if r.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit:%s", r.Detail())
 	}
 
 	// Plural wording, and the count is this test's own goroutines.
@@ -189,10 +186,10 @@ func TestTimedOutTestDoesNotStallLaterDrains(t *testing.T) {
 
 	// -progress full: the later tests' `pass` lines are asserted below, and
 	// pass lines are suppressed by default when stdout is a pipe (T1888).
-	out, runErr := exec.Command(promiseBin, "test", "-progress", "full", src).CombinedOutput()
-	combined := string(out)
-	if runErr == nil {
-		t.Fatalf("expected non-zero exit for the timed-out test.\nOutput:\n%s", combined)
+	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", src).RequireRan(t)
+	combined := r.Combined()
+	if r.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit for the timed-out test:%s", r.Detail())
 	}
 
 	if !regexp.MustCompile(`TIMEOUT \([\d.]+s\) a_times_out_holding_a_goroutine`).MatchString(combined) {

@@ -2,11 +2,9 @@ package testrun
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
@@ -62,20 +60,21 @@ func TestMissedJoinSignalReportsNamedTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := time.Now()
 	// -progress full: the follow-on test's `pass` line is asserted below, and
 	// pass lines are suppressed by default when stdout is a pipe (T1888).
-	out, runErr := exec.Command(promiseBin, "test", "-progress", "full", "-timeout", "2s", src).CombinedOutput()
-	elapsed := time.Since(start)
-	combined := string(out)
+	//
+	// The child is bounded by clitest's backstop rather than measured against a
+	// wall clock. The old form asserted elapsed < 3m and, when a saturated
+	// runner blew it, reported "the per-test deadline did not bound the blocked
+	// join" — naming the scheduler for a host that was merely busy, and for a
+	// clock that included the child's cold compile (T2133). That the deadline
+	// bounded the join is what the TIMEOUT assertions below read, and every one
+	// of them holds only if it fired.
+	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", "-timeout", "2s", src).RequireRan(t)
+	combined := r.Combined()
 
-	if runErr == nil {
-		t.Fatalf("expected non-zero exit for a test wedged on its own join.\nOutput:\n%s", combined)
-	}
-	// A blocked receive must cost the per-test budget, not the process backstop.
-	// Compile plus a 2s deadline plus slack — not an assertion on the deadline.
-	if elapsed > 3*time.Minute {
-		t.Errorf("run took %s — the per-test deadline did not bound the blocked join.\nOutput:\n%s", elapsed, combined)
+	if r.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit for a test wedged on its own join:%s", r.Detail())
 	}
 	if !strings.Contains(combined, "TIMEOUT (") {
 		t.Errorf("expected a TIMEOUT outcome.\nOutput:\n%s", combined)

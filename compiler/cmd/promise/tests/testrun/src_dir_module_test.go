@@ -55,9 +55,9 @@ func TestModuleTestSrcDirIsModuleDir(t *testing.T) {
 	bin := clitest.Bin(t)
 	epoch := clitest.CompilerEpoch(t)
 
-	// Inherits this package's isolated PROMISE_HOME (clitest.IsolateHome, in
-	// TestMain), so both invocations share one build cache — which is the point
-	// when the thing under test is a cache key.
+	// Inherits this package's PROMISE_HOME (clitest.SharedHome, in TestMain),
+	// so both invocations share one build cache — which is the point when the
+	// thing under test is a cache key.
 	runTest := func(dir string) (string, error) {
 		cmd := exec.Command(bin, "test", ".")
 		cmd.Dir = dir

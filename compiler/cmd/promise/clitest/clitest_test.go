@@ -181,3 +181,154 @@ func TestBuildCommandsSpellBothForms(t *testing.T) {
 		t.Errorf("relative command = %q, want %q", relative, wantRelative)
 	}
 }
+
+// TestResolveHomeIsTheWorktreeHome pins what replaced the per-package temp home
+// (T2133): the shared home is the worktree's .promise-home — the one bin/build,
+// bin/test, bin/verify and bin/gate populate, so it is warm and materialization
+// is not charged to a test.
+func TestResolveHomeIsTheWorktreeHome(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, ok := repoRootFrom(dir)
+	if !ok {
+		t.Skip("not running inside a checkout")
+	}
+	home, cleanup := resolveHome()
+	defer cleanup()
+	if want := filepath.Join(root, ".promise-home"); home != want {
+		t.Errorf("resolveHome() = %q, want the worktree home %q", home, want)
+	}
+	if fi, err := os.Stat(home); err != nil || !fi.IsDir() {
+		t.Errorf("resolveHome() did not create %q: %v", home, err)
+	}
+}
+
+// TestResolveHomeNeverTheSharedPromiseHome is the invariant docs/build-tools.md
+// §"Test Sandboxing" states: no test writes the machine-global ~/.promise. The
+// ambient PROMISE_HOME is deliberately not consulted, so neither a bare
+// `go test ./...` nor a --shared run (which leaves it unset, i.e. ~/.promise)
+// can point these packages at the user's real cache.
+func TestResolveHomeNeverTheSharedPromiseHome(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := repoRootFrom(dir); !ok {
+		t.Skip("not running inside a checkout")
+	}
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no user home dir on this host")
+	}
+	shared := filepath.Join(userHome, ".promise")
+	for _, ambient := range []string{shared, filepath.Join(t.TempDir(), "elsewhere")} {
+		t.Setenv("PROMISE_HOME", ambient)
+		home, cleanup := resolveHome()
+		cleanup()
+		if home == shared {
+			t.Errorf("PROMISE_HOME=%q made resolveHome() return the shared home %q", ambient, shared)
+		}
+		if home == ambient {
+			t.Errorf("resolveHome() followed the ambient PROMISE_HOME %q; it must not be an input", ambient)
+		}
+	}
+}
+
+// TestHomeForRootFallsBackOutsideACheckout: with no checkout to anchor to, the
+// package owns a temp home and removes it — the one branch that still behaves
+// the way every package used to.
+func TestHomeForRootFallsBackOutsideACheckout(t *testing.T) {
+	home, cleanup := homeForRoot("")
+	if !strings.Contains(filepath.Base(home), "promise-clitest-home-") {
+		t.Errorf("homeForRoot(\"\") = %q, want a temp home", home)
+	}
+	if fi, err := os.Stat(home); err != nil || !fi.IsDir() {
+		t.Errorf("the fallback home %q was not created: %v", home, err)
+	}
+	cleanup()
+	if _, err := os.Stat(home); !os.IsNotExist(err) {
+		t.Errorf("the fallback home %q outlived its cleanup: %v", home, err)
+	}
+}
+
+// TestWarmupBinDeclinesABinaryBinWouldRefuse: TestMain must not warm against a
+// compiler the tree has outrun (T2137) or one that is not there — resolveBin
+// already decides that, and warmupBin's whole job is to defer to it and answer
+// "" rather than to second-guess it.
+func TestWarmupBinDeclinesABinaryBinWouldRefuse(t *testing.T) {
+	t.Chdir(filesystemRoot(t.TempDir()))
+	t.Setenv("PROMISE_TEST_BIN", "")
+	if got := warmupBin(); got != "" {
+		t.Errorf("warmupBin() = %q outside any checkout, want \"\"", got)
+	}
+	t.Setenv("PROMISE_TEST_BIN", filepath.Join(t.TempDir(), "no-such-compiler"))
+	if got := warmupBin(); got != "" {
+		t.Errorf("warmupBin() = %q for a PROMISE_TEST_BIN that names nothing, want \"\"", got)
+	}
+}
+
+// TestWarmToolchainWithoutABinaryIsANoOp: the warm-up is best effort, and "no
+// compiler fit to warm with" is Bin's to report per test. Warming must not
+// panic, exit, or leave anything behind on the way to that report.
+func TestWarmToolchainWithoutABinaryIsANoOp(t *testing.T) {
+	warmToolchain("") // must simply return
+}
+
+// TestWarmToolchainSurvivesABinaryThatFails: a warm-up that cannot run leaves
+// the tests exactly where they were rather than failing the whole package
+// before the first test starts.
+func TestWarmToolchainSurvivesABinaryThatFails(t *testing.T) {
+	warmToolchain(filepath.Join(t.TempDir(), "no-such-binary"))
+}
+
+// suiteStub stands in for testing.M: SharedHome's contract is what the suite
+// sees while it runs and what it returns afterwards, and both are observable
+// without a real suite.
+type suiteStub struct {
+	code     int
+	ran      bool
+	homeSeen string
+}
+
+func (s *suiteStub) Run() int {
+	s.ran = true
+	s.homeSeen = os.Getenv("PROMISE_HOME")
+	return s.code
+}
+
+// TestSharedHomeRunsTheSuiteUnderTheWorktreeHome pins the whole TestMain
+// contract in one place: the suite runs, it runs with PROMISE_HOME pointing at
+// the worktree home rather than at whatever was ambient, and its exit code is
+// what SharedHome returns — a suite whose failures were swallowed would report
+// a green package (T2133).
+func TestSharedHomeRunsTheSuiteUnderTheWorktreeHome(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, ok := repoRootFrom(dir)
+	if !ok {
+		t.Skip("not running inside a checkout")
+	}
+	// Restored by t.Setenv's cleanup after SharedHome overwrites it.
+	t.Setenv("PROMISE_HOME", filepath.Join(t.TempDir(), "ambient"))
+
+	suite := &suiteStub{code: 7}
+	if got := SharedHome(suite); got != 7 {
+		t.Errorf("SharedHome returned %d, want the suite's 7", got)
+	}
+	if !suite.ran {
+		t.Fatal("SharedHome did not run the suite")
+	}
+	if want := filepath.Join(root, ".promise-home"); suite.homeSeen != want {
+		t.Errorf("the suite ran under PROMISE_HOME=%q, want the worktree home %q",
+			suite.homeSeen, want)
+	}
+	// And the home it pointed at is real, so the first child does not have to
+	// create it mid-flight.
+	if fi, err := os.Stat(suite.homeSeen); err != nil || !fi.IsDir() {
+		t.Errorf("the shared home %q was not there for the suite: %v", suite.homeSeen, err)
+	}
+}

@@ -1,9 +1,7 @@
 package testrun
 
 import (
-	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,11 +40,11 @@ func TestIncompleteHarnessReportsFailure(t *testing.T) {
 
 	// -progress full: this test asserts the completed test's `pass` line is
 	// still reported, and pass lines are suppressed by default on a pipe (T1888).
-	out, runErr := exec.Command(promiseBin, "test", "-progress", "full", src).CombinedOutput()
-	combined := string(out)
+	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", src).RequireRan(t)
+	combined := r.Combined()
 
-	if runErr == nil {
-		t.Fatalf("expected non-zero exit for a truncated run.\nOutput:\n%s", combined)
+	if r.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit for a truncated run:%s", r.Detail())
 	}
 	if !strings.Contains(combined, "INCOMPLETE") {
 		t.Errorf("expected an INCOMPLETE outcome.\nOutput:\n%s", combined)
@@ -80,11 +78,11 @@ func TestIncompleteMultiFileReportsFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, runErr := exec.Command(promiseBin, "test", "-progress", "full", dir).CombinedOutput()
-	combined := string(out)
+	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", dir).RequireRan(t)
+	combined := r.Combined()
 
-	if runErr == nil {
-		t.Fatalf("expected non-zero exit for a truncated run.\nOutput:\n%s", combined)
+	if r.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit for a truncated run:%s", r.Detail())
 	}
 	if !strings.Contains(combined, "(2 incomplete)") {
 		t.Errorf("expected the file line to report '(2 incomplete)'.\nOutput:\n%s", combined)
@@ -126,10 +124,10 @@ func TestIncompleteNotReportedForExcludedTests(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, runErr := exec.Command(promiseBin, "test", src).CombinedOutput()
-	combined := string(out)
-	if runErr != nil {
-		t.Fatalf("excluded tests must not trip the completeness check: %v\nOutput:\n%s", runErr, combined)
+	r := clitest.Run(t, promiseBin, nil, "test", src).RequireRan(t)
+	combined := r.Combined()
+	if r.ExitCode != 0 {
+		t.Fatalf("excluded tests must not trip the completeness check:%s", r.Detail())
 	}
 	if strings.Contains(combined, "INCOMPLETE") {
 		t.Errorf("excluded test reported as INCOMPLETE.\nOutput:\n%s", combined)
@@ -154,17 +152,14 @@ func TestIncompleteFromCachedBinaryPreservesExitCode(t *testing.T) {
 	}
 
 	for _, run := range []string{"compiled", "cached"} {
-		cmd := exec.Command(promiseBin, "test", src)
-		out, runErr := cmd.CombinedOutput()
-		combined := string(out)
+		r := clitest.Run(t, promiseBin, nil, "test", src).RequireRan(t)
+		combined := r.Combined()
 
-		var exitErr *exec.ExitError
-		if !errors.As(runErr, &exitErr) {
-			t.Fatalf("%s run: expected a non-zero exit, got %v.\nOutput:\n%s", run, runErr, combined)
+		if r.ExitCode == 0 {
+			t.Fatalf("%s run: expected a non-zero exit:%s", run, r.Detail())
 		}
-		if exitErr.ExitCode() != 3 {
-			t.Errorf("%s run: exit code = %d, want the child's 3.\nOutput:\n%s",
-				run, exitErr.ExitCode(), combined)
+		if r.ExitCode != 3 {
+			t.Errorf("%s run: exit code = %d, want the child's 3:%s", run, r.ExitCode, r.Detail())
 		}
 		if !strings.Contains(combined, "INCOMPLETE (-) b_dies") {
 			t.Errorf("%s run: expected INCOMPLETE naming b_dies.\nOutput:\n%s", run, combined)
@@ -189,11 +184,11 @@ func TestIncompleteCoverageModeReportsFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, runErr := exec.Command(promiseBin, "test", "-coverage", src).CombinedOutput()
-	combined := string(out)
+	r := clitest.Run(t, promiseBin, nil, "test", "-coverage", src).RequireRan(t)
+	combined := r.Combined()
 
-	if runErr == nil {
-		t.Fatalf("expected non-zero exit in coverage mode.\nOutput:\n%s", combined)
+	if r.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit in coverage mode:%s", r.Detail())
 	}
 	if !strings.Contains(combined, "INCOMPLETE (-) b_dies") || !strings.Contains(combined, "c_after") {
 		t.Errorf("expected INCOMPLETE naming b_dies and listing c_after.\nOutput:\n%s", combined)
@@ -219,11 +214,11 @@ func TestIncompleteStressAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, runErr := exec.Command(promiseBin, "test", "-stress", "2", src).CombinedOutput()
-	combined := string(out)
+	r := clitest.Run(t, promiseBin, nil, "test", "-stress", "2", src).RequireRan(t)
+	combined := r.Combined()
 
-	if runErr == nil {
-		t.Fatalf("expected non-zero exit from stress mode.\nOutput:\n%s", combined)
+	if r.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit from stress mode:%s", r.Detail())
 	}
 	if !strings.Contains(combined, "b_dies") {
 		t.Errorf("expected the killing test to be named.\nOutput:\n%s", combined)

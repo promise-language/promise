@@ -3,10 +3,32 @@
 package blobstore
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
+
+// CloneFile makes dst a copy-on-write clone of src (APFS clonefile(2)).
+//
+// The clone is a distinct inode that shares src's blocks until one of them is
+// written, so materializing a 375 MB toolchain view costs metadata rather than
+// 375 MB of I/O — and PatchAndSignMachO may still rewrite the result without
+// touching the CAS blob, which §5.1 requires to stay the raw upstream bytes
+// (T2133). A hardlink would be cheaper still and is exactly what that rule
+// forbids here.
+//
+// Returns an error on a filesystem without clonefile (HFS+, a network mount) or
+// across devices; callers fall back to a streamed copy.
+func CloneFile(src, dst string) error {
+	// clonefile(2) requires dst not to exist.
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return unix.Clonefile(src, dst, 0)
+}
 
 // PatchAndSignMachO patches an extracted LLVM Mach-O file so it can find
 // libLLVM in its own directory, then re-signs it ad-hoc (§5.1). Lifted verbatim

@@ -27,7 +27,7 @@ main!() {
 `
 
 // runProbe runs a command in dir under the package's shared PROMISE_HOME
-// (clitest.IsolateHome, in TestMain) and returns its stdout. Stderr is captured
+// (clitest.SharedHome, in TestMain) and returns its stdout. Stderr is captured
 // separately rather than combined: the probe's answers are "key=value" lines on
 // stdout, and folding the compiler's own diagnostics in would let one
 // masquerade as an answer.

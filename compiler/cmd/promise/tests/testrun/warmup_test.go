@@ -3,13 +3,12 @@ package testrun
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
-	"time"
 )
 
 // TestTestBinaryWarmupContractHolds guards the warm-up contract end to end
@@ -44,10 +43,10 @@ func TestTestBinaryWarmupContractHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := exec.Command(promiseBin, "test", file).CombinedOutput()
-	combined := string(out)
-	if err != nil {
-		t.Fatalf("expected the test file to pass, got %v.\nOutput:\n%s", err, combined)
+	r := clitest.Run(t, promiseBin, nil, "test", file).RequireRan(t)
+	combined := r.Combined()
+	if r.ExitCode != 0 {
+		t.Fatalf("expected the test file to pass:%s", r.Detail())
 	}
 
 	// warmTestBinary's warnings all carry this prefix.

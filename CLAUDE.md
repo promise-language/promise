@@ -314,11 +314,17 @@ now live in per-area packages under `compiler/cmd/promise/tests/` (`pkgmgr`,
 `codegentest`. A test that calls `runAdd`, reads `embeddedCatalog` or parses a
 child's output with `parseChildOutput` stays in `package main`.
 
-Each of those packages takes its own `PROMISE_HOME` via `clitest.IsolateHome`
-in a one-line `TestMain`. That is not optional tidiness: a `go test` binary is
-a second "compiler" as far as `module.CompilerChanged` is concerned, so without
-it `ensureCacheValid` wipes `cache/llvm-view` out from under whichever peer
-package is compiling right then.
+Each of those packages points `PROMISE_HOME` at the worktree's `.promise-home`
+via `clitest.SharedHome` in a one-line `TestMain`, and warms the toolchain once
+before any test runs. They used to take a *fresh temp* home apiece, to dodge a
+`ensureCacheValid` wipe that T1684 then removed outright — and on macOS and
+Windows a fresh home means materializing a 375 MB LLVM view (~900 MB on Windows,
+where Linux only symlinks), three times per run, inside whatever test happened to
+reach it first (T2133). The shared home is the one `bin/build` and `bin/test`
+already populate, so it is warm; it is never `~/.promise`, which no test may
+write (`docs/build-tools.md` §"Test Sandboxing"). Drive the compiler through
+`clitest.Run`, which bounds the child and reports *why* it died — a killed child
+must never be reported as a bug in whatever the test was asserting.
 
 ```go
 // codegen tests (compiler/internal/codegen/tests/<area>/)

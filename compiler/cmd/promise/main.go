@@ -10750,13 +10750,8 @@ func extractEmbedded(fsys embed.FS, prefix, destDir string) {
 // prior inode at dst (the macOS amfid-wedge failure), and overwriting a running
 // executable cannot hit ETXTBSY or expose a partially written binary.
 func copyFile(src, dst string, perm os.FileMode) {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading %s: %v\n", src, err)
-		os.Exit(1)
-	}
-	if err := writeFileAtomic(dst, data, perm); err != nil {
-		fmt.Fprintf(os.Stderr, "error writing %s: %v\n", dst, err)
+	if err := copyFileAtomic(src, dst, perm); err != nil {
+		fmt.Fprintf(os.Stderr, "error copying %s to %s: %v\n", src, dst, err)
 		os.Exit(1)
 	}
 }

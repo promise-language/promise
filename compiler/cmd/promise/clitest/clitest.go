@@ -1,6 +1,6 @@
 // Package clitest holds the helpers shared by cmd/promise's per-area test
-// packages: locating the built compiler, and driving it as a subprocess under
-// an isolated PROMISE_HOME and git configuration.
+// packages: locating the built compiler, and driving it as a bounded subprocess
+// under a known PROMISE_HOME and git configuration.
 //
 // It exists because cmd/promise's tests are split across packages, for the same
 // reason codegen's are (T1776). 859 tests in one package took six minutes of
@@ -313,38 +313,121 @@ func GitRun(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// IsolateHome gives the calling test package its own PROMISE_HOME for the whole
-// run, and is meant to be the body of a package's TestMain.
+// SharedHome points the calling test package at the worktree's .promise-home for
+// the whole run and warms it once before any test starts. It is meant to be the
+// body of a package's TestMain.
 //
-// Without it these packages share the developer's real cache with package main,
-// whose test binary is not bin/promise: module.CompilerChanged stamps
-// os.Executable(), so a test binary always looks like a freshly installed
-// compiler and ensureCacheValid answers by wiping cache/llvm-view with an
-// unsynchronized RemoveAll. Run serially that only cost a re-extraction, which
-// is why it went unnoticed; run beside these packages it deletes a peer
-// process's staging dir mid-write and the peer's build fails with a bare
-// "no such file or directory".
+// It replaced a fresh temp home per package, whose stated reason no longer
+// exists. That reason was the stamp wipe: module.CompilerChanged stamps
+// os.Executable(), so a test binary looked like a freshly installed compiler and
+// ensureCacheValid answered by wiping cache/llvm-view out from under a peer
+// mid-write. T1684 removed the wipe outright — ensureCacheValid now clears
+// nothing, because every extraction cache is content-keyed and a changed binary
+// simply reads a different subtree. These packages could not trigger it anyway:
+// they are black-box, so the test binary itself never reads PROMISE_HOME (its
+// only compiler import is internal/module, for pure functions), and every write
+// to the home is made by a bin/promise CHILD — one binary, one identity.
 //
-// Isolation is also what makes them fast. Sharing one home serialises every
-// concurrent compiler behind the same view lock and build-cache entries; with a
-// home apiece the packages stop queueing behind each other.
+// A home apiece is therefore pure cost, and on macOS and Windows it is a large
+// one. The LLVM view is 375 MB of copies there (~900 MB on Windows, where the
+// lld aliases are copies too) against Linux's symlinks, so three packages paid
+// for it three times per run, inside whatever test happened to be first — which
+// is how a saturated runner reddened as a scheduler bug (T2133). The worktree
+// home is the one bin/build, bin/test, bin/verify and bin/gate already populate,
+// so it is warm and resolveLLVMView's lock-free viewComplete fast path is hit
+// immediately.
 //
-// The wipe racing a peer is a real defect in the compiler rather than in these
-// tests — two promise binaries sharing one PROMISE_HOME, say a dev build and an
-// installed one, ping-pong the stamp and can kill each other's view
-// materialization. It is the hazard T1616 removed for embedded modules and left
-// in place for the LLVM and CRT views.
-func IsolateHome(m interface{ Run() int }) int {
-	home, err := os.MkdirTemp("", "promise-clitest-home-")
-	if err != nil {
-		panic("clitest: cannot create isolated PROMISE_HOME: " + err.Error())
-	}
+// It resolves to <root>/.promise-home rather than to the ambient PROMISE_HOME so
+// that a bare `go test ./...`, and a --shared run that leaves PROMISE_HOME
+// unset, can never write the machine-global ~/.promise (docs/build-tools.md
+// §"Test Sandboxing"). Only the no-checkout fallback creates and removes a temp
+// home; the worktree home is never deleted.
+func SharedHome(m interface{ Run() int }) int {
+	home, cleanup := resolveHome()
 	if err := os.Setenv("PROMISE_HOME", home); err != nil {
 		panic("clitest: cannot set PROMISE_HOME: " + err.Error())
 	}
+	warmToolchain(warmupBin())
 	code := m.Run()
-	os.RemoveAll(home)
+	cleanup()
 	return code
+}
+
+// resolveHome returns the package's PROMISE_HOME and the cleanup that owns it.
+// Outside a checkout repoRootFrom reports none, which homeForRoot reads as the
+// temp-home fallback.
+func resolveHome() (home string, cleanup func()) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return homeForRoot("")
+	}
+	root, _ := repoRootFrom(dir)
+	return homeForRoot(root)
+}
+
+// homeForRoot is resolveHome with the checkout as a parameter, so the
+// no-checkout branch — the only one that creates a home of its own, and so the
+// only one with anything to clean up — is reachable without a test having to
+// find a directory outside every checkout on the host.
+func homeForRoot(root string) (home string, cleanup func()) {
+	if root != "" {
+		home = filepath.Join(root, ".promise-home")
+		if err := os.MkdirAll(home, 0o755); err != nil {
+			panic("clitest: cannot create " + home + ": " + err.Error())
+		}
+		return home, func() {}
+	}
+	tmp, err := os.MkdirTemp("", "promise-clitest-home-")
+	if err != nil {
+		panic("clitest: cannot create a fallback PROMISE_HOME: " + err.Error())
+	}
+	return tmp, func() { os.RemoveAll(tmp) }
+}
+
+// warmupBin is the compiler to warm the home with, or "" when there is none fit
+// to warm it — no checkout, nothing built, or a binary the tree has outrun
+// (T2137). Each of those is Bin's to report per test, in the wording that fits;
+// TestMain's only job is not to warm against them.
+func warmupBin() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	bin, err := resolveBin(dir, os.Getenv("PROMISE_TEST_BIN"))
+	if err != nil {
+		return ""
+	}
+	return bin
+}
+
+// warmToolchain materializes the toolchain views and the embedded modules into
+// the shared home once, before any test runs.
+//
+// The materialization belongs to the package, not to whichever test happens to
+// reach it first. On a cold home it copies a 375 MB toolchain on macOS (~900 MB
+// on Windows), and while it runs every peer promise blocks on the view lock and
+// writes "Waiting for promise (materializing LLVM toolchain) to finish..." to
+// its own stderr. Charged to a test that is what T2133 saw twice over: a whole
+// three-minute budget spent before the subject of the test began, and a stream
+// progress_test.go asserts holds exactly one line.
+//
+// `promise exec` is the honest warm-up — it is the same path the tests drive, so
+// it materializes exactly what they need and nothing else. Best effort: a
+// warm-up that fails leaves the tests exactly where they were.
+func warmToolchain(bin string) {
+	if bin == "" {
+		return
+	}
+	// A directory of its own, so the warm-up is never interpreted against
+	// whatever project the test binary happens to be sitting in.
+	dir, err := os.MkdirTemp("", "promise-clitest-warm-")
+	if err != nil {
+		return
+	}
+	defer os.RemoveAll(dir)
+	cmd := exec.Command(bin, "exec", `print_line("");`)
+	cmd.Dir = dir
+	_ = cmd.Run()
 }
 
 // MakeSubdirRepo builds a bare git repo with NO promise.toml at its root and one

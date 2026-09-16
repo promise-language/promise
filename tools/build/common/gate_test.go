@@ -3,6 +3,7 @@ package common
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -651,5 +652,66 @@ func TestRunGate_ListWorksUnderToolchainOverride(t *testing.T) {
 	t.Setenv("PROMISE_OPT", "/custom/opt")
 	if err := RunGate("", []string{"--list"}); err != nil {
 		t.Errorf("--list must still work under an override: %v", err)
+	}
+}
+
+// TestGateGoTestArgv_IsTheSharedSpelling: the go-test gate runs the `go test`
+// bin/test and tested:go run, not a second spelling of it.
+//
+// It did not, for as long as T1817 had been bounding everything else: the gate
+// kept the bare `go test -v -count=1 ./...` it was written with, so -p and
+// -parallel both defaulted to GOMAXPROCS and multiplied — 82 concurrent
+// compilers on a 12-core host — and the per-package limit stayed Go's 10m where
+// verify gives 30m. That is what turned a cold toolchain materialization into
+// three-minute test timeouts on macOS and Windows (T2133), and it is exactly the
+// drift docs/gate-system.md's "one implementation in two modes" exists to
+// prevent.
+func TestGateGoTestArgv_IsTheSharedSpelling(t *testing.T) {
+	got := gateGoTestArgv()
+	if want := goTestArgs("-v", "-count=1"); !slices.Equal(got, want) {
+		t.Errorf("gateGoTestArgv() = %v, want the shared %v", got, want)
+	}
+	assertBoundedGoTestArgv(t, got)
+	if n := len(got); n == 0 || got[n-1] != "./..." {
+		t.Errorf("gateGoTestArgv() = %v, want it to end in ./...", got)
+	}
+	for _, flag := range []string{"-v", "-count=1"} {
+		if !slices.Contains(got, flag) {
+			t.Errorf("gateGoTestArgv() dropped %s, which its output parsers read: %v", flag, got)
+		}
+	}
+}
+
+// TestGateCoverageArgv_IsTheSharedSpelling: the coverage gate had the same bare
+// command and gets the same bounded one, with its instrumentation ahead of the
+// package pattern.
+func TestGateCoverageArgv_IsTheSharedSpelling(t *testing.T) {
+	got := gateCoverageArgv([]string{"pkg/a", "pkg/b"}, "/tmp/cov.out")
+	assertBoundedGoTestArgv(t, got)
+	if !slices.Contains(got, "-coverpkg=pkg/a,pkg/b") {
+		t.Errorf("gateCoverageArgv() lost its package list: %v", got)
+	}
+	if !slices.Contains(got, "-coverprofile=/tmp/cov.out") {
+		t.Errorf("gateCoverageArgv() lost its profile path: %v", got)
+	}
+	if n := len(got); n == 0 || got[n-1] != "./..." {
+		t.Errorf("gateCoverageArgv() = %v, want it to end in ./...", got)
+	}
+}
+
+// assertBoundedGoTestArgv checks the three flags a gate must not measure
+// without: the concurrency bound docs/build-tools.md §"Test Concurrency"
+// requires, and verify's per-package timeout.
+func assertBoundedGoTestArgv(t *testing.T, argv []string) {
+	t.Helper()
+	for _, flag := range []string{"-p", "-parallel", "-timeout"} {
+		i := slices.Index(argv, flag)
+		if i < 0 {
+			t.Errorf("argv %v has no %s — the gate is measuring unbounded", argv, flag)
+			continue
+		}
+		if i+1 >= len(argv) || argv[i+1] == "" {
+			t.Errorf("argv %v has %s with no value", argv, flag)
+		}
 	}
 }

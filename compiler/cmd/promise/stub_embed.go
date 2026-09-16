@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -41,6 +42,40 @@ func readEmbeddedStub(binaryName string) ([]byte, error) {
 		return nil, fmt.Errorf("no embedded stub in this build")
 	}
 	return embeddedStub.ReadFile(stubEmbedPrefix + "/" + binaryName)
+}
+
+// copyFileAtomic copies src to dst via a temp file in dst's directory followed
+// by a rename, exactly as writeFileAtomic does — but streamed, so the source
+// never lands in the Go heap.
+//
+// The toolchain blobs this moves are ~125-200 MB apiece, and reading one whole
+// is a ~200 MB allocation per tool, three tools per view, on the path a cold
+// PROMISE_HOME takes before it can compile anything (T2133). io.Copy's fixed
+// buffer costs the same wall time with none of the heap.
+func copyFileAtomic(src, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	dir := filepath.Dir(dst)
+	tmp, err := os.CreateTemp(dir, ".tmp-"+filepath.Base(dst)+"-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once renamed
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	return renameWithRetry(tmpName, dst)
 }
 
 // writeFileAtomic writes data to path via a temp file in the same directory

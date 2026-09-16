@@ -791,3 +791,167 @@ func TestPublishViewDirConcurrentCleanSafety(t *testing.T) {
 		t.Errorf("re-published file missing: %v", err)
 	}
 }
+
+// TestLinkOrCopyBlobLinksOnOneFilesystem pins the cheap path: an immutable blob
+// enters a view dir as a second name for the same inode, so a cold view costs
+// metadata rather than the ~375 MB macOS and ~900 MB Windows were copying per
+// PROMISE_HOME (T2133).
+func TestLinkOrCopyBlobLinksOnOneFilesystem(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "blob")
+	if err := os.WriteFile(src, []byte("tool bytes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "opt")
+	if err := linkOrCopyBlob(src, dst, 0o755); err != nil {
+		t.Fatalf("linkOrCopyBlob: %v", err)
+	}
+	si, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	di, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(si, di) {
+		t.Errorf("%s is a copy of %s, want a link on one filesystem", dst, src)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != "tool bytes" {
+		t.Errorf("linked file = %q, %v; want the source bytes", got, err)
+	}
+}
+
+// TestLinkOrCopyBlobFallsBackToACopy: where a link cannot be made — the CAS and
+// the view on different filesystems — the blob is still materialized, byte for
+// byte, over whatever was at the destination, and the source is left alone.
+func TestLinkOrCopyBlobFallsBackToACopy(t *testing.T) {
+	t.Parallel()
+	crossDevice := func(string, string) error { return errors.New("cross-device link") }
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "blob")
+	if err := os.WriteFile(src, []byte("tool bytes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A stale file already at dst, so the replacement half is exercised too.
+	dst := filepath.Join(dir, "opt")
+	if err := os.WriteFile(dst, []byte("stale"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkOrCopy(crossDevice, src, dst, 0o755); err != nil {
+		t.Fatalf("linkOrCopy did not fall back: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != "tool bytes" {
+		t.Fatalf("copied file = %q, %v; want the source bytes", got, err)
+	}
+	si, _ := os.Stat(src)
+	di, _ := os.Stat(dst)
+	if os.SameFile(si, di) {
+		t.Errorf("the fallback produced a link, not a copy")
+	}
+	if data, err := os.ReadFile(src); err != nil || string(data) != "tool bytes" {
+		t.Errorf("the source was disturbed: %q, %v", data, err)
+	}
+}
+
+// TestMakeLLDAliasesDoNotDuplicateLLD: the four lld-mode aliases are names for
+// the one lld, never four copies of it. On Windows they were copies — 525 MB of
+// duplicate bytes in every view (T2133) — and everywhere else symlinks.
+func TestMakeLLDAliasesDoNotDuplicateLLD(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	lldName := "lld"
+	if runtime.GOOS == "windows" {
+		lldName = "lld.exe"
+	}
+	lldPath := filepath.Join(dir, lldName)
+	if err := os.WriteFile(lldPath, []byte("lld bytes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := makeLLDAliases(dir); err != nil {
+		t.Fatalf("makeLLDAliases: %v", err)
+	}
+	lldInfo, err := os.Stat(lldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for link := range embeddedLLVMSymlinks {
+		name := link
+		if runtime.GOOS == "windows" {
+			name = link + ".exe"
+		}
+		aliasPath := filepath.Join(dir, name)
+		info, err := os.Stat(aliasPath)
+		if err != nil {
+			t.Errorf("alias %s missing: %v", name, err)
+			continue
+		}
+		if !os.SameFile(lldInfo, info) {
+			t.Errorf("alias %s resolves to its own bytes, want the one lld", name)
+		}
+	}
+}
+
+// TestMaterializeViewFileLeavesARunnableToolOfItsOwn covers the two properties
+// TestMaterializeViewFile above does not, both of which a materialized tool
+// silently fails without.
+//
+// The mode: the view dir is what findLLVMTool hands the driver, so the file has
+// to be executable. macOS reaches it down two paths — clonefile, which inherits
+// the source's mode, and a streamed copy, which sets one — and a blob that ever
+// reached the CAS non-executable would give a runnable tool down one and an
+// EACCES down the other.
+//
+// The inode: outside Linux the file must be its own, because PatchAndSignMachO
+// rewrites it in place and §5.1 requires the CAS blob to stay the raw upstream
+// bytes its content hash was computed over.
+func TestMaterializeViewFileLeavesARunnableToolOfItsOwn(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	blob := filepath.Join(dir, "blob")
+	if err := os.WriteFile(blob, []byte("opt bytes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "opt")
+	if err := materializeViewFile(blob, dst); err != nil {
+		t.Fatalf("materializeViewFile: %v", err)
+	}
+	fi, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o111 == 0 {
+		t.Errorf("the materialized tool is not executable: %v", fi.Mode().Perm())
+	}
+	if runtime.GOOS == "darwin" {
+		bi, err := os.Stat(blob)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if os.SameFile(bi, fi) {
+			t.Errorf("macOS shares the blob's inode; the patch+re-sign would rewrite hashed content")
+		}
+	}
+}
+
+// TestMakeLLDAliasesWithoutLLDIsANoOp: a view whose manifest carries no lld
+// (a thin placeholder) must publish without aliases rather than fail, since
+// viewComplete only demands them when lld is present.
+func TestMakeLLDAliasesWithoutLLDIsANoOp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := makeLLDAliases(dir); err != nil {
+		t.Fatalf("makeLLDAliases with no lld: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("makeLLDAliases invented %d entries with no lld to alias", len(entries))
+	}
+}

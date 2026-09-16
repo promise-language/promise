@@ -504,21 +504,71 @@ func viewComplete(viewDir string, entries []*blobstore.ManifestEntry) bool {
 }
 
 // materializeViewFile places a CAS blob into the view dir. macOS gets a patched
-// + signed working copy; other platforms get a symlink (copy on Windows, which
-// needs admin for symlinks).
+// + signed working copy; Linux gets a symlink, and Windows — where a symlink
+// needs admin — gets a hardlink.
+//
+// Only macOS needs bytes of its own: PatchAndSignMachO rewrites the file in
+// place, and §5.1 requires the CAS blob to stay the raw upstream bytes it was
+// hashed as. A clone (copy-on-write, its own inode) satisfies both at metadata
+// cost; a streamed copy is the fallback where clonefile is unavailable. A
+// hardlink there would be a patch applied to the hashed content (T2133).
 func materializeViewFile(blobPath, dst string) error {
 	os.Remove(dst)
 	switch runtime.GOOS {
 	case "darwin":
-		copyFile(blobPath, dst, 0o755)
+		if err := blobstore.CloneFile(blobPath, dst); err != nil {
+			if cerr := copyFileAtomic(blobPath, dst, viewToolPerm); cerr != nil {
+				return cerr
+			}
+		}
+		// Both branches have to leave the same file behind: clonefile inherits
+		// the source's mode where the copy sets one, so a blob that ever reached
+		// the CAS non-executable would give a runnable tool down one path and an
+		// EACCES down the other.
+		if err := os.Chmod(dst, viewToolPerm); err != nil {
+			return err
+		}
 		blobstore.PatchAndSignMachO(dst)
 		return nil
 	case "windows":
-		copyFile(blobPath, dst, 0o755)
-		return nil
+		return linkOrCopyBlob(blobPath, dst, viewToolPerm)
 	default:
 		return os.Symlink(blobPath, dst)
 	}
+}
+
+// viewToolPerm is the mode a materialized LLVM tool carries: it has to be
+// executable, since the view dir is what findLLVMTool hands the driver.
+const viewToolPerm = 0o755
+
+// linkOrCopyBlob places an immutable blob — a CAS entry, or a tool from the
+// host prebuilts cache — into a view dir by hardlink, falling back to a streamed
+// copy when the two are not on one filesystem.
+//
+// Nothing ever rewrites a view file on the platforms that take this path (the
+// macOS patch+re-sign is the one mutation, and it never comes here), so sharing
+// the source's inode is safe and makes a cold view cost metadata instead of the
+// ~900 MB Windows was copying per PROMISE_HOME (T2133). CAS blobs are committed
+// 0755, so a link is already executable; perm applies only to the copy.
+//
+// A link keeps the source's bytes alive until the view dir is removed too, so
+// the space is reclaimed when `promise doctor --repair` sweeps stale views
+// rather than when gc drops the blob.
+func linkOrCopyBlob(src, dst string, perm os.FileMode) error {
+	return linkOrCopy(os.Link, src, dst, perm)
+}
+
+// linkOrCopy is linkOrCopyBlob with the link syscall injected, so the
+// cross-filesystem fallback — otherwise reachable only on a host with two
+// filesystems arranged just so — can be exercised anywhere. A parameter rather
+// than a package var, for the same reason renameRetrying takes one: a var a
+// test swaps is a var every parallel test in the package races.
+func linkOrCopy(link func(src, dst string) error, src, dst string, perm os.FileMode) error {
+	os.Remove(dst)
+	if err := link(src, dst); err == nil {
+		return nil
+	}
+	return copyFileAtomic(src, dst, perm)
 }
 
 // makeLLDAliases creates the lld-mode aliases (ld.lld/ld64.lld/lld-link/wasm-ld)
@@ -540,7 +590,11 @@ func makeLLDAliases(viewDir string) error {
 		linkPath := filepath.Join(viewDir, name)
 		os.Remove(linkPath)
 		if runtime.GOOS == "windows" {
-			copyFile(lldPath, linkPath, 0o755)
+			// Hardlink, not a copy: four aliases of a ~131 MB lld were 525 MB of
+			// duplicate bytes per view, and lld is never rewritten in place.
+			if err := linkOrCopyBlob(lldPath, linkPath, viewToolPerm); err != nil {
+				return err
+			}
 		} else {
 			if err := os.Symlink(lldName, linkPath); err != nil {
 				return err
@@ -691,7 +745,9 @@ func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, 
 				}
 				blobPath = p
 			}
-			copyFile(blobPath, filepath.Join(tmpDir, f), 0o644)
+			if err := linkOrCopyBlob(blobPath, filepath.Join(tmpDir, f), 0o644); err != nil {
+				return err
+			}
 		}
 		return nil
 	}); err != nil {

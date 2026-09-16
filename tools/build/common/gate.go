@@ -296,6 +296,28 @@ func runGateWasmWebTests(root string, args []string) error {
 	return nil
 }
 
+// gateGoTestArgv is the go-test gate's `go test` command: goTestArgs()'s bounded
+// -p / -parallel / -timeout, plus the -v its output parsers read and the -count=1
+// it needs to measure the tree rather than replay a saved result.
+//
+// It is goTestArgs() and not a second spelling because a tool and the gate that
+// measures the same property are one implementation in two modes
+// (docs/gate-system.md). This gate kept its own argv through T1817 and so went
+// on running unbounded -p/-parallel long after bin/test stopped: on a 12-core
+// host that is 82 concurrent compilers at load average 31, which is what turned
+// a cold toolchain materialization into three-minute test timeouts (T2133).
+//
+// extra flags go ahead of the package pattern, so the coverage gate below is
+// this command plus instrumentation rather than a second copy of it.
+func gateGoTestArgv(extra ...string) []string {
+	return goTestArgs(append([]string{"-v", "-count=1"}, extra...)...)
+}
+
+// gateCoverageArgv is gateGoTestArgv plus the coverage instrumentation.
+func gateCoverageArgv(covPkgs []string, covFile string) []string {
+	return gateGoTestArgv("-coverpkg="+strings.Join(covPkgs, ","), "-coverprofile="+covFile)
+}
+
 // runGateGoTest runs Go unit tests and writes structured JSON gate values to stdout.
 func runGateGoTest(root string, args []string) error {
 	args = NormalizeArgs(args)
@@ -328,7 +350,7 @@ func runGateGoTest(root string, args []string) error {
 	compilerDir := filepath.Join(root, "compiler")
 
 	fmt.Fprintf(os.Stderr, "Running go tests...\n")
-	output, testErr := RunTeeStderr(compilerDir, "go", "test", "-v", "-count=1", "./...")
+	output, testErr := RunTeeStderr(compilerDir, "go", gateGoTestArgv()...)
 
 	passed, failed := ParseGoTestOutput(output)
 	goFiles := ParseGoTestGroups(output)
@@ -472,8 +494,7 @@ func runGateCoverage(root string, args []string) error {
 	defer os.Remove(covFile)
 
 	var goCovPct float64
-	goOutput, _ := RunTeeStderr(compilerDir, "go", "test", "-v", "-count=1",
-		"-coverpkg="+strings.Join(covPkgs, ","), "-coverprofile="+covFile, "./...")
+	goOutput, _ := RunTeeStderr(compilerDir, "go", gateCoverageArgv(covPkgs, covFile)...)
 	// Read the profile whatever the tests returned. A failing test still
 	// produces a complete profile, and reporting 0 for a run that measured fine
 	// is a false collapse indistinguishable from a real one — the failure is

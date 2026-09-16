@@ -168,6 +168,13 @@ void *realloc(void *ptr, size_t new_size) {
 }
 
 // --- Canonical ABI support (Component Model) ---
+//
+// Every cabi_* function below is a plain C function reached from Promise through
+// a `extern declaration, so it crosses in the raw C ABI rather than the
+// value-struct bridge form the compiler-synthesized platform layer uses. The
+// compiler knows which symbols those are from rawABIExternSymbols in
+// compiler/internal/codegen/extern.go — adding a helper here means adding its
+// symbol there, or wasm-ld resolves the call to a trapping stub (T1660).
 
 // cabi_realloc — Canonical ABI memory allocation for the Component Model.
 // Required export for every component; used by the host to allocate/reallocate

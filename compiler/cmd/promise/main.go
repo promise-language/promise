@@ -5893,6 +5893,43 @@ func ensureWasiAdapter() (string, error) {
 	return adapterPath, nil
 }
 
+// wasmSignatureMismatchPrefix is how wasm-ld announces that a symbol's
+// declaration and definition disagree. It is only a *warning*: wasm-ld resolves
+// the call to a stub that executes `unreachable`, so the link succeeds and the
+// module traps the first time that call is reached. Everything after the prefix
+// on that line is the symbol name.
+const wasmSignatureMismatchPrefix = "function signature mismatch: "
+
+// wasmLinkDiagnosticError turns wasm-ld's signature-mismatch warnings into a
+// build failure. A build that reports success while emitting one of these
+// produces a .wasm that traps at runtime with no diagnosis at the call site, so
+// the warning is treated as the error it effectively is (T1660).
+func wasmLinkDiagnosticError(stderr string) error {
+	var syms []string
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(stderr, "\n") {
+		idx := strings.Index(line, wasmSignatureMismatchPrefix)
+		if idx < 0 {
+			continue
+		}
+		sym := strings.TrimSpace(line[idx+len(wasmSignatureMismatchPrefix):])
+		if sym == "" || seen[sym] {
+			continue
+		}
+		seen[sym] = true
+		syms = append(syms, sym)
+	}
+	if len(syms) == 0 {
+		return nil
+	}
+	// wasm-ld's emission order is not stable across links; the message is.
+	sort.Strings(syms)
+	return fmt.Errorf("error linking (wasm-ld): function signature mismatch for %s — "+
+		"the lowered signature of the `extern declaration does not match the definition in the "+
+		"linked object; wasm-ld replaces such a call with a trapping stub, so the module would "+
+		"trap at runtime instead of failing here", strings.Join(syms, ", "))
+}
+
 // linkWasmMulti links multiple .o files for WebAssembly.
 func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) error {
 	lldPath, err := findLLVMTool("wasm-ld")
@@ -5905,12 +5942,22 @@ func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) er
 	if err != nil {
 		return err
 	}
+	var diag bytes.Buffer
 	if err := runResilient(func() *exec.Cmd {
+		diag.Reset() // runResilient re-invokes this per attempt
 		c := runLLVMCmd(lldPath, linkArgs...)
-		c.Stderr = os.Stderr
+		c.Stderr = io.MultiWriter(os.Stderr, &diag)
 		return c
 	}); err != nil {
 		return fmt.Errorf("error linking (wasm-ld): %w", err)
+	}
+	if err := wasmLinkDiagnosticError(diag.String()); err != nil {
+		// wasm-ld exited 0 and wrote the module before we rejected it — unlike
+		// every other link failure, where no output is produced. Remove it, so a
+		// caller that ignores the error cannot run a trapping binary and an
+		// incremental build cannot mistake it for up-to-date output.
+		os.Remove(outputFile)
+		return err
 	}
 
 	// Post-link: emit bootstrap .js loader for wasm32-web targets

@@ -190,9 +190,15 @@ func TestWasmImportStringParamFlattensToPtrLen(t *testing.T) {
 }
 
 // T1506: the flattening must be scoped to wasm_import externs only — a plain
-// (non-wasm_import) native extern taking a string param keeps passing the
-// existing boxed value-struct pointer, matching the native C ABI other
-// native extern callers (e.g. cabi_string_data in wasm_alloc.c) already rely on.
+// (non-wasm_import) native extern taking a string param keeps passing the boxed
+// value-struct pointer, which is the convention the codegen-synthesized platform
+// layer expects (promise_print_string and the promise_io_*/promise_os_* bridges
+// all receive their string that way).
+//
+// T1660: this comment used to cite cabi_string_data as the caller relying on
+// that shape, which was exactly backwards — wasm_alloc.c's helpers are plain C
+// and want the bare instance pointer. They are now lowered through the raw-C-ABI
+// registry instead; see TestCabiHelpersUseRawCABI.
 func TestWasmExternStringParamUnchangedForNonWasmImport(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		_take(string s) `+"`extern(\"native_take\")"+`;
@@ -694,4 +700,179 @@ func TestFailableExternSret(t *testing.T) {
 	codegentest.AssertContains(t, ir, "declare void @promise_get_cwd(")
 	// Caller allocates sret and loads result
 	codegentest.AssertContains(t, ir, "call void @promise_get_cwd(")
+}
+
+// T1660: the canonical-ABI helpers in wasm_alloc.o are plain C functions, so
+// every `extern naming one must lower to the raw C ABI — scalars by value,
+// string as its bare instance pointer, results returned directly. Before this
+// fix they took the value-struct bridge path (sret-first, every scalar as an i8*
+// to its value struct), which wasm-ld resolved to a trapping stub for the shapes
+// it could see and linked *silently wrong* for the rest (cabi_store_i32's
+// (i8*,i8*) is indistinguishable from (i32,i32) on wasm32).
+//
+// The ABI belongs to the symbol, not the target, so the same lowering applies on
+// every target; cabiHelperDecls is asserted for wasm32-wasi, wasm32-web and the
+// host below.
+var cabiHelperDecls = []string{
+	"declare i32 @cabi_retarea_ptr()",
+	"declare i32 @cabi_load_i32(i32 %ptr)",
+	"declare i64 @cabi_load_i64(i32 %ptr)",
+	"declare float @cabi_load_f32(i32 %ptr)",
+	"declare double @cabi_load_f64(i32 %ptr)",
+	"declare void @cabi_store_i32(i32 %ptr, i32 %val)",
+	"declare void @cabi_store_i64(i32 %ptr, i64 %val)",
+	"declare void @cabi_store_f32(i32 %ptr, float %val)",
+	"declare void @cabi_store_f64(i32 %ptr, double %val)",
+	"declare i32 @cabi_string_data(i8* %s)",
+	"declare i32 @cabi_string_len(i8* %s)",
+	"declare i8* @cabi_string_from(i32 %ptr, i32 %len)",
+	"declare i32 @cabi_vector_data(i8* %v)",
+	"declare i32 @cabi_vector_len(i8* %v)",
+	"declare i8* @cabi_vector_from(i32 %ptr, i32 %len, i32 %elem_size)",
+	"declare i32 @cabi_realloc(i32 %ptr, i32 %old_size, i32 %align, i32 %new_size)",
+}
+
+// cabiHelperSource declares and calls every helper in rawABIExternSymbols, so
+// each one is actually emitted (an uncalled extern is never declared).
+const cabiHelperSource = "" +
+	"_cabi_retarea_ptr() i32 `extern(\"cabi_retarea_ptr\");\n" +
+	"_cabi_load_i32(i32 ptr) i32 `extern(\"cabi_load_i32\");\n" +
+	"_cabi_load_i64(i32 ptr) i64 `extern(\"cabi_load_i64\");\n" +
+	"_cabi_load_f32(i32 ptr) f32 `extern(\"cabi_load_f32\");\n" +
+	"_cabi_load_f64(i32 ptr) f64 `extern(\"cabi_load_f64\");\n" +
+	"_cabi_store_i32(i32 ptr, i32 val) `extern(\"cabi_store_i32\");\n" +
+	"_cabi_store_i64(i32 ptr, i64 val) `extern(\"cabi_store_i64\");\n" +
+	"_cabi_store_f32(i32 ptr, f32 val) `extern(\"cabi_store_f32\");\n" +
+	"_cabi_store_f64(i32 ptr, f64 val) `extern(\"cabi_store_f64\");\n" +
+	"_cabi_string_data(string s) i32 `extern(\"cabi_string_data\");\n" +
+	"_cabi_string_len(string s) i32 `extern(\"cabi_string_len\");\n" +
+	"_cabi_string_from(i32 ptr, i32 len) string `extern(\"cabi_string_from\");\n" +
+	"_cabi_vector_data_u8(u8[] v) i32 `extern(\"cabi_vector_data\");\n" +
+	"_cabi_vector_len_u8(u8[] v) i32 `extern(\"cabi_vector_len\");\n" +
+	"_cabi_vector_from_u8(i32 ptr, i32 len, i32 elem_size) u8[] `extern(\"cabi_vector_from\");\n" +
+	"_cabi_realloc(i32 ptr, i32 old_size, i32 align, i32 new_size) i32 `extern(\"cabi_realloc\");\n" +
+	"main() {\n" +
+	"  area := _cabi_retarea_ptr();\n" +
+	"  _cabi_store_i32(area, _cabi_load_i32(area));\n" +
+	"  _cabi_store_i64(area, _cabi_load_i64(area));\n" +
+	"  _cabi_store_f32(area, _cabi_load_f32(area));\n" +
+	"  _cabi_store_f64(area, _cabi_load_f64(area));\n" +
+	"  s := _cabi_string_from(_cabi_string_data(\"x\"), _cabi_string_len(\"x\"));\n" +
+	"  u8[] v = _cabi_vector_from_u8(0i32, 0i32, 1i32);\n" +
+	"  n := _cabi_vector_data_u8(v) + _cabi_vector_len_u8(v);\n" +
+	"  m := _cabi_realloc(0i32, 0i32, 1i32, 4i32);\n" +
+	"}\n"
+
+func assertCabiHelpersRaw(t *testing.T, ir string) {
+	t.Helper()
+	for _, want := range cabiHelperDecls {
+		codegentest.AssertContains(t, ir, want)
+	}
+	// No helper may keep the value-struct bridge shape.
+	codegentest.AssertNotContains(t, ir, "@cabi_load_i32(i8* %sret")
+	codegentest.AssertNotContains(t, ir, "@cabi_string_from(i8* %sret")
+	codegentest.AssertNotContains(t, ir, "@cabi_store_i32(i8* %ptr")
+}
+
+func TestCabiHelpersUseRawCABI(t *testing.T) {
+	assertCabiHelpersRaw(t, codegentest.GenerateIRForTarget(t, cabiHelperSource, "wasm32-wasi"))
+}
+
+func TestCabiHelpersUseRawCABIOnWasmWeb(t *testing.T) {
+	assertCabiHelpersRaw(t, codegentest.GenerateIRForTarget(t, cabiHelperSource, "wasm32-web"))
+}
+
+// The registry is keyed on the symbol, not the target: an extern naming a
+// wasm_alloc.o helper lowers the same way everywhere, so a host build fails at
+// link time (symbol absent) rather than silently producing a different ABI.
+func TestCabiHelpersUseRawCABIOnHost(t *testing.T) {
+	assertCabiHelpersRaw(t, codegentest.GenerateIR(t, cabiHelperSource))
+}
+
+// The raw-ABI path must stay narrow: a plain extern whose symbol is not a
+// wasm_alloc.o helper keeps the value-struct bridge ABI on WASM (the T0283
+// scoping that the codegen-synthesized platform layer depends on).
+func TestNonCabiExternKeepsBridgeABIOnWasm(t *testing.T) {
+	ir := codegentest.GenerateIRForTarget(t, `
+		_cabi_lookalike(i32 ptr) i32 `+"`extern(\"cabi_lookalike\")"+`;
+		main() { x := _cabi_lookalike(0i32); }
+	`, "wasm32-wasi")
+	codegentest.AssertContains(t, ir, "declare void @cabi_lookalike(i8* %sret, i8* %ptr)")
+}
+
+// The raw-ABI path applies only to a declaration that actually has a raw C form.
+// `extern is writable in ordinary source, so any signature at all can name a
+// canonical-ABI symbol; codegen must lower it, not crash. Each case below keeps
+// the value-struct bridge ABI, and the wasm-ld signature check then reports the
+// disagreement with wasm_alloc.o by name (T1660).
+func TestCabiSymbolWithNoRawFormKeepsBridgeABI(t *testing.T) {
+	// A user-type parameter has no raw C form.
+	ir := codegentest.GenerateIRForTarget(t, `
+		type Thing { int x; }
+		_load(Thing t) i32 `+"`extern(\"cabi_load_i32\")"+`;
+		main() { th := Thing(x: 1); n := _load(th); }
+	`, "wasm32-wasi")
+	codegentest.AssertContains(t, ir, "declare void @cabi_load_i32(i8* %sret, i8* %t)")
+}
+
+// An optional result is {i1, T}, which C never declares. It matters that this
+// falls back rather than matching on the payload: extractNamed does not unwrap
+// Optional, so a lookupLayout miss must read as "no raw form" — treating it as
+// the bare payload scalar would drop the presence bit silently.
+func TestOptionalCabiResultKeepsSret(t *testing.T) {
+	ir := codegentest.GenerateIRForTarget(t, `
+		_load(i32 ptr) i32? `+"`extern(\"cabi_load_i32\")"+`;
+		main() { n := _load(0i32); }
+	`, "wasm32-wasi")
+	codegentest.AssertContains(t, ir, "declare void @cabi_load_i32(i8* %sret, i8* %ptr)")
+}
+
+func TestFailableCabiSymbolKeepsSret(t *testing.T) {
+	// A failable result is Promise's own {i1, T, i8*} struct, which C never
+	// declares — so sret stays, exactly as for any other failable extern.
+	ir := codegentest.GenerateIRForTarget(t, `
+		_load!(i32 ptr) i32 `+"`extern(\"cabi_load_i64\")"+`;
+		main() {}
+	`, "wasm32-wasi")
+	codegentest.AssertContains(t, ir, "declare void @cabi_load_i64(i8* %sret, i8* %ptr)")
+}
+
+func TestWasmImportWinsOverRawABIRegistry(t *testing.T) {
+	// `wasm_import says the symbol is a *host* import, not the statically-linked
+	// wasm_alloc.o helper — so the canonical import convention applies and the
+	// registry does not.
+	ir := codegentest.GenerateIRForTarget(t, `
+		_load(i32 ptr) i32 `+"`extern(\"cabi_load_f32\") `wasm_import(\"env\", \"cabi_load_f32\") `target(wasm)"+`;
+		main() { n := _load(0i32); }
+	`, "wasm32-wasi")
+	codegentest.AssertContains(t, ir, `declare i32 @cabi_load_f32(i32 %ptr) "wasm-import-module"="env"`)
+}
+
+// A `&` parameter must never take the raw path, even when its element type is a
+// scalar or a string. extractNamed unwraps SharedRef/MutRef, so `i32&` looks like
+// a plain i32 to a layout-kind test — fitsRawABI has to reject the ref itself.
+//
+// This is the one fallback whose absence wasm-ld could not catch. Dropping the
+// guard declares a hybrid — raw direct return, but the parameter still a typed
+// pointer from the ref branch above it — and genExternCall then passes the
+// pointer. On wasm32 that is (i32) -> i32 on both sides, matching C's signature
+// exactly, so the link is clean and cabi_load_i32 silently dereferences a
+// pointer-to-value-struct as if it were the caller's address (T1660).
+func TestRefParamOnCabiSymbolKeepsBridgeABI(t *testing.T) {
+	ir := codegentest.GenerateIRForTarget(t, `
+		_load(i32& p) i32 `+"`extern(\"cabi_load_i32\")"+`;
+		_len(string& s) i32 `+"`extern(\"cabi_string_len\")"+`;
+		main() {
+		  i32 v = 7i32;
+		  n := _load(v);
+		  string t = "ab";
+		  m := _len(t);
+		}
+	`, "wasm32-wasi")
+	// Typed pointer to the value struct, and sret back — the bridge ABI intact.
+	codegentest.AssertContains(t, ir, "declare void @cabi_load_i32(i8* %sret, %promise_i32_v* %p)")
+	codegentest.AssertContains(t, ir, "declare void @cabi_string_len(i8* %sret, %promise_string_v* %s)")
+	// The hybrid shape a missing guard produces must not appear.
+	codegentest.AssertNotContains(t, ir, "declare i32 @cabi_load_i32(%promise_i32_v*")
+	codegentest.AssertNotContains(t, ir, "declare i32 @cabi_string_len(%promise_string_v*")
 }

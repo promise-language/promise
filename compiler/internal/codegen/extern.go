@@ -22,6 +22,76 @@ func (c *Compiler) lookupLayout(typ types.Type) *TypeDeclLayout {
 	return nil
 }
 
+// rawABIExternSymbols are the canonical-ABI runtime helpers defined in
+// compiler/cmd/promise/crt/wasm32/wasm_alloc.c and statically linked from
+// wasm_alloc.o. Unlike the platform-layer symbols codegen synthesizes — which
+// cross the `extern boundary in Promise's value-struct bridge form (a leading
+// sret pointer, and every value parameter as a pointer to its value struct) —
+// these are plain C functions and cross in the raw platform C ABI: scalars by
+// value, string and T[] as their bare instance/header pointer, scalar and
+// pointer results returned directly.
+//
+// Which ABI a symbol carries is a property of the *symbol*, not of the
+// declaration, so it is registered here rather than marked up in generated
+// binding source — annotations.md §13: the set of bindable symbols is closed and
+// "registered in one place". Recording it here also means bindings already
+// published against an older compiler (the wasi_preview_2 catalog module) become
+// correct without regeneration (T1660).
+//
+// Adding a helper to wasm_alloc.c means adding its symbol here.
+var rawABIExternSymbols = map[string]bool{
+	"cabi_realloc":     true,
+	"cabi_retarea_ptr": true,
+	"cabi_load_i32":    true,
+	"cabi_load_i64":    true,
+	"cabi_load_f32":    true,
+	"cabi_load_f64":    true,
+	"cabi_store_i32":   true,
+	"cabi_store_i64":   true,
+	"cabi_store_f32":   true,
+	"cabi_store_f64":   true,
+	"cabi_string_data": true,
+	"cabi_string_len":  true,
+	"cabi_string_from": true,
+	"cabi_vector_data": true,
+	"cabi_vector_len":  true,
+	"cabi_vector_from": true,
+}
+
+// isRawABIExtern reports whether an extern symbol is one of the raw-C-ABI
+// canonical-ABI runtime helpers (see rawABIExternSymbols).
+func isRawABIExtern(cName string) bool { return rawABIExternSymbols[cName] }
+
+// fitsRawABI reports whether every parameter and the result of ext can cross in
+// the raw C ABI — a scalar by value, or a bare pointer for a string or an opaque
+// container. A user type, enum, optional or `&T` ref has no raw C form, and a
+// failable result is Promise's own {i1, T, i8*} struct rather than anything C
+// declares.
+//
+// A declaration that does not fit simply keeps the value-struct bridge ABI. That
+// matters because `extern is writable in ordinary source: someone can name a
+// canonical-ABI symbol with any signature at all, and crashing codegen over it
+// would be a far worse diagnosis than the wasm-ld signature check, which names
+// the symbol and explains the consequence (T1660).
+func (c *Compiler) fitsRawABI(ext *ExternFunc) bool {
+	fits := func(t types.Type) bool {
+		if isOpaqueContainerType(t) {
+			return true
+		}
+		if isRefType(t) {
+			return false
+		}
+		layout := c.lookupLayout(t)
+		return layout != nil && (layout.Kind == LayoutPrimitive || layout.Kind == LayoutString)
+	}
+	for _, pt := range ext.ParamTypes {
+		if !fits(pt) {
+			return false
+		}
+	}
+	return ext.ResultType == nil || fits(ext.ResultType)
+}
+
 // declareExterns creates LLVM IR function declarations for all extern functions.
 // Value params are passed by pointer (i8*); ref params as typed pointers.
 // Struct returns use sret pattern (void return, first param is result pointer).
@@ -50,10 +120,25 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 			}
 		}
 
+		// Raw-C-ABI runtime helpers: no sret, scalars by value, string/vector as
+		// their bare pointer. The result is then whatever llvmNamedType gives
+		// (a scalar, or i8* for string), which is exactly the C declaration.
+		//
+		// A `wasm_import on the same declaration names a *host* import rather
+		// than the statically-linked helper, so it wins: the symbol is then just
+		// an import name and the canonical (ptr, len) convention is the right one.
+		// Decided once here and carried on ext.RawABI, because genExternCall has
+		// to lower the arguments the same way this declared the parameters.
+		isRawABI := isRawABIExtern(ext.CName) && !isWasmImport && !ext.IsFailable && c.fitsRawABI(ext)
+		if isRawABI {
+			hasSret = false
+		}
+
 		// Deduplicate by C name — multiple Promise externs may map to the same C function
 		if fn, ok := cFuncs[ext.CName]; ok {
 			ext.IRFunc = fn
 			ext.HasSret = hasSret
+			ext.RawABI = isRawABI
 			c.funcs[ext.PromiseName] = fn
 			continue
 		}
@@ -82,6 +167,16 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 				continue
 			}
 
+			if isRawABI {
+				// Raw C ABI: scalars by value; a string is the bare instance
+				// pointer, NOT the wasm_import (ptr, len) flattening below —
+				// wasm_alloc.c reads the Promise string layout itself, whereas a
+				// JS host cannot know that layout. fitsRawABI already established
+				// that every parameter kind here has a raw form.
+				params = append(params, ir.NewParam(paramName, llvmNamedType(extractNamed(pt))))
+				continue
+			}
+
 			if isWasmImport && layout.Kind == LayoutPrimitive {
 				// WASM imports: primitive scalars pass by value directly
 				params = append(params, ir.NewParam(paramName, llvmNamedType(extractNamed(pt))))
@@ -107,7 +202,8 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 			if isOpaqueContainerType(ext.ResultType) {
 				retType = irtypes.I8Ptr
 			} else if !hasSret {
-				// WASM: primitive scalar direct return
+				// WASM import: primitive scalar direct return.
+				// Raw C ABI: scalar, or i8* for a string instance pointer.
 				retType = llvmNamedType(extractNamed(ext.ResultType))
 			}
 		}
@@ -122,6 +218,7 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 
 		ext.IRFunc = fn
 		ext.HasSret = hasSret
+		ext.RawABI = isRawABI
 		c.funcs[ext.PromiseName] = fn
 		cFuncs[ext.CName] = fn
 	}
@@ -171,6 +268,15 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 
 		// Container types (Vector, Channel, string) are already i8* — pass directly
 		if isOpaqueContainerType(ext.ParamTypes[i]) {
+			callArgs = append(callArgs, arg)
+			continue
+		}
+
+		// Raw C ABI: the internal representation already *is* the C value — a
+		// scalar for primitives, the i8* instance pointer for strings — so it
+		// passes through with no value-struct packing. declareExterns decided
+		// this and declared the parameters to match (T1660).
+		if ext.RawABI {
 			callArgs = append(callArgs, arg)
 			continue
 		}

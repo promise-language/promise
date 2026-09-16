@@ -469,7 +469,7 @@ Primitive JS values (`boolean`, `number`, `string`, `null`, `undefined`) are ext
 For WASI, compound types are serialized into WASM linear memory using the canonical ABI:
 
 **Strings**: `(i32 ptr, i32 len)` — UTF-8 bytes in linear memory. The generated binding:
-1. Calls `canonical_abi_realloc(0, 0, 1, len)` to allocate space
+1. Calls `cabi_realloc(0, 0, 1, len)` to allocate space
 2. Copies Promise string bytes into linear memory
 3. Passes `(ptr, len)` to the WASI import
 4. For returns: reads `(ptr, len)`, constructs Promise string, frees allocation
@@ -481,6 +481,20 @@ For WASI, compound types are serialized into WASM linear memory using the canoni
 **Variants/Results/Options**: Discriminant `i32` tag followed by the active case's payload, padded to the largest variant.
 
 **Resource handles**: `i32` index into the host's handle table. No serialization — passed directly as WASM i32 values.
+
+### Helper Symbols and Their ABI
+
+The canonical-ABI helpers — `cabi_realloc`, `cabi_retarea_ptr`, `cabi_load_*`/`cabi_store_*`, `cabi_string_data`/`_len`/`_from`, `cabi_vector_data`/`_len`/`_from` — are defined in the compiler's own `wasm_alloc.c` and **statically linked**, not imported. They cross the `` `extern `` boundary in the **raw platform C ABI**: scalars by value, `string` and `T[]` as their bare instance/header pointer, and scalar or pointer results returned directly.
+
+This is a different convention from the one the platform-layer symbols the backend emits use. Those cross in Promise's value-struct bridge form — a leading `sret` result pointer, and every value parameter as a pointer to its value struct — because the backend writes both sides. It is also different from the `wasm_import` convention above, where a `string` parameter flattens to `(i32 ptr, i32 len)`: a JS host cannot know Promise's boxed-string layout, whereas `wasm_alloc.c` reads that layout deliberately.
+
+**Which ABI a symbol carries is a property of the symbol, not of the declaration**, so it is registered once on the compiler side rather than marked up in generated binding source. Generated bindings therefore need no annotation for it, and a binding generated against an older compiler does not need regenerating when the set changes.
+
+### Signature Mismatches Are Build Errors
+
+**A `wasm-ld` `function signature mismatch` fails the build.** wasm-ld resolves a mismatch by replacing the call with a stub that executes `unreachable` and emitting only a warning, so a build that reports success can produce a module that traps on its first canonical call — and the trap names the call site rather than the declaration that was wrong. The compiler scans the linker's output and fails the build, naming every mismatched symbol.
+
+This does not catch everything, which is why it is a backstop rather than the gate: on `wasm32` a pointer and an `i32` are the same type, so a mismatch such as `void(i8*, i8*)` against C's `void(int, int)` links silently. The gate is a canonical binding that is built **and run**.
 
 ---
 

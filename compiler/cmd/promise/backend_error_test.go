@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/promise-language/promise/compiler/internal/codegen"
@@ -340,4 +341,72 @@ func TestExitOnCompileErrorNilIsNoop(t *testing.T) {
 	// A non-nil error would call os.Exit(1) and abort the test binary, so this
 	// only exercises the nil branch — the branch every successful build takes.
 	exitOnCompileError(nil)
+}
+
+// T1660: wasm-ld reports a declaration/definition signature disagreement as a
+// *warning* and resolves the call to a trapping stub, so the link succeeds and
+// the module traps at runtime with the failure attributed to the call site
+// rather than the mismatch. wasmLinkDiagnosticError promotes it to a build error.
+func TestWasmLinkDiagnosticError(t *testing.T) {
+	const oneMismatch = `wasm-ld: warning: function signature mismatch: cabi_realloc
+>>> defined as (i32, i32, i32, i32, i32) -> void in repro.wasm.lto.o
+>>> defined as (i32, i32, i32, i32) -> i32 in wasm_alloc.o
+`
+	tests := []struct {
+		name     string
+		stderr   string
+		wantErr  bool
+		wantIn   []string
+		wantOnce string // if set, must appear in the message exactly once
+	}{
+		{name: "clean", stderr: "", wantErr: false},
+		{
+			name:   "unrelated warnings are not fatal",
+			stderr: "wasm-ld: warning: --export=cabi_realloc: symbol not found\n",
+		},
+		{
+			name:    "one mismatch",
+			stderr:  oneMismatch,
+			wantErr: true,
+			wantIn:  []string{"cabi_realloc", "trapping stub"},
+		},
+		{
+			// Sorted, not in wasm-ld's emission order, which is not stable — the
+			// message is read by humans and matched by tests.
+			name: "several mismatches are all named, in sorted order",
+			stderr: oneMismatch +
+				"wasm-ld: warning: function signature mismatch: cabi_string_from\n" +
+				"wasm-ld: warning: function signature mismatch: cabi_load_i32\n",
+			wantErr: true,
+			wantIn:  []string{"cabi_load_i32, cabi_realloc, cabi_string_from"},
+		},
+		{
+			name: "a repeated symbol is named once",
+			stderr: "wasm-ld: warning: function signature mismatch: cabi_load_i32\n" +
+				"wasm-ld: warning: function signature mismatch: cabi_load_i32\n",
+			wantErr:  true,
+			wantOnce: "cabi_load_i32",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := wasmLinkDiagnosticError(tc.stderr)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("wasmLinkDiagnosticError(%q) error = %v, want error = %v", tc.stderr, err, tc.wantErr)
+			}
+			if err == nil {
+				return
+			}
+			for _, want := range tc.wantIn {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+			if tc.wantOnce != "" {
+				if got := strings.Count(err.Error(), tc.wantOnce); got != 1 {
+					t.Errorf("%q named %d times, want once: %v", tc.wantOnce, got, err)
+				}
+			}
+		})
+	}
 }

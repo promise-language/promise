@@ -80,6 +80,7 @@ type ExternFunc struct {
 	ParamTypes     []types.Type     // Promise types of each parameter
 	ResultType     types.Type       // Promise return type (nil for void)
 	HasSret        bool             // true if return uses sret pointer (large struct return)
+	RawABI         bool             // true if the symbol crosses in the raw C ABI (see rawABIExternSymbols)
 	IsFailable     bool             // true if the extern is failable (returns T!)
 	WasmImportMod  string           // WASM import module name (from `wasm_import annotation)
 	WasmImportName string           // WASM import name (from `wasm_import annotation)

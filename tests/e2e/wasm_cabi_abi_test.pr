@@ -1,0 +1,148 @@
+// T1660: the canonical-ABI helpers in wasm_alloc.o are plain C functions and
+// must be reached through the raw C ABI, not Promise's value-struct bridge form.
+//
+// This is the build-and-run gate the WIT/component-model path never had: the
+// whole canonical surface had generation-only coverage, so a helper could be
+// declared with a signature wasm-ld could not match and nothing noticed. Two
+// distinct failures are caught here, and only one of them is a link diagnostic:
+//
+//   - a shape wasm-ld *can* see (`cabi_retarea_ptr`, `cabi_load_i64`, ...) is
+//     resolved to a trapping stub, so the module traps on first call;
+//   - a shape it *cannot* (`cabi_store_i32` lowered to (i8*, i8*) is
+//     indistinguishable from C's (i32, i32) on wasm32) links silently and writes
+//     a pointer-to-value-struct where the scalar belonged.
+//
+// So the assertions have to run, not just link. Every helper whose signature
+// wasm-ld cannot check on its own is exercised below. The rest are covered by the
+// codegen IR tests and the link check instead, each for a stated reason:
+//   - `cabi_string_from`/`cabi_vector_from` return a C-heap block that Promise
+//     would then pal_free — the separate heap mismatch tracked as T1503;
+//   - `cabi_vector_data`/`_len`/`_from` are absent from the checked-in prebuilt
+//     wasm_alloc.o even though wasm_alloc.c defines them, so calling one links as
+//     an undefined host import and the module will not instantiate (T2128);
+//   - `cabi_realloc` has no matching free reachable from Promise, so calling it
+//     here would leak the block. Its arity differs from the bridge form, so the
+//     link check does see it.
+_cabi_retarea_ptr() i32 `extern("cabi_retarea_ptr") `target(wasm);
+_cabi_load_i32(i32 ptr) i32 `extern("cabi_load_i32") `target(wasm);
+_cabi_load_i64(i32 ptr) i64 `extern("cabi_load_i64") `target(wasm);
+_cabi_load_f32(i32 ptr) f32 `extern("cabi_load_f32") `target(wasm);
+_cabi_load_f64(i32 ptr) f64 `extern("cabi_load_f64") `target(wasm);
+_cabi_store_i32(i32 ptr, i32 val) `extern("cabi_store_i32") `target(wasm);
+_cabi_store_i64(i32 ptr, i64 val) `extern("cabi_store_i64") `target(wasm);
+_cabi_store_f32(i32 ptr, f32 val) `extern("cabi_store_f32") `target(wasm);
+_cabi_store_f64(i32 ptr, f64 val) `extern("cabi_store_f64") `target(wasm);
+_cabi_string_data(string s) i32 `extern("cabi_string_data") `target(wasm);
+_cabi_string_len(string s) i32 `extern("cabi_string_len") `target(wasm);
+
+// A second Promise name on the same C symbol. bindgen emits exactly this shape —
+// one `_cabi_vector_len_<elem>` per list element type, all bound to
+// cabi_vector_len — so the alias is the production case, not a contrivance.
+_cabi_string_len_alias(string s) i32 `extern("cabi_string_len") `target(wasm);
+
+// Round-trips every scalar width through the canonical return area, then reads a
+// string back through its handle-taking helpers. Returns a bitmask of the checks
+// that failed, so a failure names which shape broke rather than just "not zero".
+cabi_failures() int `target(wasm) {
+  int failed = 0;
+  area := _cabi_retarea_ptr();
+
+  _cabi_store_i32(area, 1819043176i32);
+  if _cabi_load_i32(area) != 1819043176i32 {
+    failed = failed + 1;
+  }
+
+  _cabi_store_i64(area + 8i32, 72623859790382856i64);
+  if _cabi_load_i64(area + 8i32) != 72623859790382856i64 {
+    failed = failed + 2;
+  }
+
+  _cabi_store_f32(area + 16i32, 1.5f32);
+  if _cabi_load_f32(area + 16i32) != 1.5f32 {
+    failed = failed + 4;
+  }
+
+  _cabi_store_f64(area + 24i32, 2.25f64);
+  if _cabi_load_f64(area + 24i32) != 2.25f64 {
+    failed = failed + 8;
+  }
+
+  // A string crosses as its bare instance pointer; the helper reads Promise's
+  // own layout off it (len at +8 with the literal flag masked, bytes at +16).
+  if _cabi_string_len("hell") != 4i32 {
+    failed = failed + 16;
+  }
+  if _cabi_load_i32(_cabi_string_data("hell")) != 1819043176i32 {
+    failed = failed + 32;
+  }
+
+  return failed;
+}
+
+cabi_failures() int `target(!wasm) {
+  return 0;
+}
+
+test_cabi_helpers_match_runtime_abi() `test {
+  assert(cabi_failures() == 0, "canonical-ABI helper signatures disagree with wasm_alloc.o");
+}
+
+// The raw-ABI path passes a string straight through as its instance pointer,
+// skipping packToValueStruct. Skipping the pack must not skip drop bookkeeping:
+// every check above uses a string *literal*, which lives in .rodata and is never
+// freed, so a lost drop would be invisible there. These are heap strings — one
+// held in a local, one an unnamed temporary consumed by the call — and the
+// harness fails the test on any alloc-count delta.
+heap_string_failures() int `target(wasm) {
+  int failed = 0;
+  string prefix = "he";
+  string suffix = "llo";
+  string joined = prefix + suffix;
+
+  if _cabi_string_len(joined) != 5i32 {
+    failed = failed + 1;
+  }
+  if _cabi_string_len(prefix + suffix) != 5i32 {
+    failed = failed + 2;
+  }
+  if _cabi_string_data(joined) == 0i32 {
+    failed = failed + 4;
+  }
+  return failed;
+}
+
+heap_string_failures() int `target(!wasm) {
+  return 0;
+}
+
+test_heap_strings_cross_raw_abi_without_leaking() `test {
+  assert(heap_string_failures() == 0, "heap string through a raw-ABI extern");
+}
+
+// declareExterns lowers the first declaration of a C symbol and reuses it for
+// every later one, so the alias takes the dedup path and inherits its ABI from a
+// field rather than from the lowering it just skipped.
+//
+// This has to be checked by running. If the alias were to lose the raw ABI it
+// would pack a value struct and pass a pointer to *that* — still an i8*, so the
+// LLVM types line up and wasm-ld sees one consistent signature. Nothing short of
+// executing it can tell the two pointers apart, and the helper would be reading a
+// length out of the wrong object (T1660).
+alias_failures() int `target(wasm) {
+  int failed = 0;
+  if _cabi_string_len("hell") != 4i32 {
+    failed = failed + 1;
+  }
+  if _cabi_string_len_alias("hell") != 4i32 {
+    failed = failed + 2;
+  }
+  return failed;
+}
+
+alias_failures() int `target(!wasm) {
+  return 0;
+}
+
+test_aliased_cabi_symbol_keeps_raw_abi() `test {
+  assert(alias_failures() == 0, "a second `extern on one canonical-ABI symbol lost the raw ABI");
+}

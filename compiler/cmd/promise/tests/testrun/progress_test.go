@@ -6,15 +6,26 @@ package testrun
 // place the whole chain — flag parsing, mode resolution, the multi-file
 // parent's own `pass` lines, and the `-progress full` it forces on its children
 // — is observable at once.
+//
+// Every child runs through runProgressOK or runProgressFailing, which check the
+// exit status before any assertion reads a stream, and every message that could
+// otherwise print an empty stream ends with progressRun.detail(). These tests
+// assert on what the child *renders*, and a child that never ran renders
+// nothing: a message built from stdout alone then reports "the mode is wrong"
+// when the truth is "there was no run", and throws away the exit status and
+// stderr — the only two places the cause could be (T2119).
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
@@ -51,36 +62,146 @@ main() ` + "`test(expected: \"hi\")" + ` {
 }
 `
 
-// progressRun is one invocation's separated streams.
+// progressBrokenSource does not parse, so the child dies before it can run a
+// single test — the shape T2119's failure had: nothing on stdout, everything on
+// stderr.
+const progressBrokenSource = `
+broken_one() ` + "`test" + ` {
+  assert(1 + == 2, "unparseable");
+}
+`
+
+// progressRunTimeout bounds one child invocation. These runs compile a two-test
+// file; the worst observed under a saturated bin/verify was 29s (T2119). The
+// budget is compile + slack — the same 3 minutes stuck_test.go allows for the
+// same reason — not a timing assertion. Without it a wedged child costs the
+// whole package deadline and surfaces as a goroutine dump rather than as this
+// test.
+const progressRunTimeout = 3 * time.Minute
+
+// progressRun is one invocation: what was run, how it ended, and its separated
+// streams.
 type progressRun struct {
+	args, env      []string
 	stdout, stderr string
 	err            error
+	exitCode       int // -1: killed by a signal, or never started
+	timedOut       bool
+	budget         time.Duration // the deadline this run was given
+	elapsed        time.Duration
+}
+
+// detail is the whole record of one invocation — see the file comment for why a
+// failure message built from stdout alone is worse than no message at all.
+func (r progressRun) detail() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n  command: promise %s\n", strings.Join(r.args, " "))
+	fmt.Fprintf(&b, "  env:     %v\n", r.env)
+	if r.timedOut {
+		fmt.Fprintf(&b, "  exit:    KILLED — exceeded the %s budget after %s\n",
+			r.budget, r.elapsed.Round(time.Millisecond))
+	} else {
+		fmt.Fprintf(&b, "  exit:    code %d (%v) after %s\n",
+			r.exitCode, r.err, r.elapsed.Round(time.Millisecond))
+	}
+	fmt.Fprintf(&b, "  stdout:  %s\n", quoteStream(r.stdout))
+	fmt.Fprintf(&b, "  stderr:  %s\n", quoteStream(r.stderr))
+	return b.String()
+}
+
+// quoteStream renders a captured stream so an empty one is visibly empty rather
+// than a blank line the reader has to interpret.
+func quoteStream(s string) string {
+	if s == "" {
+		return "<empty>"
+	}
+	return "\n    " + strings.ReplaceAll(strings.TrimRight(s, "\n"), "\n", "\n    ")
 }
 
 // runProgress invokes the built compiler with stdout and stderr captured
 // separately — CombinedOutput would interleave the transient line into the
 // stream this test has to prove stays clean.
+//
+// Callers go through runProgressOK or runProgressFailing rather than calling
+// this directly, so the exit status is checked before any assertion reads a
+// stream.
 func runProgress(t *testing.T, bin string, env []string, args ...string) progressRun {
 	t.Helper()
-	cmd := exec.Command(bin, args...)
+	return runProgressWithin(t, bin, env, progressRunTimeout, args...)
+}
+
+// runProgressWithin is runProgress under an explicit budget. Only the deadline's
+// own test passes anything but progressRunTimeout: a backstop that is never
+// exercised is a backstop nobody knows still works.
+func runProgressWithin(t *testing.T, bin string, env []string, budget time.Duration, args ...string) progressRun {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if env != nil {
 		cmd.Env = append(os.Environ(), env...)
 	}
+	// The child fans out to opt/llc and to the compiled test binary. WaitDelay
+	// bounds how long Wait blocks on the capture pipes once the child is gone,
+	// so a surviving grandchild cannot hold this test open. Those grandchildren
+	// are self-limiting — opt/llc finish in seconds, and the test binary has its
+	// own per-test watchdog and batch budget (T1639) — so killing the process
+	// group, which out here would need a build-tagged unix/windows pair, buys
+	// nothing.
+	cmd.WaitDelay = 5 * time.Second
+	start := time.Now()
 	err := cmd.Run()
-	return progressRun{stdout: out.String(), stderr: errb.String(), err: err}
+	code := -1
+	if cmd.ProcessState != nil {
+		code = cmd.ProcessState.ExitCode()
+	}
+	return progressRun{
+		args: args, env: env,
+		stdout: out.String(), stderr: errb.String(),
+		err: err, exitCode: code, timedOut: ctx.Err() != nil,
+		budget: budget, elapsed: time.Since(start),
+	}
+}
+
+// runProgressExpectingExit runs the compiler and requires an exact exit code. A
+// child that failed to compile, was killed, or timed out fails the test here —
+// where the evidence is — rather than downstream, where the only symptom is an
+// empty stream and the assertion blames the render mode.
+func runProgressExpectingExit(t *testing.T, bin string, env []string, want int, args ...string) progressRun {
+	t.Helper()
+	r := runProgress(t, bin, env, args...)
+	if r.exitCode != want {
+		t.Fatalf("expected exit %d, got %d:%s", want, r.exitCode, r.detail())
+	}
+	return r
+}
+
+// runProgressOK requires a clean exit.
+func runProgressOK(t *testing.T, bin string, env []string, args ...string) progressRun {
+	t.Helper()
+	return runProgressExpectingExit(t, bin, env, 0, args...)
+}
+
+// runProgressFailing requires exit code 1 — `promise test` reports a failing
+// suite, and a usage error, with exactly that. A signal (-1), a Go panic (2) or
+// a memory-limit abort (134) is a dead child rather than a reported failure, and
+// must not satisfy a test that only asked for "non-zero".
+func runProgressFailing(t *testing.T, bin string, env []string, args ...string) progressRun {
+	t.Helper()
+	return runProgressExpectingExit(t, bin, env, 1, args...)
 }
 
 // summaryRe matches the multi-file grand summary and the single-file batch
 // summary alike — the block the item's invariant pins as mode-independent.
 var progressSummaryRe = regexp.MustCompile(`(?m)^\d+ passed, \d+ failed.*$`)
 
-func summaryLines(t *testing.T, out string) string {
+func summaryLines(t *testing.T, r progressRun) string {
 	t.Helper()
-	m := progressSummaryRe.FindAllString(out, -1)
+	m := progressSummaryRe.FindAllString(r.stdout, -1)
 	if len(m) == 0 {
-		t.Fatalf("no summary line in output:\n%s", out)
+		t.Fatalf("no summary line in output:%s", r.detail())
 	}
 	return strings.Join(m, "\n")
 }
@@ -121,51 +242,47 @@ func TestProgressModes_MultiFile(t *testing.T) {
 	bin := clitest.Bin(t)
 	dir := writeFixture(t)
 
-	full := runProgress(t, bin, nil, "test", "-progress", "full", dir)
-	plain := runProgress(t, bin, nil, "test", "-progress", "plain", dir)
-	tty := runProgress(t, bin, nil, "test", "-progress", "tty", dir)
-
-	for name, r := range map[string]progressRun{"full": full, "plain": plain, "tty": tty} {
-		if r.err == nil {
-			t.Fatalf("%s: expected a non-zero exit for the failing test\n%s", name, r.stdout)
-		}
-	}
+	// The fixture has a deliberately failing test, so each mode exits 1.
+	full := runProgressFailing(t, bin, nil, "test", "-progress", "full", dir)
+	plain := runProgressFailing(t, bin, nil, "test", "-progress", "plain", dir)
+	tty := runProgressFailing(t, bin, nil, "test", "-progress", "tty", dir)
 
 	// 1. `full` is the machine-readable stream: the passing file is named.
 	if got := passLines(full.stdout); len(got) != 1 || !strings.Contains(got[0], "alpha_test.pr") {
-		t.Errorf("full mode pass lines = %v, want one naming alpha_test.pr\n%s", got, full.stdout)
+		t.Errorf("full mode pass lines = %v, want one naming alpha_test.pr%s", got, full.detail())
 	}
 
 	// 2. Neither quiet mode prints a passing line on stdout.
 	for name, r := range map[string]progressRun{"plain": plain, "tty": tty} {
 		if got := passLines(r.stdout); len(got) != 0 {
-			t.Errorf("%s mode leaked passing lines on stdout: %v", name, got)
+			t.Errorf("%s mode leaked passing lines on stdout: %v%s", name, got, r.detail())
 		}
 	}
 
 	// 3. tty stdout is byte-identical to plain stdout apart from the timings
 	//    baked into each line, so compare the lines with timings elided.
 	if got, want := elideTimings(tty.stdout), elideTimings(plain.stdout); got != want {
-		t.Errorf("tty stdout differs from plain:\n tty:\n%s\nplain:\n%s", got, want)
+		t.Errorf("tty stdout differs from plain:\n tty:\n%s\nplain:\n%s\ntty run:%s\nplain run:%s",
+			got, want, tty.detail(), plain.detail())
 	}
 
 	// 4. THE INVARIANT: the summary is the same in every mode.
-	fs := elideTimings(summaryLines(t, full.stdout))
-	ps := elideTimings(summaryLines(t, plain.stdout))
-	ts := elideTimings(summaryLines(t, tty.stdout))
+	fs := elideTimings(summaryLines(t, full))
+	ps := elideTimings(summaryLines(t, plain))
+	ts := elideTimings(summaryLines(t, tty))
 	if fs != ps || ps != ts {
 		t.Errorf("summary differs between modes:\n full: %q\nplain: %q\n  tty: %q", fs, ps, ts)
 	}
 	// alpha contributes two passes, beta one pass and one failure.
 	if !strings.Contains(fs, "3 passed, 1 failed (2 files") {
-		t.Errorf("summary = %q, want it to report 3 passed, 1 failed over 2 files", fs)
+		t.Errorf("summary = %q, want it to report 3 passed, 1 failed over 2 files%s", fs, full.detail())
 	}
 
 	// 5. Failures persist verbatim in every mode, with their FAILED: section.
 	for name, r := range map[string]progressRun{"full": full, "plain": plain, "tty": tty} {
 		for _, want := range []string{"FAIL (", "beta_test.pr", "beta_broken", "FAILED:"} {
 			if !strings.Contains(r.stdout, want) {
-				t.Errorf("%s mode dropped %q from stdout:\n%s", name, want, r.stdout)
+				t.Errorf("%s mode dropped %q from stdout:%s", name, want, r.detail())
 			}
 		}
 	}
@@ -216,28 +333,29 @@ func TestProgressModes_SingleFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	full := runProgress(t, bin, nil, "test", "-progress", "full", src)
-	plain := runProgress(t, bin, nil, "test", "-progress", "plain", src)
-	tty := runProgress(t, bin, nil, "test", "-progress", "tty", src)
+	// The mixed fixture has a deliberately failing test, so each mode exits 1.
+	full := runProgressFailing(t, bin, nil, "test", "-progress", "full", src)
+	plain := runProgressFailing(t, bin, nil, "test", "-progress", "plain", src)
+	tty := runProgressFailing(t, bin, nil, "test", "-progress", "tty", src)
 
 	if got := passLines(full.stdout); len(got) != 1 || !strings.Contains(got[0], "beta_ok") {
-		t.Errorf("full mode pass lines = %v, want one naming beta_ok\n%s", got, full.stdout)
+		t.Errorf("full mode pass lines = %v, want one naming beta_ok%s", got, full.detail())
 	}
 	for name, r := range map[string]progressRun{"plain": plain, "tty": tty} {
 		if got := passLines(r.stdout); len(got) != 0 {
-			t.Errorf("%s mode leaked passing lines: %v", name, got)
+			t.Errorf("%s mode leaked passing lines: %v%s", name, got, r.detail())
 		}
 		if !strings.Contains(r.stdout, "FAIL (") || !strings.Contains(r.stdout, "beta_broken") {
-			t.Errorf("%s mode dropped the failure line:\n%s", name, r.stdout)
+			t.Errorf("%s mode dropped the failure line:%s", name, r.detail())
 		}
 		// The panic context under a FAIL is not a progress line and must stay.
 		if !strings.Contains(r.stdout, "deliberate failure") {
-			t.Errorf("%s mode dropped the assertion context:\n%s", name, r.stdout)
+			t.Errorf("%s mode dropped the assertion context:%s", name, r.detail())
 		}
 	}
-	fs := elideTimings(summaryLines(t, full.stdout))
-	ps := elideTimings(summaryLines(t, plain.stdout))
-	ts := elideTimings(summaryLines(t, tty.stdout))
+	fs := elideTimings(summaryLines(t, full))
+	ps := elideTimings(summaryLines(t, plain))
+	ts := elideTimings(summaryLines(t, tty))
 	if fs != ps || ps != ts {
 		t.Errorf("single-file summary differs between modes:\n full: %q\nplain: %q\n  tty: %q", fs, ps, ts)
 	}
@@ -258,21 +376,16 @@ func TestProgressModes_SnapshotPassSuppressed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	full := runProgress(t, bin, nil, "test", "-progress", "full", src)
-	plain := runProgress(t, bin, nil, "test", "-progress", "plain", src)
-	if full.err != nil {
-		t.Fatalf("snapshot test should pass: %v\n%s\n%s", full.err, full.stdout, full.stderr)
-	}
-	if plain.err != nil {
-		t.Fatalf("snapshot test should pass: %v\n%s\n%s", plain.err, plain.stdout, plain.stderr)
-	}
+	// The snapshot test passes, so both runs must exit 0.
+	full := runProgressOK(t, bin, nil, "test", "-progress", "full", src)
+	plain := runProgressOK(t, bin, nil, "test", "-progress", "plain", src)
 	if got := passLines(full.stdout); len(got) != 1 || !strings.HasPrefix(got[0], "PASS (") {
-		t.Errorf("full mode pass lines = %v, want one \"PASS (…)\"\n%s", got, full.stdout)
+		t.Errorf("full mode pass lines = %v, want one \"PASS (…)\"%s", got, full.detail())
 	}
 	if got := passLines(plain.stdout); len(got) != 0 {
-		t.Errorf("plain mode leaked the snapshot pass line: %v", got)
+		t.Errorf("plain mode leaked the snapshot pass line: %v%s", got, plain.detail())
 	}
-	if a, b := elideTimings(summaryLines(t, full.stdout)), elideTimings(summaryLines(t, plain.stdout)); a != b {
+	if a, b := elideTimings(summaryLines(t, full)), elideTimings(summaryLines(t, plain)); a != b {
 		t.Errorf("snapshot summary differs between modes: %q vs %q", a, b)
 	}
 }
@@ -290,40 +403,42 @@ func TestProgressFlagBeatsEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The fixture is two passing tests, so every run below must exit 0 —
+	// including the unrecognized-env one, whose whole point is that an
+	// unrecognized PROMISE_PROGRESS falls through to detection rather than
+	// being fatal.
+	//
 	// Env alone: full turns the pass lines back on even though stdout is a pipe.
-	envFull := runProgress(t, bin, []string{"PROMISE_PROGRESS=full"}, "test", src)
+	envFull := runProgressOK(t, bin, []string{"PROMISE_PROGRESS=full"}, "test", src)
 	if len(passLines(envFull.stdout)) == 0 {
-		t.Errorf("PROMISE_PROGRESS=full did not restore pass lines:\n%s", envFull.stdout)
+		t.Errorf("PROMISE_PROGRESS=full did not restore pass lines:%s", envFull.detail())
 	}
 	// Flag beats env in both directions.
-	flagPlain := runProgress(t, bin, []string{"PROMISE_PROGRESS=full"}, "test", "-progress", "plain", src)
+	flagPlain := runProgressOK(t, bin, []string{"PROMISE_PROGRESS=full"}, "test", "-progress", "plain", src)
 	if got := passLines(flagPlain.stdout); len(got) != 0 {
-		t.Errorf("-progress plain lost to PROMISE_PROGRESS=full: %v", got)
+		t.Errorf("-progress plain lost to PROMISE_PROGRESS=full: %v%s", got, flagPlain.detail())
 	}
-	flagFull := runProgress(t, bin, []string{"PROMISE_PROGRESS=plain"}, "test", "-progress", "full", src)
+	flagFull := runProgressOK(t, bin, []string{"PROMISE_PROGRESS=plain"}, "test", "-progress", "full", src)
 	if len(passLines(flagFull.stdout)) == 0 {
-		t.Errorf("-progress full lost to PROMISE_PROGRESS=plain:\n%s", flagFull.stdout)
+		t.Errorf("-progress full lost to PROMISE_PROGRESS=plain:%s", flagFull.detail())
 	}
 	// The default with a piped stdout and no env is the quiet form.
-	auto := runProgress(t, bin, []string{"PROMISE_PROGRESS="}, "test", src)
+	auto := runProgressOK(t, bin, []string{"PROMISE_PROGRESS="}, "test", src)
 	if got := passLines(auto.stdout); len(got) != 0 {
-		t.Errorf("the piped default printed pass lines: %v", got)
+		t.Errorf("the piped default printed pass lines: %v%s", got, auto.detail())
 	}
 	// An unrecognized env value falls through to detection rather than failing.
-	garbage := runProgress(t, bin, []string{"PROMISE_PROGRESS=quiet"}, "test", src)
-	if garbage.err != nil {
-		t.Errorf("an unrecognized PROMISE_PROGRESS must not be fatal: %v\n%s", garbage.err, garbage.stderr)
-	}
+	garbage := runProgressOK(t, bin, []string{"PROMISE_PROGRESS=quiet"}, "test", src)
 	if got := passLines(garbage.stdout); len(got) != 0 {
-		t.Errorf("garbage env should fall back to detection (plain); got %v", got)
+		t.Errorf("garbage env should fall back to detection (plain); got %v%s", got, garbage.detail())
 	}
 	// Every mode agrees on the summary.
-	want := elideTimings(summaryLines(t, envFull.stdout))
+	want := elideTimings(summaryLines(t, envFull))
 	for name, r := range map[string]progressRun{
 		"flagPlain": flagPlain, "flagFull": flagFull, "auto": auto, "garbage": garbage,
 	} {
-		if got := elideTimings(summaryLines(t, r.stdout)); got != want {
-			t.Errorf("%s summary = %q, want %q", name, got, want)
+		if got := elideTimings(summaryLines(t, r)); got != want {
+			t.Errorf("%s summary = %q, want %q%s", name, got, want, r.detail())
 		}
 	}
 }
@@ -336,13 +451,11 @@ func TestProgressFlagRejectsUnknownSpelling(t *testing.T) {
 	t.Parallel()
 	bin := clitest.Bin(t)
 	for _, bad := range []string{"quiet", "1", "on", ""} {
-		r := runProgress(t, bin, nil, "test", "-progress", bad, "nonexistent_test.pr")
-		if r.err == nil {
-			t.Errorf("-progress %q was accepted", bad)
-			continue
-		}
+		// A usage error is exit 1; runProgressFailing is what rejects it being
+		// accepted (exit 0) or the child dying on the way to saying so.
+		r := runProgressFailing(t, bin, nil, "test", "-progress", bad, "nonexistent_test.pr")
 		if !strings.Contains(r.stderr, "-progress requires one of: auto, full, plain, tty") {
-			t.Errorf("-progress %q: stderr = %q, want the accepted-spellings message", bad, r.stderr)
+			t.Errorf("-progress %q: want the accepted-spellings message:%s", bad, r.detail())
 		}
 	}
 	// "auto" is accepted and means "detect" — under a pipe, that is plain.
@@ -351,17 +464,14 @@ func TestProgressFlagRejectsUnknownSpelling(t *testing.T) {
 	if err := os.WriteFile(src, []byte(progressPassingSource), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r := runProgress(t, bin, []string{"PROMISE_PROGRESS="}, "test", "-progress", "auto", src)
-	if r.err != nil {
-		t.Fatalf("-progress auto should be accepted: %v\n%s", r.err, r.stderr)
-	}
+	r := runProgressOK(t, bin, []string{"PROMISE_PROGRESS="}, "test", "-progress", "auto", src)
 	if got := passLines(r.stdout); len(got) != 0 {
-		t.Errorf("-progress auto under a pipe printed pass lines: %v", got)
+		t.Errorf("-progress auto under a pipe printed pass lines: %v%s", got, r.detail())
 	}
-	// And the usage line advertises the flag.
-	usage := runProgress(t, bin, nil, "test")
+	// And the usage line advertises the flag. No target is a usage error: exit 1.
+	usage := runProgressFailing(t, bin, nil, "test")
 	if !strings.Contains(usage.stderr, "-progress auto|full|plain|tty") {
-		t.Errorf("usage does not document -progress: %q", usage.stderr)
+		t.Errorf("usage does not document -progress:%s", usage.detail())
 	}
 }
 
@@ -377,12 +487,9 @@ func TestProgressDoesNotAffectOtherCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, env := range [][]string{nil, {"PROMISE_PROGRESS=plain"}, {"PROMISE_PROGRESS=tty"}} {
-		r := runProgress(t, bin, env, "run", src)
-		if r.err != nil {
-			t.Fatalf("env %v: %v\n%s\n%s", env, r.err, r.stdout, r.stderr)
-		}
+		r := runProgressOK(t, bin, env, "run", src)
 		if strings.TrimSpace(r.stdout) != "hello" {
-			t.Errorf("env %v: stdout = %q, want \"hello\"", env, r.stdout)
+			t.Errorf("env %v: stdout = %q, want \"hello\"%s", env, r.stdout, r.detail())
 		}
 		// The rewriter's signature is a bare CR (return to line start) or an
 		// ANSI escape. A CR that is part of a CRLF line ending is not that —
@@ -406,11 +513,12 @@ func TestProgressDoesNotAffectJSONMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	base := runProgress(t, bin, []string{"PROMISE_PROGRESS="}, "test", "--json", dir)
+	// The mixed fixture has a deliberately failing test, so each run exits 1.
+	base := runProgressFailing(t, bin, []string{"PROMISE_PROGRESS="}, "test", "--json", dir)
 	for _, env := range [][]string{{"PROMISE_PROGRESS=plain"}, {"PROMISE_PROGRESS=tty"}, {"PROMISE_PROGRESS=full"}} {
-		r := runProgress(t, bin, env, "test", "--json", dir)
+		r := runProgressFailing(t, bin, env, "test", "--json", dir)
 		if got, want := elideJSONVolatile(r.stdout), elideJSONVolatile(base.stdout); got != want {
-			t.Errorf("env %v changed the JSONL stream:\n got: %s\nwant: %s", env, got, want)
+			t.Errorf("env %v changed the JSONL stream:\n got: %s\nwant: %s%s", env, got, want, r.detail())
 		}
 		if strings.ContainsAny(r.stdout, "\r\x1b") {
 			t.Errorf("env %v leaked a carriage return or escape into the JSONL stream: %q", env, r.stdout)
@@ -420,7 +528,7 @@ func TestProgressDoesNotAffectJSONMode(t *testing.T) {
 	// comparison above could not have passed vacuously.
 	for _, want := range []string{`"beta_ok"`, `"beta_broken"`, `"pass"`, `"fail"`} {
 		if !strings.Contains(base.stdout, want) {
-			t.Errorf("JSONL stream is missing %s:\n%s", want, base.stdout)
+			t.Errorf("JSONL stream is missing %s:%s", want, base.detail())
 		}
 	}
 }
@@ -431,4 +539,106 @@ var jsonVolatileRe = regexp.MustCompile(`"(elapsed|duration_ms|duration|file)":\
 
 func elideJSONVolatile(s string) string {
 	return jsonVolatileRe.ReplaceAllString(s, `"$1":X`)
+}
+
+// TestProgressRunReportsWhyTheChildFailed pins the diagnostic contract the
+// helpers in this file exist for. Under a full bin/verify one of these children
+// died during its cold compile, and the assertion reported "did not restore
+// pass lines" with an empty body — discarding the exit status and stderr, the
+// only two places the cause could be (T2119).
+func TestProgressRunReportsWhyTheChildFailed(t *testing.T) {
+	t.Parallel()
+	bin := clitest.Bin(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "broken_test.pr")
+	if err := os.WriteFile(src, []byte(progressBrokenSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The premise: a child that cannot compile writes nothing at all to stdout,
+	// so an assertion that reads stdout alone has no evidence to report.
+	r := runProgressFailing(t, bin, nil, "test", src)
+	if r.stdout != "" {
+		t.Errorf("a compile failure should leave stdout empty; got %q", r.stdout)
+	}
+	if !strings.Contains(r.stderr, "broken_test.pr") {
+		t.Errorf("the compile error must reach stderr:%s", r.detail())
+	}
+
+	// So the record carries the exit status and stderr, and says "empty" out
+	// loud rather than printing a blank line the reader has to interpret.
+	// Whitespace is collapsed first: this pins what detail() reports, not how
+	// its columns happen to be padded.
+	d := r.detail()
+	compact := strings.Join(strings.Fields(d), " ")
+	for _, want := range []string{"exit: code 1", "broken_test.pr", "stdout: <empty>"} {
+		if !strings.Contains(compact, want) {
+			t.Errorf("detail() dropped %q:\n%s", want, d)
+		}
+	}
+
+	// And a killed child names its deadline rather than reporting a bare code.
+	killed := progressRun{args: []string{"test", "x.pr"}, exitCode: -1,
+		timedOut: true, budget: progressRunTimeout}
+	if d := killed.detail(); !strings.Contains(d, "KILLED") ||
+		!strings.Contains(d, progressRunTimeout.String()) {
+		t.Errorf("a timed-out run must name its deadline:\n%s", d)
+	}
+}
+
+// TestProgressRunDeadlineKillsTheChild exercises the backstop itself: the
+// deadline fires, the child is killed, and the record says so. The synthetic
+// case in TestProgressRunReportsWhyTheChildFailed pins only the rendering; this
+// pins the mechanism (context, kill, timedOut) end to end.
+//
+// Measuring time is the point here rather than a stand-in for a happens-before
+// edge, which is the case docs/code-style.md §"Test synchronization" explicitly
+// allows — this is a test *of* a timeout. The margin is not fine: the budget is
+// milliseconds and the work it interrupts is a cold compile of several seconds,
+// in a t.TempDir() that guarantees a cache miss.
+func TestProgressRunDeadlineKillsTheChild(t *testing.T) {
+	t.Parallel()
+	bin := clitest.Bin(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "deadline_test.pr")
+	if err := os.WriteFile(src, []byte(progressPassingSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const budget = 50 * time.Millisecond
+	r := runProgressWithin(t, bin, nil, budget, "test", src)
+
+	if !r.timedOut {
+		t.Fatalf("the deadline did not fire:%s", r.detail())
+	}
+	// A killed process has no exit code of its own.
+	if r.exitCode != -1 {
+		t.Errorf("a killed child should report exit -1, got %d:%s", r.exitCode, r.detail())
+	}
+	// And the report names the budget rather than a bare exit status, so the
+	// reader is not left guessing why a run produced nothing.
+	d := r.detail()
+	if !strings.Contains(d, "KILLED") || !strings.Contains(d, budget.String()) {
+		t.Errorf("a killed run must name the budget it exceeded:\n%s", d)
+	}
+}
+
+// TestQuoteStreamMakesAStreamLegible pins the rendering contract detail() rests
+// on: an absent stream is named rather than left blank, and a present one is
+// indented so it cannot be misread as the harness's own output.
+func TestQuoteStreamMakesAStreamLegible(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, in, want string }{
+		{"empty is named", "", "<empty>"},
+		{"one line is indented", "boom\n", "\n    boom"},
+		{"trailing blank lines are trimmed", "boom\n\n\n", "\n    boom"},
+		{"every line is indented", "a\nb\n", "\n    a\n    b"},
+		{"interior blank lines are kept", "a\n\nb\n", "\n    a\n    \n    b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := quoteStream(tc.in); got != tc.want {
+				t.Errorf("quoteStream(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
 }

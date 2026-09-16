@@ -402,6 +402,106 @@ func TestTestedPromise_NoSummaryIsNotZeroFailures(t *testing.T) {
 	}
 }
 
+// Which summary field becomes which metric, for the Promise checker. Four
+// counts of the same type in one line are what a transposition hides: a
+// failures count carrying the unit count would still look like a plausible
+// envelope, and nothing downstream could tell.
+func TestCheckedPromise_MapsTheSummaryToItsMetrics(t *testing.T) {
+	stubGateBuild(t, &fakeBuild{})
+	root := rootWithCompiler(t)
+	const output = "FAIL modules/std (18 errors)\n\n851 checked, 1 warned, 9 failed (861 units, 27 errors, 1 warning, 42.173s)\n"
+
+	metrics, incomplete, err := measureCheckedPromiseWith(root,
+		func(string) (string, error) { return output, nil })
+	if err != nil {
+		t.Fatalf("diagnostics are a measurement: %v", err)
+	}
+	if incomplete != "" {
+		t.Errorf("incomplete = %q, want empty", incomplete)
+	}
+	want := map[string]int64{
+		"promise_check_failures": 9,
+		"promise_check_errors":   27,
+		"promise_check_warnings": 1,
+		"promise_check_units":    861,
+	}
+	if len(metrics) != len(want) {
+		t.Fatalf("got %d metrics %+v, want %d", len(metrics), metrics, len(want))
+	}
+	for _, m := range metrics {
+		if m.Int != want[m.Name] {
+			t.Errorf("%s = %d, want %d", m.Name, m.Int, want[m.Name])
+		}
+	}
+}
+
+// A sweep that printed no summary checked nothing, and zero failures is not
+// what that means.
+func TestCheckedPromise_NoSummaryIsNotZeroFailures(t *testing.T) {
+	stubGateBuild(t, &fakeBuild{})
+	root := rootWithCompiler(t)
+
+	metrics, _, err := measureCheckedPromiseWith(root,
+		func(string) (string, error) { return "the compiler crashed\n", nil })
+	if err == nil {
+		t.Fatalf("a sweep that printed no summary measured %+v", metrics)
+	}
+	if !strings.Contains(err.Error(), "no summary line") {
+		t.Errorf("error %q does not say what was missing", err)
+	}
+}
+
+// The checker IS the compiler, so a build that reported success but left no
+// binary must not be reported as a clean tree — the same guard formatted:promise
+// carries, for the same reason.
+func TestCheckedPromise_MissingCompilerIsNotClean(t *testing.T) {
+	stubGateBuild(t, &fakeBuild{})
+
+	metrics, incomplete, err := measureCheckedPromiseWith(t.TempDir(),
+		func(string) (string, error) { t.Fatal("the sweep must not run without a compiler"); return "", nil })
+	if err != nil {
+		t.Fatalf("a missing binary is a reason, not an error: %v", err)
+	}
+	if len(metrics) != 0 {
+		t.Errorf("metrics = %+v, want none", metrics)
+	}
+	if !strings.Contains(incomplete, "left no") {
+		t.Errorf("incomplete = %q, does not say the binary is missing", incomplete)
+	}
+}
+
+// A build that did not complete reports no numbers and says why: a count about
+// artifacts that were never produced is a number about nothing.
+func TestCheckedPromise_BuildFailureReportsNoNumbers(t *testing.T) {
+	stubGateBuild(t, buildFails())
+
+	metrics, incomplete, err := measureCheckedPromiseWith(rootWithCompiler(t),
+		func(string) (string, error) { t.Fatal("the sweep must not run behind a failed build"); return "", nil })
+	if err != nil {
+		t.Fatalf("a failed build is a reason, not an error: %v", err)
+	}
+	if len(metrics) != 0 {
+		t.Errorf("metrics = %+v, want none", metrics)
+	}
+	if !strings.Contains(incomplete, "the Promise check did not run") {
+		t.Errorf("incomplete = %q, does not name what was skipped", incomplete)
+	}
+}
+
+// rootWithCompiler is a temp root holding a stand-in bin/promise, so the
+// missing-binary guard is not what a test about something else measures.
+func rootWithCompiler(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "bin", BinaryName()), []byte("stand-in"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 // writeGoModule puts a one-package module at dir whose only content is body.
 func writeGoModule(t *testing.T, dir, pkg, body string) {
 	t.Helper()

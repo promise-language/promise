@@ -134,6 +134,46 @@ func measureCheckedGoWith(root string, capture captureFunc) ([]Metric, string, e
 	return []Metric{Count("vet_findings", len(findings))}, incomplete, nil
 }
 
+// measureCheckedPromise counts what `promise check` reports over this project's
+// Promise code. Counting is this mode's ONLY addition: the sweep's summary line
+// is the answer, and the tool mode is that same command run by hand.
+//
+// The compiler IS the checker, so this measures the one the tree in front of it
+// builds — like measureFormattedPromise, and for the same reason.
+func measureCheckedPromise(root string) ([]Metric, string, error) {
+	return measureCheckedPromiseWith(root, RunPromiseCheckCapture)
+}
+
+// checkRunner is RunPromiseCheckCapture's shape as a parameter: the seam a test
+// uses to stand in for a sweep that needs a built compiler and takes a minute.
+type checkRunner func(root string) (string, error)
+
+// measureCheckedPromiseWith is measureCheckedPromise with the sweep as a
+// parameter, so which summary field becomes which metric can be pinned without
+// analysing nine hundred units to find out.
+func measureCheckedPromiseWith(root string, runCheck checkRunner) ([]Metric, string, error) {
+	if err := ensureGateBuild(root); err != nil {
+		return []Metric{}, buildDidNotComplete("the Promise check did not run", err), nil
+	}
+	// The build having completed, bin/promise exists — but a missing checker
+	// would otherwise be reported here as a clean zero, which is the failure
+	// this whole gate is being added to prevent.
+	if !Exists(filepath.Join(root, "bin", BinaryName())) {
+		return []Metric{}, "the build reported success but left no " + BinaryName() + ", so the Promise code was not checked", nil
+	}
+	output, _ := runCheck(root)
+	summary := ParseCheckSummaryLine(output)
+	if summary == nil {
+		return nil, "", fmt.Errorf("the Promise check printed no summary line, so nothing was measured")
+	}
+	return []Metric{
+		Count("promise_check_failures", summary.Failed),
+		Count("promise_check_errors", summary.Errors),
+		Count("promise_check_warnings", summary.Warnings),
+		Count("promise_check_units", summary.Units),
+	}, "", nil
+}
+
 // measureTestedGo counts failing Go tests and failing packages, across every Go
 // module in the tree. Both numbers are worth having: one failing test in one
 // package and forty in forty are different situations, and a single number

@@ -209,6 +209,7 @@ func TestContractGates_PartGraphTerminates(t *testing.T) {
 var integrationMetrics = []string{
 	"unformatted_go_files", "unformatted_promise_files",
 	"unbuildable_go_packages", "build_failures", "vet_findings",
+	"promise_check_failures", "promise_check_errors", "promise_check_warnings",
 	"go_test_failures", "go_test_packages_failed",
 	"host_test_failures", "host_leak_count",
 }
@@ -278,7 +279,8 @@ func TestFit_FloorsAreCaps(t *testing.T) {
 // strings, and the second is exactly how T2087 happened; spelling the reason
 // makes the next person's choice a decision rather than an inheritance.
 var integrationMetricsUnjudged = map[string]string{
-	"host_test_count": "a suite's size is not a quality of the change. It ratchets `up` where a target carries a figure, but requiring that everywhere would fail a target for deleting a test — which is sometimes the right change.",
+	"host_test_count":     "a suite's size is not a quality of the change. It ratchets `up` where a target carries a figure, but requiring that everywhere would fail a target for deleting a test — which is sometimes the right change.",
+	"promise_check_units": "how many units the checker was given is not a quality of the change either — merging two files into a module lowers it without checking any less. It ratchets `up` where a target carries a figure; what guards against a sweep that measured nothing is the gate's refusal of a run that printed no summary.",
 }
 
 // metricNameLiteral matches the name a gate gives a metric at the only place

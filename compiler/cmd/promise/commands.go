@@ -42,7 +42,7 @@ var commandTree = []*cmdNode{
 	{name: "run", group: "Compile & run", summary: "Compile and run a Promise source file or project", help: func(w io.Writer) { printRunUsage(w) }},
 	{name: "exec", group: "Compile & run", summary: "Execute inline Promise code (auto-wraps in failable main)"},
 	{name: "test", group: "Compile & run", summary: "Discover and run test functions"},
-	{name: "check", group: "Compile & run", summary: "Run semantic analysis (type checking) only"},
+	{name: "check", group: "Compile & run", summary: "Analyse a file, module or project without building", help: func(w io.Writer) { printCheckUsage(w) }},
 
 	// Documentation & discovery
 	{name: "help", group: "Documentation & discovery", summary: "Show language overview and quick-start guide"},

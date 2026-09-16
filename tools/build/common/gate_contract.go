@@ -195,19 +195,13 @@ var contractGates = map[string]contractGateDef{
 		summary: "go vet diagnostics",
 		measure: measureCheckedGo,
 	},
-	// checked has no :promise instance yet, and that is a missing tool rather
-	// than a decision. `promise check` takes ONE FILE and most .pr files are
-	// not checkable alone: a file of a multi-file module reports undefined
-	// names that its own module defines (modules/std/vector.pr does not see
-	// _FnIter in iter.pr), and the negative fixtures under tests/modules/ are
-	// invalid on purpose. A per-file count therefore measures how the files are
-	// arranged, not whether the code is sound — 50 of 942 here, none of them a
-	// defect. Promise's semantic analysis IS exercised: every test compiles its
-	// module graph under `tested:promise`. Checking a PROJECT without building
-	// it needs `promise check <project>`, which the compiler does not have.
+	"checked:promise": {
+		summary: "Promise semantic and ownership diagnostics",
+		measure: measureCheckedPromise,
+	},
 	"checked": {
 		summary: "diagnostics from every language's checker",
-		parts:   []string{"checked:go"},
+		parts:   []string{"checked:go", "checked:promise"},
 	},
 	"tested:go": {
 		summary: "failing tests in every Go module's suite",

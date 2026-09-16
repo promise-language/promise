@@ -54,6 +54,26 @@
       "direction": "down",
       "updated": "2026-06-03"
     },
+    "promise_check_errors": {
+      "value": 27,
+      "direction": "down",
+      "updated": "2026-09-16"
+    },
+    "promise_check_failures": {
+      "value": 9,
+      "direction": "down",
+      "updated": "2026-09-16"
+    },
+    "promise_check_units": {
+      "value": 861,
+      "direction": "up",
+      "updated": "2026-09-16"
+    },
+    "promise_check_warnings": {
+      "value": 1,
+      "direction": "down",
+      "updated": "2026-09-16"
+    },
     "promise_coverage_pct": {
       "direction": "up"
     },
@@ -201,6 +221,24 @@
       "direction": "down",
       "updated": "2026-06-03"
     },
+    "promise_check_errors": {
+      "value": 27,
+      "direction": "down",
+      "updated": "2026-09-16"
+    },
+    "promise_check_failures": {
+      "value": 9,
+      "direction": "down",
+      "updated": "2026-09-16"
+    },
+    "promise_check_units": {
+      "type": "informational"
+    },
+    "promise_check_warnings": {
+      "value": 1,
+      "direction": "down",
+      "updated": "2026-09-16"
+    },
     "promise_coverage_pct": {
       "direction": "up"
     },
@@ -313,6 +351,24 @@
       "direction": "exact",
       "updated": "2026-09-13"
     },
+    "promise_check_errors": {
+      "value": 27,
+      "direction": "down",
+      "updated": "2026-09-16"
+    },
+    "promise_check_failures": {
+      "value": 9,
+      "direction": "down",
+      "updated": "2026-09-16"
+    },
+    "promise_check_units": {
+      "type": "informational"
+    },
+    "promise_check_warnings": {
+      "value": 1,
+      "direction": "down",
+      "updated": "2026-09-16"
+    },
     "stale_generated_files": {
       "value": 0,
       "direction": "exact",
@@ -396,6 +452,24 @@
       "value": 0,
       "direction": "down",
       "updated": "2026-06-03"
+    },
+    "promise_check_errors": {
+      "value": 27,
+      "direction": "down",
+      "updated": "2026-09-16"
+    },
+    "promise_check_failures": {
+      "value": 9,
+      "direction": "down",
+      "updated": "2026-09-16"
+    },
+    "promise_check_units": {
+      "type": "informational"
+    },
+    "promise_check_warnings": {
+      "value": 1,
+      "direction": "down",
+      "updated": "2026-09-16"
     },
     "stale_generated_files": {
       "value": 0,

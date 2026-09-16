@@ -90,6 +90,7 @@ Compiler: promise build file.pr | Run: promise run file.pr | Exec: promise exec 
   promise build file.pr   Compile a single file to an executable
   promise run file.pr     Compile and run (append -- args to forward argv to os.args)
   promise test file.pr    Run tests
+  promise check <target>  Analyse a file, module or project without building
   promise exec '<code>'   Run inline code (failable main, ?^ works)
   promise package add <name|url>   Add an external dependency (git URL or catalog name)
   promise package remove <url>     Remove a dependency from promise.toml

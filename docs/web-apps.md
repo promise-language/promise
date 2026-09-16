@@ -607,11 +607,9 @@ Two scoping decisions:
   through in CI, or the reverse. `-no-check` is the escape hatch for anyone who
   wants the raw output; `bind` already takes `-target`, so it checks for the
   target it generated for.
-- **`promise check` accepting only a single file is a separate bug** (`main.go:296-303`
-  calls `compileFrontend(os.Args[2])`, parsing exactly one file, which fails on
-  the first sibling reference in any multi-file project). It should resolve its
-  input the way `build` does. Tracked separately; the bind self-check does not
-  wait on it, and once both land the self-check is the same shared entry point
+- **`promise check` resolves its input the way `build` does** — both go through
+  the one `resolveTarget` policy, so a project is analysed as a project and a
+  standalone file as a file. The bind self-check is the same shared entry point
   called in-process.
 
 ## 17. Testing

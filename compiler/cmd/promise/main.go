@@ -315,14 +315,7 @@ func main() {
 	case "test":
 		runTest(os.Args[2:])
 	case "check":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: promise check <file.pr>")
-			os.Exit(1)
-		}
-		file, info := compileFrontend(os.Args[2])
-		_ = file
-		fmt.Printf("OK: %d types, %d objects, %d scopes\n",
-			len(info.Types), len(info.Objects), len(info.Scopes))
+		runCheck(os.Args[2:])
 	case "emit-ir":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "usage: promise emit-ir [-target triple] <file.pr>")
@@ -422,10 +415,9 @@ func runLegacy(args []string) {
 		file := parseSourceFile(filename)
 		ast.Print(os.Stdout, file)
 	} else if runCheck {
-		file, info := compileFrontend(filename)
-		_ = file
-		fmt.Printf("OK: %d types, %d objects, %d scopes\n",
-			len(info.Types), len(info.Objects), len(info.Scopes))
+		// The deprecated spelling of `promise check <file>`, and the same
+		// implementation — one answer, reported one way.
+		checkOneUnit(filename, "")
 	} else {
 		// Just parse and print the parse tree
 		input, err := antlr.NewFileStream(filename)
@@ -472,7 +464,7 @@ func runEmitIR(args []string) {
 	// accepts every triple the compiler knows — not just the ones this release
 	// can link (T0533 Part 2).
 	checkEmitTargetFlag(target)
-	cfg, files, resolvedFile, err := resolveTarget(filename, "emit-ir")
+	cfg, files, resolvedFile, err := resolveTarget(filename, "emit-ir", false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -493,7 +485,11 @@ func runEmitIR(args []string) {
 // it returns (nil, nil, nil) so callers can fall back to single-file discovery.
 // When promise.toml exists but the directory has no .pr files, an error is
 // returned so the user is told their project is empty.
-func discoverProject(dir string) (*module.Config, []string, error) {
+// includeTests adds the project's *_test.pr files to the sources — what
+// `promise check` wants, since a module's tests are code this project owns and
+// are only analysable in their module's context. build/run/emit-ir pass false:
+// test functions are not part of the program they compile.
+func discoverProject(dir string, includeTests bool) (*module.Config, []string, error) {
 	tomlPath := filepath.Join(dir, "promise.toml")
 	if _, err := os.Stat(tomlPath); err != nil {
 		if os.IsNotExist(err) {
@@ -510,7 +506,7 @@ func discoverProject(dir string) (*module.Config, []string, error) {
 		return nil, nil, err
 	}
 	cfg.Dir = absDir
-	files, err := module.CollectModuleSources(absDir, false)
+	files, err := module.CollectModuleSources(absDir, includeTests)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -529,11 +525,11 @@ func discoverProject(dir string) (*module.Config, []string, error) {
 //   - standalone file → single-file compile
 //   - nonexistent     → returned as a file so the frontend reports file-not-found
 //
-// cmd is the command the user typed ("build"/"run"/"emit-ir"), used in hint text
-// so the error names the command actually run. On success exactly one of cfg
-// (project) or file (standalone) is non-empty; files holds the project sources
-// when cfg != nil.
-func resolveTarget(arg, cmd string) (cfg *module.Config, files []string, file string, err error) {
+// cmd is the command the user typed ("build"/"run"/"emit-ir"/"check"), used in
+// hint text so the error names the command actually run. includeTests is passed
+// through to discoverProject. On success exactly one of cfg (project) or file
+// (standalone) is non-empty; files holds the project sources when cfg != nil.
+func resolveTarget(arg, cmd string, includeTests bool) (cfg *module.Config, files []string, file string, err error) {
 	target := arg
 	if target == "" {
 		target = "."
@@ -546,7 +542,7 @@ func resolveTarget(arg, cmd string) (cfg *module.Config, files []string, file st
 		return nil, nil, arg, nil
 	}
 	if stat.IsDir() {
-		cfg, files, derr := discoverProject(target)
+		cfg, files, derr := discoverProject(target, includeTests)
 		if derr != nil {
 			return nil, nil, "", derr
 		}
@@ -613,7 +609,7 @@ func buildToFile(args []string, cmd string) (filename, outputFile, target string
 	// Resolve the source argument to a project or a single file via the shared
 	// policy (T1603): no arg → CWD (must be a project), directory → must be a
 	// project, file inside a project → error, standalone file → single-file.
-	projectCfg, projectFiles, resolvedFile, err := resolveTarget(filename, cmd)
+	projectCfg, projectFiles, resolvedFile, err := resolveTarget(filename, cmd, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -780,7 +776,7 @@ func runRun(args []string) {
 	// key matches across invocations. Using the SAME shared resolver (T1603) for
 	// the cache-key path and the compile path means cold and warm runs cannot
 	// diverge — the bad-target error surfaces here, before any cache/temp work.
-	cfg, _, resolvedFile, err := resolveTarget(filename, "run")
+	cfg, _, resolvedFile, err := resolveTarget(filename, "run", false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -2704,22 +2700,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	unlock := module.LockBuildDirShared()
 	defer unlock()
 
-	// Ensure embedded module extraction completes before spawning child
-	// processes. Each child calls extractEmbeddedModule independently; if
-	// the cache is empty (first run or after compiler change), concurrent
-	// children race on directory creation + file writes. Extracting all
-	// modules here in the parent ensures the cache is populated first.
-	ensureCacheValid()
-	if entries, err := embeddedModules.ReadDir("resources/modules"); err == nil {
-		for _, e := range entries {
-			if e.IsDir() {
-				if _, err := extractEmbeddedModule(e.Name()); err != nil {
-					fmt.Fprintf(os.Stderr, "error extracting module %s: %v\n", e.Name(), err)
-					os.Exit(1)
-				}
-			}
-		}
-	}
+	prepareEmbeddedModulesForChildren()
 
 	totalStart := time.Now()
 
@@ -4172,6 +4153,32 @@ func checkClangVersion(clangPath string) {
 
 // ensureCacheValidOnce runs the compiler stamp check at most once per process.
 var ensureCacheValidOnce sync.Once
+
+// prepareEmbeddedModulesForChildren extracts every embedded module before this
+// process spawns children that each need them.
+//
+// Each child calls extractEmbeddedModule independently; if the cache is empty
+// (first run, or after a compiler change) concurrent children race on directory
+// creation and file writes. Extracting here, in the one parent, is what makes
+// the cache already populated by the time any child looks. Shared by the
+// multi-file test runner and the `promise check` sweep — the hazard is the
+// same, so the guard is one implementation.
+func prepareEmbeddedModulesForChildren() {
+	ensureCacheValid()
+	entries, err := embeddedModules.ReadDir("resources/modules")
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := extractEmbeddedModule(e.Name()); err != nil {
+			fmt.Fprintf(os.Stderr, "error extracting module %s: %v\n", e.Name(), err)
+			os.Exit(1)
+		}
+	}
+}
 
 // ensureCacheValid checks whether the running compiler binary matches the one
 // that last populated the extraction caches (LLVM tools, CRT, embedded catalog
@@ -6494,7 +6501,7 @@ func parseSourceFile(filename string) *ast.File {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error reading %s: %v\n", filename, err)
-		os.Exit(1)
+		exitFrontend(1)
 	}
 	source := strings.ReplaceAll(string(data), "\r\n", "\n")
 	return parseSource(filename, source)
@@ -6518,15 +6525,17 @@ func parseSource(filename, source string) *ast.File {
 	tree := p.CompilationUnit()
 
 	if lexEl.errors+parseEl.errors > 0 {
-		os.Exit(1)
+		countCheckDiagnostics(lexEl.errors + parseEl.errors)
+		exitFrontend(1)
 	}
 
 	file, errs := ast.Build(filename, tree)
 	if len(errs) > 0 {
 		for _, e := range errs {
+			countCheckDiagnostic(false)
 			fmt.Fprintln(os.Stderr, e)
 		}
-		os.Exit(1)
+		exitFrontend(1)
 	}
 	return file
 }
@@ -6555,7 +6564,7 @@ func setProgramSourceDir(info *sema.Info, dir string) {
 func compileProjectFrontend(projectDir string, files []string, triple string) (*ast.File, *sema.Info) {
 	if len(files) == 0 {
 		fmt.Fprintf(os.Stderr, "error: project %q contains no .pr files\n", projectDir)
-		os.Exit(1)
+		exitFrontend(1)
 	}
 
 	tParse := time.Now()
@@ -6567,7 +6576,7 @@ func compileProjectFrontend(projectDir string, files []string, triple string) (*
 			data, err := os.ReadFile(f)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error reading %s: %v\n", f, err)
-				os.Exit(1)
+				exitFrontend(1)
 			}
 			fileContents[i] = []byte(strings.ReplaceAll(string(data), "\r\n", "\n"))
 		}
@@ -6624,7 +6633,7 @@ func compileProjectFrontend(projectDir string, files []string, triple string) (*
 		timePhase("sema", time.Since(tSema), "")
 		printFileErrors(projectDir, errs)
 		if semaFatal(errs) {
-			os.Exit(1)
+			exitFrontend(1)
 		}
 	}
 
@@ -6653,7 +6662,7 @@ func compileProjectFrontend(projectDir string, files []string, triple string) (*
 	}
 	if len(embedErrs) > 0 {
 		printFileErrors(projectDir, embedErrs)
-		os.Exit(1)
+		exitFrontend(1)
 	}
 
 	tOwner := time.Now()
@@ -6661,7 +6670,7 @@ func compileProjectFrontend(projectDir string, files []string, triple string) (*
 	timePhase("ownership", time.Since(tOwner), "")
 	if len(ownerErrs) > 0 {
 		printFileErrors(projectDir, ownerErrs)
-		os.Exit(1)
+		exitFrontend(1)
 	}
 
 	return merged, info
@@ -6676,7 +6685,7 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	data, readErr := os.ReadFile(filename)
 	if readErr != nil {
 		fmt.Fprintf(os.Stderr, "error reading %s: %v\n", filename, readErr)
-		os.Exit(1)
+		exitFrontend(1)
 	}
 	source := strings.ReplaceAll(string(data), "\r\n", "\n")
 	if home, homeErr := module.PromiseHome(); homeErr == nil {
@@ -6730,7 +6739,7 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 		timePhase("sema", time.Since(tSema), "")
 		printFileErrors(filename, errs)
 		if semaFatal(errs) {
-			os.Exit(1)
+			exitFrontend(1)
 		}
 	}
 
@@ -6761,7 +6770,7 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	}
 	if len(embedErrs) > 0 {
 		printFileErrors(filename, embedErrs)
-		os.Exit(1)
+		exitFrontend(1)
 	}
 
 	tOwner := time.Now()
@@ -6769,7 +6778,7 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	timePhase("ownership", time.Since(tOwner), "")
 	if len(ownerErrs) > 0 {
 		printFileErrors(filename, ownerErrs)
-		os.Exit(1)
+		exitFrontend(1)
 	}
 
 	return file, info
@@ -7539,7 +7548,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 		cat, err := module.ParseCatalog(embeddedCatalog)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: invalid embedded catalog: %v\n", err)
-			os.Exit(1)
+			exitFrontend(1)
 		}
 		catalog = cat
 	}
@@ -7548,7 +7557,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 	for name := range namedRequire {
 		if catalog != nil && catalog.Lookup(name) != nil {
 			fmt.Fprintf(os.Stderr, "error: [require.%s] conflicts with catalog module '%s'\n", name, name)
-			os.Exit(1)
+			exitFrontend(1)
 		}
 	}
 
@@ -7581,7 +7590,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: error loading module '%s': %v\n", filename, u.CatalogName, err)
-				os.Exit(1)
+				exitFrontend(1)
 			}
 			if modInfo != nil {
 				if u.Alias != "_" {
@@ -7605,7 +7614,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: error loading module '%s': %v\n", filename, u.Path, err)
-			os.Exit(1)
+			exitFrontend(1)
 		}
 		// Use the alias from the use declaration as the module name for codegen.
 		// This ensures qualified calls like vis.func() resolve correctly even when
@@ -8950,15 +8959,18 @@ func printFileErrors(filename string, errs []error) {
 	for _, e := range errs {
 		var pos ast.Pos
 		var msg string
+		warning := false
 		switch err := e.(type) {
 		case *sema.Error:
-			pos, msg = err.Pos, err.Msg
+			pos, msg, warning = err.Pos, err.Msg, err.Warning
 		case *ownership.Error:
 			pos, msg = err.Pos, err.Msg
 		default:
+			countCheckDiagnostic(false)
 			fmt.Fprintln(os.Stderr, e)
 			continue
 		}
+		countCheckDiagnostic(warning)
 
 		fmt.Fprintf(os.Stderr, "%s:%d:%d: %s\n", pos.File, pos.Line, pos.Column, msg)
 		ctxFile := pos.File

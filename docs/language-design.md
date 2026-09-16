@@ -59,7 +59,7 @@ promise test dir/...              # Recursive directory scan
 promise test -timeout 30s ...     # Per-test timeout (default: 60s)
 promise test -parallel 4 ...      # Run up to N tests in parallel (default: NumCPU)
 promise test -stress [N|dur] ...  # Stress test (count, duration, or until Ctrl+C)
-promise check file.pr             # Type-check only
+promise check file.pr             # Analyse without building (file, project, or dir/...)
 
 # Documentation & discovery
 promise                           # Concise command index (grouped)
@@ -2762,20 +2762,20 @@ At any call site, an argument can be passed by name using `name: expression`, wh
 
 ```promise
 // All positional
-sendEmail("bob@ex.com", "Hi");
+sendEmail("bob@example.com", "Hi");
 
 // Positional then named (skip optional params)
-sendEmail("bob@ex.com", "Hi", priority: 1);
+sendEmail("bob@example.com", "Hi", priority: 1);
 
 // All named (any order)
-sendEmail(to: "bob@ex.com", subject: "Hi", cc: "a@ex.com");
-sendEmail(cc: "a@ex.com", subject: "Hi", to: "bob@ex.com");
+sendEmail(to: "bob@example.com", subject: "Hi", cc: "a@example.com");
+sendEmail(cc: "a@example.com", subject: "Hi", to: "bob@example.com");
 
 // ERROR — named before positional:
-sendEmail(cc: "a@ex.com", "bob@ex.com", "Hi");
+sendEmail(cc: "a@example.com", "bob@example.com", "Hi");
 
 // ERROR — interleaving:
-sendEmail("bob@ex.com", cc: "a@ex.com", "Hi");
+sendEmail("bob@example.com", cc: "a@example.com", "Hi");
 ```
 
 Valid pattern: `[positional...] [named...]` — positional arguments fill parameters left-to-right in declaration order, named arguments fill parameters by name.
@@ -2795,10 +2795,10 @@ A parameter can be omitted at the call site if it has a default value or its typ
 
 ```promise
 // Skip body and cc, provide priority by name:
-sendEmail("bob@ex.com", "Hi", priority: 1);
+sendEmail("bob@example.com", "Hi", priority: 1);
 
 // Skip body, provide cc by name:
-sendEmail("bob@ex.com", "Hi", cc: "alice@ex.com");
+sendEmail("bob@example.com", "Hi", cc: "alice@example.com");
 ```
 
 #### Default Value Evaluation

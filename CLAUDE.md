@@ -84,6 +84,13 @@ bin/promise exec -timeout 10s 'print_line("hi")'  # exec with timeout (failable 
 bin/promise emit-ir file.pr                    # print LLVM IR to stdout
 bin/promise emit-ir file.pr > out.ll           # save IR to file
 
+# Analysis only — no codegen, no linking (T2085). A directory with a
+# promise.toml is ONE unit (all its .pr files, tests included); a .pr file
+# outside any project is another. This is what the `checked:promise` gate runs.
+bin/promise check file.pr                      # a file that belongs to no project
+bin/promise check modules/std                  # a module or project, as one unit
+bin/promise check tests/... modules/...        # sweep; ends with one summary line
+
 # Per-test timeout control (T0023)
 bin/promise test -timeout-scale 2.0 tests/...            # double all timeouts (slow CI)
 bin/promise test -timeout-scale 0.5 tests/...            # halve all timeouts

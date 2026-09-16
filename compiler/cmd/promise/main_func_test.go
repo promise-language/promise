@@ -89,7 +89,7 @@ func TestDiscoverProject(t *testing.T) {
 		writeFile(t, dir, "promise.toml", "[module]\nname = \"myapp\"\nepoch = \"2026.0\"\n")
 		writeFile(t, dir, "main.pr", "main() {}\n")
 		writeFile(t, dir, "helper.pr", "type Helper { int x; }\n")
-		cfg, files, err := discoverProject(dir)
+		cfg, files, err := discoverProject(dir, false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -109,7 +109,7 @@ func TestDiscoverProject(t *testing.T) {
 		writeFile(t, dir, "promise.toml", "[module]\nname = \"myapp\"\nepoch = \"2026.0\"\n")
 		writeFile(t, dir, "main.pr", "main() {}\n")
 		writeFile(t, dir, "main_test.pr", "test_foo() `test {}\n")
-		_, files, err := discoverProject(dir)
+		_, files, err := discoverProject(dir, false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -118,10 +118,27 @@ func TestDiscoverProject(t *testing.T) {
 		}
 	})
 
+	// The other half of that switch: `promise check` asks for the tests, because
+	// a module's test files are code this project owns and are only analysable
+	// in their module's context (T2085).
+	t.Run("toml_includes_test_files_when_asked", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "promise.toml", "[module]\nname = \"myapp\"\nepoch = \"2026.0\"\n")
+		writeFile(t, dir, "main.pr", "main() {}\n")
+		writeFile(t, dir, "main_test.pr", "test_foo() `test {}\n")
+		_, files, err := discoverProject(dir, true)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(files) != 2 {
+			t.Errorf("got %d files, want 2 (test files should be included): %v", len(files), files)
+		}
+	})
+
 	t.Run("toml_only_no_pr_files", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "promise.toml", "[module]\nname = \"empty\"\nepoch = \"2026.0\"\n")
-		_, _, err := discoverProject(dir)
+		_, _, err := discoverProject(dir, false)
 		if err == nil {
 			t.Fatal("expected error for project with no .pr files")
 		}
@@ -133,7 +150,7 @@ func TestDiscoverProject(t *testing.T) {
 	t.Run("no_toml_returns_nil", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "main.pr", "main() {}\n")
-		cfg, files, err := discoverProject(dir)
+		cfg, files, err := discoverProject(dir, false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -153,7 +170,7 @@ func TestDiscoverProject(t *testing.T) {
 		writeFile(t, dir, "main.pr", "main() {}\n")
 		writeFile(t, dir, "inner/promise.toml", "[module]\nname = \"inner\"\nepoch = \"2026.0\"\n")
 		writeFile(t, dir, "inner/lib.pr", "type Inner {}\n")
-		_, files, err := discoverProject(dir)
+		_, files, err := discoverProject(dir, false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -172,7 +189,7 @@ func TestDiscoverProject(t *testing.T) {
 		// Missing required [module] name
 		writeFile(t, dir, "promise.toml", "[module]\nepoch = \"2026.0\"\n")
 		writeFile(t, dir, "main.pr", "main() {}\n")
-		_, _, err := discoverProject(dir)
+		_, _, err := discoverProject(dir, false)
 		if err == nil {
 			t.Fatal("expected error for invalid promise.toml")
 		}
@@ -201,7 +218,7 @@ func TestResolveTarget(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "promise.toml", "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n")
 		writeFile(t, dir, "main.pr", "main() {}\n")
-		cfg, files, file, err := resolveTarget(dir, "build")
+		cfg, files, file, err := resolveTarget(dir, "build", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -224,7 +241,7 @@ func TestResolveTarget(t *testing.T) {
 		writeFile(t, dir, "promise.toml", "[module]\nname = \"cwdproj\"\nepoch = \"2026.0\"\n")
 		writeFile(t, dir, "main.pr", "main() {}\n")
 		t.Chdir(dir)
-		cfg, _, file, err := resolveTarget("", "run")
+		cfg, _, file, err := resolveTarget("", "run", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -242,7 +259,7 @@ func TestResolveTarget(t *testing.T) {
 	t.Run("directory_without_promise_toml_is_error", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "main.pr", "main() {}\n")
-		_, _, _, err := resolveTarget(dir, "run")
+		_, _, _, err := resolveTarget(dir, "run", false)
 		if err == nil {
 			t.Fatal("expected non-project directory to be an error")
 		}
@@ -260,7 +277,7 @@ func TestResolveTarget(t *testing.T) {
 		// source files; resolveTarget must surface it rather than mislabel the dir.
 		dir := t.TempDir()
 		writeFile(t, dir, "promise.toml", "[module]\nname = \"empty\"\nepoch = \"2026.0\"\n")
-		_, _, _, err := resolveTarget(dir, "build")
+		_, _, _, err := resolveTarget(dir, "build", false)
 		if err == nil {
 			t.Fatal("expected error for a project with no .pr files")
 		}
@@ -273,7 +290,7 @@ func TestResolveTarget(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "promise.toml", "[module]\nname = \"inproj\"\nepoch = \"2026.0\"\n")
 		writeFile(t, dir, "main.pr", "main() {}\n")
-		_, _, _, err := resolveTarget(filepath.Join(dir, "main.pr"), "emit-ir")
+		_, _, _, err := resolveTarget(filepath.Join(dir, "main.pr"), "emit-ir", false)
 		if err == nil {
 			t.Fatal("expected a file inside a project to be an error")
 		}
@@ -291,7 +308,7 @@ func TestResolveTarget(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "promise.toml", "[module]\nname = \"subproj\"\nepoch = \"2026.0\"\n")
 		writeFile(t, dir, "src/main.pr", "main() {}\n")
-		_, _, _, err := resolveTarget(filepath.Join(dir, "src", "main.pr"), "build")
+		_, _, _, err := resolveTarget(filepath.Join(dir, "src", "main.pr"), "build", false)
 		if err == nil {
 			t.Fatal("expected a file in a project subdir to be an error")
 		}
@@ -305,7 +322,7 @@ func TestResolveTarget(t *testing.T) {
 		// No promise.toml anywhere above (t.TempDir is under the OS temp root).
 		writeFile(t, dir, "solo.pr", "main() {}\n")
 		path := filepath.Join(dir, "solo.pr")
-		cfg, files, file, err := resolveTarget(path, "build")
+		cfg, files, file, err := resolveTarget(path, "build", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -325,7 +342,7 @@ func TestResolveTarget(t *testing.T) {
 		// frontend reports a clean file-not-found error — resolveTarget must not
 		// claim project membership or error out itself.
 		missing := filepath.Join(t.TempDir(), "does_not_exist.pr")
-		cfg, files, file, err := resolveTarget(missing, "run")
+		cfg, files, file, err := resolveTarget(missing, "run", false)
 		if err != nil {
 			t.Fatalf("nonexistent path should not error from resolveTarget, got: %v", err)
 		}
@@ -461,7 +478,7 @@ func TestCompileProjectFrontendSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, files, err := discoverProject(dir)
+	cfg, files, err := discoverProject(dir, false)
 	if err != nil {
 		t.Fatalf("discoverProject failed: %v", err)
 	}

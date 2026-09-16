@@ -663,7 +663,11 @@ func buildToFile(args []string, cmd string) (filename, outputFile, target string
 	if projectCfg != nil {
 		file, info = compileProjectFrontend(projectDir, projectFiles, target)
 	} else {
-		file, info = compileFrontend(filename)
+		// T2086: the single-file branch must filter `target(cond) against the
+		// requested triple, exactly as the project branch does. target was
+		// defaulted to the host triple above, so a build with no -target is
+		// unaffected.
+		file, info = compileFrontendForTarget(filename, target)
 	}
 
 	// Check for main() function — must exist for build/run (not test).
@@ -6538,11 +6542,6 @@ func parseSource(filename, source string) *ast.File {
 		exitFrontend(1)
 	}
 	return file
-}
-
-// compileFrontend runs the full frontend pipeline for the host target.
-func compileFrontend(filename string) (*ast.File, *sema.Info) {
-	return compileFrontendForTarget(filename, "")
 }
 
 // setProgramSourceDir records dir as the program's own source directory — the

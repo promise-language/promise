@@ -519,3 +519,78 @@ func TestCompileProjectFrontendSuccess(t *testing.T) {
 		t.Error("expected main FuncDecl in merged AST")
 	}
 }
+
+// TestCompileFrontendForTargetFiltersByTriple is the single-file counterpart of
+// TestCompileProjectFrontendSuccess, and covers what T2086 got wrong: the triple
+// handed to compileFrontendForTarget is what `target(cond) resolves against.
+//
+// This has to be an in-process test. buildToFile and the two `check` paths are
+// in package main, which nothing can import, so the black-box tests over in
+// tests/buildrun drive the built binary as a subprocess — where Go's coverage
+// instrumentation cannot see any of it (main.go contributes zero blocks to that
+// package's profile). The asymmetry is likely why the defect survived: the
+// project branch's callee had a direct unit test here, the single-file branch's
+// callee had none.
+//
+// Both declaration kinds are checked because `target applies to types as well as
+// functions, and the type form is what the earlier duplicate report (T1966) hit.
+// Both calls read the same file, so a pass also means the AST cache — keyed on
+// content and compiler identity, with no triple — does not carry one target's
+// filtering into another's build.
+//
+// Only the "declaration is present" direction is observable here: a source that
+// referenced a filtered-out declaration would make compileFrontendForTarget
+// os.Exit(1). That direction is covered by the subprocess tests.
+func TestCompileFrontendForTargetFiltersByTriple(t *testing.T) {
+	dir := t.TempDir()
+	// main() deliberately calls neither gated declaration, so the source is
+	// valid under every triple and no call can exit the test process.
+	src := "gated_fn() int `target(wasm) { return 7; }\n" +
+		"type GatedType `target(wasm) { int x; }\n" +
+		"main() {}\n"
+	path := filepath.Join(dir, "gated.pr")
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// filtered reports whether each gated declaration was excluded, looked up
+	// in the Info belonging to the same call that produced the AST.
+	filtered := func(t *testing.T, triple string) (fn, typ bool) {
+		t.Helper()
+		file, info := compileFrontendForTarget(path, triple)
+		if file == nil || info == nil {
+			t.Fatalf("compileFrontendForTarget(%q) returned nil", triple)
+		}
+		var sawFn, sawType bool
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Name == "gated_fn" {
+					sawFn, fn = true, info.FilteredDecls[decl]
+				}
+			case *ast.TypeDecl:
+				if d.Name == "GatedType" {
+					sawType, typ = true, info.FilteredDecls[decl]
+				}
+			}
+		}
+		if !sawFn || !sawType {
+			t.Fatalf("triple %q: gated declarations missing from the AST (fn=%v type=%v)",
+				triple, sawFn, sawType)
+		}
+		return fn, typ
+	}
+
+	// "" is what the `check` paths pass: no -target flag, so filter for the host.
+	// No host is wasm, so both `target(wasm) declarations must be excluded.
+	if fn, typ := filtered(t, ""); !fn || !typ {
+		t.Errorf(`compileFrontendForTarget(path, "") kept a `+"`"+`target(wasm) declaration `+
+			"(gated_fn filtered=%v, GatedType filtered=%v); an empty triple must filter for the host", fn, typ)
+	}
+
+	// The requested triple must win — this is the T2086 fix.
+	if fn, typ := filtered(t, "wasm32-wasi"); fn || typ {
+		t.Errorf("compileFrontendForTarget(path, \"wasm32-wasi\") filtered out a `target(wasm) declaration "+
+			"(gated_fn filtered=%v, GatedType filtered=%v); filtering must follow the requested triple, not the host", fn, typ)
+	}
+}

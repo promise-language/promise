@@ -165,6 +165,77 @@ func TestWriteFileAtomicBadDir(t *testing.T) {
 	}
 }
 
+// TestWriteFileAtomicLostReplaceRaceSucceeds: on Windows the replace step of a
+// rename fails with ERROR_ACCESS_DENIED while any other handle to the destination
+// lives, and os.Open holds exactly such a handle (no FILE_SHARE_DELETE). A writer
+// that loses that race to a peer who wrote the *same* bytes has nothing left to
+// do, so writeFileAtomic reports success rather than aborting the caller's build
+// (T2132). Before the fix this returned "Access is denied." after the full retry
+// budget — which is what turned a loaded bin/verify run red.
+func TestWriteFileAtomicLostReplaceRaceSucceeds(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("rename(2) is atomic on POSIX; a held destination is a Windows-only failure")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "libSystem.B.tbd")
+	content := []byte("--- !tapi-tbd\ntargets: [ x86_64-macos ]\n")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	// The handle a peer writer's replace, an antivirus, or the indexer would hold.
+	held, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	if err := writeFileAtomic(path, content, 0644); err != nil {
+		t.Fatalf("writing bytes the destination already holds must succeed, got %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("destination = %q (err %v), want it left holding the same bytes", got, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 file (no temp leftovers), got %d", len(entries))
+	}
+}
+
+// TestWriteFileAtomicHeldDestinationKeepsItsPromise is the other half, and guards
+// against an over-eager version of the fix rather than against the original bug:
+// whatever writeFileAtomic reports, success must mean the destination really holds
+// the requested bytes. The existing file here is the same *length* as the wanted
+// content and different from it, so a settled check that compared only sizes would
+// report success over a destination it never wrote — and a corrupt stub of the
+// right length would quietly stop being repaired.
+func TestWriteFileAtomicHeldDestinationKeepsItsPromise(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("rename(2) is atomic on POSIX; a held destination is a Windows-only failure")
+	}
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "libSystem.B.tbd")
+	want := []byte("hello")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), len(want)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	held, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	werr := writeFileAtomic(path, want, 0644)
+	got, rerr := os.ReadFile(path)
+	if werr == nil && (rerr != nil || !bytes.Equal(got, want)) {
+		t.Fatalf("reported success while the destination still holds %q (err %v)", got, rerr)
+	}
+}
+
 // TestRenameWithRetryNonRetryableFailsFast: a non-retryable rename error (here a
 // nonexistent source, which is real on every platform) must short-circuit
 // immediately rather than spin through the full backoff budget (~0.55s). This
@@ -175,7 +246,7 @@ func TestRenameWithRetryNonRetryableFailsFast(t *testing.T) {
 	src := filepath.Join(dir, "does-not-exist")
 	dst := filepath.Join(dir, "dst")
 	start := time.Now()
-	err := renameWithRetry(src, dst)
+	err := renameWithRetry(src, dst, nil)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("expected an error renaming a nonexistent source")
@@ -205,7 +276,7 @@ func TestRenameRetryingSucceedsAfterTransient(t *testing.T) {
 		}
 		return nil
 	}
-	if err := renameRetrying(rename, retryablePredicate, noBackoff, "s", "d"); err != nil {
+	if err := renameRetrying(rename, retryablePredicate, noBackoff, nil, "s", "d"); err != nil {
 		t.Fatalf("expected success after transient errors, got %v", err)
 	}
 	if calls != 4 {
@@ -223,7 +294,7 @@ func TestRenameRetryingExhausts(t *testing.T) {
 		calls++
 		return errRetryable
 	}
-	err := renameRetrying(rename, retryablePredicate, noBackoff, "s", "d")
+	err := renameRetrying(rename, retryablePredicate, noBackoff, nil, "s", "d")
 	if !errors.Is(err, errRetryable) {
 		t.Fatalf("expected the last retryable error, got %v", err)
 	}
@@ -242,7 +313,7 @@ func TestRenameRetryingNonRetryable(t *testing.T) {
 		calls++
 		return fatal
 	}
-	err := renameRetrying(rename, retryablePredicate, noBackoff, "s", "d")
+	err := renameRetrying(rename, retryablePredicate, noBackoff, nil, "s", "d")
 	if !errors.Is(err, fatal) {
 		t.Fatalf("expected the non-retryable error, got %v", err)
 	}
@@ -257,11 +328,113 @@ func TestRenameRetryingFirstTry(t *testing.T) {
 	t.Parallel()
 	calls := 0
 	rename := func(src, dst string) error { calls++; return nil }
-	if err := renameRetrying(rename, retryablePredicate, noBackoff, "s", "d"); err != nil {
+	if err := renameRetrying(rename, retryablePredicate, noBackoff, nil, "s", "d"); err != nil {
 		t.Fatalf("expected immediate success, got %v", err)
 	}
 	if calls != 1 {
 		t.Fatalf("expected exactly 1 attempt, got %d", calls)
+	}
+}
+
+// TestRenameRetryingAcceptsASettledDestination: the Windows lost-replace race
+// (T2132). The rename keeps failing with a retryable error, but the destination
+// already holds what this rename was for, so the loop stops and reports success
+// instead of spending the rest of its budget on work another writer finished.
+func TestRenameRetryingAcceptsASettledDestination(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	rename := func(src, dst string) error { calls++; return errRetryable }
+	checks := 0
+	settled := func() bool { checks++; return checks >= 2 } // settles on the 2nd look
+	if err := renameRetrying(rename, retryablePredicate, noBackoff, settled, "s", "d"); err != nil {
+		t.Fatalf("a destination that already holds the outcome is success, got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected the loop to stop after 2 attempts, got %d", calls)
+	}
+}
+
+// TestRenameRetryingUnsettledDestinationStillExhausts: a destination that never
+// settles is a real failure. The loop still spends the full budget and returns the
+// last error, so a lost race is never confused with a broken one.
+func TestRenameRetryingUnsettledDestinationStillExhausts(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	rename := func(src, dst string) error { calls++; return errRetryable }
+	err := renameRetrying(rename, retryablePredicate, noBackoff, func() bool { return false }, "s", "d")
+	if !errors.Is(err, errRetryable) {
+		t.Fatalf("expected the last retryable error, got %v", err)
+	}
+	if calls != renameAttempts {
+		t.Fatalf("expected exactly %d attempts on exhaustion, got %d", renameAttempts, calls)
+	}
+}
+
+// TestRenameRetryingNonRetryableIgnoresSettled: a non-retryable error is a real
+// one and is never masked by a destination that happens to be right. The settled
+// check is not even consulted — the question it answers ("did someone else finish
+// this for me?") is only meaningful for a transient sharing failure.
+func TestRenameRetryingNonRetryableIgnoresSettled(t *testing.T) {
+	t.Parallel()
+	fatal := errors.New("no such file")
+	consulted := false
+	rename := func(src, dst string) error { return fatal }
+	settled := func() bool { consulted = true; return true }
+	err := renameRetrying(rename, retryablePredicate, noBackoff, settled, "s", "d")
+	if !errors.Is(err, fatal) {
+		t.Fatalf("expected the non-retryable error, got %v", err)
+	}
+	if consulted {
+		t.Error("settled must not be consulted for a non-retryable error")
+	}
+}
+
+// TestFileHasBytes pins the settled check writeFileAtomic supplies: only a
+// destination that already holds exactly the wanted bytes counts. Size equality is
+// not enough — a same-size file with different content still needs writing.
+func TestFileHasBytes(t *testing.T) {
+	t.Parallel()
+	want := []byte("hello")
+	cases := []struct {
+		name     string
+		existing []byte // nil: no file at that path at all
+		hasBytes bool
+	}{
+		{"missing", nil, false},
+		{"shorter", []byte("hell"), false},
+		{"longer", []byte("hello world"), false},
+		{"same size different bytes", []byte("HELLO"), false},
+		{"identical", []byte("hello"), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "f")
+			if c.existing != nil {
+				if err := os.WriteFile(path, c.existing, 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := fileHasBytes(path, want); got != c.hasBytes {
+				t.Errorf("fileHasBytes = %v, want %v", got, c.hasBytes)
+			}
+		})
+	}
+}
+
+// TestFileHasBytesDirectoryIsNotContent: a directory is never a destination that
+// already holds the wanted bytes. This is the read's error check, and it is
+// load-bearing rather than defensive: on Windows os.Stat reports a directory's
+// size as 0, so a zero-length write to a path a directory occupies gets past the
+// size comparison, and os.ReadFile then fails and returns nil — which bytes.Equal
+// considers equal to empty. Without the check, fileHasBytes would call that
+// destination correct and writeFileAtomic would report a write it never did.
+func TestFileHasBytesDirectoryIsNotContent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, want := range [][]byte{nil, {}, []byte("x")} {
+		if fileHasBytes(dir, want) {
+			t.Errorf("a directory holds no content, but fileHasBytes(dir, %q) said it does", want)
+		}
 	}
 }
 
@@ -332,6 +505,44 @@ func TestReplaceSymlinkRetryingDrawsANewNameOnCollision(t *testing.T) {
 	}
 	if got, err := os.Readlink(path); err != nil || got != "libSystem.B.tbd" {
 		t.Fatalf("link = %q (err %v), want libSystem.B.tbd", got, err)
+	}
+}
+
+// TestReplaceSymlinkRetryingPropagatesSymlinkError: "that name is taken" is the
+// only symlink failure worth another name. Anything else — a permission denial, a
+// filesystem with no symlinks — is a real error about the operation itself, so it
+// propagates on the first attempt instead of being retried eight times under
+// different names. Nothing was created, so nothing is removed and the entry that
+// was already at path is left exactly as it was.
+func TestReplaceSymlinkRetryingPropagatesSymlinkError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "libSystem.tbd")
+	if err := os.WriteFile(path, []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	denied := errors.New("operation not permitted")
+	calls := 0
+	symlink := func(target, name string) error { calls++; return denied }
+
+	err := replaceSymlinkRetrying(symlink, "libSystem.B.tbd", path)
+	if !errors.Is(err, denied) {
+		t.Fatalf("expected the symlink error, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("a real symlink failure must not be retried, got %d attempts", calls)
+	}
+	got, rerr := os.ReadFile(path)
+	if rerr != nil || string(got) != "stale" {
+		t.Fatalf("existing entry = %q (err %v), want it untouched", got, rerr)
+	}
+	entries, rderr := os.ReadDir(dir)
+	if rderr != nil {
+		t.Fatal(rderr)
+	}
+	if len(entries) != 1 {
+		t.Errorf("expected only the original entry, got %d", len(entries))
 	}
 }
 

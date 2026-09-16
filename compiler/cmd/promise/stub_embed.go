@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -80,6 +81,15 @@ func copyFileAtomic(src, dst string, perm os.FileMode) error {
 
 // writeFileAtomic writes data to path via a temp file in the same directory
 // followed by a rename, so a reader never observes a half-written file (T0722).
+//
+// Concurrent writers of identical bytes both succeed (T2132). On Windows the
+// replace step of a rename fails with ERROR_ACCESS_DENIED while any other handle
+// to the destination lives — a peer writer's replace in flight, or an antivirus
+// or the indexer scanning the file that just landed — so the loser of that race
+// asks whether path already holds exactly the bytes it was told to write and
+// reports success when it does: its whole postcondition is met and there is
+// nothing left for it to do. A destination that is missing or different is still
+// an error, so a wrong file is still repaired.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".tmp-"+filepath.Base(path)+"-*")
@@ -98,7 +108,22 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := os.Chmod(tmpName, perm); err != nil {
 		return err
 	}
-	return renameWithRetry(tmpName, path)
+	return renameWithRetry(tmpName, path, func() bool { return fileHasBytes(path, data) })
+}
+
+// fileHasBytes reports whether path already holds exactly want. The size check
+// comes first because it is handle-free (GetFileAttributesEx on Windows), so a
+// destination that is plainly wrong costs no open handle — which matters here,
+// since a handle on the destination is the very thing that makes a concurrent
+// MoveFileEx fail. Size alone is not the answer: a same-size file with different
+// bytes is still wrong.
+func fileHasBytes(path string, want []byte) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() != int64(len(want)) {
+		return false
+	}
+	got, err := os.ReadFile(path)
+	return err == nil && bytes.Equal(got, want)
 }
 
 // renameAttempts bounds the retry loop; renameBackoff yields the pause before
@@ -113,15 +138,26 @@ func renameBackoff(i int) time.Duration { return time.Duration(i+1) * 10 * time.
 // when an antivirus or the search indexer momentarily holds the file open; a short
 // backoff lets the lock clear. On other platforms rename(2) is atomic and never
 // retries (isRetryableRenameError always returns false there).
-func renameWithRetry(src, dst string) error {
-	return renameRetrying(os.Rename, isRetryableRenameError, renameBackoff, src, dst)
+//
+// settled reports whether dst already holds what this rename was for, so a race
+// lost to someone who produced exactly that outcome is success rather than a
+// failure (T2132); nil when the caller has no way to tell, and then the rename
+// error is the whole answer. Answering that way means the rename did *not*
+// happen, so src is still on disk and removing it stays the caller's job — as it
+// already is on the error path.
+func renameWithRetry(src, dst string, settled func() bool) error {
+	return renameRetrying(os.Rename, isRetryableRenameError, renameBackoff, settled, src, dst)
 }
 
 // renameRetrying is the testable core of renameWithRetry with its dependencies
-// (the rename syscall, the retryable-error predicate, and the backoff schedule)
-// injected, so the retry/exhaustion path — unreachable on non-Windows where
-// isRetryableRenameError is always false — can be exercised on any platform.
-func renameRetrying(rename func(src, dst string) error, retryable func(error) bool, backoff func(int) time.Duration, src, dst string) error {
+// (the rename syscall, the retryable-error predicate, the backoff schedule, and
+// the settled check) injected, so the retry/exhaustion path — unreachable on
+// non-Windows where isRetryableRenameError is always false — can be exercised on
+// any platform.
+//
+// settled is consulted only after a *retryable* failure: a non-retryable error is
+// a real one, and a destination that happens to be right must never mask it.
+func renameRetrying(rename func(src, dst string) error, retryable func(error) bool, backoff func(int) time.Duration, settled func() bool, src, dst string) error {
 	var err error
 	for i := 0; i < renameAttempts; i++ {
 		if err = rename(src, dst); err == nil {
@@ -130,11 +166,21 @@ func renameRetrying(rename func(src, dst string) error, retryable func(error) bo
 		if !retryable(err) {
 			return err
 		}
+		if settled != nil && settled() {
+			return nil // someone else already produced exactly this outcome
+		}
 		if i < renameAttempts-1 { // no point sleeping after the final attempt
 			time.Sleep(backoff(i))
 		}
 	}
 	return err
+}
+
+// linkPointsAt reports whether path is a symlink to target — the one question
+// ensureSymlink asks of an entry it did not create itself.
+func linkPointsAt(path, target string) bool {
+	got, err := os.Readlink(path)
+	return err == nil && got == target
 }
 
 // symlinkNameAttempts bounds the search for an unused sibling name in
@@ -154,7 +200,7 @@ const symlinkNameAttempts = 8
 // each tells us which one of two racing processes won, so the answer is always
 // read from the syscall rather than from a preceding Stat.
 func ensureSymlink(target, path string) error {
-	if got, err := os.Readlink(path); err == nil && got == target {
+	if linkPointsAt(path, target) {
 		return nil
 	}
 	err := os.Symlink(target, path)
@@ -166,7 +212,7 @@ func ensureSymlink(target, path string) error {
 	}
 	// Lost the race. A concurrent process producing the identical link is the
 	// expected outcome, not an error.
-	if got, rerr := os.Readlink(path); rerr == nil && got == target {
+	if linkPointsAt(path, target) {
 		return nil
 	}
 	// Something else is at path — a link to the wrong target, or a leftover file.
@@ -184,6 +230,10 @@ func ensureSymlink(target, path string) error {
 // is atomic, so a concurrent reader sees the old entry or the new link, never an
 // absent one. symlink(2) is itself the create-if-absent primitive, so EEXIST on
 // the sibling just means that name was taken — no Stat, no check-then-act.
+//
+// If that rename loses a Windows sharing race to a process that produced the same
+// link, the outcome is already there and the loser reports success (T2132) — the
+// same answer ensureSymlink gives a lost EEXIST race above.
 func replaceSymlinkRetrying(symlink func(target, name string) error, target, path string) error {
 	dir, base := filepath.Dir(path), filepath.Base(path)
 	for attempt := 0; attempt < symlinkNameAttempts; attempt++ {
@@ -194,11 +244,13 @@ func replaceSymlinkRetrying(symlink func(target, name string) error, target, pat
 			}
 			return err
 		}
-		if err := renameWithRetry(tmpName, path); err != nil {
-			os.Remove(tmpName)
-			return err
-		}
-		return nil
+		err := renameWithRetry(tmpName, path, func() bool { return linkPointsAt(path, target) })
+		// The temp link is gone once the rename moved it, and still there when the
+		// rename failed — or when another process got there first with the same link
+		// (T2132), which answers the rename without consuming the name. Removing it
+		// either way is what leaves no debris behind.
+		os.Remove(tmpName)
+		return err
 	}
 	return fmt.Errorf("no unused temporary name available in %s after %d attempts", dir, symlinkNameAttempts)
 }

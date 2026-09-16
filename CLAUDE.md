@@ -58,7 +58,10 @@ bin/run <gate> --verdict   # judge an envelope on stdin (what the flow SDK asks)
 
 All build steps (ANTLR generation, resource embedding, compilation) are handled by `bin/build` directly — there is no `compiler/Makefile`.
 
-Go tests run from `compiler/`:
+Go tests run from `compiler/`. The black-box CLI packages (`cmd/promise/tests/...`) drive the built
+`bin/promise` and refuse to run against one older than the tree: a bare `go test` after editing compiler
+source fails immediately naming `bin/build`, instead of reporting a product failure that is really a
+missing rebuild (T2137).
 
 ```bash
 # Run tests for a single package

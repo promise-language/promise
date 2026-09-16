@@ -12,34 +12,6 @@ import (
 	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
 
-// findPromiseBinary locates the bin/promise binary built by bin/build.
-// Skips the test if the binary is not present (e.g. fresh checkout where
-// `./make` hasn't run yet).
-func findPromiseBinary(t *testing.T) string {
-	t.Helper()
-	// Walk up from the test's source directory to the repo root.
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	for i := 0; i < 6; i++ {
-		bin := filepath.Join(dir, "bin", "promise")
-		if runtime.GOOS == "windows" {
-			bin = filepath.Join(dir, "bin", "promise.exe")
-		}
-		if _, err := os.Stat(bin); err == nil {
-			return bin
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	t.Skipf("bin/promise binary not found — run bin/build first")
-	return ""
-}
-
 // TestBuildProjectMultiFile verifies that `promise build .` in a directory
 // with a promise.toml and multiple .pr files compiles them all together and
 // names the binary after the [module].name field.

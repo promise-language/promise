@@ -17,6 +17,8 @@
 package clitest
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,31 +32,80 @@ import (
 // there is none. PROMISE_TEST_BIN wins when set; otherwise the repo root is
 // found by walking up from the test's working directory, so this works at any
 // package depth.
+//
+// The binary must also be current with the tree. Before T2137 this checked only
+// that a file existed there, so a compiler predating the source under test
+// answered for it and the suite reported a product defect that was really a
+// missing rebuild (T2134). A stale binary now fails the test and names
+// bin/build; see stale.go for why the check is deliberately no stricter than
+// bin/build's own rule.
+//
+// PROMISE_TEST_BIN bypasses the freshness check outright: an explicitly named
+// binary is the caller's declared intent, and an installed or published
+// compiler is not expected to match the worktree.
 func Bin(t *testing.T) string {
 	t.Helper()
-	if bin := os.Getenv("PROMISE_TEST_BIN"); bin != "" {
-		return bin
-	}
-	name := "promise"
-	if runtime.GOOS == "windows" {
-		name = "promise.exe"
-	}
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
+	bin, err := resolveBin(dir, os.Getenv("PROMISE_TEST_BIN"))
+	switch {
+	case errors.Is(err, errNoBinary):
+		// A missing binary is visibly absent and cannot produce a false
+		// verdict, so it stays a skip; a stale one silently produces a wrong
+		// one, which is why that case fails instead.
+		t.Skip(err.Error())
+	case err != nil:
+		t.Fatal(err)
+	}
+	return bin
+}
+
+// errNoBinary means no compiler is available to test against — the skip case.
+var errNoBinary = errors.New("set PROMISE_TEST_BIN or build via bin/build to run this end-to-end test")
+
+// resolveBin is Bin's decision without the *testing.T, so every branch of it is
+// reachable from a unit test: the env override, the two no-binary skips, and
+// the staleness refusal.
+func resolveBin(startDir, envBin string) (string, error) {
+	if envBin != "" {
+		if !fileExists(envBin) {
+			return "", fmt.Errorf("PROMISE_TEST_BIN names a binary that does not exist: %s", envBin)
+		}
+		return envBin, nil
+	}
+	root, ok := repoRootFrom(startDir)
+	if !ok {
+		return "", errNoBinary
+	}
+	bin := filepath.Join(root, "bin", binaryName())
+	if !fileExists(bin) {
+		return "", errNoBinary
+	}
+	if err := cachedFreshnessError(root, bin); err != nil {
+		return "", err
+	}
+	return bin, nil
+}
+
+// repoRootFrom walks up from dir to the checkout it belongs to, identified by
+// two directories every Promise checkout has. Matching on bin/promise alone —
+// what this did before T2137 — would accept an unrelated installed compiler
+// sitting in some parent directory, and leaves the freshness check with no tree
+// to compare the binary against.
+func repoRootFrom(dir string) (string, bool) {
 	for {
-		if bin := filepath.Join(dir, "bin", name); fileExists(bin) {
-			return bin
+		if fileExists(filepath.Join(dir, "compiler", "go.mod")) &&
+			fileExists(filepath.Join(dir, "modules", "std")) {
+			return dir, true
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			break
+			return "", false
 		}
 		dir = parent
 	}
-	t.Skip("set PROMISE_TEST_BIN or build via bin/build to run this end-to-end test")
-	return ""
 }
 
 func fileExists(path string) bool {
@@ -89,7 +140,7 @@ func NewEnv(t *testing.T) *Env {
 	home := t.TempDir()
 	gitconfig := filepath.Join(t.TempDir(), "gitconfig")
 	if err := os.WriteFile(gitconfig,
-		[]byte("[user]\n\temail = test@test.com\n\tname = Test\n[safe]\n\tdirectory = *\n"), 0644); err != nil {
+		[]byte("[user]\n\temail = test@users.noreply.github.com\n\tname = Test\n[safe]\n\tdirectory = *\n"), 0644); err != nil {
 		t.Fatalf("write git config: %v", err)
 	}
 	return &Env{bin: bin, home: home, env: append(os.Environ(),
@@ -192,7 +243,7 @@ func MakeWorkRepo(t *testing.T) string {
 		t.Fatal(err)
 	}
 	GitRun(t, dir, "init", "--initial-branch=main")
-	GitRun(t, dir, "config", "user.email", "t@t.com")
+	GitRun(t, dir, "config", "user.email", "test@users.noreply.github.com")
 	GitRun(t, dir, "config", "user.name", "T")
 	return dir
 }
@@ -308,7 +359,7 @@ func MakeSubdirRepo(t *testing.T, mods map[string]string) (bareRepo, commit stri
 		t.Fatal(err)
 	}
 	GitRun(t, work, "init", "--initial-branch=main")
-	GitRun(t, work, "config", "user.email", "test@test.com")
+	GitRun(t, work, "config", "user.email", "test@users.noreply.github.com")
 	GitRun(t, work, "config", "user.name", "Test")
 
 	// Root marker for a non-Promise-primary repo — deliberately no promise.toml.

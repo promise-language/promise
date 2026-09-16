@@ -285,6 +285,15 @@ func compilerIdentityShort(binaryPath string) string {
 // isBinaryUpToDate returns true if the compiler binary exists, was built with
 // the given version, and no source file has been modified since the binary was
 // built. This lets RunBuild skip the entire pipeline when nothing has changed.
+//
+// The mtime half of this answer is mirrored in the compiler module, by
+// compiler/cmd/promise/clitest/stale.go: the black-box CLI tests drive
+// bin/promise and refuse to run against one older than the tree (T2137), and
+// their failure message tells the caller to run bin/build. The two lists cannot
+// be shared across the module boundary, so they are kept in a subset
+// relationship by hand — an input added over there but not here would make
+// bin/build report "up to date" for a binary those tests still reject, wedging
+// the caller between two tools (T1813). Adding one here is always safe.
 func isBinaryUpToDate(root, binDir, version string) bool {
 	binaryPath := filepath.Join(binDir, BinaryName())
 	binaryInfo, err := os.Stat(binaryPath)

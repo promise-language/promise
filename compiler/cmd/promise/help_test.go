@@ -8,22 +8,7 @@ import (
 )
 
 func TestPrintHelp(t *testing.T) {
-	// Capture stdout.
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-
-	printHelp()
-
-	w.Close()
-	os.Stdout = old
-
-	buf := make([]byte, 64*1024)
-	n, _ := r.Read(buf)
-	output := string(buf[:n])
+	output := captureStdout(t, printHelp)
 
 	// Check key sections are present.
 	for _, want := range []string{
@@ -192,21 +177,7 @@ func TestHelpTreeReachable(t *testing.T) {
 // one (T0925).
 func TestHelpCommandsAreDispatched(t *testing.T) {
 	dispatched := dispatchedCommands(t)
-
-	// Capture printHelp() output (writes to os.Stdout).
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	printHelp()
-	w.Close()
-	os.Stdout = old
-
-	buf := make([]byte, 64*1024)
-	n, _ := r.Read(buf)
-	helpOut := string(buf[:n])
+	helpOut := captureStdout(t, printHelp)
 
 	helpCmdRe := regexp.MustCompile(`promise ([a-z][a-z0-9-]*)`)
 	for _, m := range helpCmdRe.FindAllStringSubmatch(helpOut, -1) {

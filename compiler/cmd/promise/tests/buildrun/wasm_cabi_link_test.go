@@ -31,7 +31,7 @@ func TestBindWitCanonicalAbiLinksCleanForWasm(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	witPath := filepath.Join(dir, "api.wit")
 	wit := `package test:api;
 
@@ -112,7 +112,7 @@ func TestBindWitCanonicalAbiScalarsBuildForWasm(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	witPath := filepath.Join(dir, "api.wit")
 	wit := `package test:api;
 
@@ -194,7 +194,7 @@ func TestWasmSignatureMismatchFailsTheBuild(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	srcPath := filepath.Join(dir, "mismatch.pr")
 	src := "_cabi_load_i32(i32 ptr, i32 extra) i32 `extern(\"cabi_load_i32\");\n" +
 		"main() { x := _cabi_load_i32(0i32, 0i32); }\n"

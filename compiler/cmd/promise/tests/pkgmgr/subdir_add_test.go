@@ -23,7 +23,7 @@ func TestAddWithSubdir(t *testing.T) {
 
 	bareDir := filepath.ToSlash(clitest.ShortRepoDir(t))
 	workDir := clitest.ShortRepoDir(t)
-	projDir := t.TempDir()
+	projDir := clitest.TempDir(t)
 
 	run := func(dir, name string, args ...string) { cli.Run(t, dir, name, args...) }
 
@@ -86,7 +86,7 @@ func TestUpdateNamedSubdirEntry(t *testing.T) {
 
 	bareDir := filepath.ToSlash(clitest.ShortRepoDir(t))
 	workDir := clitest.ShortRepoDir(t)
-	projDir := t.TempDir()
+	projDir := clitest.TempDir(t)
 
 	run := func(dir, name string, args ...string) { cli.Run(t, dir, name, args...) }
 	headOf := func(dir string) string { return cli.Git(t, dir, "rev-parse", "HEAD") }
@@ -158,7 +158,7 @@ func TestAddNamedWithoutSubdir(t *testing.T) {
 
 	bareDir := filepath.ToSlash(clitest.ShortRepoDir(t))
 	workDir := clitest.ShortRepoDir(t)
-	projDir := t.TempDir()
+	projDir := clitest.TempDir(t)
 
 	run := func(dir, name string, args ...string) { cli.Run(t, dir, name, args...) }
 

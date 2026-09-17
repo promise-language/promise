@@ -32,7 +32,7 @@ func TestTestBinaryWarmupContractHolds(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	unique := fmt.Sprintf("warmup-contract-%d-%d", os.Getpid(), time.Now().UnixNano())
 	src := "// " + unique + "\n" +
 		"warm_ok() `test {\n" +

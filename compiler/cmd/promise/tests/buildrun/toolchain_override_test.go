@@ -20,7 +20,7 @@ func fakeOptReporting(t *testing.T, version string) string {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script tool stubs are not executable on Windows")
 	}
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	path := filepath.Join(dir, "opt")
 	script := "#!/bin/sh\necho \"LLVM version " + version + "\"\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {

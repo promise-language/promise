@@ -133,7 +133,7 @@ func TestSearchEmptyCatalog(t *testing.T) {
 func setupGitTestEnv(t *testing.T) {
 	t.Helper()
 	configPath := filepath.Join(t.TempDir(), "gitconfig")
-	configContent := "[user]\n\temail = test@test.com\n\tname = Test\n[safe]\n\tdirectory = *\n"
+	configContent := "[user]\n\temail = test@example.com\n\tname = Test\n[safe]\n\tdirectory = *\n"
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("setupGitTestEnv: write git config: %v", err)
 	}

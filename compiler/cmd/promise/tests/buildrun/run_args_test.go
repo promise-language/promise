@@ -23,7 +23,7 @@ func TestRunForwardsProgramArgs(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	// A program that prints each os.args entry on its own line, so stdout is an
 	// exact, order-preserving transcript of the forwarded argv.
 	src := "use os;\n" +
@@ -96,7 +96,7 @@ func TestRunForwardsFilenameLikeArgOnCacheMiss(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := "use os;\n" +
 		"main() {\n" +
 		"  args := os.args;\n" +

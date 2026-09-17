@@ -22,7 +22,7 @@ func TestUpdateURLKeyedEntry(t *testing.T) {
 	// the epoch-<E> tag the resolver should re-resolve to (§9.8 step 3).
 	bareDir := filepath.ToSlash(clitest.ShortRepoDir(t))
 	workDir := clitest.ShortRepoDir(t)
-	projDir := t.TempDir()
+	projDir := clitest.TempDir(t)
 
 	run := func(dir, name string, args ...string) { cli.Run(t, dir, name, args...) }
 
@@ -74,7 +74,7 @@ func TestUpdateSpecificTarget(t *testing.T) {
 	// Test updating a specific URL-keyed entry by URL
 	bareDir := filepath.ToSlash(clitest.ShortRepoDir(t))
 	workDir := clitest.ShortRepoDir(t)
-	projDir := t.TempDir()
+	projDir := clitest.TempDir(t)
 
 	run := func(dir, name string, args ...string) { cli.Run(t, dir, name, args...) }
 
@@ -111,7 +111,7 @@ func TestAddWithCustomRef(t *testing.T) {
 	// with no epoch-tag walk-back (the user pinned it).
 	bareDir := filepath.ToSlash(clitest.ShortRepoDir(t))
 	workDir := clitest.ShortRepoDir(t)
-	projDir := t.TempDir()
+	projDir := clitest.TempDir(t)
 
 	run := func(dir, name string, args ...string) { cli.Run(t, dir, name, args...) }
 
@@ -154,7 +154,7 @@ func TestUpdateNamedEntry(t *testing.T) {
 	// Test updating a [require.NAME] entry when the epoch-<E> tag has moved forward
 	bareDir := filepath.ToSlash(clitest.ShortRepoDir(t))
 	workDir := clitest.ShortRepoDir(t)
-	projDir := t.TempDir()
+	projDir := clitest.TempDir(t)
 
 	run := func(dir, name string, args ...string) { cli.Run(t, dir, name, args...) }
 
@@ -206,7 +206,7 @@ func TestUpdateAlreadyCurrent(t *testing.T) {
 	// Create a local bare git repo
 	bareDir := filepath.ToSlash(clitest.ShortRepoDir(t))
 	workDir := clitest.ShortRepoDir(t)
-	projDir := t.TempDir()
+	projDir := clitest.TempDir(t)
 
 	run := func(dir, name string, args ...string) { cli.Run(t, dir, name, args...) }
 

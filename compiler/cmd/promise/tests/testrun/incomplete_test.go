@@ -32,7 +32,7 @@ func TestIncompleteHarnessReportsFailure(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "incomplete_test.pr")
 	if err := os.WriteFile(src, []byte(incompleteSource), 0o644); err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestIncompleteMultiFileReportsFailure(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "incomplete_test.pr"), []byte(incompleteSource), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestIncompleteNotReportedForExcludedTests(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "excluded_test.pr")
 	// Excluded on every supported target, so the assertion never runs anywhere.
 	// Multiple targets combine with `||` — a comma starts the next NAMED annotation
@@ -144,7 +144,7 @@ func TestIncompleteFromCachedBinaryPreservesExitCode(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "exit3_test.pr")
 	source := strings.Replace(incompleteSource, "_exit_now(0)", "_exit_now(3)", 1)
 	if err := os.WriteFile(src, []byte(source), 0o644); err != nil {
@@ -178,7 +178,7 @@ func TestIncompleteCoverageModeReportsFailure(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "incomplete_test.pr")
 	if err := os.WriteFile(src, []byte(incompleteSource), 0o644); err != nil {
 		t.Fatal(err)
@@ -208,7 +208,7 @@ func TestIncompleteStressAttribution(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "incomplete_test.pr")
 	if err := os.WriteFile(src, []byte(incompleteSource), 0o644); err != nil {
 		t.Fatal(err)

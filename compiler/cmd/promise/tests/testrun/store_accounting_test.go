@@ -47,7 +47,7 @@ import (
 func compilerWithItsOwnLedger(t *testing.T) string {
 	t.Helper()
 	src := clitest.Bin(t)
-	dst := filepath.Join(t.TempDir(), "promise")
+	dst := filepath.Join(clitest.TempDir(t), "promise")
 	if runtime.GOOS == "windows" {
 		dst += ".exe"
 	}
@@ -186,7 +186,7 @@ func TestStoreLedgerCountsEveryHomeARunUses(t *testing.T) {
 	}
 	bin := compilerWithItsOwnLedger(t)
 
-	aliases := t.TempDir()
+	aliases := clitest.TempDir(t)
 	var homes []string
 	for i := 0; i < 3; i++ {
 		alias := filepath.Join(aliases, fmt.Sprintf("home-%d", i))
@@ -259,7 +259,7 @@ func TestStoreLedgerIsQuietOnAWarmHome(t *testing.T) {
 func TestPromiseTestEmitsTheStoreRecord(t *testing.T) {
 	t.Parallel()
 	bin := clitest.Bin(t)
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "store_record_test.pr")
 	if err := os.WriteFile(src, []byte("one_ok() `test {\n  assert(1 == 1, \"ran\");\n}\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -346,7 +346,7 @@ func TestStoreLedgerReportsWhatAColdHomeCost(t *testing.T) {
 	}
 
 	bin := compilerWithItsOwnLedger(t)
-	cold := filepath.Join(t.TempDir(), "cold-home")
+	cold := filepath.Join(clitest.TempDir(t), "cold-home")
 	if err := linkTree(blobs, filepath.Join(cold, "cache", "blobs")); err != nil {
 		t.Skipf("could not seed a cold home without copying: %v", err)
 	}

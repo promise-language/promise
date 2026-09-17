@@ -82,9 +82,9 @@ main() {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			// One shared PROMISE_HOME so both programs hit the same build cache.
-			home := t.TempDir()
+			home := clitest.TempDir(t)
 			run := func(prog, label string) (string, error) {
-				dir := t.TempDir()
+				dir := clitest.TempDir(t)
 				src := filepath.Join(dir, "prog.pr")
 				if err := os.WriteFile(src, []byte(prog), 0644); err != nil {
 					t.Fatalf("write %s: %v", label, err)

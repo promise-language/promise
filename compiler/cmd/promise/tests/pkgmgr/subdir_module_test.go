@@ -33,7 +33,7 @@ func TestBuildSubdirRemoteModules(t *testing.T) {
 		"types": "proto/types",
 	})
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	manifest := "[module]\nname = \"app\"\nepoch = \"2026.0\"\nmain = \"main.pr\"\n\n" +
 		"[require.wire]\nurl = \"" + repo + "\"\ncommit = \"" + commit + "\"\nsubdir = \"proto/wire\"\n\n" +
 		"[require.types]\nurl = \"" + repo + "\"\ncommit = \"" + commit + "\"\nsubdir = \"proto/types\"\n"
@@ -93,7 +93,7 @@ func TestBuildSubdirRemoteModuleMissingManifest(t *testing.T) {
 
 	repo, commit := clitest.MakeSubdirRepo(t, map[string]string{"wire": "proto/wire"})
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	manifest := "[module]\nname = \"app\"\nepoch = \"2026.0\"\nmain = \"main.pr\"\n\n" +
 		"[require.wire]\nurl = \"" + repo + "\"\ncommit = \"" + commit + "\"\nsubdir = \"proto/nope\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"), []byte(manifest), 0644); err != nil {
@@ -126,7 +126,7 @@ func TestSubdirRemoteModuleReplace(t *testing.T) {
 
 	// A local checkout of the same repo layout — no git needed, [replace] wins
 	// before any fetch.
-	local := filepath.Join(t.TempDir(), "base")
+	local := filepath.Join(clitest.TempDir(t), "base")
 	for name, sub := range map[string]string{"wire": "proto/wire", "types": "proto/types"} {
 		d := filepath.Join(local, filepath.FromSlash(sub))
 		if err := os.MkdirAll(d, 0755); err != nil {
@@ -143,7 +143,7 @@ func TestSubdirRemoteModuleReplace(t *testing.T) {
 	}
 
 	const repoURL = "https://github.com/acme/base"
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	manifest := "[module]\nname = \"app\"\nepoch = \"2026.0\"\nmain = \"main.pr\"\n\n" +
 		"[require.wire]\nurl = \"" + repoURL + "\"\ncommit = \"deadbeef\"\nsubdir = \"proto/wire\"\n\n" +
 		"[require.types]\nurl = \"" + repoURL + "\"\ncommit = \"deadbeef\"\nsubdir = \"proto/types\"\n\n" +
@@ -197,7 +197,7 @@ func TestBuildNamedRequireRootModule(t *testing.T) {
 	// Empty subdir → the module's promise.toml lands at the repo root.
 	repo, commit := clitest.MakeSubdirRepo(t, map[string]string{"wire": ""})
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	manifest := "[module]\nname = \"app\"\nepoch = \"2026.0\"\nmain = \"main.pr\"\n\n" +
 		"[require.wire]\nurl = \"" + repo + "\"\ncommit = \"" + commit + "\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"), []byte(manifest), 0644); err != nil {
@@ -227,7 +227,7 @@ func TestBuildAliasedCatalogImport(t *testing.T) {
 	}
 	cli := clitest.NewEnv(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"app\"\nepoch = \"2026.0\"\nmain = \"main.pr\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -257,7 +257,7 @@ func TestBuildTwoAliasedModulesAcrossFiles(t *testing.T) {
 	}
 	cli := clitest.NewEnv(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"app\"\nepoch = \"2026.0\"\nmain = \"main.pr\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -293,7 +293,7 @@ func TestSameAliasTwoModulesAllowed(t *testing.T) {
 	}
 	cli := clitest.NewEnv(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"app\"\nepoch = \"2026.0\"\nmain = \"main.pr\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -333,12 +333,12 @@ func TestBuildSubdirModulesAtDifferentCommits(t *testing.T) {
 	}
 	cli := clitest.NewEnv(t)
 
-	work := filepath.Join(t.TempDir(), "work")
+	work := filepath.Join(clitest.TempDir(t), "work")
 	if err := os.MkdirAll(work, 0755); err != nil {
 		t.Fatal(err)
 	}
 	clitest.GitRun(t, work, "init", "--initial-branch=main")
-	clitest.GitRun(t, work, "config", "user.email", "test@test.com")
+	clitest.GitRun(t, work, "config", "user.email", "test@example.com")
 	clitest.GitRun(t, work, "config", "user.name", "Test")
 
 	writeSub := func(sub, name, body string) {
@@ -370,10 +370,10 @@ func TestBuildSubdirModulesAtDifferentCommits(t *testing.T) {
 	clitest.GitRun(t, work, "commit", "-m", "v2")
 	commit2 := clitest.GitRun(t, work, "rev-parse", "HEAD")
 
-	repo := filepath.Join(t.TempDir(), "base.git")
+	repo := filepath.Join(clitest.TempDir(t), "base.git")
 	clitest.GitRun(t, "", "clone", "--bare", "--quiet", work, repo)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	manifest := "[module]\nname = \"app\"\nepoch = \"2026.0\"\nmain = \"main.pr\"\n\n" +
 		"[require.wire]\nurl = \"" + repo + "\"\ncommit = \"" + commit1 + "\"\nsubdir = \"proto/wire\"\n\n" +
 		"[require.types]\nurl = \"" + repo + "\"\ncommit = \"" + commit2 + "\"\nsubdir = \"proto/types\"\n"

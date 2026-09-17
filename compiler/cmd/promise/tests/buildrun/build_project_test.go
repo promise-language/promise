@@ -22,7 +22,7 @@ func TestBuildProjectMultiFile(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"myapp\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -72,7 +72,7 @@ func TestBuildProjectOutputOverride(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"myapp\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -116,7 +116,7 @@ func TestBuildProjectExcludesTestFiles(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"app\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestRunProjectMultiFile(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"runme\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestEmitIRProjectMultiFile(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"emitme\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -234,7 +234,7 @@ func TestBuildFileInsideProject(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"insideproj\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -285,7 +285,7 @@ func TestRunFileInsideProject(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"runinside\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -333,7 +333,7 @@ func TestBuildFileNoProjectStillSingleFile(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "solo.pr"),
 		[]byte("main() { print_line(\"hi\"); }\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -368,7 +368,7 @@ func TestBuildNonexistentFileInsideProject(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"bogusname\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -414,7 +414,7 @@ func TestBuildFileInProjectSubdir(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"subproj\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -465,7 +465,7 @@ func TestRunFileNoProjectStillSingleFile(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "solo.pr"),
 		[]byte("main() { print_line(\"solo-ok\"); }\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -498,7 +498,7 @@ func TestTargetDirWithoutProjectIsError(t *testing.T) {
 
 	for _, cmdName := range []string{"build", "run", "emit-ir"} {
 		t.Run(cmdName, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := clitest.TempDir(t)
 			// A lone .pr file with main() but no promise.toml — under the old
 			// behavior this directory would have auto-discovered main.pr.
 			if err := os.WriteFile(filepath.Join(dir, "main.pr"),
@@ -536,7 +536,7 @@ func TestNoArgInNonProjectDirIsError(t *testing.T) {
 
 	for _, cmdName := range []string{"build", "run"} {
 		t.Run(cmdName, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := clitest.TempDir(t)
 			if err := os.WriteFile(filepath.Join(dir, "main.pr"),
 				[]byte("main() { print_line(\"hi\"); }\n"), 0644); err != nil {
 				t.Fatal(err)
@@ -565,7 +565,7 @@ func TestEmitIRFileInsideProjectIsError(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"emitproj\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -607,7 +607,7 @@ func TestBindWebIdlJsValueDocParses(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	idlPath := filepath.Join(dir, "element.idl")
 	idl := `[Exposed=Window]
 interface Element {
@@ -653,7 +653,7 @@ func TestBindWebIdlUnionAttrCompilesClean(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	idlPath := filepath.Join(dir, "element.idl")
 	idl := `[Exposed=Window]
 interface Element {
@@ -754,7 +754,7 @@ func TestUnusedImportWarnsButBuildsOK(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "main.pr")
 	// `use path;` is never referenced — an unused import.
 	if err := os.WriteFile(src,
@@ -791,7 +791,7 @@ func TestMissingPerFileImportFailsBuild(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
 		[]byte("[module]\nname = \"twofile\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -840,7 +840,7 @@ func TestBindWebIdlBorrowFactoryCompilesClean(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	idlPath := filepath.Join(dir, "dom.idl")
 	idl := `interface Node {
 	constructor(DOMString tag);
@@ -913,7 +913,7 @@ func TestBindWitBorrowFactoryCompilesClean(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	witPath := filepath.Join(dir, "api.wit")
 	wit := `package test:api;
 
@@ -981,7 +981,7 @@ func TestBindWebIdlBorrowedWrapperSkipsRelease(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	idlPath := filepath.Join(dir, "dom.idl")
 	if err := os.WriteFile(idlPath, []byte("interface Document {\n\tDOMString title();\n};\n"), 0644); err != nil {
 		t.Fatal(err)

@@ -100,7 +100,7 @@ func passLines(out string) []string {
 // one build-cache entry and only the first pays for compilation.
 func writeFixture(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	for name, src := range map[string]string{
 		"alpha_test.pr": progressPassingSource,
 		"beta_test.pr":  progressMixedSource,
@@ -219,7 +219,7 @@ func elideVolatile(s string) string { return storeCostRe.ReplaceAllString(elideT
 func TestProgressModes_SingleFile(t *testing.T) {
 	t.Parallel()
 	bin := clitest.Bin(t)
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "single_test.pr")
 	if err := os.WriteFile(src, []byte(progressMixedSource), 0o644); err != nil {
 		t.Fatal(err)
@@ -262,7 +262,7 @@ func TestProgressModes_SingleFile(t *testing.T) {
 func TestProgressModes_SnapshotPassSuppressed(t *testing.T) {
 	t.Parallel()
 	bin := clitest.Bin(t)
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "snap_test.pr")
 	if err := os.WriteFile(src, []byte(progressSnapshotSource), 0o644); err != nil {
 		t.Fatal(err)
@@ -289,7 +289,7 @@ func TestProgressModes_SnapshotPassSuppressed(t *testing.T) {
 func TestProgressFlagBeatsEnv(t *testing.T) {
 	t.Parallel()
 	bin := clitest.Bin(t)
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "env_test.pr")
 	if err := os.WriteFile(src, []byte(progressPassingSource), 0o644); err != nil {
 		t.Fatal(err)
@@ -351,7 +351,7 @@ func TestProgressFlagRejectsUnknownSpelling(t *testing.T) {
 		}
 	}
 	// "auto" is accepted and means "detect" — under a pipe, that is plain.
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "auto_test.pr")
 	if err := os.WriteFile(src, []byte(progressPassingSource), 0o644); err != nil {
 		t.Fatal(err)
@@ -373,7 +373,7 @@ func TestProgressFlagRejectsUnknownSpelling(t *testing.T) {
 func TestProgressDoesNotAffectOtherCommands(t *testing.T) {
 	t.Parallel()
 	bin := clitest.Bin(t)
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "hello.pr")
 	if err := os.WriteFile(src, []byte("main() {\n  print_line(\"hello\");\n}\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -400,7 +400,7 @@ func TestProgressDoesNotAffectOtherCommands(t *testing.T) {
 func TestProgressDoesNotAffectJSONMode(t *testing.T) {
 	t.Parallel()
 	bin := clitest.Bin(t)
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "json_test.pr"), []byte(progressMixedSource), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +450,7 @@ func elideJSONVolatile(s string) string {
 func TestProgressRunReportsWhyTheChildFailed(t *testing.T) {
 	t.Parallel()
 	bin := clitest.Bin(t)
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "broken_test.pr")
 	if err := os.WriteFile(src, []byte(progressBrokenSource), 0o644); err != nil {
 		t.Fatal(err)
@@ -496,11 +496,11 @@ func TestProgressRunReportsWhyTheChildFailed(t *testing.T) {
 // edge, which is the case docs/code-style.md §"Test synchronization" explicitly
 // allows — this is a test *of* a timeout. The margin is not fine: the budget is
 // milliseconds and the work it interrupts is a cold compile of several seconds,
-// in a t.TempDir() that guarantees a cache miss.
+// in a clitest.TempDir(t) that guarantees a cache miss.
 func TestProgressRunDeadlineKillsTheChild(t *testing.T) {
 	t.Parallel()
 	bin := clitest.Bin(t)
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "deadline_test.pr")
 	if err := os.WriteFile(src, []byte(progressPassingSource), 0o644); err != nil {
 		t.Fatal(err)

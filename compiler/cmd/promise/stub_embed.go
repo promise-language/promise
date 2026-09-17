@@ -76,7 +76,9 @@ func copyFileAtomic(src, dst string, perm os.FileMode) error {
 	if err := os.Chmod(tmpName, perm); err != nil {
 		return err
 	}
-	return renameWithRetry(tmpName, dst)
+	// No settled check (T2132): proving dst already holds src's bytes means reading
+	// a toolchain blob back in full, the cost this function exists to avoid.
+	return renameWithRetry(tmpName, dst, nil)
 }
 
 // writeFileAtomic writes data to path via a temp file in the same directory

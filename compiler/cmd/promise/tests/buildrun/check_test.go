@@ -48,7 +48,7 @@ func runCheck(t *testing.T, dir string, args ...string) (stdout, stderr string, 
 // iter.pr is the shape this reproduces.
 func TestCheckMultiFileModuleAsUnit(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	writeFiles(t, dir, map[string]string{
 		"promise.toml": "[module]\nname = \"shapes\"\nepoch = \"2026.0\"\n",
 		"point.pr":     "type Pt `public {\n  int x;\n}\n",
@@ -66,7 +66,7 @@ func TestCheckMultiFileModuleAsUnit(t *testing.T) {
 
 func TestCheckFileInsideProjectNamesTheProject(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	writeFiles(t, dir, map[string]string{
 		"promise.toml": "[module]\nname = \"shapes\"\nepoch = \"2026.0\"\n",
 		"point.pr":     "type Pt `public {\n  int x;\n}\n",
@@ -89,7 +89,7 @@ func TestCheckFileInsideProjectNamesTheProject(t *testing.T) {
 // module's context, and nothing else in the tree can check them.
 func TestCheckIncludesModuleTestFiles(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	writeFiles(t, dir, map[string]string{
 		"promise.toml": "[module]\nname = \"lib\"\nepoch = \"2026.0\"\n",
 		"lib.pr":       "double(int x) int `public {\n  return x * 2;\n}\n",
@@ -109,7 +109,7 @@ func TestCheckIncludesModuleTestFiles(t *testing.T) {
 // them under their own outcome and still exits zero.
 func TestCheckWarningsDoNotFail(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	writeFiles(t, dir, map[string]string{
 		"main.pr": "use path;\n\nmain() {\n  print_line(\"hi\");\n}\n",
 	})
@@ -128,7 +128,7 @@ func TestCheckWarningsDoNotFail(t *testing.T) {
 
 func TestCheckErrorsExitNonZeroAndCount(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	writeFiles(t, dir, map[string]string{
 		"main.pr": "main() {\n  int a = nope_one();\n  int b = nope_two();\n}\n",
 	})
@@ -146,7 +146,7 @@ func TestCheckErrorsExitNonZeroAndCount(t *testing.T) {
 // the property the gate's caller needs and a person reading a script needs.
 func TestCheckMissingFileExitsNonZero(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	writeFiles(t, dir, map[string]string{"main.pr": "main() {}\n"})
 
 	stdout, stderr, ok := runCheck(t, dir, "no/such/file.pr")
@@ -162,7 +162,7 @@ func TestCheckMissingFileExitsNonZero(t *testing.T) {
 // are what the checked:promise gate reads.
 func TestCheckSweepSummary(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	writeFiles(t, dir, map[string]string{
 		"a.pr":                  "main() {\n  print_line(\"a\");\n}\n",
 		"b.pr":                  "helper() int {\n  return 1;\n}\n",
@@ -200,7 +200,7 @@ func TestCheckSweepSummary(t *testing.T) {
 // total, which is what promise_check_warnings is.
 func TestCheckSweepWarnedUnit(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	writeFiles(t, dir, map[string]string{
 		"a.pr":     "helper_one() int {\n  return 1;\n}\n",
 		"warny.pr": "use path;\n\nhelper_two() int {\n  return 2;\n}\n",
@@ -226,7 +226,7 @@ func TestCheckSweepWarnedUnit(t *testing.T) {
 // must not fail a sweep of everything.
 func TestCheckEmptyProject(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	writeFiles(t, dir, map[string]string{
 		"empty/promise.toml": "[module]\nname = \"empty\"\nepoch = \"2026.0\"\n",
 		"a.pr":               "main() {\n  print_line(\"a\");\n}\n",
@@ -255,7 +255,7 @@ func TestCheckEmptyProject(t *testing.T) {
 // one unit, and discoverProject is what decides what belongs to it.
 func TestCheckProjectWithSourcesOnlyInSubdirectory(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	writeFiles(t, dir, map[string]string{
 		"promise.toml": "[module]\nname = \"deep\"\nepoch = \"2026.0\"\n",
 		"src/one.pr":   "type Thing `public {\n  int n;\n}\n",
@@ -276,7 +276,7 @@ func TestCheckProjectWithSourcesOnlyInSubdirectory(t *testing.T) {
 // count clause must not be read as a unit that reported nothing.
 func TestCheckSweepUnitNameWithParentheses(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	writeFiles(t, dir, map[string]string{
 		"a (copy).pr": "helper_one() int {\n  return 1;\n}\n",
 		"b.pr":        "helper_two() int {\n  return 2;\n}\n",
@@ -293,7 +293,7 @@ func TestCheckSweepUnitNameWithParentheses(t *testing.T) {
 
 func TestCheckRejectsUnknownFlag(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	writeFiles(t, dir, map[string]string{"main.pr": "main() {}\n"})
 
 	_, stderr, ok := runCheck(t, dir, "-nosuchflag", "main.pr")
@@ -307,7 +307,7 @@ func TestCheckRejectsUnknownFlag(t *testing.T) {
 
 func TestCheckNoTargetsPrintsUsage(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 
 	_, stderr, ok := runCheck(t, dir)
 	if ok {

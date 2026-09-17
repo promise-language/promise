@@ -48,9 +48,9 @@ func TestBuildLooseFileFiltersForRequestedTarget(t *testing.T) {
 		t.Run(tc.triple, func(t *testing.T) {
 			t.Parallel()
 
-			// No promise.toml: this is the single-file path, and t.TempDir()
+			// No promise.toml: this is the single-file path, and clitest.TempDir(t)
 			// has no project anywhere above it.
-			dir := t.TempDir()
+			dir := clitest.TempDir(t)
 			src := "gated() int `target(" + tc.cond + ") { return 7; }\n" +
 				"main() { print_line(gated().to_string()); }\n"
 			if err := os.WriteFile(filepath.Join(dir, "main.pr"), []byte(src), 0644); err != nil {
@@ -94,7 +94,7 @@ func TestBuildLooseFileLinksTheTargetVariant(t *testing.T) {
 	const wasmMarker = "T2086-wasm-variant"
 	const nativeMarker = "T2086-native-variant"
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := "which() string `target(wasm)  { return \"" + wasmMarker + "\"; }\n" +
 		"which() string `target(!wasm) { return \"" + nativeMarker + "\"; }\n" +
 		"main() { print_line(which()); }\n"

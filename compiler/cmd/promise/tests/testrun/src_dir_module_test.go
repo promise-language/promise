@@ -32,7 +32,7 @@ test_src_dir_is_the_module_dir() ` + "`test" + ` {
 // realTempDir returns a fresh temp directory with every symlink resolved.
 func realTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := filepath.EvalSymlinks(t.TempDir())
+	dir, err := filepath.EvalSymlinks(clitest.TempDir(t))
 	if err != nil {
 		t.Fatalf("resolve temp dir: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestModuleTestSrcDirIsModuleDir(t *testing.T) {
 		write("probe_test.pr", srcDirModuleTest)
 	}
 
-	// Real paths, not t.TempDir()'s: on macOS that is a path under a symlink
+	// Real paths, not clitest.TempDir(t)'s: on macOS that is a path under a symlink
 	// (/var → /private/var), and the compiler's filepath.Abs(".") keeps the
 	// spelling of the cwd it is handed while the test binary's os.working_dir
 	// (getcwd) resolves it. Naming the resolved directory keeps both on one

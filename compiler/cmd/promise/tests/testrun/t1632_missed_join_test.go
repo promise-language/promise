@@ -54,7 +54,7 @@ func TestMissedJoinSignalReportsNamedTimeout(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "missed_join_test.pr")
 	if err := os.WriteFile(src, []byte(missedJoinSignalSource), 0o644); err != nil {
 		t.Fatal(err)

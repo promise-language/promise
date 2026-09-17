@@ -43,7 +43,7 @@ func TestRunPackageCheckEpoch(t *testing.T) {
 	cli := clitest.NewEnv(t)
 	epoch := cli.CompilerEpoch(t)
 
-	modDir := t.TempDir()
+	modDir := clitest.TempDir(t)
 	clitest.WriteModule(t, modDir, "lib", epoch, true)
 	out := cli.PromiseOK(t, modDir, "package", "check-epoch", epoch)
 	if !strings.Contains(out, "✓ compatible") || !strings.Contains(out, "git tag epoch-"+epoch) {
@@ -61,11 +61,11 @@ func TestRunPackageBuildIndex(t *testing.T) {
 
 	bareDir, headCommit := makeTaggedModuleRepo(t, cli, "mymod", epoch, true)
 
-	catalogDir := t.TempDir()
+	catalogDir := clitest.TempDir(t)
 	os.WriteFile(filepath.Join(catalogDir, "modules.toml"),
 		[]byte("[modules.mymod]\nurl = \""+bareDir+"\"\n"), 0644)
 
-	out := cli.PromiseOK(t, t.TempDir(), "package", "build-index", catalogDir, epoch)
+	out := cli.PromiseOK(t, clitest.TempDir(t), "package", "build-index", catalogDir, epoch)
 	if !strings.Contains(out, "✓ mymod") {
 		t.Errorf("expected '✓ mymod', got: %s", out)
 	}
@@ -101,11 +101,11 @@ func TestRunPackageBuildIndexReport(t *testing.T) {
 
 	bareDir, _ := makeTaggedModuleRepo(t, cli, "brokenmod", epoch, false) // fails to compile
 
-	catalogDir := t.TempDir()
+	catalogDir := clitest.TempDir(t)
 	os.WriteFile(filepath.Join(catalogDir, "modules.toml"),
 		[]byte("[modules.brokenmod]\nurl = \""+bareDir+"\"\n"), 0644)
 
-	out := cli.PromiseOK(t, t.TempDir(), "package", "build-index", catalogDir, epoch, "-report")
+	out := cli.PromiseOK(t, clitest.TempDir(t), "package", "build-index", catalogDir, epoch, "-report")
 	if !strings.Contains(out, "✗ brokenmod") || !strings.Contains(out, "pre-release report") {
 		t.Errorf("expected ✗ + report note, got: %s", out)
 	}

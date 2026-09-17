@@ -64,7 +64,7 @@ func probeField(t *testing.T, out, key string) string {
 // is about. A relative argument is resolved against the invoking cwd, whose
 // spelling the caller chooses; an absolute one is baked exactly as given.
 //
-// Two spellings reach these tests. On macOS t.TempDir() hands back a path under a
+// Two spellings reach these tests. On macOS clitest.TempDir(t) hands back a path under a
 // symlink (/var -> /private/var), which getcwd resolves and filepath.Abs
 // deliberately does not. On Windows a path inherited through %TEMP% may name a
 // component by its 8.3 short name (C:\Users\RUNNER~1\..., the GitHub runner's
@@ -139,8 +139,8 @@ func TestRunSrcDirIsSourceNotCwd(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	srcDir := t.TempDir()
-	cwdDir := t.TempDir()
+	srcDir := clitest.TempDir(t)
+	cwdDir := clitest.TempDir(t)
 	if srcDir == cwdDir {
 		t.Fatal("test setup is broken: source and invocation directories must differ")
 	}
@@ -164,8 +164,8 @@ func TestRunProjectSrcDirIsProjectDir(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	projDir := t.TempDir()
-	cwdDir := t.TempDir()
+	projDir := clitest.TempDir(t)
+	cwdDir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(projDir, "promise.toml"),
 		[]byte("[module]\nname = \"probe\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -189,7 +189,7 @@ func TestExecHasNoSrcDir(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	cwdDir := t.TempDir()
+	cwdDir := clitest.TempDir(t)
 	// autoInjectCatalogUses pulls in `use os;` from the bare os.src_dir reference.
 	out := runProbe(t, cwdDir, bin, "exec",
 		`if d := os.src_dir { print_line("src_dir=" + d); } else { print_line("src_dir=<none>"); }`)
@@ -211,8 +211,8 @@ func TestRunSrcDirNotSharedBetweenIdenticalSources(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	dirA := t.TempDir()
-	dirB := t.TempDir()
+	dirA := clitest.TempDir(t)
+	dirB := clitest.TempDir(t)
 	probeA := writeProbe(t, dirA, "probe.pr")
 	probeB := writeProbe(t, dirB, "probe.pr")
 
@@ -239,9 +239,9 @@ func TestBuiltBinaryKeepsSrcDir(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	srcDir := t.TempDir()
-	outDir := t.TempDir()
-	runDir := t.TempDir()
+	srcDir := clitest.TempDir(t)
+	outDir := clitest.TempDir(t)
+	runDir := clitest.TempDir(t)
 	probe := writeProbe(t, srcDir, "probe.pr")
 	binary := filepath.Join(outDir, "probe")
 	if runtime.GOOS == "windows" {
@@ -272,7 +272,7 @@ func TestRunSrcDirFromRelativeArgument(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	srcDir := t.TempDir()
+	srcDir := clitest.TempDir(t)
 	subDir := filepath.Join(srcDir, "sub")
 	if err := os.MkdirAll(subDir, 0755); err != nil {
 		t.Fatal(err)
@@ -316,14 +316,14 @@ func TestRunProjectSrcDirTrailingSeparator(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	projDir := t.TempDir()
+	projDir := clitest.TempDir(t)
 	if err := os.WriteFile(filepath.Join(projDir, "promise.toml"),
 		[]byte("[module]\nname = \"probe\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	writeProbe(t, projDir, "main.pr")
 
-	out := runProbe(t, t.TempDir(), bin, "run", projDir+string(os.PathSeparator))
+	out := runProbe(t, clitest.TempDir(t), bin, "run", projDir+string(os.PathSeparator))
 
 	if got, want := probeField(t, out, "src_dir"), projDir; got != want {
 		t.Errorf("os.src_dir for a trailing-separator project argument = %q, want %q", got, want)
@@ -344,7 +344,7 @@ func TestRunSrcDirVisibleFromImportedModule(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 
-	projDir := t.TempDir()
+	projDir := clitest.TempDir(t)
 	depDir := filepath.Join(projDir, "dep")
 	if err := os.MkdirAll(depDir, 0755); err != nil {
 		t.Fatal(err)
@@ -378,7 +378,7 @@ main!() {
 }
 `)
 
-	out := runProbe(t, t.TempDir(), bin, "run", projDir)
+	out := runProbe(t, clitest.TempDir(t), bin, "run", projDir)
 
 	if got, want := probeField(t, out, "src_dir"), projDir; got != want {
 		t.Errorf("os.src_dir in main = %q, want the project directory %q", got, want)

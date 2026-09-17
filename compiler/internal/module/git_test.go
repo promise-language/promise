@@ -33,7 +33,7 @@ func createTestRepo(t *testing.T, name string) (bareRepo, commitHash string) {
 	}
 
 	run(workDir, "git", "init", "--initial-branch=main")
-	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.email", "test@example.com")
 	run(workDir, "git", "config", "user.name", "Test")
 
 	// Write promise.toml
@@ -288,7 +288,7 @@ func TestResolveRemoteModuleTwoCommits(t *testing.T) {
 	}
 
 	run(workDir, "git", "init", "--initial-branch=main")
-	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.email", "test@example.com")
 	run(workDir, "git", "config", "user.name", "Test")
 
 	os.WriteFile(filepath.Join(workDir, "promise.toml"), []byte("[module]\nname = \"twocommit\"\nepoch = \"2026.0\"\n"), 0644)
@@ -368,7 +368,7 @@ func TestPinResolveTag(t *testing.T) {
 	}
 
 	run(workDir, "git", "init", "--initial-branch=main")
-	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.email", "test@example.com")
 	run(workDir, "git", "config", "user.name", "Test")
 	os.WriteFile(filepath.Join(workDir, "promise.toml"), []byte("[module]\nname = \"tagged\"\nepoch = \"2026.0\"\n"), 0644)
 	os.WriteFile(filepath.Join(workDir, "tagged.pr"), []byte("hello() int `public { return 1; }\n"), 0644)
@@ -421,7 +421,7 @@ func TestPinResolveHEAD(t *testing.T) {
 	}
 
 	run(workDir, "git", "init", "--initial-branch=main")
-	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.email", "test@example.com")
 	run(workDir, "git", "config", "user.name", "Test")
 	os.WriteFile(filepath.Join(workDir, "f.txt"), []byte("hello"), 0644)
 	run(workDir, "git", "add", ".")
@@ -468,7 +468,7 @@ func TestPinResolveNotFound(t *testing.T) {
 	}
 
 	run(workDir, "git", "init", "--initial-branch=main")
-	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.email", "test@example.com")
 	run(workDir, "git", "config", "user.name", "Test")
 	os.WriteFile(filepath.Join(workDir, "f.txt"), []byte("hello"), 0644)
 	run(workDir, "git", "add", ".")
@@ -647,7 +647,7 @@ func createSubdirTestRepo(t *testing.T) (bareRepo, commitHash string) {
 	}
 
 	run(workDir, "git", "init", "--initial-branch=main")
-	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.email", "test@example.com")
 	run(workDir, "git", "config", "user.name", "Test")
 
 	// A Go-primary repo marker at the root — deliberately no promise.toml here.

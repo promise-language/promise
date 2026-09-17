@@ -26,7 +26,7 @@ func TestCheckUpgradeWithDeps(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 	epoch := clitest.CompilerEpoch(t)
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 
 	makeDep := func(good bool) (url, commit string) {
 		work := clitest.MakeWorkRepo(t)
@@ -38,7 +38,7 @@ func TestCheckUpgradeWithDeps(t *testing.T) {
 	}
 
 	runCheck := func(t *testing.T, depURL, depCommit string) (string, error) {
-		proj := t.TempDir()
+		proj := clitest.TempDir(t)
 		toml := "[module]\nname = \"proj\"\nepoch = \"" + epoch + "\"\n\n[require]\n\"" + depURL + "\" = \"" + depCommit + "\"\n"
 		os.WriteFile(filepath.Join(proj, "promise.toml"), []byte(toml), 0644)
 		cmd := exec.Command(bin, "package", "check-upgrade", epoch)

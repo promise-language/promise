@@ -39,7 +39,7 @@ func TestStuckGoroutineReportsNamedTimeout(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "stuck_test.pr")
 	if err := os.WriteFile(src, []byte(stuckGoroutineSource), 0o644); err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestStuckGoroutineWordingAndFailPrecedence(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "stuck_variants_test.pr")
 	if err := os.WriteFile(src, []byte(stuckVariantsSource), 0o644); err != nil {
 		t.Fatal(err)
@@ -178,7 +178,7 @@ func TestTimedOutTestDoesNotStallLaterDrains(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
 
-	dir := t.TempDir()
+	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "baseline_test.pr")
 	if err := os.WriteFile(src, []byte(timedOutBaselineSource), 0o644); err != nil {
 		t.Fatal(err)

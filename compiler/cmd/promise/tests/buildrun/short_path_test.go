@@ -37,7 +37,7 @@ func TestSameDirDistinguishesSpellingFromIdentity(t *testing.T) {
 		}
 	}
 
-	other := t.TempDir()
+	other := clitest.TempDir(t)
 	if same, _, _ := sameDir(short, other); same {
 		t.Errorf("sameDir(%q, %q) = true, want false - two different directories, not two spellings of one",
 			short, other)
@@ -53,7 +53,7 @@ func TestSameDirDistinguishesSpellingFromIdentity(t *testing.T) {
 // fixture into a bug report against the compiler.
 func TestSameDirNamesWhichSideDoesNotStat(t *testing.T) {
 	t.Parallel()
-	exists := t.TempDir()
+	exists := clitest.TempDir(t)
 	missing := filepath.Join(exists, "no-such-directory")
 
 	if same, gotErr, wantErr := sameDir(missing, exists); same || gotErr == nil || wantErr != nil {

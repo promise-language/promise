@@ -35,7 +35,7 @@ func newCLIEnv(t *testing.T) *cliEnv {
 	home := t.TempDir()
 	gitconfig := filepath.Join(t.TempDir(), "gitconfig")
 	if err := os.WriteFile(gitconfig,
-		[]byte("[user]\n\temail = test@test.com\n\tname = Test\n[safe]\n\tdirectory = *\n"), 0644); err != nil {
+		[]byte("[user]\n\temail = test@example.com\n\tname = Test\n[safe]\n\tdirectory = *\n"), 0644); err != nil {
 		t.Fatalf("write git config: %v", err)
 	}
 	return &cliEnv{bin: bin, home: home, env: append(os.Environ(),

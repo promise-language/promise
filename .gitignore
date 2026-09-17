@@ -7,10 +7,6 @@ compiler/tools/antlr-*.jar
 compiler/internal/parser/*.interp
 compiler/internal/parser/*.tokens
 
-# bin/ holds only build artifacts — the compiler binary, hash and store-accounting
-# sidecars, and all Go build/flow tools compiled by ./make. Nothing under bin/ is
-# ever committed.
-bin/
 compiler/grammar/.antlr/PromiseLexer.interp
 compiler/grammar/.antlr/PromiseLexer.java
 compiler/grammar/.antlr/PromiseLexer.tokens
@@ -22,21 +18,13 @@ compiler/grammar/.antlr/PromiseParser.tokens
 tools/build/winlink/lib/
 
 # Debug build output
-.promise-build/
+/.promise-build/
 
 # Local promise home for testing
-.promise-home/
+/.promise-home/
 
 # Build cache
 **/.DS_Store
-# Per-clone files provisioned by `workspace setup` (tracker MCP + local guidance) —
-# host/clone-specific, never committed.
-.claude/settings.local.json
-CLAUDE.local.md
-.mcp.json
-# Post-build hook `workspace setup` installs so ./make re-syncs this checkout's
-# flow binaries. Per-clone: it holds an absolute path to that host's workspace.
-/make.local
 
 # Wrangler (Cloudflare CLI) local state — created by `npx wrangler` during blob publishing
 .wrangler/
@@ -49,9 +37,11 @@ CLAUDE.local.md
 # deps/, manifest-*.json). Scratch — produced in CI and by local runs, never committed.
 /dist/
 
-# Transient flow lease / worktree state written by the do flow when run locally.
-.flow/
-
-# written by `workspace setup` — per-host/per-clone, never committed
+# forge dev tooling — bin/ holds locally-built tools, never committed
+/bin/
+/CLAUDE.local.md
+/.flow/
+/.claude/settings.local.json
 /.workspace/
+/.home/
 /.mcp.json

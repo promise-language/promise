@@ -1,4 +1,6 @@
 {
   "worktree_free_bytes":    {"direction": "at_least", "cap": 4294967296},
-  "build_cache_free_bytes": {"direction": "at_least", "cap": 2147483648}
+  "build_cache_free_bytes": {"direction": "at_least", "cap": 2147483648},
+
+  "latest_is_epoch":        {"direction": "at_least", "cap": 1}
 }

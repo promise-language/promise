@@ -99,7 +99,7 @@ Edit and commit gates run locally (fast, synchronous). Periodic and platform gat
 
 **Purpose:** Enforce that quality metrics only improve over time. Block commits that regress.
 
-**Mechanism:** `bin/verify` writes a flat `gate-values.json` sidecar to `.promise-home/`. The commit gate (`tools/build/common/commitgate.go`) reads gate values directly by name and compares against baselines. No translation layer -- metric names in gate values match metric names in baselines.
+**Mechanism:** `bin/verify` and every gate write a flat `gate-values.json` sidecar to `.promise-home/`, whose metric names match the names in `baselines.json` — no translation layer. Advancing a baseline from it is the **workspace's** job, uniform across every managed repository; this project carried its own `bin/commitgate` for it until that tool was deleted, unwired, in favour of the shared one. Nothing in this repository moves a baseline.
 
 ### Non-ratchet commit checks
 
@@ -193,7 +193,7 @@ The `coverage` entry above is **Pending** (has direction but no value -- will be
 **Key files:**
 - `tools/build/common/verify_summary.go` -- `GateValues` type + IO, `ParseTestSummaryLine`
 - `tools/build/common/hash.go` -- `WorktreeHash`, the content identity gate values are stamped with
-- `tools/build/common/commitgate.go` -- `Baseline` struct (3-state), ratchet enforcement
+- `tools/build/common/baselines.go` -- `Baseline` struct (3-state), and the ratchet directions `bin/run` judges against. Reading only: nothing here moves a baseline.
 - `tools/build/common/verify.go` -- writes `gate-values.json` after verify
 - `tools/build/common/precommit.go` -- defense-in-depth baseline check
 - `tools/gates/baselines.json` -- per-platform baseline state
@@ -357,7 +357,7 @@ Tests that completed before the abort keep their real result.
 
 ### Metrics
 
-Metrics are **derived by counting records**, so they always agree with the `files` data. Each is prefixed by the target family (`host_` or `wasm_`); the full set is always present, even when a count is zero (a gate reports a stable metric set rather than omitting a zero). The commit gate consumes these reported values directly — it does not re-count records.
+Metrics are **derived by counting records**, so they always agree with the `files` data. Each is prefixed by the target family (`host_` or `wasm_`); the full set is always present, even when a count is zero (a gate reports a stable metric set rather than omitting a zero). Whatever advances a baseline consumes these reported values directly — it does not re-count records.
 
 | metric                | counts records with status |
 |-----------------------|----------------------------|
@@ -386,7 +386,7 @@ Metrics are **derived by counting records**, so they always agree with the `file
 - **Zero is a legitimate, visible value.** The full set is reported on every run, zeros included: a counter that appeared only when non-zero could not be judged against a baseline of zero.
 - **Where they cannot be measured, they are omitted and the reason is given** — never reported as zeros, which read exactly like a clean run.
 - **`integration` carries the two whose end state is an absolute.** `cas_network_bytes` and `cas_home_count` describe what a run ought never to do, so they belong with the numbers a landing decision rests on. The byte and population totals move with how warm the host was and with which platform links rather than copies; they are reported by the tracker gates and by `promise test`, where no term is owed.
-- **A number is judged where it is reproducible.** The gates measure with `-count=1`, so each reports the same figure every time and a term on it means something. `bin/verify` does not, and its Go phase replays whatever the test cache holds — so it *reports* the store's cost to the operator and deliberately keeps it out of its gate values, because the commit gate is the only thing that moves a baseline and a ratchet fed from a cached run settles below every full one.
+- **A number is judged where it is reproducible.** The gates measure with `-count=1`, so each reports the same figure every time and a term on it means something. `bin/verify` does not, and its Go phase replays whatever the test cache holds — so it *reports* the store's cost to the operator and deliberately keeps it out of its gate values: a ratchet fed from a cached run settles below every full one.
 - **The install gate reports none of them.** It deliberately runs an installed compiler under a sandbox home, so its home count is two by construction and describes the gate rather than the tree.
 
 The single source for all four is a ledger the compiler appends to, one line per occurrence, in the directory holding its own binary (`bin/.promise-cas.jsonl` in a worktree). It is beside the *binary* and not inside a Promise home on purpose: a run fans out into many compiler processes, those processes may each choose a different home, and a per-home tally cannot see the very case that matters — which is exactly how three private homes went unnoticed for eighteen days. Appends are atomic, so concurrent compilers need no lock, and nothing is written on the warm path.
@@ -411,10 +411,13 @@ These gates speak the contract the flow SDK and BASE share, and the SDK **fails 
 |---|---|---|---|
 | Gate | `bin/gate <name> --envelope` | nothing | one envelope: `{"gate","metrics":[{"name","type","value","unit"?}…],"incomplete"?}` |
 | Judge | `bin/run <name> --verdict` | the envelope, on stdin | one verdict: `{"acceptable":bool,"thresholds":{…},"detail":"…"}` |
-| Listing | `bin/gate --list [--json]` | nothing | the gate names, one per line (or `{"gates":[…]}`) |
-| Listing | `bin/run --list [--json]` | nothing | the same gates, plus this project's commands |
+| Listing | `bin/gate --list [--json]` | nothing | the gate names, one per line (or `{"gates":[{"name","summary"}…]}`) |
+| Listing | `bin/run --list [--json]` | nothing | the same gates, plus every command `./make` builds |
+| Command | `bin/run <command> [args…]` | nothing | whatever `bin/<command>` prints; its exit status becomes this one's |
 
 `--envelope`, `--list` and `--json` are flags of the **binary**. They are not gate names and not modifiers of one; a runner appends `--envelope` last when it asks for a measurement.
+
+**The JSON listing is an array of objects, not of names.** A caller addresses a gate by `name`; the `summary` is for whoever reads the listing, and a field added later is ignored by a reader rather than refused — that is what an additive interface means. The distinction is not cosmetic: the flow SDK's discovery unmarshals each entry into a struct with a `name`, so a bare `["tested", …]` still parses, yields nothing, and the repository is discovered as **a machine with no gates** — a silent failure with no parse error anywhere to explain it.
 
 **The gates.** A name is a concept and an optional instance (`checked:go`), and every row is separately runnable — that is what narrowing means here:
 
@@ -432,8 +435,21 @@ These gates speak the contract the flow SDK and BASE share, and the SDK **fails 
 | `tested` | both host suites | both |
 | `integration` | `formatted` + `builds` + `checked` + `tested`, measured at once — what a landing decision rests on | all of the above |
 | `fit` | the machine, before work is given to it | `worktree_free_bytes`, `build_cache_free_bytes` |
+| `tested:wasm` | the Promise suite against wasm32-wasi (needs `wasmtime`) | `wasm_test_failures`, `wasm_leak_count`, `wasm_test_count` |
+| `tested:wasm-web` | the Promise suite against wasm32-web, under Node | `wasm_web_test_failures`, `wasm_web_leak_count`, `wasm_web_test_count` |
+| `tested:stress` | tests that do not agree with themselves across repeated runs | `stress_flaky_count`, `stress_iterations` |
+| `covered` | how much of each language's source the suites reach | `go_coverage_pct`, `promise_coverage_pct` |
+| `size:wasm` | what the wasm32-wasi canaries compile to, per canary | `wasm_size_<canary>`, `wasm_size_total` |
+| `install:thin` | installing a published thin release, end to end | the install phases' own metrics |
+| `latest-invariant` | whether `releases/latest` resolves to an epoch-* release | `latest_is_epoch` |
 
 Every gate above except `fit` also reports `cas_network_bytes` and `cas_home_count` — see [Store metrics](#store-metrics).
+
+**The last seven are not part of `integration`, and that is the point of naming them.** They are the measurements a landing decision must not wait on — the wasm suite alone runs longer than every host gate combined — and they are run on a schedule instead. Naming them is what lets an orchestrator ask for one: a measurement reachable only by knowing its subcommand can be asked for only by whoever wrote the schedule.
+
+**Three of those names are outside flow's closed vocabulary** — `size:wasm`, `install:thin` and `latest-invariant`. Two of them carry an instance half even though the concept is ours, because each measures one of several things it could: the canaries are built for wasm32-wasi, and a later `size:native` or `size:wasm-web` is a sibling gate rather than a rename of this one. That is permitted rather than tolerated: a project has gates the flow knows nothing about, and the SDK skips a name it does not recognise rather than refusing the listing. They are listed because the tracker addresses them by name, and it is the listing's job to say what can be addressed.
+
+**`latest-invariant` also answers to its older subcommand spelling** — a bare `bin/gate latest-invariant`, which is what a scheduled gate runs today. It is the one name with no instance half to tell the two spellings apart, so `bin/gate latest-invariant --envelope` takes the contract path while a bare invocation keeps the subcommand. `install:thin` needs no such seam: it does not collide with `bin/gate install --variant …` at all.
 
 A metric's presence here is not its term: which of `integration`'s metrics are *enforced* on a target is that target's block in `baselines.json`, and a metric whose end state the tree has not reached yet is registered there and tracked until it does.
 
@@ -442,7 +458,7 @@ A metric's presence here is not its term: which of `integration`'s metrics are *
 - **`fit` is not part of `integration`.** A machine that cannot build is not a change that may not land. It reports free space on the worktree's filesystem (which also holds `.promise-home/`) and on the one under `go env GOCACHE`, always both, so the envelope's shape does not vary by host.
 - **The gate never judges; the judge never measures, and reads two kinds of terms.** A **cap** is an absolute a person edits, in [`tools/gates/thresholds.json`](../tools/gates/thresholds.json) — today the `fit` floors. A **baseline** is derived, the best a metric has been, and ratchets in [`tools/gates/baselines.json`](../tools/gates/baselines.json) per platform: anything that ratchets lives there, judged `up`/`down`/`exact` in its three states (enforced, pending, informational). A metric carrying both must satisfy both, and a gate reads neither.
 - **Every metric `integration` reports carries an enforced term on every target the baselines file knows** — not merely on whichever host happens to be running. A term is per-target data, and a metric first seen on a new platform is registered *informational*, which is tracked and never judged; promoting it is a person's step, and it is owed for every target block rather than only the one in front of them. A metric enforced on one platform and informational on another means a landing decision there rests on a number nobody looks at, and the gap is invisible until someone sits down at that platform — it arrives as a red trunk for them instead of a failure for whoever opened it.
-- **An incomplete run is still judged; what it may not do is move a baseline.** Refusing it outright would make any gate that deliberately measures less than everything permanently unpassable, which reads at the call site as a broken gate. The verdict says a baseline may not move from it; `bin/run` never moves one in any case — the commit gate does that, on a complete passing run.
+- **An incomplete run is still judged; what it may not do is move a baseline.** Refusing it outright would make any gate that deliberately measures less than everything permanently unpassable, which reads at the call site as a broken gate. The verdict says a baseline may not move from it; `bin/run` never moves one in any case, and neither does anything else in this repository — advancing a baseline is the workspace's job.
 - **Every gate measures the tree as it is now, never a leftover build.** Before it measures, a gate brings the build up to date by calling `bin/build`'s own `RunBuild` **in-process** — the same parser generation, resource embedding and compile — and adds no freshness rule of its own: `bin/build` decides what "up to date" means, so an already-built tree costs about 0.1s. It happens once per gate process, so `integration`'s parts share one build. This is not an optimisation of `tested`: the compiler `go:embed`s about a dozen generated, untracked inputs that only `bin/build` produces, so a gate that measured without producing them first reported numbers about a tree nobody proposed (stale artifacts), or refused to measure at all (missing artifacts), or reported a `vet_findings` count made entirely of the resulting package-load errors — a number about a tree `vet` never got far enough to analyse. `fit` is the only exception: it measures the machine rather than the tree, and must be answerable on a machine that cannot build. A build that does not complete is itself a measurement — `builds` reports `build_failures`, and every part whose numbers would be about build artifacts reports none and says why.
 - **A gate never repairs its subject.** Every check is the check-only form — no `gofmt -w`, no `promise format`, no staging; that is the difference from `bin/verify`, which repairs on its way to an answer. Bringing the build up to date is not a repair, but it is not invisible either: when the grammar has moved since `compiler/internal/parser/` was generated, the build regenerates those tracked files, and a runner enforcing the non-modification rule reports that as `broke_contract`. That reaches only a change that edited the grammar without regenerating, and the regenerated sources are left in the worktree for that change's own commit to carry.
 - **A project tool and the gate that measures the same property are one implementation in two modes.** The tool repairs, the gate measures, and that is the *only* difference between them: neither re-spells the other's subject, module list, package selection, exclusions or analyzer set. `bin/check` and `checked:go` share `GoCheckFindings` — the gate's count is the size of the list the tool prints. `bin/format` and `formatted:go` share one walk; `bin/coverage` and `coverage` share one package selection; `bin/test` and `tested:go` share one `go test` argv. Two spellings drift, and a drifted pair gives the project two contradictory answers to one question with no way to tell which is right.
@@ -479,7 +495,7 @@ Edit gate and commit gate binaries query the tracker for active exceptions. If t
 A gate run must never be able to invoke a model. Gates are unattended CI: they run on every host, hourly, forever, with nobody reading the launch — so a gate that can reach a model burns account quota on a schedule with no human in the loop and no cost ceiling. This is a property of gate execution, enforced rather than incidental:
 
 - **Statically**: `bin/gate`'s sources (`tools/build/common`, `tools/build/cmd/gate`) are scanned for any agent entry point — `claude`, `bin/do`, `bin/flow`, an Anthropic SDK import, or an MCP client. A future edit that adds one fails this test rather than shipping quietly.
-- **At runtime**: `bin/gate` sets `PROMISE_GATE=1` at the start of every run, inherited by its entire subprocess tree. `bin/guard` (the PreToolUse hook) denies every prompt-invoking tool — `Task`/`Agent`, `Skill`, any `mcp__*` tool, and bash invocations of `claude`, `bin/do`, or `bin/flow` — whenever that marker is present. Consistent with the guard's general fail-closed contract: if the guard cannot tell whether a tool dispatches a model, it denies.
+- **At runtime**: `bin/gate` sets `PROMISE_GATE=1` at the start of every run, inherited by its entire subprocess tree. `bin/tool-guard` (the PreToolUse hook the workspace installs) denies every prompt-invoking tool — `Task`/`Agent`, `Skill`, any `mcp__*` tool, and bash invocations of `claude`, `bin/do`, or `bin/flow` — whenever that marker is present. Consistent with that guard's general fail-closed contract: if the guard cannot tell whether a tool dispatches a model, it denies.
 
 ---
 

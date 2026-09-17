@@ -107,7 +107,7 @@ func TestWorktreeHash_PathIsPartOfIdentity(t *testing.T) {
 
 // The hash is a function of worktree content, not of the index, so staging is
 // invisible to it. This is what lets "write a new test → verify → git add →
-// commitgate" work without demanding a second verify.
+// commit" work without demanding a second verify.
 func TestWorktreeHash_UnchangedByStaging(t *testing.T) {
 	root := worktreeRepo(t)
 	writeFile(t, root, "src/new_test.go", "package main\n")

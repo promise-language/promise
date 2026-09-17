@@ -75,19 +75,37 @@ func TestParse_RefusalQuotesTheTypedSpelling(t *testing.T) {
 	}
 }
 
+// The listing is read by flow's discovery, which unmarshals each entry into a
+// struct with a `name` field. This test therefore reads it the way the SDK
+// does — objects, not strings — because the failure the wrong shape causes is
+// silent: a list of bare names parses, yields zero named gates, and the
+// repository is discovered as a machine with no gates.
 func TestGateList_JSON(t *testing.T) {
 	var out bytes.Buffer
 	if err := writeGateList(&out, true); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
-		Gates []string `json:"gates"`
+		Gates []struct {
+			Name    string `json:"name"`
+			Summary string `json:"summary"`
+		} `json:"gates"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("--list --json is not one JSON object: %v\n%s", err, out.String())
 	}
-	if !slices.Equal(got.Gates, ContractGateNames()) {
-		t.Errorf("gates = %v, want %v", got.Gates, ContractGateNames())
+	names := make([]string, 0, len(got.Gates))
+	for _, g := range got.Gates {
+		names = append(names, g.Name)
+		if g.Summary != ContractGateSummary(g.Name) {
+			t.Errorf("gate %q summary = %q, want %q", g.Name, g.Summary, ContractGateSummary(g.Name))
+		}
+		if g.Summary == "" {
+			t.Errorf("gate %q lists no summary", g.Name)
+		}
+	}
+	if !slices.Equal(names, ContractGateNames()) {
+		t.Errorf("gates = %v, want %v", names, ContractGateNames())
 	}
 }
 
@@ -131,10 +149,30 @@ func TestRunList_GatesMatchGateListAndCommands(t *testing.T) {
 	if !slices.Contains(got.Commands, "verify") {
 		t.Errorf("commands = %v, want verify (the one command a flow requires)", got.Commands)
 	}
+	// The commands are what ./make BUILDS, every one of them — the workspace
+	// reads this list to refuse installing over a project tool and to decide
+	// which recorded names it may delete, so a name missing here is a tool it
+	// will silently overwrite or remove.
 	for _, c := range got.Commands {
-		if !slices.Contains(CommandNames, c) {
-			t.Errorf("commands include %q, which is not in the closed set %v", c, CommandNames)
+		if _, err := os.Stat(filepath.Join("../../..", "tools", "build", "cmd", c)); err != nil {
+			t.Errorf("commands include %q, which ./make does not build: %v", c, err)
 		}
+	}
+	entries, err := os.ReadDir(filepath.Join("../../..", "tools", "build", "cmd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == metaBuilderName {
+			continue
+		}
+		if !slices.Contains(got.Commands, e.Name()) {
+			t.Errorf("./make builds %q and --list does not report it — the workspace would overwrite or delete bin/%s", e.Name(), e.Name())
+		}
+	}
+	// One namespace: `bin/run <name>` dispatches commands and gates alike.
+	if both := CommandGateCollisions("../../.."); len(both) > 0 {
+		t.Errorf("%v are both a command and a gate, so `bin/run %s` means one of two things", both, both[0])
 	}
 }
 
@@ -282,7 +320,20 @@ var integrationMetricsUnjudged = map[string]string{
 	"host_test_count":     "a suite's size is not a quality of the change. It ratchets `up` where a target carries a figure, but requiring that everywhere would fail a target for deleting a test — which is sometimes the right change.",
 	"promise_check_units": "how many units the checker was given is not a quality of the change either — merging two files into a module lowers it without checking any less. It ratchets `up` where a target carries a figure; what guards against a sweep that measured nothing is the gate's refusal of a run that printed no summary.",
 	"cas_network_bytes":   "what a run pulls over the wire into the store SHOULD be enforced at exactly zero, and is not yet: a real sweep fetches ~70 MB because every private PROMISE_HOME the Go suite builds starts with an empty CAS (T2150). Tracked until that is fixed; promoting it is then a value and a direction in each target block.",
-	"cas_home_count":      "one home per run is the end state and the tree is at 29 (T2150), so an enforced term today would fail every run rather than the changes that add one. Tracked until then. Note when promoting: bin/verify does not pass -count=1, so its Go phase reports anywhere from 1 to 29 depending on the test cache — which is why the store metrics stay out of its gate values, and must, or the commit gate ratchets the baseline down to a cached run and fails the next full one.",
+	// The scheduled gates' metrics. They are judged — every one of them carries
+	// a ratcheted baseline on the targets that measure it — but they are not
+	// INTEGRATION metrics, and integrationMetrics demands a term on every
+	// target this project ships. Requiring that here would fail linux-arm64 for
+	// not running a wasm suite, a stress run or coverage, which is a fact about
+	// what that platform is given to do and not a regression in any change.
+	"stress_flaky_count": "tested:stress, not integration: a flaky count needs many runs to mean anything, so it is measured on a schedule and ratcheted per target rather than demanded of every one.",
+	"stress_iterations":  "tested:stress reports how many chances a test had, because a flaky count without it says nothing. It is the size of the run, not a quality of the change.",
+	"wasm_size_total":    "the size:wasm gate, not integration: it is ratcheted per target where the WASM canaries are built, and linux-arm64 does not build them.",
+	// size:wasm reports one metric per canary under tests/size — today
+	// wasm_size_minimal, _strings, _collections, _concurrency and _full. They
+	// are built from the file names rather than spelled, so the scanner above
+	// cannot see them; they are ratcheted per target exactly as the total is.
+	"cas_home_count": "one home per run is the end state and the tree is at 29 (T2150), so an enforced term today would fail every run rather than the changes that add one. Tracked until then. Note when promoting: bin/verify does not pass -count=1, so its Go phase reports anywhere from 1 to 29 depending on the test cache — which is why the store metrics stay out of its gate values, and must, or the commit gate ratchets the baseline down to a cached run and fails the next full one.",
 }
 
 // metricNameLiteral matches the name a gate gives a metric at the only place

@@ -12,11 +12,12 @@ package common
 // verify-before-commit rule the migration retires (T2003): the gate compares
 // content against content, so a tree blessed last week and untouched is still
 // blessed, and a tree edited five seconds after verify is not. promise's own
-// gate stopped consulting the clock at T1962 — bin/commitgate compares a
-// WorktreeHash — so this record is a *second* content identity of nearly the
+// gate stopped consulting the clock at T1962 — it compares a WorktreeHash —
+// so this record is a *second* content identity of nearly the
 // same tree, in the format the external reading end fixes. The two are not
 // interchangeable, and the difference bites: WorktreeHash excludes
-// tools/gates/baselines.json because a passing commit gate rewrites it, and a
+// tools/gates/baselines.json because a passing commit gate rewrites it (the
+// workspace's, since this project's own was deleted), and a
 // plain git tree id cannot (T2082).
 //
 // It is also what keeps the formatting guarantee (docs/gate-system.md

@@ -175,6 +175,30 @@ func RunVerify(root string, args []string) error {
 		return errInterrupted
 	}
 
+	// 4b. The structural sweeps (T2160). Both are full-index scans of tracked
+	// sources rather than of a staged set, which is what lets them run here at
+	// all — verify has no staged set to look at.
+	//
+	// They live here because this is the pre-commit path this project actually
+	// uses. The git hook execs the workspace's bin/precommit-guard, which
+	// carries neither, so between the hook losing the project's own tool and
+	// this call the two rules held by review alone — and a rule with no
+	// enforcement is a rule that holds until the next person does not know it,
+	// which is the exact sentence that motivated the first of them.
+	//
+	// Cheap enough to be unconditional: both are regex sweeps over tracked
+	// text, milliseconds against a suite measured in minutes.
+	Progress().Println("Checking structure...")
+	if err := CheckHostToolLookups(root); err != nil {
+		return fmt.Errorf("check: %w", err)
+	}
+	if err := CheckTestTempPaths(root); err != nil {
+		return fmt.Errorf("check: %w", err)
+	}
+	if Interrupted() {
+		return errInterrupted
+	}
+
 	// 5. (Cache clearing now happens up front via Clean.)
 
 	// What the suites cost the content-addressed store, measured from here

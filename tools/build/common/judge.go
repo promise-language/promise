@@ -100,8 +100,8 @@ type term struct {
 // back. Refusing the verdict instead would make every gate that measures less
 // than everything — and `integration` is one, by design — permanently
 // unpassable, which is indistinguishable at the call site from a broken gate.
-// This judge never moves a baseline at all; the commit gate does that, on a
-// complete passing run.
+// This judge never moves a baseline at all, and nothing else in this
+// repository does either: advancing one is the workspace's job.
 func judge(env Envelope, caps map[string]Threshold, baselines map[string]Baseline) (acceptable bool, terms map[string]term, detail string) {
 	terms = map[string]term{}
 	var failed []string
@@ -341,15 +341,28 @@ func sortedMapKeys[V any](m map[string]V) []string {
 	return out
 }
 
-// CommandNames are the commands a flow may ask this project for. The set is
-// the SDK's and closed; what this project HAS is derived from the tools it
-// builds, never written down twice — a second copy claims `verify` on a
-// checkout that never built it.
-var CommandNames = []string{"verify", "setup", "cleanup"}
+// metaBuilderName is the one cmd/ directory that is not a command: ./make
+// builds the others and is not itself installed into bin/, so it can collide
+// with nothing and belongs in no listing.
+const metaBuilderName = "make"
 
-// SupportedCommands lists the commands this project provides: one directory per
-// command under tools/build/cmd, filtered to the closed set. A directory
-// holding anything else is not a command as far as this contract is concerned.
+// SupportedCommands lists the commands this project BUILDS: one directory per
+// command under tools/build/cmd, minus the meta-builder. Every one of them,
+// not a filtered subset.
+//
+// The filter this used to apply — flow's closed {setup, verify, cleanup} — was
+// answering a different question than the one the listing is asked. Flow's set
+// is closed because flow decides WHEN each runs and has no place to run a
+// fourth. The workspace asks this list something else entirely: which names in
+// bin/ belong to the project's own builder. It uses the answer to refuse a
+// release that would install over one of them, and to decide which recorded
+// names it may delete — so a project that under-reports gets its own tools
+// silently overwritten by `workspace setup`, or removed by `workspace update`,
+// with the one-name-one-builder refusal that exists to prevent exactly that
+// never firing (workspace tool-contract.md §5).
+//
+// It reports what the project builds, not what is built: bin/ is empty in a
+// fresh clone, and the claim has to exist before either builder has run.
 func SupportedCommands(root string) []string {
 	entries, err := os.ReadDir(filepath.Join(root, "tools", "build", "cmd"))
 	if err != nil {
@@ -359,12 +372,29 @@ func SupportedCommands(root string) []string {
 	}
 	var out []string
 	for _, e := range entries {
-		if e.IsDir() && slices.Contains(CommandNames, e.Name()) {
+		if e.IsDir() && e.Name() != metaBuilderName {
 			out = append(out, e.Name())
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// CommandGateCollisions returns the names that are both a command this project
+// builds and a gate it answers, sorted as SupportedCommands sorts.
+//
+// `bin/run <name>` dispatches both kinds, so such a name would mean one of two
+// things. It is an error rather than a precedence rule: precedence would make
+// the shadowed name silently unreachable while both still appeared in --list.
+func CommandGateCollisions(root string) []string {
+	gates := ContractGateNames()
+	var both []string
+	for _, c := range SupportedCommands(root) {
+		if slices.Contains(gates, c) {
+			both = append(both, c)
+		}
+	}
+	return both
 }
 
 // writeRunList prints what this project provides: the gates — the same list
@@ -411,6 +441,13 @@ func RunRun(root string, args []string) error {
 		}
 		return writeRunList(root, os.Stdout, jsonOut)
 	}
+	// A command is dispatched before a gate is looked for, because the two
+	// share one namespace and a name cannot be both (CommandGateCollisions).
+	// `run <name>` dispatching only gates would list sixteen commands it
+	// refuses to run, which is a listing that describes a different tool.
+	if name := firstPositional(args); name != "" && slices.Contains(SupportedCommands(root), name) {
+		return runProjectCommand(root, name, args)
+	}
 	name, verdict, err := parseRunArgs(args)
 	if err != nil {
 		return fmt.Errorf("%w\n%s", err, runUsage(root))
@@ -419,4 +456,43 @@ func RunRun(root string, args []string) error {
 		return JudgeStdin(root, name, os.Stdin, os.Stdout)
 	}
 	return runOneGate(root, name, os.Stdout)
+}
+
+// firstPositional returns the first argument that is not a flag, or "". None of
+// this tool's own flags takes a value, so the first word not starting with "-"
+// is the name: there is no `-flag value` pair for this to mistake a value for.
+func firstPositional(args []string) string {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return a
+		}
+	}
+	return ""
+}
+
+// runProjectCommand execs bin/<name>, passing through every argument but the
+// name, and makes the child's exit status this process's.
+//
+// It measures and judges NOTHING: no envelope is read and no terms are loaded.
+// A `run` that interpreted a command's output would be deciding something no
+// gate measured, which is the whole separation the gate/judge split exists for.
+func runProjectCommand(root, name string, args []string) error {
+	rest := make([]string, 0, len(args))
+	dropped := false
+	for _, a := range args {
+		if !dropped && a == name {
+			dropped = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	bin := filepath.Join(root, "bin", name+ExeSuffix())
+	if !Exists(bin) {
+		return fmt.Errorf("this project builds %s, but bin/%s is not there — run ./make",
+			name, name+ExeSuffix())
+	}
+	cmd := exec.Command(bin, rest...)
+	cmd.Dir = root
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
 }

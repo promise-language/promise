@@ -51,7 +51,21 @@ func RunGate(root string, args []string) error {
 	}
 	// Flow-contract gates take the whole argv (`fit --envelope`), because the
 	// runner appends --envelope after the name and nothing else may be accepted.
-	if IsContractGate(args[0]) {
+	//
+	// One name is BOTH a contract gate and one of the older subcommands below —
+	// `latest-invariant` — because the measurement existed as a subcommand
+	// before it had a name an orchestrator could discover, and unlike every
+	// other such pair it has no instance half to tell the two spellings apart.
+	// For that one name the contract path is taken when the caller asked for an
+	// envelope, and the subcommand keeps its own argv otherwise: a bare
+	// `bin/gate latest-invariant` is what a scheduled gate runs today, and
+	// routing it to a contract gate that refuses a bare invocation would take
+	// that schedule red without measuring anything.
+	//
+	// This is a migration seam and not a precedent: it exists for exactly the
+	// names in legacySubcommands, and it closes when those schedules move to
+	// `bin/gate <name> --envelope` and the subcommand is deleted.
+	if IsContractGate(args[0]) && (hasEnvelopeFlag(args) || !legacySubcommands[args[0]]) {
 		return runContractGate(root, args, os.Stdout)
 	}
 	switch args[0] {
@@ -130,7 +144,8 @@ func runGateTest(root string, args []string) error {
 		return fmt.Errorf("build gate output: %w", err)
 	}
 
-	// Write gate-values.json sidecar so bin/commitgate can read the metrics.
+	// Write the gate-values.json sidecar for whatever ingests it (the workspace
+	// advances baselines from these; nothing in this repository does).
 	gv := &GateValues{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Platform:  hostTarget,
@@ -209,7 +224,8 @@ func runGateWasmTests(root string, args []string) error {
 		return fmt.Errorf("build gate output: %w", err)
 	}
 
-	// Write gate-values.json sidecar so bin/commitgate can read the metrics.
+	// Write the gate-values.json sidecar for whatever ingests it (the workspace
+	// advances baselines from these; nothing in this repository does).
 	// Platform is the host (where the gate ran); the metrics carry the wasm_
 	// prefix and the envelope's target records the test target.
 	gv := &GateValues{
@@ -287,7 +303,8 @@ func runGateWasmWebTests(root string, args []string) error {
 		return fmt.Errorf("build gate output: %w", err)
 	}
 
-	// Write gate-values.json sidecar so bin/commitgate can read the metrics.
+	// Write the gate-values.json sidecar for whatever ingests it (the workspace
+	// advances baselines from these; nothing in this repository does).
 	// Platform is the host (where the gate ran); the metrics carry the
 	// wasm_web_ prefix and the envelope's target records the test target.
 	gv := &GateValues{
@@ -733,4 +750,22 @@ func ParseCoverageTotal(output string) float64 {
 		return pct
 	}
 	return 0
+}
+
+// legacySubcommands are the names that are both a contract gate and one of the
+// older subcommands. A name here answers to both spellings during the
+// migration; every other contract gate answers only to the contract one.
+var legacySubcommands = map[string]bool{
+	"latest-invariant": true,
+}
+
+// hasEnvelopeFlag reports whether the caller asked for a measurement. Both
+// spellings, because every other flag in this tool accepts both.
+func hasEnvelopeFlag(args []string) bool {
+	for _, a := range args[1:] {
+		if a == "--envelope" || a == "-envelope" {
+			return true
+		}
+	}
+	return false
 }

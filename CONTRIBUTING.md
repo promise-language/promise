@@ -114,8 +114,9 @@ the shared `~/.promise` cache instead of the per-clone `.promise-home/`.
 
 ## 7. Gates & git hooks
 
-`./make` points git at `.githooks/`, whose `pre-commit` hook delegates to
-`bin/precommit`. The project enforces quality with a layered **gate system**:
+`./make` points git at `.githooks/`, whose `pre-commit` hook execs
+`bin/precommit-guard` — the commit gate the workspace installs — and refuses the
+commit outright if it is not there. The project enforces quality with a layered **gate system**:
 
 - **Edit gates** (sub-second, on every file edit) — e.g. block `allow_leaks:
   true` from entering `.pr` files.

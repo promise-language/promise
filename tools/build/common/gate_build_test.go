@@ -58,6 +58,18 @@ func stubGateBuild(t *testing.T, fake *fakeBuild) {
 	t.Cleanup(func() { runGateBuild, gateBuild = savedFunc, savedState })
 }
 
+// stubMachineGates stands in for the two measurements whose subject is a
+// published release rather than this tree. Unstubbed they reach the network and
+// one of them installs a toolchain — inside `go test ./...`, which is the very
+// thing tested:go measures.
+func stubMachineGates(t *testing.T) {
+	t.Helper()
+	savedPhases, savedLatest := installPhases, latestIsEpoch
+	installPhases = func(root, work, variant, channel string, system bool) error { return nil }
+	latestIsEpoch = func() error { return nil }
+	t.Cleanup(func() { installPhases, latestIsEpoch = savedPhases, savedLatest })
+}
+
 // buildFails is the stub every gate-shape test below uses. A FAILING build
 // makes the whole table affordable: each measurement that reads build
 // artifacts short-circuits to a reason without spawning a child, so a pin
@@ -112,11 +124,16 @@ func TestContractGate_EveryTreeGateBuilds(t *testing.T) {
 			fake := buildFails()
 			stubGateBuild(t, fake)
 
+			stubMachineGates(t)
+
 			if _, err := MeasureContractGate(t.TempDir(), name); err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
+			// Derived from the registry, not spelled: measuresMachine IS the
+			// declaration that a gate's subject is not the tree, so a gate
+			// added later is covered here without anyone remembering to.
 			want := 1
-			if name == "fit" {
+			if contractGates[name].measuresMachine {
 				want = 0
 			}
 			if gateBuild.runs != want {

@@ -64,6 +64,13 @@ func Size(name string, n int64, unit string) Metric {
 	return Metric{Name: name, Type: MetricInt, Int: n, Unit: unit}
 }
 
+// Percent is a proportion, out of a hundred. Held as a float because it is one:
+// coverage that moved from 71.4 to 71.9 is a real change, and rounding it to a
+// whole number would report the two runs as identical.
+func Percent(name string, v float64) Metric {
+	return Metric{Name: name, Type: MetricFloat, Float: v, Unit: "%"}
+}
+
 // Number is the value as a float, for comparison against a threshold. Widening
 // is safe only in the judge, which compares and never stores.
 func (m Metric) Number() float64 {
@@ -228,6 +235,55 @@ var contractGates = map[string]contractGateDef{
 	"fit": {
 		summary:         "free space where this project's work writes",
 		measure:         measureFit,
+		measuresMachine: true,
+	},
+
+	// The measurements too slow for the landing path, each separately
+	// addressable so a schedule — or a step fixing one of them — can ask for
+	// exactly one. Deliberately NOT parts of integration: the wasm suite alone
+	// runs longer than every host gate combined.
+	"tested:wasm": {
+		summary: "failing tests in the wasm32-wasi suite",
+		measure: measureTestedWasm,
+	},
+	"tested:wasm-web": {
+		summary: "failing tests in the wasm32-web suite, under Node",
+		measure: measureTestedWasmWeb,
+	},
+	"tested:stress": {
+		summary: "tests that do not agree with themselves across repeated runs",
+		measure: measureTestedStress,
+	},
+	"covered": {
+		summary: "how much of each language's source the suites reach",
+		measure: measureCovered,
+	},
+
+	// Outside flow's closed vocabulary, and listed anyway: the SDK skips a name
+	// it does not recognise, while the tracker addresses these by name. A gate
+	// the flow cannot ask for is still a gate this project has, and a listing
+	// that omitted it would describe a machine that does not exist.
+	//
+	// The instance half is carried even though the concept is ours, because
+	// each of these measures ONE of several things it could: the canaries are
+	// built for wasm32-wasi and nothing stops a later `size:native` or
+	// `size:wasm-web`, and the install is of the thin variant beside a `full`
+	// the subcommand already accepts. A bare `size` would claim to measure what
+	// this project produces while measuring one target's canaries — and the
+	// name would have to change the day the second instance arrives, which is
+	// the rename an instance suffix exists to avoid.
+	"size:wasm": {
+		summary: "what the wasm32-wasi canaries compile to, per canary",
+		measure: measureSizeWasm,
+	},
+	"install:thin": {
+		summary:         "installing a published thin release, end to end",
+		measure:         measureInstallThin,
+		measuresMachine: true,
+	},
+	"latest-invariant": {
+		summary:         "whether `releases/latest` resolves to an epoch-* release",
+		measure:         measureLatestInvariant,
 		measuresMachine: true,
 	},
 }
@@ -444,6 +500,15 @@ func flagName(raw string) (string, bool) {
 // silently — so asking the entry point is the only way to learn it. Listing is
 // the one mode besides a measurement that writes to stdout, and neither form
 // can be mistaken for an envelope by something parsing one.
+//
+// The JSON form is an ARRAY OF OBJECTS, one per gate, because that is the shape
+// flow's discovery reads (its gates-and-commands.md §"Which gates a project
+// has"). A bare array of names parses as JSON and still answers nothing: the
+// SDK unmarshals into a struct with a `name` field, gets zero gates out of a
+// list of strings, and reads the repository as a machine with no gates at all —
+// a silent discovery failure rather than a loud parse error. The summary rides
+// along for whoever reads the listing; the name is what a caller addresses, and
+// a field added here later is ignored by the SDK rather than refused.
 func writeGateList(w io.Writer, jsonOut bool) error {
 	names := ContractGateNames()
 	if !jsonOut {
@@ -454,9 +519,17 @@ func writeGateList(w io.Writer, jsonOut bool) error {
 		}
 		return nil
 	}
+	type listedGate struct {
+		Name    string `json:"name"`
+		Summary string `json:"summary"`
+	}
+	gates := make([]listedGate, 0, len(names))
+	for _, n := range names {
+		gates = append(gates, listedGate{Name: n, Summary: ContractGateSummary(n)})
+	}
 	return writeJSONLine(w, struct {
-		Gates []string `json:"gates"`
-	}{Gates: names})
+		Gates []listedGate `json:"gates"`
+	}{Gates: gates})
 }
 
 // HostTarget names the platform a run's measurements speak for, in the same

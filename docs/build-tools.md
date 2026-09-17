@@ -25,10 +25,9 @@ The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries i
 | `bin/check` | Run `go vet` over every Go module, reporting the findings this project's authors can act on — diagnostics in the generated parser are excluded. The same implementation the `checked:go` gate measures; `go vet` has no general `-fix`, so this is the check-only form of the pair. |
 | `bin/coverage` | Test coverage analysis for Go packages and Promise tests. |
 | `bin/stress` | Stress testing for flaky test detection. |
-| `bin/precommit` | The `pre-commit` git hook body: identity, staged-file, baseline-ratchet, formatting, and documentation checks. |
 | `bin/setup` | One-time dev setup (git hooks). |
 | `bin/prereqs` | Install build prerequisites (LLVM, Go, Java, wasmtime). |
-| `bin/run` | Run one contract gate and judge it against `tools/gates/thresholds.json`. `bin/run <gate>` measures and judges for a person; `bin/run <gate> --verdict` judges an envelope on stdin (what the SDK calls); `bin/run --list [--json]` prints the gates and commands this project provides. See [gate-system.md](gate-system.md#the-contract-gates-and-the-judge-binrun). |
+| `bin/run` | Run one contract gate and judge it against `tools/gates/thresholds.json`. `bin/run <gate>` measures and judges for a person; `bin/run <gate> --verdict` judges an envelope on stdin (what the SDK calls); `bin/run --list [--json]` prints the gates and every command `./make` builds — the workspace reads that list to refuse installing over a project tool and to decide which names it may remove, so it reports the whole build set rather than a subset. `bin/run <command> [args…]` dispatches `bin/<command>`, since the two kinds share one namespace. See [gate-system.md](gate-system.md#the-contract-gates-and-the-judge-binrun). |
 
 ## Architecture
 
@@ -407,23 +406,37 @@ unaffected: JSONL on stdout, human progress on stderr, exactly as before.
 
 Concurrent verify runs from different worktrees are serialized via a file lock (`~/.promise/verify.lock`), preventing resource contention.
 
-## Pre-Commit Hook (`bin/precommit`)
+## Pre-Commit Hook (`bin/precommit-guard`)
 
-`.githooks/pre-commit` runs `bin/precommit`, which is `common.RunPreCommit`. Every
-check here is cheap enough to run on each commit — the expensive suites live in
-`bin/verify` and the gates. In order:
+`.githooks/pre-commit` is a trampoline: it execs `bin/precommit-guard` and, if
+that tool is not installed, **refuses the commit**. The commit gate is delivered
+by the workspace rather than built here — `workspace setup` installs it — and
+failing closed is the point, because a hook that silently did nothing when the
+gate was missing would let a commit past every check on this page.
 
-1. **Commit identity** — author and committer emails must be `@users.noreply.github.com`, so a personal address never reaches public history. Read via `git var`, so it matches what the commit would actually record (honoring `--author`, the `GIT_*_EMAIL` env vars, and `user.email` alike).
-2. **Documentation** (`common.CheckDocs`, T1675) — three mechanical checks. All look at the whole tree rather than at the staged set, and all run before the staged-file scan so an `--allow-empty` commit cannot slip past them:
-   - **Dangling links.** Every relative Markdown link to a `.md` file, across all git-tracked `.md` files, must resolve to a file that exists. The file set comes from `git ls-files`, which is what keeps build output and the generated-but-untracked `compiler/cmd/promise/resources/` tree out of scope with no ignore list to maintain. Only link *targets* are validated — anchors are stripped, never checked, which is what holds the false-positive rate at zero.
-   - **Index coverage.** Every tracked `docs/*.md` must be linked from [index.md](index.md) — a doc the index never names is effectively unpublished. Link targets are resolved relative to `docs/`, so `../CONTRIBUTING.md` cannot stand in for `docs/CONTRIBUTING.md`. Scope is the top level of `docs/` only: `docs/archive/` is superseded material that is intentionally unindexed.
-   - **Catalog coverage.** Every directory under `modules/` needs a `[modules.<name>]` entry in `catalog.toml` (entries with a `url` key are remote and exempt from needing a directory), and every catalog module that actually ships source — a non-`_test.pr` file with at least one non-comment line — must be named as `modules/<name>/` in both `CLAUDE.md` and `docs/standard-library.md`.
+The project's own `bin/precommit` used to be that hook body. It was deleted once
+the trampoline stopped naming it; what it checked now lives in two places:
 
-   These verify link targets, index reachability, and module-name *presence* only, never prose accuracy. `README.md` is deliberately out of scope for catalog coverage: its module list lives in an ASCII box-drawing tree using bare directory names, and a matcher robust enough to read that would produce false positives. README stays human-reviewed.
-3. **Host-tool lookups** (`common.CheckHostToolLookups`, T2116) — rejects any tracked Go source that resolves a program through the host's `PATH` (`Which`, `exec.LookPath`, or `exec.Command` naming a toolchain binary bare) without a `// path-ok: <reason>` marker on that line. Full-tree sweep like the documentation checks, and tests are in scope with product code: the regression it exists for was a *test* that probed `PATH` for `llvm-dlltool` after the resolver had stopped honouring it. The permitted reasons are the ones §4 names — host-state reporters (`bin/prereqs`, `promise doctor`), the documented test runtimes, and an explicitly requested non-default target. See [code-style.md](code-style.md) for the marker convention.
-4. **Staged files** — rejects compiled binaries (`bin/promise`, …), stray `.log` files, and non-ASCII filenames. A commit with nothing staged stops here; the remaining checks have nothing to look at.
-5. **Baseline ratchet** — when `tools/gates/baselines.json` is staged, compares it against `HEAD` and rejects any metric that moved the wrong way.
-6. **Formatting** — rejects the commit if `bin/format` would change anything. Go is checked in-process via `go/format`; Promise by shelling out to `bin/promise format -check`.
+- **The workspace's shared commit gate**, for everything every project wants:
+  commit identity (author and committer emails must be `@users.noreply.github.com`,
+  so a personal address never reaches public history), the staged-file scan
+  (compiled binaries, stray `.log` files, non-ASCII filenames), the
+  `tools/gates/baselines.json` ratchet, and formatting.
+- **This project's seam in the workspace** (`projects/promise/precommit-guard/`),
+  for the checks only Promise wants: `catalog-coverage` — every directory under
+  `modules/` has a `[modules.<name>]` entry in `catalog.toml`, and every catalog
+  module shipping source is named in `CLAUDE.md` and
+  [standard-library.md](standard-library.md) — and `test-sleeps`, the
+  `sleep()`-as-synchronization guard ([code-style.md](code-style.md)).
+
+Documentation coverage — every tracked `docs/*.md` linked from
+[index.md](index.md) — is carried by the shared gate.
+
+**Two sweeps are currently carried by neither** (T2160): the host-tool-lookup
+check (`// path-ok:` markers, T2108/T2116) and the test-temp-path check (T1963).
+Their implementations and tests are still in `tools/build/common/`; what they
+lost is a caller. Until that item is closed, those two rules hold by review
+rather than by a gate.
 
 ## Staleness Check
 
@@ -435,7 +448,7 @@ tools source has changed — rebuild before continuing: /abs/path/to/repo/make (
 
 and exits with code 1. This ensures you never accidentally use a stale tool after editing the build system.
 
-The `bin/guard` PreToolUse hook applies the same check per tool call. While the guard is stale it blocks Bash but lets Edit/Write through — its gates are read from disk at runtime, so a stale binary still enforces them correctly (T0276) — and it lifts the stale block for any command chain that invokes the repository's own make script, including wrapped forms such as `./make && go test ./...`, `./make 2>&1 | tail`, and `cd <repo> && ./make`. Only the stale block is lifted: every sub-command in such a chain still goes through the ordinary per-command checks, so a destructive second half is refused exactly as it would be on its own.
+The `bin/tool-guard` PreToolUse hook — the workspace's, wired up in `.claude/settings.json` — applies the same check per tool call. While the tools are stale the guard blocks Bash but lets Edit/Write through — its gates are read from disk at runtime, so a stale binary still enforces them correctly (T0276) — and it lifts the stale block for any command chain that invokes the repository's own make script, including wrapped forms such as `./make && go test ./...`, `./make 2>&1 | tail`, and `cd <repo> && ./make`. Only the stale block is lifted: every sub-command in such a chain still goes through the ordinary per-command checks, so a destructive second half is refused exactly as it would be on its own.
 
 The rule both messages follow: **the recovery command a staleness message names must be one the same binary will accept from the caller's cwd.** That is why each leads with the absolute path — it is unambiguous from any directory, whereas a bare `./make` is valid only at the repo root and is offered second, labelled with where it applies. Both spellings come from one helper (`common.MakeCommands`), so what a message suggests cannot drift from what the guard accepts. Which repository the verdict is about is the build-time stamp, never the working directory — see [Which Repository a Tool Acts On](#which-repository-a-tool-acts-on).
 

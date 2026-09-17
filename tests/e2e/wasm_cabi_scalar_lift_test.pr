@@ -1,0 +1,166 @@
+// T2129: the conversions `promise bind wit -canonical-abi` emits at the WIT
+// boundary, pinned as behaviour rather than as generated text.
+//
+// A canonical binding declares its extern in the canonical flat representation
+// (every integer narrower than 64 bits is a core i32, 64-bit is i64, bool and
+// char are i32) and its public wrapper in the WIT type, so each wrapper carries
+// an `as` conversion in one or both directions. bindgen_test.go asserts on the
+// emitted source and the buildrun test compiles it, but neither can run it: the
+// imports have no host. So the generated text is checked there, and the
+// semantics it relies on are checked here.
+//
+// Each test below names the generated line it stands for. If one of these ever
+// changes meaning, the bindings keep compiling and start returning wrong values
+// to every WASI call — which is the failure this file exists to make loud.
+//
+// The general `as` machinery is covered by scalar_casts_test.pr; this file is
+// only the boundary contract.
+// --- Lowering: wrapper param -> flat extern arg ---------------------------
+// Generated: `_f(x as i32)` for a WIT u8/u16/u32 param.
+//
+// The canonical ABI passes an unsigned integer zero-extended. A sign-extending
+// widen would send 200u8 across as -56, and every byte-valued WASI argument
+// (a file descriptor flag, a status code) would arrive corrupt.
+cabi_lower_unsigned_zero_extends() `test {
+  u8 byte_high_bit = 200u8;
+  assert((byte_high_bit as i32) == 200i32, "u8 200 lowers to i32 200, not -56");
+
+  u8 byte_max = 255u8;
+  assert((byte_max as i32) == 255i32, "u8 max lowers zero-extended");
+
+  u16 short_high_bit = 50000u16;
+  assert((short_high_bit as i32) == 50000i32, "u16 50000 lowers zero-extended");
+}
+
+// Generated: `_f(x as i32)` for a WIT s8/s16 param — signed widens sign-extended,
+// so a negative stays negative.
+cabi_lower_signed_sign_extends() `test {
+  i8 negative_byte = -56i8;
+  assert((negative_byte as i32) == -56i32, "s8 -56 lowers sign-extended");
+
+  i16 negative_short = -1000i16;
+  assert((negative_short as i32) == -1000i32, "s16 -1000 lowers sign-extended");
+}
+
+// Generated: `_f(flag as i32)` for a WIT bool param. The canonical ABI wants
+// exactly 0 or 1 — a sign-extended i1 would send true across as -1.
+cabi_lower_bool_is_zero_or_one() `test {
+  assert((true as i32) == 1i32, "bool true lowers to 1");
+  assert((false as i32) == 0i32, "bool false lowers to 0");
+}
+
+// Generated: `_f(ch as i32)` for a WIT char param — the code point, unchanged.
+cabi_lower_char_is_code_point() `test {
+  assert(('A' as i32) == 65i32, "char A lowers to its code point");
+  assert(('\0' as i32) == 0i32, "null char lowers to 0");
+}
+
+// Generated: `_f(big as i64)` for a WIT u64 param. i64 and u64 are the same 64
+// bits, so the top half of the range has to survive the trip unchanged.
+cabi_lower_u64_preserves_bit_pattern() `test {
+  u64 above_signed_max = 18446744073709551615u64;
+  assert(((above_signed_max as i64) as u64) == above_signed_max, "u64 max round-trips through i64");
+
+  u64 mid = 9223372036854775809u64;
+  assert(((mid as i64) as u64) == mid, "u64 just above i64 max round-trips");
+}
+
+// --- Lifting: flat extern result -> wrapper result ------------------------
+// Generated: `return _f() as u32;` for a WIT u32 result. This is the case the
+// item was filed for, and the one every WASI interface hits: u32 is the default
+// integer type across filesystem, clocks, io and sockets.
+
+cabi_lift_u32_preserves_bit_pattern() `test {
+  i32 above_signed_max = -294967296i32; // 4000000000 as a core i32
+  assert((above_signed_max as u32) == 4000000000u32, "flat i32 lifts to the u32 the host sent");
+
+  i32 all_ones = -1i32;
+  assert((all_ones as u32) == 4294967295u32, "flat i32 -1 lifts to u32 max");
+}
+
+// Generated: `return _f() as u8;` — the host's value is in range, so narrowing
+// to the low byte is the identity on every value the ABI permits.
+cabi_lift_narrow_unsigned() `test {
+  i32 flat = 200i32;
+  assert((flat as u8) == 200u8, "flat i32 200 lifts to u8 200");
+
+  i32 flat_short = 50000i32;
+  assert((flat_short as u16) == 50000u16, "flat i32 50000 lifts to u16 50000");
+}
+
+// Generated: `return _f() as bool;` for a bool returned FLAT BY VALUE. The whole
+// core i32 is the value the host lowered, so testing all of it is right — and
+// deliberately tolerant of a host that sends something other than 1 for true.
+cabi_lift_bool_by_value_tests_whole_word() `test {
+  assert((0i32 as bool) == false, "flat 0 lifts to false");
+  assert((1i32 as bool) == true, "flat 1 lifts to true");
+  assert((2i32 as bool) == true, "a non-conforming flat true still lifts to true");
+}
+
+// Generated: `return _cabi_load_i32(_cabi_retarea_ptr() + 4) as u8 as bool;`
+// for a bool read out of the RETURN AREA.
+//
+// This is the one place the by-value rule above would be wrong. In memory the
+// canonical ABI stores a bool in one byte, but the only load helper is i32-wide,
+// so the three padding bytes that follow ride along in the upper bits — and the
+// ABI does not require a host to zero them. Testing the whole word would read a
+// stored `false` as `true`; narrowing to the stored byte first is what makes the
+// lift honest.
+cabi_lift_bool_from_memory_narrows_to_stored_byte() `test {
+  i32 stored_false_with_padding = 0x0100i32;
+  assert((stored_false_with_padding as bool) == true, "the whole word is non-zero (why the naive lift is wrong)");
+  assert((stored_false_with_padding as u8 as bool) == false, "narrowing to the stored byte lifts false");
+
+  i32 stored_true_with_padding = 0x0101i32;
+  assert((stored_true_with_padding as u8 as bool) == true, "a stored true still lifts true");
+
+  i32 no_padding = 0x0000i32;
+  assert((no_padding as u8 as bool) == false, "zeroed padding lifts false");
+}
+
+// Generated: `return _cabi_load_i64(...) as u64;` for a u64 read out of the
+// return area, and `as i8`/`as u16` for the narrower widths — narrowing the
+// i32-wide load discards the same padding the bool case has to reckon with.
+cabi_lift_from_memory_narrows_each_width() `test {
+  i32 byte_with_padding = 0xFF00C8i32; // payload 0xC8 = 200, padding above it
+  assert((byte_with_padding as u8) == 200u8, "u8 payload survives its padding");
+
+  i32 signed_byte_with_padding = 0xFF00C8i32;
+  assert((signed_byte_with_padding as i8) == -56i8, "s8 payload reads as signed");
+
+  i32 short_with_padding = 0x00FFC350i32; // payload 0xC350 = 50000
+  assert((short_with_padding as u16) == 50000u16, "u16 payload survives its padding");
+
+  i64 big = -1i64;
+  assert((big as u64) == 18446744073709551615u64, "u64 payload lifts from the i64 load");
+}
+
+// Generated: `return _f() as char;` — char and its flat i32 are the same width,
+// so the code point passes through in both directions.
+cabi_char_round_trips_through_flat() `test {
+  char letter = 'Z';
+  assert(((letter as i32) as char) == letter, "char round-trips through its flat i32");
+
+  i32 code_point = 0x1F600i32;
+  assert(((code_point as char) as i32) == code_point, "a non-ASCII code point round-trips");
+}
+
+// --- No conversion is emitted where the types already coincide ------------
+// s32/s64/f32/f64 generate `return _f();` with no cast at all, because the WIT
+// type and the flat type are the same Promise type. Nothing to assert about a
+// conversion that is not emitted — but the identity has to hold, or the
+// generator would be wrong to omit it.
+
+cabi_coinciding_types_need_no_conversion() `test {
+  i32 signed_word = -2147483648i32;
+  assert(signed_word == (signed_word as i32), "s32 is its own flat type");
+
+  i64 signed_long = -9223372036854775808i64;
+  assert(signed_long == (signed_long as i64), "s64 is its own flat type");
+
+  f32 single = 3.5f32;
+  assert(single == (single as f32), "f32 is its own flat type");
+
+  f64 double_precision = 3.5;
+  assert(double_precision == (double_precision as f64), "f64 is its own flat type");
+}

@@ -444,7 +444,7 @@ func (g *generator) emitStaticWrapper(m Func, resourceName, importModule string)
 	} else if retType != "" {
 		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
 		g.indent++
-		g.line("return %s(%s)%s;", externName, externParams, raise)
+		g.line("return %s;", g.liftScalarCall(fmt.Sprintf("%s(%s)%s", externName, externParams, raise), m.Results))
 		g.indent--
 	} else {
 		g.line("%s%s(%s) `public `global%s {", m.Name, failMark, params, docAnnot(m.Doc))
@@ -510,7 +510,7 @@ func (g *generator) emitGetterWrapper(m Func, resourceName, importModule string)
 		g.line("if handle == 0 { return none; }")
 		g.line("return %s(_handle: handle, _owned: true);", optResReturn)
 	default:
-		g.line("return %s(%s)%s;", externName, externArgs, raise)
+		g.line("return %s;", g.liftScalarCall(fmt.Sprintf("%s(%s)%s", externName, externArgs, raise), m.Results))
 	}
 	g.indent--
 	g.line("}")
@@ -547,7 +547,7 @@ func (g *generator) emitSetterWrapper(m Func, resourceName, importModule string)
 	case !g.canonicalABI && isOptionOfBuiltin(p.Type):
 		valueArg = lowerOptionExternArg(p.Name, p.Type)
 	default:
-		valueArg = p.Name
+		valueArg = g.lowerScalarArg(p.Name, p.Type)
 	}
 
 	externArgs := valueArg
@@ -590,7 +590,7 @@ func (g *generator) emitMethodWrapper(m Func, resourceName, importModule string)
 		} else if !g.canonicalABI && isOptionOfBuiltin(p.Type) {
 			callArgs = append(callArgs, lowerOptionExternArg(p.Name, p.Type))
 		} else {
-			callArgs = append(callArgs, p.Name)
+			callArgs = append(callArgs, g.lowerScalarArg(p.Name, p.Type))
 		}
 	}
 	externCallArgs := strings.Join(callArgs, ", ")
@@ -633,7 +633,7 @@ func (g *generator) emitMethodWrapper(m Func, resourceName, importModule string)
 	} else if retType != "" {
 		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
 		g.indent++
-		g.line("return %s(%s)%s;", externName, externCallArgs, raise)
+		g.line("return %s;", g.liftScalarCall(fmt.Sprintf("%s(%s)%s", externName, externCallArgs, raise), m.Results))
 		g.indent--
 	} else {
 		g.line("%s%s(%s) `public%s {", m.Name, failMark, thisParam, docAnnot(m.Doc))
@@ -733,7 +733,7 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 			g.line("if ref == 0 { return none; }")
 			g.line("return JsValue.Object(_js_ref: ref as int);")
 		} else {
-			g.line("return %s(%s)%s;", externName, externCallArgs, raise)
+			g.line("return %s;", g.liftScalarCall(fmt.Sprintf("%s(%s)%s", externName, externCallArgs, raise), f.Results))
 		}
 		g.indent--
 	} else {
@@ -802,7 +802,7 @@ func (g *generator) formatExternCallArgs(params []Param) string {
 		} else if !g.canonicalABI && isOptionOfBuiltin(p.Type) {
 			parts = append(parts, lowerOptionExternArg(p.Name, p.Type))
 		} else {
-			parts = append(parts, p.Name)
+			parts = append(parts, g.lowerScalarArg(p.Name, p.Type))
 		}
 	}
 	return strings.Join(parts, ", ")
@@ -1009,15 +1009,33 @@ func witBuiltinToPromise(builtin string) string {
 	}
 }
 
+// singleResultRef returns the lone type a wrapper's signature is built from,
+// unwrapping result<T, E> to its Ok type. Reports false when there is no single
+// result type to speak of — no results, a multi-result tuple, or a result<_, E>
+// whose Ok side is void — so callers leave those signatures alone.
+//
+// Every "what does this wrapper return" predicate below starts here, so the
+// unwrap rule lives in one place.
+func singleResultRef(results []TypeRef) (TypeRef, bool) {
+	if len(results) != 1 {
+		return TypeRef{}, false
+	}
+	ref := results[0]
+	if ref.Kind == ResultKind {
+		if ref.Ok == nil {
+			return TypeRef{}, false
+		}
+		ref = *ref.Ok
+	}
+	return ref, true
+}
+
 // resourceReturnType returns the resource type name if the function returns a single
 // NamedKind type (resource). Used to detect when wrapper must construct from handle.
 func resourceReturnType(results []TypeRef) (string, bool) {
-	if len(results) != 1 {
+	ref, ok := singleResultRef(results)
+	if !ok {
 		return "", false
-	}
-	ref := results[0]
-	if ref.Kind == ResultKind && ref.Ok != nil {
-		ref = *ref.Ok
 	}
 	// JsValue is a NamedKind but NOT a resource — it has no _handle field and
 	// marshals as an opaque JS ref (see jsValueReturnType / isJsValueRef, T0723).
@@ -1031,12 +1049,9 @@ func resourceReturnType(results []TypeRef) (string, bool) {
 // an optional resource (OptionKind wrapping NamedKind). The extern returns i32
 // where 0 = null, and the wrapper checks handle before constructing.
 func optionResourceReturnType(results []TypeRef) (string, bool) {
-	if len(results) != 1 {
+	ref, ok := singleResultRef(results)
+	if !ok {
 		return "", false
-	}
-	ref := results[0]
-	if ref.Kind == ResultKind && ref.Ok != nil {
-		ref = *ref.Ok
 	}
 	// Exclude Option<JsValue> — handled by optionJsValueReturnType (T0723).
 	if ref.Kind == OptionKind && ref.Elem != nil && ref.Elem.Kind == NamedKind && ref.Elem.Name != "JsValue" {
@@ -1058,12 +1073,9 @@ func isJsValueRef(ref TypeRef) bool {
 // its Ok type) is JsValue. The wrapper lifts the extern's i32 ref into a
 // JsValue.Object value.
 func jsValueReturnType(results []TypeRef) bool {
-	if len(results) != 1 {
+	ref, ok := singleResultRef(results)
+	if !ok {
 		return false
-	}
-	ref := results[0]
-	if ref.Kind == ResultKind && ref.Ok != nil {
-		ref = *ref.Ok
 	}
 	return isJsValueRef(ref)
 }
@@ -1071,12 +1083,9 @@ func jsValueReturnType(results []TypeRef) bool {
 // optionJsValueReturnType reports whether the single result (unwrapping
 // result<T, E>) is Option<JsValue>. The extern returns i32 where 0 = none.
 func optionJsValueReturnType(results []TypeRef) bool {
-	if len(results) != 1 {
+	ref, ok := singleResultRef(results)
+	if !ok {
 		return false
-	}
-	ref := results[0]
-	if ref.Kind == ResultKind && ref.Ok != nil {
-		ref = *ref.Ok
 	}
 	return ref.Kind == OptionKind && ref.Elem != nil && isJsValueRef(*ref.Elem)
 }
@@ -1229,7 +1238,7 @@ func (g *generator) formatCanonicalCallArgs(params []Param, hasRetPtr bool) stri
 			// Compound type: lower to flat values
 			parts = append(parts, g.lowerParamToFlat(p)...)
 		} else {
-			parts = append(parts, p.Name)
+			parts = append(parts, g.lowerScalarArg(p.Name, p.Type))
 		}
 	}
 	if hasRetPtr {
@@ -1256,6 +1265,93 @@ func (g *generator) lowerParamToFlat(p Param) []string {
 		// For types we can't lower yet, pass as-is (will cause compile error)
 		return []string{p.Name}
 	}
+}
+
+// canonicalFlatType returns the Promise spelling of a builtin's canonical flat
+// representation, and whether that spelling differs from the builtin's own
+// Promise type — i.e. whether a wrapper has to convert across the boundary.
+//
+// Only a builtin that flattens to exactly one core value qualifies, which is
+// asked of the flattening table rather than restated as a list of names here:
+// `string` flattens to (ptr, len) and is marshalled through the retarea helpers
+// instead, and so would any future builtin that flattens to more than one value.
+//
+// A non-builtin ref is deliberately left alone: an option/tuple/record result is
+// lifted from the wrong address today (T2145), and the type error that produces
+// is the only thing making that visible — a blanket cast would silence it and
+// start returning discriminants.
+func canonicalFlatType(ref TypeRef) (flat string, differs bool) {
+	if ref.Kind != BuiltinKind {
+		return "", false
+	}
+	flats := flattenBuiltin(ref.Builtin)
+	if len(flats) != 1 {
+		return "", false
+	}
+	flat = flatPromiseType(flats[0])
+	return flat, flat != witBuiltinToPromise(ref.Builtin)
+}
+
+// lowerScalarArg converts a wrapper parameter to the flat type its extern
+// declares (`x` → `x as i32`). Promise has no implicit numeric conversion, so
+// without this the generated module does not compile (T2129). `as` is exactly
+// the canonical conversion: unsigned widens zero-extended, signed sign-extended,
+// `bool` lowers to 0/1 and `char` to its i32 code point.
+func (g *generator) lowerScalarArg(name string, ref TypeRef) string {
+	if !g.canonicalABI {
+		return name
+	}
+	if flat, differs := canonicalFlatType(ref); differs {
+		return name + " as " + flat
+	}
+	return name
+}
+
+// liftScalarResult converts an extern's flat result back to the WIT type the
+// public wrapper declares (`_c()` → `_c() as u32`). The inverse of
+// lowerScalarArg: narrowing truncates to the low bits the host guarantees are
+// in range, and `i32` → `bool` is a non-zero test, not a truncation (T2129).
+func (g *generator) liftScalarResult(expr string, ref TypeRef) string {
+	if !g.canonicalABI {
+		return expr
+	}
+	if _, differs := canonicalFlatType(ref); differs {
+		return expr + " as " + promiseType(ref)
+	}
+	return expr
+}
+
+// liftScalarCall wraps a wrapper's extern call expression in the flat → WIT
+// conversion its declared result needs. The single place the three resource
+// emitters and emitFreeFunc share for the direct (non-retptr) return path.
+func (g *generator) liftScalarCall(expr string, results []TypeRef) string {
+	ref, ok := singleResultRef(results)
+	if !ok {
+		return expr
+	}
+	return g.liftScalarResult(expr, ref)
+}
+
+// liftScalarFromMemory lifts a scalar the host stored in the retarea, and
+// reports whether the result is a conversion (so a caller that appends a method
+// call knows to parenthesize — `as` binds looser than `.`).
+//
+// This is NOT the same conversion as a flat value returned by the extern. The
+// canonical ABI stores a bool or an i8/i16 in its own width, but the only load
+// helpers are i32/i64-wide, so the bytes that follow the payload ride along in
+// the upper bits — and the host is not required to zero that padding. A
+// narrowing cast discards it, but `bool`'s non-zero test would see it and read a
+// stored `false` as `true`, so a bool is first truncated to the byte the
+// canonical ABI actually stored. A flat bool returned *by value* needs no such
+// truncation: it is a whole core i32 the host lowered as 0 or 1, and testing all
+// of it is the tolerant reading (T2129).
+func (g *generator) liftScalarFromMemory(ref TypeRef, offset int) (expr string, converted bool) {
+	load := liftScalarFromRetPtr(ref, offset)
+	if g.canonicalABI && ref.Kind == BuiltinKind && ref.Builtin == "bool" {
+		return load + " as u8 as bool", true
+	}
+	lifted := g.liftScalarResult(load, ref)
+	return lifted, lifted != load
 }
 
 // formatExternParamsWithRetPtr generates extern params including retptr when needed.
@@ -1296,7 +1392,8 @@ func (g *generator) liftReturnFromRetPtr(results []TypeRef) string {
 			return fmt.Sprintf("_cabi_vector_from_%s(_cabi_load_i32(_cabi_retarea_ptr() + %d), _cabi_load_i32(_cabi_retarea_ptr() + %d), %d)",
 				suffix, offset, offset+4, elemSize)
 		}
-		return liftScalarFromRetPtr(ref, offset)
+		lifted, _ := g.liftScalarFromMemory(ref, offset)
+		return lifted
 	}
 	if ref.Kind == BuiltinKind && ref.Builtin == "string" {
 		return "_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr()), _cabi_load_i32(_cabi_retarea_ptr() + 4))"
@@ -1307,7 +1404,8 @@ func (g *generator) liftReturnFromRetPtr(results []TypeRef) string {
 		return fmt.Sprintf("_cabi_vector_from_%s(_cabi_load_i32(_cabi_retarea_ptr()), _cabi_load_i32(_cabi_retarea_ptr() + 4), %d)",
 			suffix, elemSize)
 	}
-	return liftScalarFromRetPtr(ref, 0)
+	lifted, _ := g.liftScalarFromMemory(ref, 0)
+	return lifted
 }
 
 // liftScalarFromRetPtr generates a load expression for a scalar at a retptr offset.
@@ -1344,8 +1442,13 @@ func (g *generator) liftErrFromRetPtr(result TypeRef) string {
 		return fmt.Sprintf("_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr() + %d), _cabi_load_i32(_cabi_retarea_ptr() + %d))",
 			offset, offset+4)
 	}
-	// Scalar/named error: lift value and stringify
-	loadExpr := liftScalarFromRetPtr(errRef, offset)
+	// Scalar/named error: lift value and stringify. The conversion has to be
+	// parenthesized before the method call: `as` binds looser than `.`, so
+	// `x as u64.to_string()` parses as `x as (u64.to_string())` (T2129).
+	loadExpr, converted := g.liftScalarFromMemory(errRef, offset)
+	if converted {
+		loadExpr = "(" + loadExpr + ")"
+	}
 	return fmt.Sprintf(`"component error: " + %s.to_string()`, loadExpr)
 }
 

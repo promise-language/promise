@@ -468,6 +468,10 @@ Primitive JS values (`boolean`, `number`, `string`, `null`, `undefined`) are ext
 
 For WASI, compound types are serialized into WASM linear memory using the canonical ABI:
 
+**Scalars**: every integer narrower than 64 bits flattens to a core `i32` (`u8`, `u16`, `u32`, `s8`, `s16`, `s32`, `char`, `bool`), 64-bit integers to `i64`, and floats to `f32`/`f64`. The extern declares that flat type; the public wrapper keeps the WIT type from the mapping table above and **converts at the boundary** — unsigned values widen zero-extended, signed ones sign-extended, `bool` lowers to 0/1 and lifts as a non-zero test, and `char` carries its code point. Promise has no implicit numeric conversion, so this conversion is not an optimization: a wrapper that returned the extern's result verbatim would not compile.
+
+A scalar read back out of the **return area** is narrowed to its stored width first. There it is not a flat core value but a value in memory, stored in its own width (a `bool` and an `s8` occupy one byte), while the load helpers are `i32`/`i64`-wide — so the padding that follows the payload rides along in the upper bits, and the canonical ABI does not require a host to zero it. Narrowing discards it; without that step a stored `false` would test non-zero and lift as `true`.
+
 **Strings**: `(i32 ptr, i32 len)` — UTF-8 bytes in linear memory. The generated binding:
 1. Calls `cabi_realloc(0, 0, 1, len)` to allocate space
 2. Copies Promise string bytes into linear memory

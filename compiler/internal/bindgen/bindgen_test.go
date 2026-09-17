@@ -1453,7 +1453,11 @@ func TestCodegenCanonicalABIStringReturn(t *testing.T) {
 	assertContains(t, out, "_cabi_load_i32(")
 }
 
-func TestCodegenCanonicalABIScalarUnchanged(t *testing.T) {
+// T2129: the extern uses the canonical flat type and the wrapper keeps the WIT
+// type, so the wrapper has to convert in both directions. Promise has no
+// implicit numeric conversion — before this, the generated module did not
+// compile, and this test asserted the uncompilable body.
+func TestCodegenCanonicalABIScalarCasts(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
 		ImportModule: "test:test/api",
@@ -1468,8 +1472,220 @@ func TestCodegenCanonicalABIScalarUnchanged(t *testing.T) {
 	out := GeneratePromiseWithOptions(modules, "wasi", true)
 	// Scalar extern should use flat types
 	assertContains(t, out, "_add(i32 a, i32 b) i32")
-	// Wrapper should pass scalars directly
-	assertContains(t, out, "return _add(a, b);")
+	// Wrapper lowers each param to the flat type and lifts the result back
+	assertContains(t, out, "return _add(a as i32, b as i32) as u32;")
+}
+
+// T2129: one function per WIT builtin, in both directions. A builtin whose flat
+// type and Promise type coincide (s32/s64/f32/f64) must emit no cast at all —
+// otherwise the generated source grows noise the reader has to discount.
+func TestCodegenCanonicalABIScalarCastMatrix(t *testing.T) {
+	cases := []struct {
+		builtin string
+		wrapper string // Promise type the wrapper declares
+		lower   string // expected param lowering, "" when none is needed
+		lift    string // expected result lift, "" when none is needed
+	}{
+		{"u8", "u8", "v as i32", "as u8"},
+		{"u16", "u16", "v as i32", "as u16"},
+		{"u32", "u32", "v as i32", "as u32"},
+		{"u64", "u64", "v as i64", "as u64"},
+		{"s8", "i8", "v as i32", "as i8"},
+		{"s16", "i16", "v as i32", "as i16"},
+		{"s32", "i32", "", ""},
+		{"s64", "i64", "", ""},
+		{"f32", "f32", "", ""},
+		{"f64", "f64", "", ""},
+		{"bool", "bool", "v as i32", "as bool"},
+		{"char", "char", "v as i32", "as char"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.builtin, func(t *testing.T) {
+			ref := TypeRef{Kind: BuiltinKind, Builtin: tc.builtin}
+			modules := []*Module{{
+				Name:         "test",
+				ImportModule: "test:test/api",
+				Functions: []Func{{
+					Name:       "echo",
+					Kind:       FuncFree,
+					Params:     []Param{{Name: "v", Type: ref}},
+					Results:    []TypeRef{ref},
+					ImportName: "echo",
+				}},
+			}}
+			out := GeneratePromiseWithOptions(modules, "wasi", true)
+			assertContains(t, out, "echo("+tc.wrapper+" v) "+tc.wrapper+" `public")
+			if tc.lower == "" && tc.lift == "" {
+				assertContains(t, out, "return _echo(v);")
+				assertNotContains(t, out, " as ")
+				return
+			}
+			assertContains(t, out, "return _echo("+tc.lower+") "+tc.lift+";")
+		})
+	}
+}
+
+// T2129: the retptr path lifts with a _cabi_load_* helper, whose result type is
+// the flat type too — so the same conversion is owed there.
+func TestCodegenCanonicalABIRetPtrScalarCast(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name: "get_count",
+			Kind: FuncFree,
+			Results: []TypeRef{{
+				Kind: ResultKind,
+				Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+				Err:  &TypeRef{Kind: BuiltinKind, Builtin: "string"},
+			}},
+			ImportName: "get-count",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, "return _cabi_load_i32(_cabi_retarea_ptr() + 4) as u32;")
+}
+
+// T2129: a bool lifted out of the retarea must be truncated to the byte the
+// canonical ABI stored before it is tested. The load helper is i32-wide and the
+// host need not zero the padding that follows a 1-byte payload, so a bare
+// non-zero test over all four bytes reads a stored `false` as `true`. A bool
+// returned flat by value is a whole core i32 and needs no truncation, which the
+// matrix test above pins.
+func TestCodegenCanonicalABIRetPtrBoolTruncatesToStoredWidth(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name: "is_ready",
+			Kind: FuncFree,
+			Results: []TypeRef{{
+				Kind: ResultKind,
+				Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "bool"},
+				Err:  &TypeRef{Kind: BuiltinKind, Builtin: "string"},
+			}},
+			ImportName: "is-ready",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, "return _cabi_load_i32(_cabi_retarea_ptr() + 4) as u8 as bool;")
+}
+
+// T2129: the error payload is stringified, and `as` binds looser than `.` —
+// `x as u64.to_string()` parses as `x as (u64.to_string())`, so the conversion
+// must be parenthesized before the method call.
+func TestCodegenCanonicalABIRetPtrErrScalarCastParenthesized(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name: "get_count",
+			Kind: FuncFree,
+			Results: []TypeRef{{
+				Kind: ResultKind,
+				Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "string"},
+				Err:  &TypeRef{Kind: BuiltinKind, Builtin: "u64"},
+			}},
+			ImportName: "get-count",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, "(_cabi_load_i64(_cabi_retarea_ptr() + 8) as u64).to_string()")
+}
+
+// T2129: the conversion is owed on resource members too — a scalar-only
+// resource is the common WASI shape. (A resource member taking or returning a
+// string/list is still broken for an unrelated reason — T2144.)
+func TestCodegenCanonicalABIResourceScalarCast(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "Counter",
+			Drop: true,
+			Methods: []Func{
+				{
+					Name:       "constructor",
+					Kind:       FuncConstructor,
+					Params:     []Param{{Name: "start", Type: TypeRef{Kind: BuiltinKind, Builtin: "u32"}}},
+					ImportName: "[constructor]counter",
+				},
+				{
+					Name:       "bump",
+					Kind:       FuncMethod,
+					Params:     []Param{{Name: "by", Type: TypeRef{Kind: BuiltinKind, Builtin: "u8"}}},
+					Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "bool"}},
+					ImportName: "[method]counter.bump",
+				},
+			},
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, "handle := _counter_constructor(start as i32);")
+	assertContains(t, out, "return _counter_bump(this._handle, by as i32) as bool;")
+}
+
+// T2129: only BuiltinKind scalars convert. An option/tuple result is lifted
+// from the wrong address (T2145) and its type error is what makes that visible
+// — a blanket cast would silence it and start returning the discriminant.
+func TestCodegenCanonicalABICompoundResultNotCast(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "maybe_count",
+			Kind:       FuncFree,
+			Results:    []TypeRef{{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}}},
+			ImportName: "maybe-count",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, "return _cabi_load_i32(_cabi_retarea_ptr() + 0);")
+	assertNotContains(t, out, " as ")
+}
+
+// T2129: whether a conversion is owed is asked of the flattening table, not of a
+// list of type names — so a builtin that flattens to more than one core value is
+// rejected structurally. `string` is that case today, and the assertion holds for
+// any future multi-flat builtin without this function learning its name.
+func TestCanonicalFlatTypeRejectsMultiFlatBuiltin(t *testing.T) {
+	if flat, differs := canonicalFlatType(TypeRef{Kind: BuiltinKind, Builtin: "string"}); differs || flat != "" {
+		t.Errorf("canonicalFlatType(string) = (%q, %v), want (\"\", false) — string flattens to (ptr, len)", flat, differs)
+	}
+	// A name the flattening table does not know still flattens to a single i32,
+	// so it is judged on that single value like any other scalar.
+	if flat, differs := canonicalFlatType(TypeRef{Kind: BuiltinKind, Builtin: "unknown-future-type"}); flat != "i32" || !differs {
+		t.Errorf("canonicalFlatType(unknown) = (%q, %v), want (\"i32\", true)", flat, differs)
+	}
+	if flat, differs := canonicalFlatType(TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}}); differs || flat != "" {
+		t.Errorf("canonicalFlatType(list) = (%q, %v), want (\"\", false)", flat, differs)
+	}
+}
+
+// T2129: a wrapper with no single result type to convert — a multi-result WIT
+// function returns a Promise tuple — must have its call emitted verbatim. The
+// resource emitters reach the direct return path for any result shape (they do
+// not implement the retptr protocol, T2144), so this is how a tuple gets there.
+func TestCodegenCanonicalABIMultiResultMethodNotCast(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Resources: []Resource{{
+			Name: "Reader",
+			Methods: []Func{{
+				Name: "split",
+				Kind: FuncMethod,
+				Results: []TypeRef{
+					{Kind: BuiltinKind, Builtin: "u32"},
+					{Kind: BuiltinKind, Builtin: "u32"},
+				},
+				ImportName: "[method]reader.split",
+			}},
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, "split(this) (u32, u32) `public {")
+	assertContains(t, out, "return _reader_split(this._handle);")
 }
 
 func TestCodegenCanonicalABIResultRetPtr(t *testing.T) {
@@ -1546,6 +1762,12 @@ func TestCodegenNonCanonicalUnchanged(t *testing.T) {
 			Kind:       FuncFree,
 			Params:     []Param{{Name: "name", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
 			ImportName: "greet",
+		}, {
+			Name:       "add",
+			Kind:       FuncFree,
+			Params:     []Param{{Name: "a", Type: TypeRef{Kind: BuiltinKind, Builtin: "u32"}}},
+			Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "u8"}},
+			ImportName: "add",
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
@@ -1554,6 +1776,11 @@ func TestCodegenNonCanonicalUnchanged(t *testing.T) {
 	assertNotContains(t, out, "name_len")
 	// Should use Promise string type
 	assertContains(t, out, "string name")
+	// T2129's conversion belongs to the canonical ABI's flat representation and
+	// must not leak into the default path, where the extern already declares the
+	// WIT type.
+	assertNotContains(t, out, " as ")
+	assertContains(t, out, "return _add(a);")
 }
 
 func TestFlatParamName(t *testing.T) {
@@ -2127,7 +2354,9 @@ func TestCodegenCanonicalABIResultErrScalar(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromiseWithOptions(modules, "wasi", true)
-	assertContains(t, out, `_cabi_load_i32(_cabi_retarea_ptr() + 4).to_string()`)
+	// The load returns the flat i32; the payload is a u32, so it converts before
+	// it is stringified — an i32 would print a large error code negative (T2129).
+	assertContains(t, out, `(_cabi_load_i32(_cabi_retarea_ptr() + 4) as u32).to_string()`)
 	assertContains(t, out, `"component error: "`)
 	assertNotContains(t, out, `error("component error")`)
 }
@@ -2169,7 +2398,7 @@ func TestCodegenCanonicalABIResultErrVoidOk(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromiseWithOptions(modules, "wasi", true)
-	assertContains(t, out, `_cabi_load_i32(_cabi_retarea_ptr() + 4).to_string()`)
+	assertContains(t, out, `(_cabi_load_i32(_cabi_retarea_ptr() + 4) as u32).to_string()`)
 	assertContains(t, out, `"component error: "`)
 }
 

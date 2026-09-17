@@ -165,21 +165,55 @@ func TestFreshnessIgnoresAMissingBinary(t *testing.T) {
 
 // The relative spelling has to be one the caller's shell will actually run;
 // docs/windows-support.md writes it `bin\build` there.
+//
+// Both platforms are named rather than inferred, so the Windows spelling is
+// checked on the Linux and macOS hosts that run almost every build. That is the
+// hole T2152 came through: the staleness-message test asserted `bin/build`
+// unconditionally, which no Windows run could satisfy, and no non-Windows run
+// could notice. A foreign-platform row asserts the suffix rather than the
+// separator, because filepath joins with the host's (see buildCommandsFor).
 func TestBuildCommandsSpellBothForms(t *testing.T) {
-	root := t.TempDir()
-	abs, relative := buildCommands(root)
+	for _, tc := range []struct {
+		goos         string
+		wantRelative string
+		wantSuffix   string
+	}{
+		{goos: "windows", wantRelative: `bin\build`, wantSuffix: ".exe"},
+		{goos: "linux", wantRelative: "bin/build", wantSuffix: ""},
+		{goos: "darwin", wantRelative: "bin/build", wantSuffix: ""},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			root := t.TempDir()
+			abs, relative := buildCommandsFor(tc.goos, root)
 
-	wantAbs := filepath.Join(root, "bin", "build"+exeSuffix())
-	if abs != wantAbs {
-		t.Errorf("absolute command = %q, want %q", abs, wantAbs)
+			if relative != tc.wantRelative {
+				t.Errorf("buildCommandsFor(%q) relative = %q, want %q", tc.goos, relative, tc.wantRelative)
+			}
+			if want := filepath.Join(root, "bin", "build"+tc.wantSuffix); abs != want {
+				t.Errorf("buildCommandsFor(%q) abs = %q, want %q", tc.goos, abs, want)
+			}
+			if !filepath.IsAbs(abs) {
+				t.Errorf("buildCommandsFor(%q) abs = %q, which does not resolve from an arbitrary cwd", tc.goos, abs)
+			}
+			// Both spellings must name the same tool — one being the other's
+			// root-relative form is the whole reason a caller can pick either.
+			if filepath.Base(abs) != "build"+tc.wantSuffix || !strings.HasSuffix(relative, "build") {
+				t.Errorf("buildCommandsFor(%q) = (%q, %q): the two spellings name different tools", tc.goos, abs, relative)
+			}
+		})
 	}
-	wantRelative := "bin/build"
-	if runtime.GOOS == "windows" {
-		wantRelative = `bin\build`
-	}
-	if relative != wantRelative {
-		t.Errorf("relative command = %q, want %q", relative, wantRelative)
-	}
+
+	// And the wrapper forwards the host's platform rather than a fixed one —
+	// without this, every row above could pass while callers got the wrong pair.
+	t.Run("host", func(t *testing.T) {
+		root := t.TempDir()
+		abs, relative := buildCommands(root)
+		wantAbs, wantRelative := buildCommandsFor(runtime.GOOS, root)
+		if abs != wantAbs || relative != wantRelative {
+			t.Errorf("buildCommands = (%q, %q), want the %s pair (%q, %q)",
+				abs, relative, runtime.GOOS, wantAbs, wantRelative)
+		}
+	})
 }
 
 // TestResolveHomeIsTheWorktreeHome pins what replaced the per-package temp home

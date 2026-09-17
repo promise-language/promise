@@ -168,7 +168,24 @@ func freshnessError(root, bin string) error {
 // (docs/windows-support.md writes `bin\build`), and a message naming a command
 // the caller's shell will not run is the T1813 defect.
 func buildCommands(root string) (abs, relative string) {
-	if runtime.GOOS == "windows" {
+	return buildCommandsFor(runtime.GOOS, root)
+}
+
+// buildCommandsFor is buildCommands with the platform named rather than read
+// from the host, so both spellings are exercised wherever the suite runs. The
+// Windows spelling is the one that cannot be checked on the host that runs
+// almost every build: T2152 was this test package asserting `bin/build`
+// unconditionally, which passed on every Linux and macOS run and could not pass
+// on any Windows one, and it reached trunk because nothing here ever evaluated
+// the Windows branch.
+//
+// Only the two literals vary by platform. The absolute path is still joined
+// with the *host* separator, since filepath is compiled for one platform — so
+// buildCommandsFor("windows", …) off Windows yields a real Windows suffix on a
+// host-shaped path, which is what makes the suffix, and not the separator,
+// the part a foreign-platform caller may assert on.
+func buildCommandsFor(goos, root string) (abs, relative string) {
+	if goos == "windows" {
 		return filepath.Join(root, "bin", "build.exe"), `bin\build`
 	}
 	return filepath.Join(root, "bin", "build"), "bin/build"

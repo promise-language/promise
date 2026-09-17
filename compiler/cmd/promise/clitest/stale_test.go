@@ -143,9 +143,15 @@ func TestMessageNamesTheNewestSourceAndBothBuildSpellings(t *testing.T) {
 	if !strings.Contains(msg, "modules/std/string.pr") {
 		t.Errorf("message names a file other than the newest source:\n%s", msg)
 	}
-	abs := filepath.Join(root, "bin", "build"+exeSuffix())
-	absAt := strings.Index(msg, abs)
-	relAt := strings.Index(msg, "bin/build from the repo root")
+	// Both spellings come from the helper that produced them, so this test is
+	// about the message carrying them in the right order — not about what they
+	// are on this platform. TestBuildCommandsSpellBothForms pins that, and
+	// pinning it a second time here is what made this assertion POSIX-only:
+	// the message says `bin\build` on Windows, so the hard-coded `bin/build`
+	// could never be found and the test failed on every Windows run (T2152).
+	wantAbs, wantRelative := buildCommands(root)
+	absAt := strings.Index(msg, wantAbs)
+	relAt := strings.Index(msg, wantRelative+" from the repo root")
 	if absAt < 0 || relAt < 0 {
 		t.Fatalf("message must name both spellings of the rebuild command:\n%s", msg)
 	}

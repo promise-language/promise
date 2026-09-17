@@ -35,13 +35,15 @@ func needsToolchainStubs() bool { return runtime.GOOS == "linux" }
 // (T1774). Supplying the library ourselves is the same move Windows makes with
 // its self-generated import libs (T0772): we own the link surface rather than
 // asking the user to install one.
-func writeToolchainStubs(viewDir string) error {
+// Returns the bytes it wrote, so the view's materialization cost includes the
+// stubs rather than only the tools (T2143).
+func writeToolchainStubs(viewDir string) (int64, error) {
 	if !needsToolchainStubs() {
-		return nil
+		return 0, nil
 	}
 	entries, err := os.ReadDir(viewDir)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var tools []string
 	for _, e := range entries {
@@ -52,10 +54,18 @@ func writeToolchainStubs(viewDir string) error {
 	}
 	written, err := elfstub.WriteFor(tools, viewDir)
 	if err != nil {
-		return fmt.Errorf("generating LLVM toolchain compatibility stubs: %w", err)
+		return 0, fmt.Errorf("generating LLVM toolchain compatibility stubs: %w", err)
+	}
+	var stubBytes int64
+	for _, name := range written {
+		if info, serr := os.Stat(filepath.Join(viewDir, name)); serr == nil {
+			stubBytes += info.Size()
+		}
 	}
 	// The marker is written even when nothing needed stubbing, so "this view was
 	// built by a compiler that checked" and "this view needs no stubs" are the
 	// same fast-path answer.
-	return os.WriteFile(filepath.Join(viewDir, stubMarkerName), []byte(strings.Join(written, "\n")), 0o644)
+	marker := []byte(strings.Join(written, "\n"))
+	stubBytes += int64(len(marker))
+	return stubBytes, os.WriteFile(filepath.Join(viewDir, stubMarkerName), marker, 0o644)
 }

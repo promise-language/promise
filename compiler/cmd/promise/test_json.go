@@ -51,6 +51,10 @@ type coverageRecord struct {
 	Total   int    `json:"total"`
 }
 
+// The stream carries one more kind-bearing record: the run's store cost
+// (`"kind":"cas"`), emitted once by the parent. It lives in cas_report.go with
+// the rest of that accounting.
+
 // rosterMarkerPrefix tags the single roster line a child emits in --json mode.
 // It is parsed (and never echoed) by the parent; plain `promise test` runs do
 // not emit it, so humans never see it.

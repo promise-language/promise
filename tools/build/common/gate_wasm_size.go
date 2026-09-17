@@ -42,6 +42,10 @@ func runGateWasmSize(root string, args []string) error {
 		return fmt.Errorf("build: %w", buildErr)
 	}
 
+	// Everything this gate goes on to do is charged to the store (T2143); the
+	// build above is not, and neither is the warm-up openCASWindow performs.
+	store := openCASWindow(root)
+
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 	promiseBin := filepath.Join(root, "bin", BinaryName())
 
@@ -108,6 +112,8 @@ func runGateWasmSize(root string, args []string) error {
 	fmt.Fprintf(os.Stderr, "  %-25s %8d bytes  (%.1f KB)\n", "TOTAL", totalSize, float64(totalSize)/1024.0)
 
 	// Write gate-values.json sidecar.
+	store.AddTo(gv.Values)
+
 	if err := WriteGateValues(root, gv); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}

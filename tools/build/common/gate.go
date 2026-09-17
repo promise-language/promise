@@ -110,6 +110,10 @@ func runGateTest(root string, args []string) error {
 		return fmt.Errorf("build: %w", buildErr)
 	}
 
+	// Everything this gate goes on to do is charged to the store (T2143); the
+	// build above is not, and neither is the warm-up openCASWindow performs.
+	store := openCASWindow(root)
+
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 
 	// Run host tests with --json. The runner streams one JSON record per
@@ -132,6 +136,8 @@ func runGateTest(root string, args []string) error {
 		Platform:  hostTarget,
 		Values:    out.Metrics,
 	}
+	store.AddTo(gv.Values)
+
 	if err := WriteGateValues(root, gv); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
@@ -186,6 +192,10 @@ func runGateWasmTests(root string, args []string) error {
 		return fmt.Errorf("build: %w", buildErr)
 	}
 
+	// Everything this gate goes on to do is charged to the store (T2143); the
+	// build above is not, and neither is the warm-up openCASWindow performs.
+	store := openCASWindow(root)
+
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 
 	// Run wasm tests with --json (single-target wasm gate). The runner streams
@@ -207,6 +217,8 @@ func runGateWasmTests(root string, args []string) error {
 		Platform:  hostTarget,
 		Values:    out.Metrics,
 	}
+	store.AddTo(gv.Values)
+
 	if err := WriteGateValues(root, gv); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
@@ -258,6 +270,10 @@ func runGateWasmWebTests(root string, args []string) error {
 		return fmt.Errorf("build: %w", buildErr)
 	}
 
+	// Everything this gate goes on to do is charged to the store (T2143); the
+	// build above is not, and neither is the warm-up openCASWindow performs.
+	store := openCASWindow(root)
+
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 
 	// Run wasm32-web tests with --json (single-target gate). The runner streams
@@ -279,6 +295,8 @@ func runGateWasmWebTests(root string, args []string) error {
 		Platform:  hostTarget,
 		Values:    out.Metrics,
 	}
+	store.AddTo(gv.Values)
+
 	if err := WriteGateValues(root, gv); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
@@ -346,6 +364,10 @@ func runGateGoTest(root string, args []string) error {
 		return fmt.Errorf("build: %w", buildErr)
 	}
 
+	// Everything this gate goes on to do is charged to the store (T2143); the
+	// build above is not, and neither is the warm-up openCASWindow performs.
+	store := openCASWindow(root)
+
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 	compilerDir := filepath.Join(root, "compiler")
 
@@ -362,6 +384,8 @@ func runGateGoTest(root string, args []string) error {
 	}
 	gv.Values["go_test_count"] = float64(passed)
 	gv.Values["go_test_failures"] = float64(failed)
+
+	store.AddTo(gv.Values)
 
 	if err := WriteGateValues(root, gv); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
@@ -405,6 +429,10 @@ func runGateStress(root string, args []string) error {
 		return fmt.Errorf("build: %w", buildErr)
 	}
 
+	// Everything this gate goes on to do is charged to the store (T2143); the
+	// build above is not, and neither is the warm-up openCASWindow performs.
+	store := openCASWindow(root)
+
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 	promiseBin := filepath.Join(root, "bin", BinaryName())
 
@@ -420,6 +448,8 @@ func runGateStress(root string, args []string) error {
 	}
 	gv.Values["stress_iterations"] = float64(iters)
 	gv.Values["stress_flaky_count"] = float64(flakyCount)
+
+	store.AddTo(gv.Values)
 
 	if err := WriteGateValues(root, gv); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
@@ -466,6 +496,10 @@ func runGateCoverage(root string, args []string) error {
 	if buildErr != nil {
 		return fmt.Errorf("build: %w", buildErr)
 	}
+
+	// Everything this gate goes on to do is charged to the store (T2143); the
+	// build above is not, and neither is the warm-up openCASWindow performs.
+	store := openCASWindow(root)
 
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 	compilerDir := filepath.Join(root, "compiler")
@@ -528,6 +562,8 @@ func runGateCoverage(root string, args []string) error {
 	gv.Values["promise_coverage_pct"] = promiseCovPct
 	gv.Values["promise_test_count"] = float64(promisePassed)
 	gv.Values["promise_test_failures"] = float64(promiseFailed)
+
+	store.AddTo(gv.Values)
 
 	if err := WriteGateValues(root, gv); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)

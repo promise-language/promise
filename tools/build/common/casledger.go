@@ -1,0 +1,264 @@
+package common
+
+// What a gate run costs the content-addressed store (T2143).
+//
+// Two things move bytes that no gate measured before this: blobs pulled over
+// the wire into the store because it did not have them, and bytes written
+// exploding store (and embedded) content into a usable on-disk form — the
+// llvm-view tools, the CRT/OpenSSL/compiler-rt/winlink trees, the WASM objects,
+// the macOS SDK stub, the embedded catalog. Both are side effects of the TREE's
+// shape rather than of the work asked for, and both multiply by however many
+// isolated caches a change decides to create. T2133 was one warm 375 MB
+// materialization becoming three cold ones per test run, unmeasured, for 18
+// days.
+//
+// The compiler appends an event per occurrence to a ledger beside its own
+// binary (compiler/internal/casmetrics). A gate empties that ledger once its
+// build and toolchain warm-up are done, and reads it back when the measurement
+// is over — so the numbers describe the measured phase and not how warm the
+// machine happened to be when it started.
+//
+// The ledger's path rule and line format are spelled here a second time because
+// the tools are a separate Go module from the compiler and cannot import it —
+// the same necessity that duplicates MuslManifestName. Both spellings are
+// pinned by golden tests (TestCASLedgerFormat here, TestLedgerFormat there), so
+// a change to one that is not made to the other fails immediately rather than
+// silently reporting zeros forever.
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+)
+
+// casLedgerName is the ledger's file name, in the directory holding the
+// compiler binary. Keep in lockstep with casmetrics.LedgerName.
+const casLedgerName = ".promise-cas.jsonl"
+
+// casLedgerPath is where this repository's compiler writes its ledger.
+func casLedgerPath(root string) string {
+	return filepath.Join(root, "bin", casLedgerName)
+}
+
+// casEvent is one line of the ledger. Keep in lockstep with casmetrics.event.
+type casEvent struct {
+	Event string `json:"event"`
+	Name  string `json:"name,omitempty"`
+	Bytes int64  `json:"bytes,omitempty"`
+	Count int    `json:"count,omitempty"`
+	Path  string `json:"path,omitempty"`
+}
+
+// casLedgerFold is the fold of every event in the file.
+type casLedgerFold struct {
+	NetworkBytes      int64
+	MaterializedBytes int64
+	Materializations  int
+	Homes             []string
+	Names             []string
+}
+
+// readCASLedger folds the ledger. An absent one folds to zero: nothing has cost
+// the store anything, which is the reading a warm run is supposed to produce.
+func readCASLedger(root string) (casLedgerFold, error) {
+	l := casLedgerFold{}
+	data, err := os.ReadFile(casLedgerPath(root))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return l, nil
+		}
+		return l, err
+	}
+	homes := map[string]bool{}
+	names := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var e casEvent
+		// A torn trailing line from a killed writer is skipped rather than
+		// failing the read: the rest of the run's accounting still holds.
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			continue
+		}
+		switch e.Event {
+		case "network":
+			l.NetworkBytes += e.Bytes
+		case "materialize":
+			l.MaterializedBytes += e.Bytes
+			l.Materializations += e.Count
+			if e.Name != "" {
+				names[e.Name] = true
+			}
+		case "home":
+			if e.Path != "" {
+				homes[e.Path] = true
+			}
+		}
+	}
+	l.Homes = sortedSetKeys(homes)
+	l.Names = sortedSetKeys(names)
+	return l, nil
+}
+
+// resetCASLedger opens a fresh measurement window by emptying the ledger.
+// Failing here is what makes the metrics unavailable rather than zero: a
+// directory that cannot hold a ledger cannot hold the run's accounting either.
+func resetCASLedger(root string) error {
+	path := casLedgerPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, nil, 0o644)
+}
+
+// casWindow is an opened measurement window.
+type casWindow struct {
+	root string
+	open bool
+	why  string // why it could not be opened, when open is false
+}
+
+// openCASWindow warms the toolchain and then empties the ledger, so what the
+// gate goes on to measure is what the measured phase itself cost.
+//
+// The warm-up is deliberate and is what makes cas_network_bytes judgeable at
+// exactly zero: a fresh clone has to stage a toolchain once, and charging the
+// first run for it would make the metric describe the machine. Anything fetched
+// or exploded AFTER it is work the tree asked for a second time.
+func openCASWindow(root string) casWindow {
+	ensureToolchainWarm(root)
+	if err := resetCASLedger(root); err != nil {
+		return casWindow{root: root, why: "the store ledger could not be opened (" + firstRealLine(err.Error()) + "), so the store's cost was not measured"}
+	}
+	return casWindow{root: root, open: true}
+}
+
+// Values folds the window into the gate values a tracker gate reports. The four
+// are always present, zeros included: a counter that appears only when non-zero
+// cannot be judged against a baseline of zero.
+//
+// An unopened window contributes nothing at all rather than four zeros, and
+// says why — numbers about nothing read exactly like a clean run.
+func (w casWindow) Values() (map[string]float64, string) {
+	if !w.open {
+		return nil, w.why
+	}
+	l, err := readCASLedger(w.root)
+	if err != nil {
+		return nil, "the store ledger could not be read (" + firstRealLine(err.Error()) + "), so the store's cost was not measured"
+	}
+	return map[string]float64{
+		"cas_network_bytes":      float64(l.NetworkBytes),
+		"cas_materialized_bytes": float64(l.MaterializedBytes),
+		"cas_materializations":   float64(l.Materializations),
+		"cas_home_count":         float64(len(l.Homes)),
+	}, ""
+}
+
+// AddTo merges this window's values into a gate's own. Called once, last, so a
+// gate's store cost covers everything it did. A window that could not be opened
+// contributes no keys and says so on stderr — four zeros would read exactly
+// like a clean run.
+func (w casWindow) AddTo(values map[string]float64) {
+	vals, incomplete := w.Values()
+	if vals == nil {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", incomplete)
+		return
+	}
+	for k, v := range vals {
+		values[k] = v
+	}
+}
+
+// Metrics folds the window into contract-gate metrics. Only the two whose end
+// state is an absolute are reported here — no bytes over the wire, one home per
+// run — because docs/gate-system.md requires every metric `integration` reports
+// to carry an enforced term on every target, and a byte or population count is
+// legitimately non-zero the first time a clone builds. The other two go to the
+// tracker gates and to `promise test`, where no term is owed.
+//
+// Neither of these two is enforced YET: a real sweep reports 29 homes and ~70 MB
+// fetched, because the Go suite builds a private PROMISE_HOME per test (T2150).
+// Both are registered informational in every target block until that is fixed.
+func (w casWindow) Metrics() ([]Metric, string) {
+	vals, incomplete := w.Values()
+	if vals == nil {
+		return nil, incomplete
+	}
+	return []Metric{
+		Size("cas_network_bytes", int64(vals["cas_network_bytes"]), "bytes"),
+		Count("cas_home_count", int(vals["cas_home_count"])),
+	}, ""
+}
+
+// ensureToolchainWarm materializes the toolchain into the ambient Promise home
+// once, before a measurement window opens, by running the compiler the way a
+// test does. Best effort: a warm-up that fails leaves the gate exactly where it
+// was, and whatever it could not stage is measured as the cost it really is.
+//
+// `promise exec` is the honest warm-up — the same path the suites drive, so it
+// materializes what they need and nothing else. clitest.warmToolchain does the
+// same for the Go suites; the two are separate modules and cannot share it.
+func ensureToolchainWarm(root string) {
+	bin := filepath.Join(root, "bin", BinaryName())
+	if !Exists(bin) {
+		return
+	}
+	// A directory of its own, so the warm-up is never interpreted against
+	// whatever project the gate happens to be run from.
+	dir, err := os.MkdirTemp("", "promise-gate-warm-")
+	if err != nil {
+		return
+	}
+	defer os.RemoveAll(dir)
+	cmd := exec.Command(bin, "exec", `print_line("");`)
+	cmd.Dir = dir
+	_ = cmd.Run()
+}
+
+func sortedSetKeys(m map[string]bool) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// SummaryLine is the window's one human line, or "" when the run cost the store
+// nothing — the same rule `promise test` follows, and for the same reason: a
+// counter that is zero on every warm run must not cost every warm run a line of
+// a tail-read.
+//
+// This is what bin/verify prints. The numbers it JUDGES come from the gates,
+// which measure with -count=1 and so report the same figure every time; see
+// RunVerify for why this run's figure must not reach a ratchet.
+func (w casWindow) SummaryLine() string {
+	if !w.open {
+		return ""
+	}
+	l, err := readCASLedger(w.root)
+	if err != nil {
+		return ""
+	}
+	if l.NetworkBytes == 0 && l.MaterializedBytes == 0 && l.Materializations == 0 {
+		return ""
+	}
+	line := fmt.Sprintf("Store cost:   %d materialization(s) over %d home(s), %.1f MB written, %.1f MB fetched",
+		l.Materializations, len(l.Homes), megabytes(l.MaterializedBytes), megabytes(l.NetworkBytes))
+	if len(l.Names) > 0 {
+		line += " (" + strings.Join(l.Names, ", ") + ")"
+	}
+	return line
+}
+
+func megabytes(n int64) float64 { return float64(n) / (1024 * 1024) }

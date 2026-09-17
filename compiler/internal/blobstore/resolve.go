@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	"github.com/promise-language/promise/compiler/internal/casmetrics"
 )
 
 // downloadClient is the HTTP client for all CAS blob/archive fetches. It bounds
@@ -659,6 +660,15 @@ func (r *Resolver) downloadLimited(rawURL, dst string, sizeLimit int64, label st
 		return "", err
 	}
 	defer f.Close()
+	// Account for what actually comes off the wire, on every exit path below
+	// (T2143). A stalled, overshooting or hash-mismatched transfer spent its
+	// bytes exactly as a successful one did, so the count is taken from what
+	// io.Copy moved rather than from what the manifest said the entry weighs —
+	// which is also what makes a CAS hit, which never reaches this function,
+	// report zero. Flushed once per transfer, never per read: the ledger must
+	// not be touched mid-download.
+	var wire int64
+	defer func() { casmetrics.AddNetwork(wire) }()
 	h := sha256.New()
 	var reader io.Reader = &stallReader{r: resp.Body, watchdog: watchdog, timeout: downloadStallTimeout}
 	if sizeLimit > 0 {
@@ -672,6 +682,7 @@ func (r *Resolver) downloadLimited(rawURL, dst string, sizeLimit int64, label st
 		defer r.progress.Done()
 	}
 	n, err := io.Copy(io.MultiWriter(h, f), reader)
+	wire = n
 	if err != nil {
 		if stalled.Load() {
 			return "", &netError{fmt.Errorf("download stalled (no data for %s) from %s", downloadStallTimeout, rawURL)}

@@ -17,11 +17,17 @@ func TestWriteToolchainStubsMarksEvenWithNothingToStub(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "opt"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeToolchainStubs(dir); err != nil {
+	written, err := writeToolchainStubs(dir)
+	if err != nil {
 		t.Fatalf("writeToolchainStubs: %v", err)
 	}
+	// Nothing to stub still writes the marker, and the marker is a real cost —
+	// zero here only on a host that needs no stubs at all (T2143).
+	if want := writtenBytes(t, dir); written != want {
+		t.Errorf("writeToolchainStubs reported %d bytes, but wrote %d", written, want)
+	}
 	marker := filepath.Join(dir, stubMarkerName)
-	_, err := os.Stat(marker)
+	_, err = os.Stat(marker)
 	if needsToolchainStubs() && err != nil {
 		t.Fatalf("marker not written: %v", err)
 	}
@@ -43,12 +49,23 @@ func TestWriteToolchainStubsCoversLLD(t *testing.T) {
 	if err := os.Symlink(lld, filepath.Join(dir, "lld")); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeToolchainStubs(dir); err != nil {
+	written, err := writeToolchainStubs(dir)
+	if err != nil {
 		t.Fatalf("writeToolchainStubs: %v", err)
 	}
 	marker, err := os.ReadFile(filepath.Join(dir, stubMarkerName))
 	if err != nil {
 		t.Fatalf("marker: %v", err)
+	}
+	// T2143: the stubs are part of what a cold Linux view COSTS, and on Linux
+	// they are most of it — the tools themselves are symlinks. A byte count that
+	// forgot them would understate every cold run on the one platform where the
+	// rest of the view is free.
+	if want := writtenBytes(t, dir); written != want {
+		t.Errorf("writeToolchainStubs reported %d bytes, but wrote %d", written, want)
+	}
+	if written == 0 {
+		t.Error("a view that generated a stub reported costing nothing")
 	}
 	if !strings.Contains(string(marker), "libxml2.so.2") {
 		t.Fatalf("marker = %q, want it to name libxml2.so.2", marker)
@@ -109,4 +126,31 @@ func stagedLLDForTest(t *testing.T) string {
 	}
 	t.Skip("no staged lld on this host (run bin/build first)")
 	return ""
+}
+
+// writtenBytes is the size of everything writeToolchainStubs put in a view dir:
+// the generated stub libraries and the marker. The tools the caller staged are
+// excluded — a symlink or a hardlink into the CAS costs no bytes, which is the
+// distinction the accounting exists to make.
+func writtenBytes(t *testing.T, viewDir string) int64 {
+	t.Helper()
+	marker, err := os.ReadFile(filepath.Join(viewDir, stubMarkerName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0 // a host that needs no stubs writes nothing at all
+		}
+		t.Fatalf("marker: %v", err)
+	}
+	total := int64(len(marker))
+	for _, name := range strings.Split(string(marker), "\n") {
+		if name == "" {
+			continue
+		}
+		info, serr := os.Stat(filepath.Join(viewDir, name))
+		if serr != nil {
+			t.Fatalf("stub %s named in the marker is missing: %v", name, serr)
+		}
+		total += info.Size()
+	}
+	return total
 }

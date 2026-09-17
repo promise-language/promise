@@ -177,6 +177,21 @@ func RunVerify(root string, args []string) error {
 
 	// 5. (Cache clearing now happens up front via Clean.)
 
+	// What the suites cost the content-addressed store, measured from here
+	// (T2143): the build above and the toolchain warm-up inside openCASWindow
+	// come first, so anything fetched or exploded during the suites is work the
+	// TREE asked for a second time — which is the shape T2133 had and nothing
+	// measured for eighteen days.
+	//
+	// Reported to the operator, and deliberately NOT written into the gate
+	// values below. The commit gate is the only thing that moves a baseline,
+	// and this run's Go phase does not pass -count=1: it reports anywhere from
+	// one home to thirty depending on how much of the suite Go's test cache
+	// replayed (T2150). A ratchet fed from that would settle on whichever run
+	// replayed the most and then fail every full one. The gates measure with
+	// -count=1, and are where these numbers are judged.
+	store := openCASWindow(root)
+
 	// 6-8b. Go suites, then (only if they all passed) the Promise suites.
 	goFlags := goTestFlags(opts.clean)
 	res, err := runVerifyTestPhases(root, opts.wasm, opts.wasmWeb, verifySuites{
@@ -241,6 +256,9 @@ func RunVerify(root string, args []string) error {
 		} else {
 			Progress().Printf("  WASM-web:     passed (%s)\n", wasmWebElapsed.Round(time.Millisecond))
 		}
+	}
+	if line := store.SummaryLine(); line != "" {
+		Progress().Printf("  %s\n", line)
 	}
 	Progress().Printf("  Total time:   %dm%02ds\n", mins, secs)
 	Progress().Println("====================================================")

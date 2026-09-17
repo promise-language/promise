@@ -76,6 +76,13 @@ func TestCoverageRecordsOnJSONStream(t *testing.T) {
 			covRecords = append(covRecords, rec)
 			continue
 		}
+		// Any record carrying a kind is not a test result — that is the rule
+		// the stream is specified by (docs/gate-system.md), and there is more
+		// than one such kind now that a run also reports what it cost the
+		// store. Keying on "not coverage" would count the next one as a test.
+		if rec.Kind != "" {
+			continue
+		}
 		tests[rec.Test] = rec.Status
 	}
 

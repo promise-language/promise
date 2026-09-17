@@ -5,6 +5,18 @@
       "direction": "exact",
       "updated": "2026-09-14"
     },
+    "cas_home_count": {
+      "type": "informational"
+    },
+    "cas_materializations": {
+      "type": "informational"
+    },
+    "cas_materialized_bytes": {
+      "type": "informational"
+    },
+    "cas_network_bytes": {
+      "type": "informational"
+    },
     "go_coverage_pct": {
       "direction": "up"
     },
@@ -172,6 +184,18 @@
       "direction": "exact",
       "updated": "2026-09-14"
     },
+    "cas_home_count": {
+      "type": "informational"
+    },
+    "cas_materializations": {
+      "type": "informational"
+    },
+    "cas_materialized_bytes": {
+      "type": "informational"
+    },
+    "cas_network_bytes": {
+      "type": "informational"
+    },
     "go_coverage_pct": {
       "direction": "up"
     },
@@ -328,6 +352,18 @@
       "direction": "exact",
       "updated": "2026-09-14"
     },
+    "cas_home_count": {
+      "type": "informational"
+    },
+    "cas_materializations": {
+      "type": "informational"
+    },
+    "cas_materialized_bytes": {
+      "type": "informational"
+    },
+    "cas_network_bytes": {
+      "type": "informational"
+    },
     "go_test_failures": {
       "value": 0,
       "direction": "exact",
@@ -409,6 +445,18 @@
       "value": 0,
       "direction": "exact",
       "updated": "2026-09-14"
+    },
+    "cas_home_count": {
+      "type": "informational"
+    },
+    "cas_materializations": {
+      "type": "informational"
+    },
+    "cas_materialized_bytes": {
+      "type": "informational"
+    },
+    "cas_network_bytes": {
+      "type": "informational"
     },
     "go_test_failures": {
       "value": 0,

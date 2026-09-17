@@ -695,7 +695,8 @@ func TestMaterializeViewFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := filepath.Join(dir, "tool")
-	if err := materializeViewFile(blobPath, dst); err != nil {
+	written, err := materializeViewFile(blobPath, dst)
+	if err != nil {
 		t.Fatalf("materializeViewFile: %v", err)
 	}
 	fi, err := os.Lstat(dst)
@@ -722,6 +723,17 @@ func TestMaterializeViewFile(t *testing.T) {
 			t.Errorf("symlink target = %q, want %q", target, blobPath)
 		}
 	}
+	// T2143: the reported cost is what the platform actually wrote. macOS owns
+	// its bytes (it patches and re-signs them); Linux symlinks and Windows
+	// hardlinks write none, and reporting a size there would make every warm
+	// platform look like the cold one the accounting exists to distinguish.
+	wantWritten := int64(0)
+	if runtime.GOOS == "darwin" {
+		wantWritten = int64(len("binary content"))
+	}
+	if written != wantWritten {
+		t.Errorf("materializeViewFile reported %d bytes written, want %d", written, wantWritten)
+	}
 }
 
 // TestMaterializeViewFileOverwrite verifies that materializeViewFile replaces a
@@ -737,7 +749,7 @@ func TestMaterializeViewFileOverwrite(t *testing.T) {
 	if err := os.WriteFile(dst, []byte("old stale content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := materializeViewFile(blobPath, dst); err != nil {
+	if _, err := materializeViewFile(blobPath, dst); err != nil {
 		t.Fatalf("materializeViewFile: %v", err)
 	}
 	// Verify the old content was replaced.
@@ -804,8 +816,20 @@ func TestLinkOrCopyBlobLinksOnOneFilesystem(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := filepath.Join(dir, "opt")
-	if err := linkOrCopyBlob(src, dst, 0o755); err != nil {
+	written, err := linkOrCopyBlob(src, dst, 0o755)
+	if err != nil {
 		t.Fatalf("linkOrCopyBlob: %v", err)
+	}
+	// T2143: a link costs no bytes, and says so. Reporting the source's size
+	// here would make the cheap path indistinguishable from the copy.
+	if written != 0 {
+		t.Errorf("a link reported %d bytes written, want 0", written)
+	}
+	// A source that is not there costs nothing rather than failing the count:
+	// the materialization itself is about to report the real error, and a
+	// panicking accountant would take the build down with it.
+	if got := blobSize(filepath.Join(dir, "no-such-blob")); got != 0 {
+		t.Errorf("blobSize of a missing file = %d, want 0", got)
 	}
 	si, err := os.Stat(src)
 	if err != nil {
@@ -841,8 +865,13 @@ func TestLinkOrCopyBlobFallsBackToACopy(t *testing.T) {
 	if err := os.WriteFile(dst, []byte("stale"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := linkOrCopy(crossDevice, src, dst, 0o755); err != nil {
+	written, err := linkOrCopy(crossDevice, src, dst, 0o755)
+	if err != nil {
 		t.Fatalf("linkOrCopy did not fall back: %v", err)
+	}
+	// T2143: the copy DID cost bytes, and says so.
+	if written != int64(len("tool bytes")) {
+		t.Errorf("the copy reported %d bytes written, want %d", written, len("tool bytes"))
 	}
 	got, err := os.ReadFile(dst)
 	if err != nil || string(got) != "tool bytes" {
@@ -872,7 +901,7 @@ func TestMakeLLDAliasesDoNotDuplicateLLD(t *testing.T) {
 	if err := os.WriteFile(lldPath, []byte("lld bytes"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := makeLLDAliases(dir); err != nil {
+	if _, err := makeLLDAliases(dir); err != nil {
 		t.Fatalf("makeLLDAliases: %v", err)
 	}
 	lldInfo, err := os.Stat(lldPath)
@@ -917,7 +946,7 @@ func TestMaterializeViewFileLeavesARunnableToolOfItsOwn(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := filepath.Join(dir, "opt")
-	if err := materializeViewFile(blob, dst); err != nil {
+	if _, err := materializeViewFile(blob, dst); err != nil {
 		t.Fatalf("materializeViewFile: %v", err)
 	}
 	fi, err := os.Stat(dst)
@@ -944,7 +973,7 @@ func TestMaterializeViewFileLeavesARunnableToolOfItsOwn(t *testing.T) {
 func TestMakeLLDAliasesWithoutLLDIsANoOp(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	if err := makeLLDAliases(dir); err != nil {
+	if _, err := makeLLDAliases(dir); err != nil {
 		t.Fatalf("makeLLDAliases with no lld: %v", err)
 	}
 	entries, err := os.ReadDir(dir)

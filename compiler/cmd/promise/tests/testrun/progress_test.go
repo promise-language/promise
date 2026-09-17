@@ -138,9 +138,9 @@ func TestProgressModes_MultiFile(t *testing.T) {
 		}
 	}
 
-	// 3. tty stdout is byte-identical to plain stdout apart from the timings
-	//    baked into each line, so compare the lines with timings elided.
-	if got, want := elideTimings(tty.Stdout), elideTimings(plain.Stdout); got != want {
+	// 3. tty stdout is byte-identical to plain stdout apart from what legitimately
+	//    differs between two runs of the same suite, so compare with that elided.
+	if got, want := elideVolatile(tty.Stdout), elideVolatile(plain.Stdout); got != want {
 		t.Errorf("tty stdout differs from plain:\n tty:\n%s\nplain:\n%s\ntty run:%s\nplain run:%s",
 			got, want, tty.Detail(), plain.Detail())
 	}
@@ -200,6 +200,19 @@ func TestProgressModes_MultiFile(t *testing.T) {
 var timingRe = regexp.MustCompile(`-?\d+\.\d+s`)
 
 func elideTimings(s string) string { return timingRe.ReplaceAllString(s, "Ts") }
+
+// storeCostRe matches the line a run prints when it cost the content-addressed
+// store something (T2143).
+var storeCostRe = regexp.MustCompile(`(?m)^store: .*\n?`)
+
+// elideVolatile is elideTimings plus that line. The store cost is volatile by
+// design: of the three runs below the first materializes whatever the home
+// still owed and the other two cost nothing, which is the fact the line exists
+// to report and says nothing at all about render mode.
+//
+// On a warm home the line never appears, so leaving it in compared clean and
+// reddened only on a cold one — a flake that reaches whoever runs with --clean.
+func elideVolatile(s string) string { return storeCostRe.ReplaceAllString(elideTimings(s), "") }
 
 // TestProgressModes_SingleFile covers the other printer: the per-test lines a
 // single-file run streams through printChildTestOutput.
@@ -412,11 +425,20 @@ func TestProgressDoesNotAffectJSONMode(t *testing.T) {
 	}
 }
 
-// elideJSONVolatile blanks the per-record fields that legitimately differ
-// between two runs of the same suite: durations and absolute paths.
+// elideJSONVolatile blanks what legitimately differs between two runs of the
+// same suite: durations, absolute paths, and the store-cost record.
+//
+// The store record (T2143) is volatile by design — it reports what the run cost
+// the content-addressed store, so the first run of a pair materializes a
+// toolchain and the second, now warm, costs nothing. That is the fact it exists
+// to report, and it says nothing about render mode, which is what this file
+// asserts on.
 var jsonVolatileRe = regexp.MustCompile(`"(elapsed|duration_ms|duration|file)":\s*("[^"]*"|[0-9.]+)`)
 
+var jsonStoreRecordRe = regexp.MustCompile(`(?m)^\{"kind":"cas".*\}$`)
+
 func elideJSONVolatile(s string) string {
+	s = jsonStoreRecordRe.ReplaceAllString(s, `{"kind":"cas":X}`)
 	return jsonVolatileRe.ReplaceAllString(s, `"$1":X`)
 }
 

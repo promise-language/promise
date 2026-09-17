@@ -68,3 +68,27 @@ func TestParsePromiseCoverageJSONLNoCoverageRecords(t *testing.T) {
 		t.Errorf("got (%v, %d, %d), want (0, 1, 0)", pct, passed, failed)
 	}
 }
+
+// storeStream is the coverage stream with the store-cost record the runner now
+// emits on every run (T2143) spliced in. The gate's readers key records on
+// (file, test), so a record carrying a kind and no test identity must pass
+// through them untouched — the same contract the coverage record relies on.
+const storeStream = `{"kind":"coverage","file":"/repo/tests/a_test.pr","covered":8,"total":10}
+{"file":"/repo/tests/a_test.pr","test":"one","status":"pass","elapsed":0.01}
+{"file":"/repo/tests/a_test.pr","test":"two","status":"fail","elapsed":0.02}
+{"kind":"cas","network_bytes":0,"materialized_bytes":0,"materializations":0,"available":true}
+`
+
+func TestStoreRecordIsNotATestRecord(t *testing.T) {
+	records := ParseTestJSONL(storeStream)
+	if len(records) != 2 {
+		t.Fatalf("got %d test records, want 2 — the store record was counted as one: %+v", len(records), records)
+	}
+	pct, passed, failed := ParsePromiseCoverageJSONL(storeStream)
+	if passed != 1 || failed != 1 {
+		t.Errorf("counts = %d passed / %d failed, want 1/1", passed, failed)
+	}
+	if pct != 80.0 {
+		t.Errorf("coverage = %.1f%%, want 80.0%% — the store record disturbed the fold", pct)
+	}
+}

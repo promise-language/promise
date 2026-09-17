@@ -18,6 +18,7 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/promise-language/promise/compiler/internal/blobstore"
+	"github.com/promise-language/promise/compiler/internal/casmetrics"
 	"github.com/promise-language/promise/compiler/internal/module"
 )
 
@@ -113,6 +114,12 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// This process is about to use this home's toolchain surface, whether or not
+	// anything has to be materialized into it. Recording the home rather than
+	// the population is what makes the count independent of how warm the host
+	// was: one home reads 1 warm and 1 cold, while three private homes read 3
+	// either way — which is the shape T2133 had and nothing measured (T2143).
+	casmetrics.RegisterHome(home)
 	// Key the view dir by the blob-hash set, not just the target: a compiler/LLVM
 	// version bump changes the entry sha256s, yielding a fresh view dir so stale
 	// tools from a previous epoch are never served from a name-only match. The CAS
@@ -217,6 +224,13 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 	// rename(2). A crashed populator leaves only an orphan temp dir (reaped on a
 	// later materialization by sweepStaleViewStaging, or by `promise doctor
 	// --repair`), never a half-built viewDir.
+	//
+	// exploded accumulates what this population COSTS in bytes — which is not
+	// the size of the view: Linux symlinks and Windows hardlinks write nothing,
+	// where macOS has to own its bytes to patch and re-sign them. That
+	// asymmetry is the signal, so each materializer reports what it wrote
+	// rather than the view being measured afterwards (T2143).
+	var exploded int64
 	if err := publishViewDir(filepath.Dir(viewDir), viewDir, func(tmpDir string) error {
 		for _, e := range entries {
 			toolName := strings.TrimPrefix(e.Name, llvmEntryPrefix)
@@ -242,17 +256,26 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 				blobPath = p
 			}
 			dst := filepath.Join(tmpDir, toolName)
-			if err := materializeViewFile(blobPath, dst); err != nil {
+			n, err := materializeViewFile(blobPath, dst)
+			exploded += n
+			if err != nil {
 				return err
 			}
 		}
-		if aerr := makeLLDAliases(tmpDir); aerr != nil {
+		n, aerr := makeLLDAliases(tmpDir)
+		exploded += n
+		if aerr != nil {
 			return aerr
 		}
-		return writeToolchainStubs(tmpDir)
+		n, serr := writeToolchainStubs(tmpDir)
+		exploded += n
+		return serr
 	}); err != nil {
 		return "", err
 	}
+	// Recorded after the publish, so a population that crashed halfway is not
+	// counted as one: the view it would have produced does not exist.
+	casmetrics.AddMaterialized("llvm-view", exploded, 1)
 
 	llvmViewDir = viewDir
 	return viewDir, nil
@@ -503,22 +526,30 @@ func viewComplete(viewDir string, entries []*blobstore.ManifestEntry) bool {
 	return true
 }
 
-// materializeViewFile places a CAS blob into the view dir. macOS gets a patched
-// + signed working copy; Linux gets a symlink, and Windows — where a symlink
-// needs admin — gets a hardlink.
+// materializeViewFile places a CAS blob into the view dir and reports how many
+// bytes doing so cost. macOS gets a patched + signed working copy; Linux gets a
+// symlink, and Windows — where a symlink needs admin — gets a hardlink.
 //
 // Only macOS needs bytes of its own: PatchAndSignMachO rewrites the file in
 // place, and §5.1 requires the CAS blob to stay the raw upstream bytes it was
 // hashed as. A clone (copy-on-write, its own inode) satisfies both at metadata
 // cost; a streamed copy is the fallback where clonefile is unavailable. A
 // hardlink there would be a patch applied to the hashed content (T2133).
-func materializeViewFile(blobPath, dst string) error {
+//
+// The byte count is what the platform actually wrote, so the link and symlink
+// branches report zero (T2143): a view that costs metadata is not a view that
+// costs 375 MB, and conflating them would hide the difference the accounting
+// exists to show.
+func materializeViewFile(blobPath, dst string) (int64, error) {
 	os.Remove(dst)
 	switch runtime.GOOS {
 	case "darwin":
+		// A clone shares the source's blocks until one side is written, but the
+		// patch+re-sign below always writes, so the bytes are owed either way.
+		written := blobSize(blobPath)
 		if err := blobstore.CloneFile(blobPath, dst); err != nil {
 			if cerr := copyFileAtomic(blobPath, dst, viewToolPerm); cerr != nil {
-				return cerr
+				return 0, cerr
 			}
 		}
 		// Both branches have to leave the same file behind: clonefile inherits
@@ -526,15 +557,26 @@ func materializeViewFile(blobPath, dst string) error {
 		// the CAS non-executable would give a runnable tool down one path and an
 		// EACCES down the other.
 		if err := os.Chmod(dst, viewToolPerm); err != nil {
-			return err
+			return written, err
 		}
 		blobstore.PatchAndSignMachO(dst)
-		return nil
+		return written, nil
 	case "windows":
 		return linkOrCopyBlob(blobPath, dst, viewToolPerm)
 	default:
-		return os.Symlink(blobPath, dst)
+		return 0, os.Symlink(blobPath, dst)
 	}
+}
+
+// blobSize is the size of a file this code is about to copy, for accounting.
+// An unreadable source is reported as costing nothing rather than failing the
+// materialization: the copy itself is about to report the real error.
+func blobSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }
 
 // viewToolPerm is the mode a materialized LLVM tool carries: it has to be
@@ -554,7 +596,10 @@ const viewToolPerm = 0o755
 // A link keeps the source's bytes alive until the view dir is removed too, so
 // the space is reclaimed when `promise doctor --repair` sweeps stale views
 // rather than when gc drops the blob.
-func linkOrCopyBlob(src, dst string, perm os.FileMode) error {
+//
+// Returns the bytes written: zero when the link succeeded, the source's size
+// when it had to fall back to a copy (T2143).
+func linkOrCopyBlob(src, dst string, perm os.FileMode) (int64, error) {
 	return linkOrCopy(os.Link, src, dst, perm)
 }
 
@@ -563,25 +608,31 @@ func linkOrCopyBlob(src, dst string, perm os.FileMode) error {
 // filesystems arranged just so — can be exercised anywhere. A parameter rather
 // than a package var, for the same reason renameRetrying takes one: a var a
 // test swaps is a var every parallel test in the package races.
-func linkOrCopy(link func(src, dst string) error, src, dst string, perm os.FileMode) error {
+func linkOrCopy(link func(src, dst string) error, src, dst string, perm os.FileMode) (int64, error) {
 	os.Remove(dst)
 	if err := link(src, dst); err == nil {
-		return nil
+		return 0, nil
 	}
-	return copyFileAtomic(src, dst, perm)
+	written := blobSize(src)
+	if err := copyFileAtomic(src, dst, perm); err != nil {
+		return 0, err
+	}
+	return written, nil
 }
 
 // makeLLDAliases creates the lld-mode aliases (ld.lld/ld64.lld/lld-link/wasm-ld)
-// pointing at the materialized "lld" in the view dir. No-op if lld is absent.
-func makeLLDAliases(viewDir string) error {
+// pointing at the materialized "lld" in the view dir, and reports the bytes
+// they cost. No-op if lld is absent.
+func makeLLDAliases(viewDir string) (int64, error) {
 	lldName := "lld"
 	if runtime.GOOS == "windows" {
 		lldName = "lld.exe"
 	}
 	lldPath := filepath.Join(viewDir, lldName)
 	if _, err := os.Stat(lldPath); err != nil {
-		return nil
+		return 0, nil
 	}
+	var written int64
 	for link := range embeddedLLVMSymlinks {
 		name := link
 		if runtime.GOOS == "windows" {
@@ -592,16 +643,18 @@ func makeLLDAliases(viewDir string) error {
 		if runtime.GOOS == "windows" {
 			// Hardlink, not a copy: four aliases of a ~131 MB lld were 525 MB of
 			// duplicate bytes per view, and lld is never rewritten in place.
-			if err := linkOrCopyBlob(lldPath, linkPath, viewToolPerm); err != nil {
-				return err
+			n, err := linkOrCopyBlob(lldPath, linkPath, viewToolPerm)
+			written += n
+			if err != nil {
+				return written, err
 			}
 		} else {
 			if err := os.Symlink(lldName, linkPath); err != nil {
-				return err
+				return written, err
 			}
 		}
 	}
-	return nil
+	return written, nil
 }
 
 // stageEmbeddedLLVMBlobs decompresses each embedded LLVM blob (full-variant
@@ -617,6 +670,7 @@ func stageEmbeddedLLVMBlobs(store *blobstore.Store) error {
 		return nil
 	}
 	prefix := llvmEmbedPrefix
+	var staged int64
 	for _, name := range llvmEmbeddedFiles() {
 		data, err := embeddedLLVM.ReadFile(prefix + "/" + name)
 		if err != nil {
@@ -629,7 +683,12 @@ func stageEmbeddedLLVMBlobs(store *blobstore.Store) error {
 		if _, err := store.StageBlob(raw); err != nil {
 			return fmt.Errorf("stage %s: %w", name, err)
 		}
+		staged += int64(len(raw))
 	}
+	// Decompressing an embedded blob INTO the store is the same per-home cost
+	// as exploding one out of it — hundreds of megabytes written because this
+	// home did not have them yet — so it is accounted the same way (T2143).
+	recordMaterializedIfWritten("llvm-stage", staged)
 	return nil
 }
 
@@ -731,6 +790,7 @@ func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, 
 	}
 	resolver := blobstore.NewResolver(store, m)
 	defer resolver.Close()
+	var exploded int64
 	if err := publishViewDir(filepath.Dir(viewDir), viewDir, func(tmpDir string) error {
 		for _, f := range files {
 			name := targetDepManifestName(dep, arch, f)
@@ -745,7 +805,9 @@ func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, 
 				}
 				blobPath = p
 			}
-			if err := linkOrCopyBlob(blobPath, filepath.Join(tmpDir, f), 0o644); err != nil {
+			n, err := linkOrCopyBlob(blobPath, filepath.Join(tmpDir, f), 0o644)
+			exploded += n
+			if err != nil {
 				return err
 			}
 		}
@@ -753,6 +815,7 @@ func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, 
 	}); err != nil {
 		return "", err
 	}
+	casmetrics.AddMaterialized(viewSubdir, exploded, 1)
 	return viewDir, nil
 }
 

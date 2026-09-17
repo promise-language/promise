@@ -284,7 +284,7 @@ The tracker gates (`test`, `wasm-test`, `wasm-web-test`, `go-test`, `stress`, `c
 | `coverage`  | host           | no                 | `*_coverage_pct`, `go_test_*`, `promise_test_*` |
 | `wasm-size` | host           | no                 | `wasm_size_*` |
 
-Metric-only gates (`stress`, `coverage`, `wasm-size`) omit `files`. Test gates populate it. The envelope shape is identical so the tracker ingests one schema.
+Metric-only gates (`stress`, `coverage`, `wasm-size`) omit `files`. Test gates populate it. The envelope shape is identical so the tracker ingests one schema. Every row above also carries the four `cas_*` [store metrics](#store-metrics), which describe what the run cost rather than what it measured.
 
 ### Single-target invariant
 
@@ -369,11 +369,35 @@ Metrics are **derived by counting records**, so they always agree with the `file
 | `<p>_excluded_count`  | `excluded` |
 | `<p>_not_run_count`   | `not-run` |
 
+### Store metrics
+
+**Every gate reports what its run cost the content-addressed store.** Two quantities move bytes that no test asks for and no test controls — blobs pulled over the wire because the store did not have them, and bytes written exploding store (and embedded) content into usable form: the `llvm-view` tools, the CRT/OpenSSL/compiler-rt/winlink trees, the WASM objects, the macOS SDK stub, the embedded catalog. Both are side effects of the **tree's shape**, and both multiply by however many isolated caches a change decides to create, so a change that triples them must be visible as a number rather than as a timeout somewhere unrelated months later.
+
+| metric | what it counts | end state |
+|---|---|---|
+| `cas_network_bytes` | bytes transferred over the wire into the store | `exact: 0` — a run that reaches the network for a blob is a cache-population defect, not a slow day |
+| `cas_home_count` | distinct Promise homes the run reached the toolchain from | `down`, from `1` — one warm home per run |
+| `cas_materialized_bytes` | bytes written making delivered content usable | tracked; differs by platform by construction |
+| `cas_materializations` | distinct view/tree populations | tracked; moves with how warm the host was |
+
+- **Counted as spent, not as declared.** A transfer contributes the bytes that actually moved — a compressed source its compressed size, a transfer that failed verification what it pulled before failing — and a store hit contributes nothing. A count taken from manifest sizes would read the same warm or cold, which is the one distinction these exist to make.
+- **A link costs nothing, and says so.** Linux symlinks its toolchain view and Windows hardlinks it; only macOS owns its bytes, because it patches and re-signs them. `cas_materialized_bytes` therefore differs by platform by construction, which is why baselines are per-platform — and why `cas_home_count`, which does not, is the one that carries the enforced ratchet.
+- **The window is the measured phase.** A gate brings the build up to date, materializes the toolchain once, empties the ledger, and only then measures. A fresh clone must stage a toolchain at some point; charging the first run for it would make the numbers describe the machine. Anything fetched or exploded *after* that point is work the tree asked for a second time.
+- **Zero is a legitimate, visible value.** The full set is reported on every run, zeros included: a counter that appeared only when non-zero could not be judged against a baseline of zero.
+- **Where they cannot be measured, they are omitted and the reason is given** — never reported as zeros, which read exactly like a clean run.
+- **`integration` carries the two whose end state is an absolute.** `cas_network_bytes` and `cas_home_count` describe what a run ought never to do, so they belong with the numbers a landing decision rests on. The byte and population totals move with how warm the host was and with which platform links rather than copies; they are reported by the tracker gates and by `promise test`, where no term is owed.
+- **A number is judged where it is reproducible.** The gates measure with `-count=1`, so each reports the same figure every time and a term on it means something. `bin/verify` does not, and its Go phase replays whatever the test cache holds — so it *reports* the store's cost to the operator and deliberately keeps it out of its gate values, because the commit gate is the only thing that moves a baseline and a ratchet fed from a cached run settles below every full one.
+- **The install gate reports none of them.** It deliberately runs an installed compiler under a sandbox home, so its home count is two by construction and describes the gate rather than the tree.
+
+The single source for all four is a ledger the compiler appends to, one line per occurrence, in the directory holding its own binary (`bin/.promise-cas.jsonl` in a worktree). It is beside the *binary* and not inside a Promise home on purpose: a run fans out into many compiler processes, those processes may each choose a different home, and a per-home tally cannot see the very case that matters — which is exactly how three private homes went unnoticed for eighteen days. Appends are atomic, so concurrent compilers need no lock, and nothing is written on the warm path.
+
 ### Runner stream (`promise test --json`)
 
 The gate is built on `promise test --json`, which streams one JSON record per line (newline-delimited JSON) as each test completes — robust to abrupt termination, since only a trailing partial line can be lost. Each line carries an **absolute** `file`, plus `test`, `status`, `elapsed`, and optional `context`. The gate parses these, relativizes the paths, groups by file, and derives the metrics above.
 
 Under `-coverage` the same stream also carries one **coverage record** per file — `{"kind":"coverage","file":…,"covered":N,"total":M}` — counting executed and total instrumented blocks. A coverage record has a `kind` and no test identity, so a reader keying on (`file`, `test`) skips it and the two record kinds coexist on one stream. Only `bin/gate coverage` runs the runner this way; the test gates never pass `-coverage`.
+
+The stream also carries exactly one **store record** — `{"kind":"cas","network_bytes":N,"materialized_bytes":M,"materializations":K,"available":true}` — reporting what that run cost the store ([above](#store-metrics)). Like the coverage record it carries a `kind` and no test identity, and unlike the human output it is emitted on every run with its zeros present. On the human path the same numbers are one line after the summary block, printed **only when something was actually spent**: a zero-valued counter must not cost every warm run a line of a tail-read.
 
 A record's `context` is bounded (≈50 lines / 4 KB, with a `… (truncated)` marker) before it enters the envelope. A failure that dumps a large body (e.g. a Go test printing the full generated IR) would otherwise JSON-encode onto a single multi-MB line, which the runner's line-oriented drain cannot consume — deadlocking the gate to its wall-clock timeout (T0777). The full, untruncated output still reaches the gate's stderr/console log.
 
@@ -409,7 +433,12 @@ These gates speak the contract the flow SDK and BASE share, and the SDK **fails 
 | `integration` | `formatted` + `builds` + `checked` + `tested`, measured at once — what a landing decision rests on | all of the above |
 | `fit` | the machine, before work is given to it | `worktree_free_bytes`, `build_cache_free_bytes` |
 
+Every gate above except `fit` also reports `cas_network_bytes` and `cas_home_count` — see [Store metrics](#store-metrics).
+
+A metric's presence here is not its term: which of `integration`'s metrics are *enforced* on a target is that target's block in `baselines.json`, and a metric whose end state the tree has not reached yet is registered there and tracked until it does.
+
 - **`integration` is a composition, and every part is addressable.** A step fixing Go vet findings runs `bin/run checked:go` (seconds) rather than paying for the whole suite each round. Passing the parts is not passing the whole, and only the whole may be cited: a fix for one area can break another, and a sequence of narrow passes describes no single state.
+- **A gate reports what its run cost the store, once.** The bytes a run pulls over the wire and the bytes it explodes out of the store are properties of the whole run, not of any part of it — a composition's parts all draw on the same store — so the numbers appear exactly once in the envelope. Reporting them per part would put the same bytes in it several times under one name and leave the judge with duplicates. The window belongs to the **process**, `bin/gate` itself, and not to the function that measures: measuring is something a caller may do at any time, and a window is a side effect no measurement should carry — one opened inside a function call resets the ledger of whatever run is already measuring. `fit` is the exception, as ever: it measures the machine, must answer on one that cannot build, and so neither warms a toolchain nor opens a window.
 - **`fit` is not part of `integration`.** A machine that cannot build is not a change that may not land. It reports free space on the worktree's filesystem (which also holds `.promise-home/`) and on the one under `go env GOCACHE`, always both, so the envelope's shape does not vary by host.
 - **The gate never judges; the judge never measures, and reads two kinds of terms.** A **cap** is an absolute a person edits, in [`tools/gates/thresholds.json`](../tools/gates/thresholds.json) — today the `fit` floors. A **baseline** is derived, the best a metric has been, and ratchets in [`tools/gates/baselines.json`](../tools/gates/baselines.json) per platform: anything that ratchets lives there, judged `up`/`down`/`exact` in its three states (enforced, pending, informational). A metric carrying both must satisfy both, and a gate reads neither.
 - **Every metric `integration` reports carries an enforced term on every target the baselines file knows** — not merely on whichever host happens to be running. A term is per-target data, and a metric first seen on a new platform is registered *informational*, which is tracked and never judged; promoting it is a person's step, and it is owed for every target block rather than only the one in front of them. A metric enforced on one platform and informational on another means a landing decision there rests on a number nobody looks at, and the gap is invisible until someone sits down at that platform — it arrives as a red trunk for them instead of a failure for whoever opened it.

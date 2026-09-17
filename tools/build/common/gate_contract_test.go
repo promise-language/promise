@@ -281,6 +281,8 @@ func TestFit_FloorsAreCaps(t *testing.T) {
 var integrationMetricsUnjudged = map[string]string{
 	"host_test_count":     "a suite's size is not a quality of the change. It ratchets `up` where a target carries a figure, but requiring that everywhere would fail a target for deleting a test — which is sometimes the right change.",
 	"promise_check_units": "how many units the checker was given is not a quality of the change either — merging two files into a module lowers it without checking any less. It ratchets `up` where a target carries a figure; what guards against a sweep that measured nothing is the gate's refusal of a run that printed no summary.",
+	"cas_network_bytes":   "what a run pulls over the wire into the store SHOULD be enforced at exactly zero, and is not yet: a real sweep fetches ~70 MB because every private PROMISE_HOME the Go suite builds starts with an empty CAS (T2150). Tracked until that is fixed; promoting it is then a value and a direction in each target block.",
+	"cas_home_count":      "one home per run is the end state and the tree is at 29 (T2150), so an enforced term today would fail every run rather than the changes that add one. Tracked until then. Note when promoting: bin/verify does not pass -count=1, so its Go phase reports anywhere from 1 to 29 depending on the test cache — which is why the store metrics stay out of its gate values, and must, or the commit gate ratchets the baseline down to a cached run and fails the next full one.",
 }
 
 // metricNameLiteral matches the name a gate gives a metric at the only place

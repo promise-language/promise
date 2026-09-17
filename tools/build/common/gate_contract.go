@@ -260,6 +260,13 @@ func unknownContractGate(name string) error {
 // MeasureContractGate runs one gate and returns what it measured. The error
 // means the measurement could not be OBTAINED; it never means "the numbers are
 // bad" — three failing tests is a successful run of the gate that counts them.
+//
+// It has no side effects of its own beyond the shared build: what a RUN costs
+// the content-addressed store is added by runContractGate, the process entry
+// point, because a run is a process and not a function call. Opening that window
+// here would mean every caller opened one — including a test measuring a gate
+// against this very checkout, which would reset the ledger of whatever verify or
+// gate was measuring at the time and silently zero its numbers.
 func MeasureContractGate(root, name string) (Envelope, error) {
 	def, ok := contractGates[name]
 	if !ok {
@@ -353,9 +360,36 @@ func runContractGate(root string, args []string, stdout io.Writer) error {
 	if !envelope {
 		return fmt.Errorf("refusing to measure %q without --envelope; run `bin/run %s` for a result meant for a person", name, name)
 	}
+	// What this RUN costs the content-addressed store, added once, around
+	// everything (T2143). It belongs here and not in MeasureContractGate: it is
+	// a property of the whole process, a composition's parts all draw on the
+	// same store, and the window is a side effect no function call should carry.
+	// fit is the exception — it measures the machine, must answer on one that
+	// cannot build, and so neither warms a toolchain nor opens a window.
+	// A name this project does not have opens no window either: the refusal
+	// comes from MeasureContractGate below, and resetting somebody's ledger on
+	// the way to an error would be the same side effect on a path that measures
+	// nothing at all.
+	def, known := contractGates[name]
+	measured := known && !def.measuresMachine
+	var store casWindow
+	if measured {
+		_ = ensureGateBuild(root)
+		store = openCASWindow(root)
+	}
 	env, err := MeasureContractGate(root, name)
 	if err != nil {
 		return fmt.Errorf("%s: %w", name, err)
+	}
+	if measured {
+		metrics, incomplete := store.Metrics()
+		env.Metrics = append(env.Metrics, metrics...)
+		if incomplete != "" {
+			if env.Incomplete != "" {
+				env.Incomplete += "; "
+			}
+			env.Incomplete += incomplete
+		}
 	}
 	out, err := json.Marshal(env)
 	if err != nil {

@@ -29,6 +29,7 @@ import (
 	"github.com/promise-language/promise/compiler/internal/ast"
 	"github.com/promise-language/promise/compiler/internal/ast/astcache"
 	"github.com/promise-language/promise/compiler/internal/blobstore"
+	"github.com/promise-language/promise/compiler/internal/casmetrics"
 	"github.com/promise-language/promise/compiler/internal/codegen"
 	"github.com/promise-language/promise/compiler/internal/module"
 	"github.com/promise-language/promise/compiler/internal/ownership"
@@ -1186,13 +1187,23 @@ func runTest(args []string) {
 		return
 	}
 
+	// What this run costs the content-addressed store is measured against the
+	// ledger as it stands right now (T2143). A child spawned by the multi-file
+	// runner opens no window of its own: the parent's covers it, and a child
+	// printing its own store line would land in the output the parent parses.
+	store := openStoreWindow()
+
 	// Single file: use simple runner (no directory summary).
 	// Multiple files: combined summary at the end.
 	// JSON mode always uses the multi-file runner — it owns the JSONL emission.
 	if len(allFiles) == 1 && !jsonMode {
 		runTestFile(allFiles[0], cfg, targetTriple, coverageMode)
+		// A single-file run has no grand summary to hang this off, so it is
+		// reported on the way out. A failing one exits from inside the runner
+		// and prints no line — the gates read the ledger itself, never this.
+		printStoreCost(store)
 	} else {
-		runTestFiles(allFiles, cfg, targetTriple, parallel, coverageMode, reportJSON)
+		runTestFiles(allFiles, cfg, targetTriple, parallel, coverageMode, reportJSON, store)
 	}
 	// Every path that exits non-zero clears on its way out (a failure line or a
 	// summary always precedes it). A clean run that printed no summary — a file
@@ -2700,7 +2711,7 @@ func writeTestReport(path string, records []reportTestRecord) {
 //     individual uses sum-of-per-test-timeouts + 30s. Both are safety nets only.
 //   - Parallelism: batch runs multiple files concurrently (resource contention
 //     possible under heavy load); individual runs one file at a time.
-func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, parallel int, coverageMode bool, reportJSON string) {
+func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, parallel int, coverageMode bool, reportJSON string, store storeWindow) {
 	unlock := module.LockBuildDirShared()
 	defer unlock()
 
@@ -2822,6 +2833,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				counts[rec.Status]++
 			}
 		}
+		// Always, zeros included (T2143): a reader judging this against a
+		// baseline of zero cannot tell an absent record from a clean run.
+		writeCASRecord(os.Stdout, store.cost())
 		fmt.Fprintf(os.Stderr, "json: %d pass, %d fail, %d timeout, %d leak, %d memory, %d excluded, %d not-run (%d files, %.3fs)\n",
 			counts["pass"], counts["fail"], counts["timeout"], counts["leak"], counts["memory"],
 			counts["excluded"], counts["not-run"], len(results), time.Since(totalStart).Seconds())
@@ -3257,6 +3271,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		summary += fmt.Sprintf(", %d stale allow_leaks", totalStale)
 	}
 	progress.Printf("%s (%d files, %.3fs)%s\n", summary, totalFiles, totalElapsed.Seconds(), targetSuffix)
+	printStoreCost(store)
 
 	if len(failures) > 0 {
 		progress.Printf("\nFAILED:\n")
@@ -4302,6 +4317,15 @@ var llvmToolEnvVars = map[string]string{
 // everyone else's red trunk (T2108). Absent a pinned toolchain the build fails
 // and says so rather than finding something else.
 func findLLVMTool(name string) (string, error) {
+	// Reaching for a toolchain binary is what makes this process a user of this
+	// home's toolchain surface, whichever rung of the ladder below answers. The
+	// count of distinct homes a run touches is the one CAS number that does not
+	// move with how warm the host was, so it is taken here rather than at a
+	// materialization that a warm run never performs (T2143).
+	if home, herr := module.PromiseHome(); herr == nil {
+		casmetrics.RegisterHome(home)
+	}
+
 	// On Windows, tools have .exe extension — try with suffix first, then bare name.
 	// On other platforms, just search the bare name.
 	searchNames := []string{name}
@@ -5000,12 +5024,17 @@ func ensureBundledSDK() (*macOSSDKInfo, error) {
 		return nil, fmt.Errorf("cannot create bundled SDK directory: %w", err)
 	}
 
+	// exploded counts only what this call actually writes, so a warm home —
+	// every file already present at the right size — reports nothing (T2143).
+	var exploded int64
+
 	// Write TBD file (skip if already exists with correct size).
 	content := []byte(bundledLibSystemTBD)
 	if info, err := os.Stat(tbdPath); err != nil || info.Size() != int64(len(content)) {
 		if err := writeFileAtomic(tbdPath, content, 0644); err != nil {
 			return nil, fmt.Errorf("cannot write bundled libSystem.tbd: %w", err)
 		}
+		exploded += int64(len(content))
 	}
 
 	// Create symlink libSystem.tbd → libSystem.B.tbd (ld64.lld resolves -lSystem
@@ -5031,9 +5060,11 @@ func ensureBundledSDK() (*macOSSDKInfo, error) {
 			if err := writeFileAtomic(fwPath, body, 0644); err != nil {
 				return nil, fmt.Errorf("cannot write bundled %s.tbd: %w", fw.name, err)
 			}
+			exploded += int64(len(body))
 		}
 	}
 
+	recordMaterializedIfWritten("macos-sdk", exploded)
 	return &macOSSDKInfo{sysroot: sdkDir}, nil
 }
 
@@ -5351,6 +5382,7 @@ func findMuslCRT(target string) (string, error) {
 		return "", fmt.Errorf("cannot create CRT cache dir %s: %v", cacheDir, err)
 	}
 	prefix := "resources/crt/" + arch
+	var exploded int64
 	for _, name := range muslCRTFiles {
 		data, err := embeddedMuslCRT.ReadFile(prefix + "/" + name)
 		if err != nil {
@@ -5359,7 +5391,9 @@ func findMuslCRT(target string) (string, error) {
 		if err := os.WriteFile(filepath.Join(cacheDir, name), data, 0644); err != nil {
 			return "", fmt.Errorf("cannot write %s to cache: %v", name, err)
 		}
+		exploded += int64(len(data))
 	}
+	casmetrics.AddMaterialized("crt", exploded, 1)
 	return cacheDir, nil
 }
 
@@ -5454,6 +5488,7 @@ func findOpenSSL(target string) (string, error) {
 		return "", fmt.Errorf("cannot create OpenSSL cache dir %s: %v", cacheDir, err)
 	}
 	prefix := "resources/openssl/" + arch
+	var exploded int64
 	for _, name := range opensslFiles {
 		data, err := embeddedOpenSSL.ReadFile(prefix + "/" + name)
 		if err != nil {
@@ -5462,7 +5497,9 @@ func findOpenSSL(target string) (string, error) {
 		if err := os.WriteFile(filepath.Join(cacheDir, name), data, 0644); err != nil {
 			return "", fmt.Errorf("cannot write %s to cache: %v", name, err)
 		}
+		exploded += int64(len(data))
 	}
+	casmetrics.AddMaterialized("openssl", exploded, 1)
 	return cacheDir, nil
 }
 
@@ -5549,6 +5586,7 @@ func findCompilerRT(target string) (string, error) {
 		return "", fmt.Errorf("cannot create compiler-rt cache dir %s: %v", cacheDir, err)
 	}
 	prefix := "resources/compiler-rt/" + arch
+	var exploded int64
 	for _, name := range compilerRTFiles {
 		data, err := embeddedCompilerRT.ReadFile(prefix + "/" + name)
 		if err != nil {
@@ -5557,7 +5595,9 @@ func findCompilerRT(target string) (string, error) {
 		if err := os.WriteFile(filepath.Join(cacheDir, name), data, 0644); err != nil {
 			return "", fmt.Errorf("cannot write %s to cache: %v", name, err)
 		}
+		exploded += int64(len(data))
 	}
+	casmetrics.AddMaterialized("compiler-rt", exploded, 1)
 	return cacheDir, nil
 }
 
@@ -5786,6 +5826,7 @@ func ensureWasmAllocObj() (string, error) {
 	if err := os.WriteFile(objPath, embeddedWasmAllocObj, 0644); err != nil {
 		return "", fmt.Errorf("cannot write wasm_alloc.o to cache: %v", err)
 	}
+	casmetrics.AddMaterialized("wasm-alloc", int64(len(embeddedWasmAllocObj)), 1)
 	return objPath, nil
 }
 
@@ -5817,6 +5858,7 @@ func ensureWasmMathObj() (string, error) {
 	if err := os.WriteFile(objPath, embeddedWasmMathObj, 0644); err != nil {
 		return "", fmt.Errorf("cannot write wasm_math.o to cache: %v", err)
 	}
+	casmetrics.AddMaterialized("wasm-math", int64(len(embeddedWasmMathObj)), 1)
 	return objPath, nil
 }
 
@@ -5901,6 +5943,7 @@ func ensureWasiAdapter() (string, error) {
 	if err := os.WriteFile(adapterPath, embeddedWasiAdapter, 0644); err != nil {
 		return "", err
 	}
+	casmetrics.AddMaterialized("wasi-adapter", int64(len(embeddedWasiAdapter)), 1)
 	return adapterPath, nil
 }
 
@@ -6397,6 +6440,7 @@ func findWindowsLinkSurface(target string) (string, error) {
 		return "", fmt.Errorf("cannot create winlink cache dir %s: %v", cacheDir, err)
 	}
 	prefix := "resources/winlink/" + arch
+	var exploded int64
 	for _, name := range winLinkFiles {
 		data, err := embeddedWinLink.ReadFile(prefix + "/" + name)
 		if err != nil {
@@ -6405,7 +6449,9 @@ func findWindowsLinkSurface(target string) (string, error) {
 		if err := os.WriteFile(filepath.Join(cacheDir, name), data, 0644); err != nil {
 			return "", fmt.Errorf("cannot write %s to cache: %v", name, err)
 		}
+		exploded += int64(len(data))
 	}
+	casmetrics.AddMaterialized("winlink", exploded, 1)
 	return cacheDir, nil
 }
 
@@ -8074,6 +8120,7 @@ func extractEmbeddedModule(name string) (string, error) {
 	}
 	defer os.RemoveAll(tmpDir) // no-op after a successful rename
 
+	var exploded int64
 	for _, e := range entries {
 		if e.IsDir() {
 			continue // embedded catalog modules are flat (no subdirectories)
@@ -8085,11 +8132,16 @@ func extractEmbeddedModule(name string) (string, error) {
 		if err := os.WriteFile(filepath.Join(tmpDir, e.Name()), data, 0644); err != nil {
 			return "", err
 		}
+		exploded += int64(len(data))
 	}
 
 	if err := publishExtractedModule(tmpDir, cacheDir); err != nil {
 		return "", err
 	}
+	// Exploding the embedded catalog into a home is the same per-home cost as
+	// exploding a CAS view into it — tens of megabytes, once per home, and it
+	// multiplies with however many homes a run creates (T2143).
+	casmetrics.AddMaterialized("embedded-modules", exploded, 1)
 	return cacheDir, nil
 }
 

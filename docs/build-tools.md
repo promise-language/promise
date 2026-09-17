@@ -130,6 +130,15 @@ assert on a flag.
 tests that shell out to `go` would lose the warm build and module caches, which
 is most of what makes the suite fast.
 
+**A private `PROMISE_HOME` is not free, and is measured.** A test that builds
+itself an empty home makes the run stage a whole toolchain into it — 375 MB of
+copies on macOS, ~900 MB on Windows, zero on Linux, which symlinks — plus a
+fetch over the wire for anything that home's empty CAS does not hold, and doing
+that per test multiplies all of it. Unmeasured, the cost is invisible until it
+surfaces as an unrelated timeout months later (T2133), so `cas_home_count`
+counts the distinct homes a run reaches the toolchain from: the end state is
+one, and a change that adds a home has to say so.
+
 ## Which Repository a Tool Acts On
 
 A tool acts on exactly one repository: the one it was built for. `./make` stamps
@@ -259,6 +268,8 @@ The version string format:
 - Release build: `<epoch>` only
 
 The epoch is read from `catalog.toml`. After building, writes `bin/.promise.hash` (SHA256 of the binary) for cache invalidation.
+
+`bin/` holds one other sidecar, written by the compiler rather than by the build: `bin/.promise-cas.jsonl`, the ledger of what runs cost the content-addressed store — bytes fetched over the wire, and bytes written exploding store content into toolchain views and CRT trees. It sits beside the binary because every compiler process in a run is that binary, while the Promise home they write into is a choice each of them makes separately; a ledger inside a home cannot see a run that used three. `bin/gate` and `bin/verify` empty it once their build and toolchain warm-up are done and read it back when they are finished — the gate to report the `cas_*` metrics, verify to print the run's cost in its summary ([gate-system.md](gate-system.md#store-metrics)).
 
 ### 6. Release builds (`bin/build --release`)
 

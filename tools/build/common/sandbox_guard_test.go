@@ -10,19 +10,48 @@ import (
 	"time"
 )
 
-// sandboxState is the machine-global state this package has destroyed before:
-// the host Promise home, and the Go test cache's expiry stamp.
+// sandboxState is the shared state this package has destroyed before: the host
+// Promise home, the Go test cache's expiry stamp, and the worktree's store
+// ledger — which is not machine-global but IS a live measurement window whenever
+// a gate or a bin/verify is running, and a test that resets it silently zeroes
+// that run's numbers.
 type sandboxState struct {
 	promiseHome string
 	expireStamp string
+	casLedger   string
 }
 
-// sandboxSnapshot reads both watched values.
+// sandboxSnapshot reads every watched value.
 func sandboxSnapshot() sandboxState {
 	return sandboxState{
 		promiseHome: promiseHomeListing(),
 		expireStamp: testExpireStamp(),
+		casLedger:   casLedgerContents(),
 	}
+}
+
+// casLedgerContents is the worktree store ledger's bytes, empty when there is
+// none (or no checkout to look in).
+//
+// Watched because resetting it is how a measurement window OPENS, so any test
+// that reaches the gate entry point with this checkout as its root truncates
+// whatever run is measuring at the time. That happened twice while T2143 was
+// being written, both times silently: the run still passed and simply reported
+// one home where it had used thirty. A test measures against a root of its own.
+//
+// Absent reads as empty rather than as a sentinel word so that the comparison
+// is uniform: the check is a prefix test, and a sentinel would make a peer
+// compiler's first append look like a shrink.
+func casLedgerContents() string {
+	root, err := RootForTests()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(casLedgerPath(root))
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // sandboxDamage returns one report for each watched value that moved between
@@ -41,6 +70,15 @@ func sandboxDamage(before, after sandboxState) []string {
 		reports = append(reports, globalDamageReport(
 			"the Go test cache expiry stamp ($GOCACHE/testexpire.txt) moved",
 			before.expireStamp, after.expireStamp))
+	}
+	// Appending to the ledger is what a compiler does — a peer process may do it
+	// at any moment — and is not damage. LOSING what was already there is,
+	// because that is a measurement window being reset under a run still using
+	// it, so the check is a prefix test rather than an equality one.
+	if !strings.HasPrefix(after.casLedger, before.casLedger) {
+		reports = append(reports, globalDamageReport(
+			"the worktree store ledger (bin/"+casLedgerName+") was reset — a test opened a measurement window against this checkout; give it a root of its own",
+			before.casLedger, after.casLedger))
 	}
 	return reports
 }

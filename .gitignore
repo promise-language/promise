@@ -7,8 +7,9 @@ compiler/tools/antlr-*.jar
 compiler/internal/parser/*.interp
 compiler/internal/parser/*.tokens
 
-# bin/ holds only build artifacts — the compiler binary, hash sidecars, and all Go
-# build/flow tools compiled by ./make. Nothing under bin/ is ever committed.
+# bin/ holds only build artifacts — the compiler binary, hash and store-accounting
+# sidecars, and all Go build/flow tools compiled by ./make. Nothing under bin/ is
+# ever committed.
 bin/
 compiler/grammar/.antlr/PromiseLexer.interp
 compiler/grammar/.antlr/PromiseLexer.java

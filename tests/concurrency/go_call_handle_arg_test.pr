@@ -1,0 +1,474 @@
+// T2163: a refcounted `sharable handle passed as an argument to the fast
+// `go f(…)` call path must be DUPLICATED at the spawn boundary
+// (docs/language-design.md §17.4). That path retained `channel[T]` only — a
+// `Ref[T]` or `Weak[T]` argument got no refcount bump and no goroutine-side
+// release, so the spawner's drop (an NLL early drop at the call, which is
+// typically its last use, or plain scope exit) freed the referent while the
+// goroutine still held the pointer. The goroutine then read allocator poison:
+// `-2387225703656530210` is 0xDEDE…, the debug allocator's freed-memory fill.
+//
+// Unlike T2162 this reproduces for a plain LOCAL as well as for a parameter.
+//
+// Every case below spawns from a helper whose scope exits before the goroutine
+// runs, so the spawner's drop is guaranteed to land first — the deterministic
+// forcing shape. Each joins over a `done` channel rather than sleeping (T1632),
+// so the goroutine's work is ordered explicitly and the per-binary leak checker
+// cannot race a clock. A missing goroutine-side release shows up as a LEAK, so
+// these tests pin both halves of the retain/release pair.
+// --- the spawned side ------------------------------------------------------
+send_ref(Ref[int] r, channel[int] done) {
+  done.send(r.borrow);
+}
+
+// Gated on `gate` so the spawner's scope-exit drops provably land BEFORE the
+// upgrade. Without that edge the goroutine races those drops and `upgrade()`
+// legitimately reports either state — a nondeterministic expectation, not a
+// compiler defect. The wait also parks the goroutine while it holds the
+// duplicated handle, so the retain has to survive a suspend point.
+send_weak(Weak[int] w, channel[int] gate, channel[int] done) {
+  <-gate;
+  s := w.upgrade();
+  done.send(s?.borrow ?: -1);
+}
+
+send_ref_and_weak(Ref[int] r, Weak[int] w, channel[int] done) {
+  s := w.upgrade();
+  done.send(r.borrow + (s?.borrow ?: -1));
+}
+
+send_two_refs(Ref[int] a, Ref[int] b, channel[int] done) {
+  done.send(a.borrow + b.borrow);
+}
+
+send_chan(channel[int] src, channel[int] done) {
+  done.send((<-src)!);
+}
+
+send_int(int n, channel[int] done) {
+  done.send(n);
+}
+
+// `move` params CONSUME the handle — §17.4's table, row 1: ownership transfers
+// rather than duplicating. The callee drops it exactly once.
+consume_ref(Ref[int] move r, channel[int] done) {
+  done.send(r.borrow);
+}
+
+consume_chan(channel[int] move ch, channel[int] done) {
+  ch.send(5);
+  done.send(1);
+}
+
+// --- Ref[T], as a LOCAL of the spawning function ---------------------------
+
+// This helper's scope exit drops `r` — before the fix the last strong handle,
+// so the Arc was freed before the goroutine ever ran.
+spawn_local_ref(channel[int] done) {
+  r := Ref[int](7);
+  go send_ref(r, done);
+}
+
+call_local_ref() `test {
+  done := channel[int](capacity: 1);
+  spawn_local_ref(done);
+  v := (<-done)!;
+  assert(v == 7, "local Ref arg, got " + v.to_string());
+}
+
+// --- Ref[T], arriving as a borrowed PARAMETER ------------------------------
+
+spawn_param_ref(Ref[int] r, channel[int] done) {
+  go send_ref(r, done);
+}
+
+make_and_spawn_param_ref(channel[int] done) {
+  r := Ref[int](7);
+  spawn_param_ref(r, done);
+}
+
+call_param_ref() `test {
+  done := channel[int](capacity: 1);
+  make_and_spawn_param_ref(done);
+  v := (<-done)!;
+  assert(v == 7, "param Ref arg, got " + v.to_string());
+}
+
+// --- Weak[T] ---------------------------------------------------------------
+
+// Scope exit drops `w` then `r`, so weak_count reaches 0 and the whole Arc
+// allocation is freed before the goroutine runs.
+spawn_local_weak(channel[int] gate, channel[int] done) {
+  r := Ref[int](11);
+  w := r.downgrade();
+  go send_weak(w, gate, done);
+}
+
+call_local_weak() `test {
+  gate := channel[int](capacity: 1);
+  done := channel[int](capacity: 1);
+  spawn_local_weak(gate, done); // returns => its scope-exit drops have run
+  gate.send(1); // only now may the goroutine upgrade
+  v := (<-done)!;
+  // -1 is the DEFINED answer, not a failure: the last strong handle died with
+  // the spawner's scope, so upgrade() correctly reports none. What the fix
+  // changes is that the goroutine's own Weak handle keeps the ALLOCATION alive
+  // long enough to observe that. Before it, this read poison out of freed memory.
+  assert(v == -1, "local Weak arg, got " + v.to_string());
+}
+
+spawn_param_weak(Weak[int] w, channel[int] gate, channel[int] done) {
+  go send_weak(w, gate, done);
+}
+
+make_and_spawn_param_weak(channel[int] gate, channel[int] done) {
+  r := Ref[int](11);
+  w := r.downgrade();
+  spawn_param_weak(w, gate, done);
+}
+
+call_param_weak() `test {
+  gate := channel[int](capacity: 1);
+  done := channel[int](capacity: 1);
+  make_and_spawn_param_weak(gate, done);
+  gate.send(1);
+  v := (<-done)!;
+  assert(v == -1, "param Weak arg, got " + v.to_string());
+}
+
+// A Ref and a Weak to the same referent in ONE call: two retains of two
+// different kinds, and the retained Ref is what keeps the referent alive, so
+// the goroutine's upgrade() succeeds where `call_local_weak`'s cannot.
+spawn_ref_and_weak(channel[int] done) {
+  r := Ref[int](11);
+  w := r.downgrade();
+  go send_ref_and_weak(r, w, done);
+}
+
+call_ref_and_weak() `test {
+  done := channel[int](capacity: 1);
+  spawn_ref_and_weak(done);
+  v := (<-done)!;
+  assert(v == 22, "Ref + Weak args, got " + v.to_string());
+}
+
+// The same handle in two argument positions — two independent retains, two
+// independent releases. An off-by-one in either direction is a leak or a UAF.
+spawn_two_refs(channel[int] done) {
+  r := Ref[int](7);
+  go send_two_refs(r, r, done);
+}
+
+call_two_refs_same_handle() `test {
+  done := channel[int](capacity: 1);
+  spawn_two_refs(done);
+  v := (<-done)!;
+  assert(v == 14, "same Ref in two arg positions, got " + v.to_string());
+}
+
+// §17.4: "`config` still usable here — it was duplicated, not moved." The
+// spawner keeps its own handle and may go on using it after the spawn.
+call_still_usable_after_spawn() `test {
+  r := Ref[int](7);
+  done := channel[int](capacity: 1);
+  go send_ref(r, done);
+  v := (<-done)!;
+  assert(v == 7, "goroutine's duplicated handle, got " + v.to_string());
+  assert(r.borrow == 7, "spawner's handle still usable after the spawn");
+}
+
+// --- `move`: transferred, NOT duplicated -----------------------------------
+
+// The callee owns and drops the handle, and the caller's drop flag is cleared,
+// so a spawn-site retain here would be released one time too many (or leak).
+call_move_ref() `test {
+  r := Ref[int](5);
+  done := channel[int](capacity: 1);
+  go consume_ref(move r, done);
+  v := (<-done)!;
+  assert(v == 5, "moved Ref arg, got " + v.to_string());
+}
+
+call_move_chan() `test {
+  ch := channel[int](capacity: 1);
+  done := channel[int](capacity: 1);
+  go consume_chan(move ch, done);
+  v := (<-done)!;
+  assert(v == 1, "moved channel arg, got " + v.to_string());
+}
+
+// --- channel[T] regression guards for the rewritten loop -------------------
+
+spawn_local_chan(channel[int] done) {
+  ch := channel[int](capacity: 1);
+  ch.send(3);
+  go send_chan(ch, done);
+}
+
+call_local_chan() `test {
+  done := channel[int](capacity: 1);
+  spawn_local_chan(done);
+  v := (<-done)!;
+  assert(v == 3, "local channel arg, got " + v.to_string());
+}
+
+spawn_param_chan(channel[int] src, channel[int] done) {
+  go send_chan(src, done);
+}
+
+make_and_spawn_param_chan(channel[int] done) {
+  ch := channel[int](capacity: 1);
+  ch.send(4);
+  spawn_param_chan(ch, done);
+}
+
+call_param_chan() `test {
+  done := channel[int](capacity: 1);
+  make_and_spawn_param_chan(done);
+  v := (<-done)!;
+  assert(v == 4, "param channel arg, got " + v.to_string());
+}
+
+// --- the arm must not over-fire on a Copy argument -------------------------
+
+spawn_local_int(channel[int] done) {
+  n := 6;
+  go send_int(n, done);
+}
+
+call_copy_arg_no_retain() `test {
+  done := channel[int](capacity: 1);
+  spawn_local_int(done);
+  v := (<-done)!;
+  assert(v == 6, "int local arg, got " + v.to_string());
+}
+
+// --- reached with c.typeSubst active ---------------------------------------
+
+// A generic spawner, so codegen reaches the §17.4 arm inside a monomorphized
+// body where the argument type must be substituted before it can be classified.
+// Two instantiations, to be sure the substitution is per-instance.
+spawn_generic_ref[T](T seed, channel[int] done) {
+  r := Ref[int](9);
+  go send_ref(r, done);
+}
+
+call_generic_spawner_concrete_ref() `test {
+  d1 := channel[int](capacity: 1);
+  spawn_generic_ref(1, d1);
+  assert((<-d1)! == 9, "generic spawner, int instantiation");
+  d2 := channel[int](capacity: 1);
+  spawn_generic_ref("x", d2);
+  assert((<-d2)! == 9, "generic spawner, string instantiation");
+}
+
+// The handle's own element type is the type parameter, so the substitution has
+// to resolve Ref[T] itself rather than an already-concrete Ref[int], and has to
+// pick the matching Ref[T].drop for the release. Unlike the cases above this one
+// does NOT fail before the fix — with no retain emitted there is nothing to get
+// wrong. What it guards is the retain that now exists: a mis-resolved element
+// type would select the wrong drop, which the per-binary leak/free checker
+// catches, and the `string` instantiation makes the referent a heap value so a
+// mis-selected drop cannot pass unnoticed.
+send_ref_generic[T](Ref[T] r, Ref[int] n, channel[int] done) {
+  done.send(n.borrow);
+}
+
+spawn_generic_handle[T](T move seed, channel[int] done) {
+  r := Ref[T](move seed);
+  n := Ref[int](33);
+  go send_ref_generic(r, n, done);
+}
+
+call_generic_spawner_generic_ref() `test {
+  d1 := channel[int](capacity: 1);
+  spawn_generic_handle(41, d1);
+  assert((<-d1)! == 33, "generic Ref[T], int instantiation");
+  d2 := channel[int](capacity: 1);
+  spawn_generic_handle[string]("hello".clone(), d2);
+  assert((<-d2)! == 33, "generic Ref[T], string instantiation");
+}
+
+// --- Release pairing: every spawn-site retain must be balanced -------------
+// The retain is only sound if the goroutine releases it on every exit path. A
+// missed release does not fail an assertion — it shows up as a LEAK outcome,
+// which is what these cases are really asserting.
+
+// The target panics while holding the duplicated Ref. Promise panics via a flag
+// rather than unwinding, and the goroutine-side release is emitted before the
+// flag is checked, so the retain must still be balanced here.
+panicker(Ref[int] r, channel[int] done) {
+  done.send(r.borrow);
+  int? nothing = none;
+  x := nothing!; // panics, still holding the retained handle
+  done.send(x);
+}
+
+spawn_panicker(channel[int] done) {
+  r := Ref[int](3);
+  go panicker(r, done);
+}
+
+goroutine_panic_releases_retained_ref() `test {
+  done := channel[int](capacity: 2);
+  spawn_panicker(done);
+  assert((<-done)! == 3, "goroutine ran before panicking");
+}
+
+// N spawns over one handle: N retains must pair with N releases.
+spawn_many(Ref[int] r, channel[int] done) {
+  for i in 0..8 {
+    go send_ref(r, done);
+  }
+}
+
+make_and_spawn_many(channel[int] done) {
+  r := Ref[int](5);
+  spawn_many(r, done);
+}
+
+loop_spawns_over_one_ref() `test {
+  done := channel[int](capacity: 8);
+  make_and_spawn_many(done);
+  int sum = 0;
+  for i in 0..8 {
+    sum = sum + (<-done)!;
+  }
+  assert(sum == 40, "all eight goroutines saw a live referent, got " + sum.to_string());
+}
+
+// A fire-and-forget spawn: nothing joins the goroutine, so the spawner's drop
+// and the goroutine's release race with no ordering between them. The refcount
+// is what makes that safe in either order.
+fire_and_forget_ref() `test {
+  r := Ref[int](1);
+  done := channel[int](capacity: 1);
+  go send_ref(r, done);
+}
+
+// `go! f(…)` exits through the failable-aggregate path rather than the plain
+// one, on both the success and the raise route.
+checked!(Ref[int] r) int {
+  if r.borrow < 0 {
+    raise error("negative");
+  }
+  return r.borrow;
+}
+
+failable_spawn(int seed) failable_task[int] {
+  r := Ref[int](seed);
+  return go! checked(r);
+}
+
+failable_go_call_ref() `test {
+  t := failable_spawn(11);
+  v := (<-t)?!;
+  assert(v == 11, "failable go-call Ref arg, got " + v.to_string());
+}
+
+failable_go_call_ref_error() `test {
+  t := failable_spawn(-1);
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    0
+  };
+  assert(got, "error surfaced from failable go-call");
+  assert(v == 0, "recovery value");
+}
+
+// --- Borrows that are not a plain local or parameter -----------------------
+// §17.4 is about the handle crossing the boundary, not about how the name that
+// carries it happens to be bound. Every shape below is a BORROW whose owner
+// stays behind, so each must be duplicated; keying the retain off the binding
+// kind would have covered only the first two sections of this file.
+
+type Holder {
+  Ref[int] r;
+}
+
+// A for-in binding over a container of handles: the element is borrowed from
+// the vector, which the spawner's scope exit drops along with its elements.
+spawn_for_in(channel[int] done) {
+  Ref[int][] rs = [Ref[int](3), Ref[int](4)];
+  for r in rs {
+    go send_ref(r, done);
+  }
+}
+
+for_in_binding_over_handles() `test {
+  done := channel[int](capacity: 2);
+  spawn_for_in(done);
+  int sum = 0;
+  for i in 0..2 {
+    sum = sum + (<-done)!;
+  }
+  assert(sum == 7, "for-in handle binding, got " + sum.to_string());
+}
+
+// A `~` mutable-borrow parameter. `Ref[T]` is `sharable, so §17.4's table
+// admits it where a non-sharable `T~` would be rejected outright.
+relay_mut_borrow(Ref[int] ~r, channel[int] done) {
+  go send_ref(r, done);
+}
+
+make_and_relay_mut_borrow(channel[int] done) {
+  r := Ref[int](7);
+  relay_mut_borrow(r, done);
+}
+
+mut_borrow_param() `test {
+  done := channel[int](capacity: 1);
+  make_and_relay_mut_borrow(done);
+  v := (<-done)!;
+  assert(v == 7, "~ borrow handle param, got " + v.to_string());
+}
+
+// A field read — not a bare identifier at all, so a name-keyed retain could
+// never have reached it. The Holder owns the handle and drops it.
+spawn_field_read(channel[int] done) {
+  h := Holder(r: Ref[int](7));
+  go send_ref(h.r, done);
+}
+
+field_read_handle() `test {
+  done := channel[int](capacity: 1);
+  spawn_field_read(done);
+  v := (<-done)!;
+  assert(v == 7, "handle read from a field, got " + v.to_string());
+}
+
+// The complement: an owned TEMPORARY is not borrowed at all — ownership is
+// transferred into the goroutine frame, which already releases it. The retain
+// must leave that path alone, so this asserts the transfer still works end to
+// end. (That the two mechanisms do not overlap is a statement about emitted IR,
+// pinned by TestT2163_GoCallOwnedTempSingleRelease rather than from here: a
+// spurious extra retain would come with its own release and stay balanced, so
+// no runtime assertion or leak count could see it.)
+make_ref() Ref[int] {
+  return Ref[int](7);
+}
+
+spawn_temp_handle(channel[int] done) {
+  go send_ref(make_ref(), done);
+}
+
+owned_temp_handle_not_double_released() `test {
+  done := channel[int](capacity: 1);
+  spawn_temp_handle(done);
+  v := (<-done)!;
+  assert(v == 7, "owned temporary handle, got " + v.to_string());
+}
+
+// Named arguments are matched to parameters by name, so the retain must follow
+// the argument's own position rather than assuming source order is param order.
+spawn_named_args(channel[int] done) {
+  r := Ref[int](7);
+  go send_ref(done: done, r: r);
+}
+
+named_arguments() `test {
+  done := channel[int](capacity: 1);
+  spawn_named_args(done);
+  v := (<-done)!;
+  assert(v == 7, "named arguments, got " + v.to_string());
+}

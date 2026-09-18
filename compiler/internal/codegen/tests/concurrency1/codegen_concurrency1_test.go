@@ -1859,11 +1859,14 @@ func TestT2162_GenericSpawnerRefParamRetained(t *testing.T) {
 	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
 }
 
-// T2162: the fast `go f(r)` path deliberately retains channels only. Ref[T] and
-// Weak[T] args are unretained there for a LOCAL too, so retaining just the
-// parameter half would be arbitrary — that whole gap is T2163. Pins the
-// boundary, so closing T2163 is a deliberate change rather than a silent one.
-func TestT2162_GoCallRefParamNotRetained(t *testing.T) {
+// T2163: the fast `go f(…)` path retained `channel[T]` only, so a Ref[T]
+// argument crossed as a bare borrow and the spawner's drop freed the Arc under
+// the running goroutine. §17.4 requires every refcounted `sharable handle to be
+// duplicated at the boundary, and the accepted set is the one
+// ownership.isRefcountedHandle already exempts from the borrow rejection —
+// Channel, Ref and Weak alike. Supersedes T2162's TestT2162_GoCallRefParamNotRetained,
+// which pinned this gap as that item's deliberate boundary.
+func TestT2163_GoCallRefParamRetained(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		worker(Ref[int] r, Channel[int] done) {
 			done.send(r.borrow);
@@ -1879,11 +1882,185 @@ func TestT2162_GoCallRefParamNotRetained(t *testing.T) {
 		}
 	`)
 	consumeIR := codegentest.ExtractFunction(ir, "__user.consume")
-	codegentest.AssertNotContains(t, consumeIR, "arcdup.inc")
-	// The `done` channel param IS retained on this path, so exactly one bump.
-	if got := strings.Count(consumeIR, "atomicrmw add"); got != 1 {
-		t.Fatalf("expected exactly 1 refcount bump (the channel param), got %d:\n%s", got, consumeIR)
+	codegentest.AssertContains(t, consumeIR, "arcdup.inc")
+	// Both handle params are retained now — the Ref and the channel.
+	if got := strings.Count(consumeIR, "atomicrmw add"); got != 2 {
+		t.Fatalf("expected 2 refcount bumps (Ref param + channel param), got %d:\n%s", got, consumeIR)
 	}
+	// And the goroutine releases what the spawn retained — an unpaired bump
+	// would pin the Arc forever.
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
+}
+
+// T2163: the same gap for a plain LOCAL, which is what distinguishes this item
+// from T2162 — a local has a drop binding, so the pre-existing arm saw it and
+// still skipped it because it tested only for a channel.
+func TestT2163_GoCallRefLocalRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		worker(Ref[int] r, Channel[int] done) {
+			done.send(r.borrow);
+		}
+		main() {
+			r := Ref[int](7);
+			done := channel[int](capacity: 1);
+			go worker(r, done);
+			v := <-done;
+		}
+	`)
+	// The spawner is main's coroutine; ExtractFunc skips the ramp call site.
+	mainIR := codegentest.ExtractFunc(ir, ".goroutine.main")
+	codegentest.AssertContains(t, mainIR, "arcdup.inc")
+	// §17.4's ordering invariant: "the goroutine's handle is created before the
+	// spawner's can drop" — so the retain must precede the ramp call, which is
+	// what hands the arguments to promise_g_new / promise_sched_enqueue.
+	dupIdx := strings.Index(mainIR, "arcdup.inc")
+	rampIdx := strings.Index(mainIR, "call i8* @.goroutine.0(")
+	if dupIdx < 0 || rampIdx < 0 || dupIdx > rampIdx {
+		t.Fatalf("expected arcdup.inc before the goroutine ramp in main:\n%s", mainIR)
+	}
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
+}
+
+// T2163: Weak[T] is `sendable `sharable alongside Ref[T] and is in
+// ownership.isRefcountedHandle, so it carries the same duplication duty. Its
+// release must be Weak[T].drop (weak_count), never Ref[T].drop (strong_count) —
+// a mis-paired release here frees the allocation out from under live handles.
+func TestT2163_GoCallWeakLocalRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		worker(Weak[int] w, Channel[int] done) {
+			s := w.upgrade();
+			done.send(s?.borrow ?: -1);
+		}
+		main() {
+			r := Ref[int](11);
+			w := r.downgrade();
+			done := channel[int](capacity: 1);
+			go worker(w, done);
+			v := <-done;
+		}
+	`)
+	mainIR := codegentest.ExtractFunc(ir, ".goroutine.main")
+	codegentest.AssertContains(t, mainIR, "weakdup.inc")
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Weak[int].drop"`)
+	codegentest.AssertNotContains(t, coroIR, `call void @"Ref[int].drop"`)
+}
+
+// T2163: the parameter half of the Weak case (T2162's arm covered it for the
+// two block spawn sites but not for this one).
+func TestT2163_GoCallWeakParamRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		worker(Weak[int] w, Channel[int] done) {
+			s := w.upgrade();
+			done.send(s?.borrow ?: -1);
+		}
+		consume(Weak[int] w, Channel[int] done) {
+			go worker(w, done);
+		}
+		main() {
+			r := Ref[int](11);
+			w := r.downgrade();
+			done := channel[int](capacity: 1);
+			consume(w, done);
+			v := <-done;
+		}
+	`)
+	consumeIR := codegentest.ExtractFunction(ir, "__user.consume")
+	codegentest.AssertContains(t, consumeIR, "weakdup.inc")
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Weak[int].drop"`)
+}
+
+// T2163: a `move` argument TRANSFERS the handle (§17.4's table, row 1) rather
+// than duplicating it — the callee owns and drops it and the caller's flag is
+// cleared, so a retain here would be released one time too many. The widened
+// arm must keep its hands off the move path.
+func TestT2163_GoCallMoveRefNotRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		sink(Ref[int] move r, Channel[int] done) {
+			done.send(r.borrow);
+		}
+		main() {
+			r := Ref[int](5);
+			done := channel[int](capacity: 1);
+			go sink(move r, done);
+			v := <-done;
+		}
+	`)
+	mainIR := codegentest.ExtractFunc(ir, ".goroutine.main")
+	codegentest.AssertNotContains(t, mainIR, "arcdup.inc")
+	// The callee consumes and drops it, so the goroutine frame must not also
+	// release it.
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertNotContains(t, coroIR, `call void @"Ref[int].drop"`)
+}
+
+// T2163 regression guard: rewriting the channel-only loop into one handle arm
+// must not disturb T1158's exactly-one-release-per-channel-argument invariant.
+func TestT2163_GoCallChannelLocalStillReleased(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		ping(Channel[int] out) { out.send(1); }
+		main() {
+			ch := channel[int](capacity: 1);
+			go ping(ch);
+		}
+	`)
+	coroFn := codegentest.ExtractDefine(ir, `.goroutine.0`)
+	if coroFn == "" {
+		t.Fatal("expected .goroutine.0 coroutine function in IR")
+	}
+	if got := strings.Count(coroFn, `call void @"Channel[int].drop"(`); got != 1 {
+		t.Fatalf("expected exactly 1 goroutine-side Channel[int].drop, got %d", got)
+	}
+}
+
+// T2163: a Copy argument must not reach the retain at all — the arm is gated on
+// the type being a refcounted sharable handle, not merely on the name being an
+// owned local.
+func TestT2163_GoCallCopyLocalNotRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		worker(int n, Channel[int] done) { done.send(n); }
+		main() {
+			n := 6;
+			done := channel[int](capacity: 1);
+			go worker(n, done);
+			v := <-done;
+		}
+	`)
+	mainIR := codegentest.ExtractFunc(ir, ".goroutine.main")
+	codegentest.AssertNotContains(t, mainIR, "arcdup.inc")
+	codegentest.AssertNotContains(t, mainIR, "weakdup.inc")
+	// Only the channel argument is retained — one bump, not two.
+	if got := strings.Count(mainIR, "atomicrmw add"); got != 1 {
+		t.Fatalf("expected exactly 1 refcount bump (the channel arg), got %d:\n%s", got, mainIR)
+	}
+}
+
+// T2163: inside a monomorphized generic body the argument type reaches the arm
+// carrying a TypeParam, so it must be substituted before it can be classified —
+// otherwise the handle is silently not retained (or retained against the wrong
+// Ref[T].drop).
+func TestT2163_GenericSpawnerRefRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		worker(Ref[int] r, Channel[int] done) {
+			done.send(r.borrow);
+		}
+		spawn[T](T tag, Channel[int] done) {
+			r := Ref[int](9);
+			go worker(r, done);
+		}
+		main() {
+			done := channel[int](capacity: 1);
+			spawn(1, done);
+			v := <-done;
+		}
+	`)
+	spawnIR := codegentest.ExtractFunction(ir, `"spawn[int]"`)
+	codegentest.AssertContains(t, spawnIR, "arcdup.inc")
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
 }
 
 // T2162 neighbour: a channel LOCAL captured by the via-block call path
@@ -1918,4 +2095,93 @@ func TestT2162_GoCallViaBlockChannelLocalRetained(t *testing.T) {
 	}
 	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
 	codegentest.AssertContains(t, coroIR, `call void @"Channel[int].drop"`)
+}
+
+// T2163: an owned temporary handle argument is TRANSFERRED into the goroutine
+// frame, not duplicated — the retain keys off "this argument is a borrow", which
+// only the argument loop can decide. A spurious retain here would come with its
+// own balancing release, so it stays refcount-neutral and no runtime assertion
+// or leak count could ever see it; the emitted IR is the only place it shows.
+func TestT2163_GoCallOwnedTempSingleRelease(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		worker(Ref[int] r, Channel[int] done) { done.send(r.borrow); }
+		make_ref() Ref[int] { return Ref[int](7); }
+		main() {
+			done := channel[int](capacity: 1);
+			go worker(make_ref(), done);
+			v := <-done;
+		}
+	`)
+	mainIR := codegentest.ExtractFunc(ir, ".goroutine.main")
+	codegentest.AssertNotContains(t, mainIR, "arcdup.inc")
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	if got := strings.Count(coroIR, `call void @"Ref[int].drop"(`); got != 1 {
+		t.Fatalf("expected exactly 1 goroutine-side Ref[int].drop for a transferred temp, got %d:\n%s", got, coroIR)
+	}
+}
+
+// T2163: a borrow that is neither a local nor a parameter still crosses the
+// boundary and still has an owner that stays behind. A for-in binding is
+// borrowed from the vector, whose scope-exit drop frees the elements.
+func TestT2163_GoCallForInBindingRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		worker(Ref[int] r, Channel[int] done) { done.send(r.borrow); }
+		spawn(Channel[int] done) {
+			Ref[int][] rs = [Ref[int](3)];
+			for r in rs { go worker(r, done); }
+		}
+		main() {
+			done := channel[int](capacity: 1);
+			spawn(done);
+			v := <-done;
+		}
+	`)
+	spawnIR := codegentest.ExtractFunction(ir, "__user.spawn")
+	codegentest.AssertContains(t, spawnIR, "arcdup.inc")
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
+}
+
+// T2163: a `~` mutable-borrow parameter carrying a handle. Its declared type is
+// a MutRef wrapper, so the classifier has to look through it to reach the
+// element type — extractNamed already sees through refs, so a missed unwrap
+// matched the origin while leaving the element nil and silently refused it.
+func TestT2163_GoCallMutBorrowParamRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		worker(Ref[int] r, Channel[int] done) { done.send(r.borrow); }
+		relay(Ref[int]~ r, Channel[int] done) { go worker(r, done); }
+		main() {
+			r := Ref[int](7);
+			done := channel[int](capacity: 1);
+			relay(r, done);
+			v := <-done;
+		}
+	`)
+	relayIR := codegentest.ExtractFunction(ir, "__user.relay")
+	codegentest.AssertContains(t, relayIR, "arcdup.inc")
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
+}
+
+// T2163: a handle read out of a field is not an identifier at all, so a retain
+// keyed on the captured NAME could never have reached it. The Holder owns the
+// handle and drops it when the spawner's scope exits.
+func TestT2163_GoCallFieldReadRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type Holder { Ref[int] r; }
+		worker(Ref[int] r, Channel[int] done) { done.send(r.borrow); }
+		spawn(Channel[int] done) {
+			h := Holder(r: Ref[int](7));
+			go worker(h.r, done);
+		}
+		main() {
+			done := channel[int](capacity: 1);
+			spawn(done);
+			v := <-done;
+		}
+	`)
+	spawnIR := codegentest.ExtractFunction(ir, "__user.spawn")
+	codegentest.AssertContains(t, spawnIR, "arcdup.inc")
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
 }

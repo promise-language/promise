@@ -504,27 +504,31 @@ type Compiler struct {
 	spawnStdinFd  *ir.Global // @__promise_spawn_stdin_fd (TLS, i32)
 
 	// Scheduler globals (Phase 5c — M:N scheduler)
-	currentGGlobal        *ir.Global  // @__promise_current_g (TLS, i8*)
-	currentPGlobal        *ir.Global  // @__promise_current_p (TLS, i8*) — current P for local queue ops
-	currentMGlobal        *ir.Global  // @__promise_current_m (TLS, i8*) — current M for syscall handoff
-	schedGlobal           *ir.Global  // @__promise_sched (global Sched struct)
-	testPanicMsgGlobal    *ir.Global  // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
-	testPanicTypeGlobal   *ir.Global  // @__promise_test_panic_type (non-TLS, i8) — 0=none, 1=rodata, 2=heap (T0275)
-	testDoneGlobal        *ir.Global  // @__promise_test_done (non-TLS, i32) — set to 1 by trampoline on completion
-	testDeadlineGlobal    *ir.Global  // @__promise_test_deadline (non-TLS, i64) — WASM cooperative test deadline; 0 = disabled (T0680)
-	testTimedOutGlobal    *ir.Global  // @__promise_test_timed_out (non-TLS, i8) — set to 1 by coop scheduler on deadline (T0680)
-	panicFlagGlobal       *ir.Global  // @__promise_panic_flag (TLS, i8) — 1 = panic in flight
-	panicMsgTlsGlobal     *ir.Global  // @__promise_panic_msg (TLS, i8*) — C string pointer to panic message
-	panicTypeTlsGlobal    *ir.Global  // @__promise_panic_type (TLS, i8) — 1=.rodata, 2=heap-allocated
-	panicExitBlock        *ir.Block   // B0228: if set, emitPanicReturn branches here instead of ret (coroutine context)
-	coroutineReturnBlock  *ir.Block   // B0353: if set, goroutine return branches here instead of ret
-	inCoroutine           bool        // true when compiling inside a go block coroutine body
-	goExprFireAndForget   bool        // true when go expr result is discarded (no <-task receiver)
-	elvisResultConsumed   bool        // T0954: true when an inline elvis `?:` result is the operand of a consuming `<-` await
-	elvisResultBound      bool        // T0952: true when an elvis `?:` result is bound directly to a variable/assignment target (claims the result temp and owns it unconditionally)
-	elvisResultReturned   bool        // T0982: true when an elvis `?:` result is the return expression (escapes to the caller). Like elvisResultBound, forces none-path default neutralization for handle/heap results, but does NOT create a per-path elvisBoundDropFlag (no binding consumes it; the returned result temp is claimed by claimStringTemp/claimHeapTemp).
-	elvisBoundDropFlag    value.Value // T0933/T0940/T0981: per-path drop flag (phi[someOwnsInner,noneOwned]) for a bound elvis `m := a ?: b`; consumed by the var-decl binding to replace maybeRegisterDrop's unconditional owning drop. nil otherwise. (T0940 generalizes the earlier T0933 heap-user-only `elvisBoundOwned`.)
-	elvisResultOwnsForced bool        // T1166: true when an elvis `?:` result is assigned to a member/index target (an owned field/element with no per-slot drop flag). genElvis clones a borrowed operand on the some/none path so the result is unconditionally owned; the container's field/element drop is then correct (no double-free of a caller/container-owned inner).
+	currentGGlobal         *ir.Global  // @__promise_current_g (TLS, i8*)
+	currentPGlobal         *ir.Global  // @__promise_current_p (TLS, i8*) — current P for local queue ops
+	currentMGlobal         *ir.Global  // @__promise_current_m (TLS, i8*) — current M for syscall handoff
+	schedGlobal            *ir.Global  // @__promise_sched (global Sched struct)
+	testPanicMsgGlobal     *ir.Global  // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
+	testPanicTypeGlobal    *ir.Global  // @__promise_test_panic_type (non-TLS, i8) — 0=none, 1=rodata, 2=heap (T0275)
+	testDoneGlobal         *ir.Global  // @__promise_test_done (non-TLS, i32) — set to 1 by trampoline on completion
+	testDeadlineGlobal     *ir.Global  // @__promise_test_deadline (non-TLS, i64) — WASM cooperative test deadline; 0 = disabled (T0680)
+	testTimedOutGlobal     *ir.Global  // @__promise_test_timed_out (non-TLS, i8) — set to 1 by coop scheduler on deadline (T0680)
+	webLiveRegsGlobal      *ir.Global  // @promise_web_live_registrations (non-TLS, i32) — wasm32-web only; liveness rule (docs/wasm-web-callbacks.md §4.1)
+	webInPumpGlobal        *ir.Global  // @promise_web_in_pump (non-TLS, i8) — wasm32-web only; re-entrancy guard (§5)
+	webTerminatedGlobal    *ir.Global  // @promise_web_terminated (non-TLS, i8) — wasm32-web only; set once the instance has exited/faulted (§10)
+	webSubscriptionsGlobal *ir.Global  // @promise_web_subscriptions (non-TLS, [256 x SubSlot]) — wasm32-web only; the fixed-size subscription table (§8, §19 phase 2)
+	panicFlagGlobal        *ir.Global  // @__promise_panic_flag (TLS, i8) — 1 = panic in flight
+	panicMsgTlsGlobal      *ir.Global  // @__promise_panic_msg (TLS, i8*) — C string pointer to panic message
+	panicTypeTlsGlobal     *ir.Global  // @__promise_panic_type (TLS, i8) — 1=.rodata, 2=heap-allocated
+	panicExitBlock         *ir.Block   // B0228: if set, emitPanicReturn branches here instead of ret (coroutine context)
+	coroutineReturnBlock   *ir.Block   // B0353: if set, goroutine return branches here instead of ret
+	inCoroutine            bool        // true when compiling inside a go block coroutine body
+	goExprFireAndForget    bool        // true when go expr result is discarded (no <-task receiver)
+	elvisResultConsumed    bool        // T0954: true when an inline elvis `?:` result is the operand of a consuming `<-` await
+	elvisResultBound       bool        // T0952: true when an elvis `?:` result is bound directly to a variable/assignment target (claims the result temp and owns it unconditionally)
+	elvisResultReturned    bool        // T0982: true when an elvis `?:` result is the return expression (escapes to the caller). Like elvisResultBound, forces none-path default neutralization for handle/heap results, but does NOT create a per-path elvisBoundDropFlag (no binding consumes it; the returned result temp is claimed by claimStringTemp/claimHeapTemp).
+	elvisBoundDropFlag     value.Value // T0933/T0940/T0981: per-path drop flag (phi[someOwnsInner,noneOwned]) for a bound elvis `m := a ?: b`; consumed by the var-decl binding to replace maybeRegisterDrop's unconditional owning drop. nil otherwise. (T0940 generalizes the earlier T0933 heap-user-only `elvisBoundOwned`.)
+	elvisResultOwnsForced  bool        // T1166: true when an elvis `?:` result is assigned to a member/index target (an owned field/element with no per-slot drop flag). genElvis clones a borrowed operand on the some/none path so the result is unconditionally owned; the container's field/element drop is then correct (no double-free of a caller/container-owned inner).
 
 	// T1353: staged, pre-evaluated receiver value for a compound member assignment
 	// (`a.b += x`). When non-nil, the getter/setter receiver-eval sites consume it

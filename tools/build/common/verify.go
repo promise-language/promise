@@ -175,25 +175,27 @@ func RunVerify(root string, args []string) error {
 		return errInterrupted
 	}
 
-	// 4b. The structural sweeps (T2160). Both are full-index scans of tracked
-	// sources rather than of a staged set, which is what lets them run here at
-	// all — verify has no staged set to look at.
+	// 4b. The structural sweeps (T2160) — every check in structuralChecks, which
+	// is the one list of them. They read the working tree rather than a staged
+	// set, which is what lets them run here at all: verify has no staged set to
+	// look at.
 	//
 	// They live here because this is the pre-commit path this project actually
-	// uses. The git hook execs the workspace's bin/precommit-guard, which
-	// carries neither, so between the hook losing the project's own tool and
-	// this call the two rules held by review alone — and a rule with no
-	// enforcement is a rule that holds until the next person does not know it,
-	// which is the exact sentence that motivated the first of them.
+	// uses. The git hook execs the workspace's bin/precommit-guard, which does
+	// not carry them, so between the hook losing the project's own tool and this
+	// call they held by review alone — and a rule with no enforcement is a rule
+	// that holds until the next person does not know it, which is the exact
+	// sentence that motivated the first of them. Going through the list rather
+	// than naming each check here is what keeps the next one from arriving with
+	// no caller at all.
 	//
-	// Cheap enough to be unconditional: both are regex sweeps over tracked
-	// text, milliseconds against a suite measured in minutes.
+	// Cheap enough to be unconditional: sweeps over tracked text, milliseconds
+	// against a suite measured in minutes. Early enough to matter, too — a
+	// dangling link or an unannotated sleep() fails here in seconds instead of
+	// in the tools test suite several minutes further in.
 	Progress().Println("Checking structure...")
-	if err := CheckHostToolLookups(root); err != nil {
-		return fmt.Errorf("check: %w", err)
-	}
-	if err := CheckTestTempPaths(root); err != nil {
-		return fmt.Errorf("check: %w", err)
+	if err := RunStructuralChecks(root); err != nil {
+		return fmt.Errorf("structure: %w", err)
 	}
 	if Interrupted() {
 		return errInterrupted

@@ -245,8 +245,8 @@ module without contributing to it (see [gate-system.md](gate-system.md)), and an
 explicitly requested non-default target linking against the host's own runtime
 (see [runtime-architecture.md](runtime-architecture.md) §"CRT Object Discovery").
 `common.CheckHostToolLookups` enforces this over the tracked Go sources — it runs
-in the pre-commit hook and in the tools test suite, so the rule no longer lives
-only in a commit message.
+in `bin/verify`'s structural phase and in the tools test suite, so the rule no
+longer lives only in a commit message.
 
 Using an override is announced on every run, and `bin/gate` refuses to emit a
 measurement under one — a verdict has to describe the tree, not the machine (see
@@ -300,6 +300,7 @@ The verify tool orchestrates the full pre-commit check:
 1. **Format** — `gofmt -w .` in compiler/, then `promise format` on all `.pr` files
 2. **Build** — full build pipeline (see above)
 3. **Check** — `bin/check`'s own implementation: `go vet` over every Go module's packages, with the generated `internal/parser` excluded from the package list *and* from the findings. Both exclusions are needed — `go vet` reports diagnostics in a package's dependencies, so naming the packages alone does not keep the generated ones out of the answer.
+3b. **Structure** — `common.RunStructuralChecks`, the sweeps over tracked sources described below
 4. **Go tests** — `go test ./...` in compiler/, then tools/build, then flows/
 5. **Promise tests (host)** — `promise test tests/... modules/... examples/...`
 6. **Promise tests (WASM)** — if `--wasm` flag, same with `-target wasm32-wasi`
@@ -313,6 +314,42 @@ have nothing to add, and every Promise row of the summary says
 `not run (go tests failed)` rather than reporting a `0s` failure for a phase
 that never happened. The closing `FAILED:` line names the suite that stopped
 the run.
+
+### The structural sweeps
+
+Step 3b runs `common.RunStructuralChecks` — every check named in
+`structuralChecks` (`tools/build/common/structural.go`):
+
+| Name | What it rejects |
+|------|-----------------|
+| `docs` | `common.CheckDocs` — dangling relative Markdown links, a tracked `docs/*.md` missing from [index.md](index.md), a `modules/` directory missing from `catalog.toml` or from the two inventory docs, and an annotation the compiler registers that [annotations.md](annotations.md) §6 has no row for |
+| `test-sleeps` | `sleep()` as synchronization in a test `.pr` without a `// sleep-ok:` reason ([code-style.md](code-style.md)) |
+| `test-temp-paths` | a scratch path built from `temp_dir` without `process_id` in a test `.pr` or an example, without a `// temp-dir-ok:` reason ([code-style.md](code-style.md)) |
+| `host-tool-lookups` | a tracked Go line resolving a toolchain binary through `PATH` without a `// path-ok:` reason (§4 above) |
+
+No sweep reads a **staged set**. Each one reads the working tree, scoped by
+`git ls-files` where it needs to skip untracked and generated output (the two
+`.pr` sweeps, the host-tool sweep, and the link and index halves of `docs`;
+catalog and annotation coverage read their directories directly). That is what
+lets them run outside a commit at all — they answer "is this tree clean", not
+"is this commit clean" — and it means a violation committed on a previous turn
+is still caught on the next run. For an index-scoped sweep, a brand-new file is
+in scope from the moment it is `git add`ed and not before.
+
+**They are one list because a check's caller is the thing that goes missing.**
+All four were written as pre-commit checks; the hook then stopped naming the tool
+that ran them, and two of them held by review alone until someone read the hook
+(T2160). A sweep named in `structuralChecks` gets both its `bin/verify` caller
+and its real-tree test in the tools suite; one absent from it gets neither, and
+that is now a single place to look rather than two. The two callers are
+deliberate redundancy, not duplication: verify fails the run in seconds, and the
+test still fails if the verify call is ever removed.
+
+All four run even when one fails, so a run reports every structural problem it
+found rather than the first. They are text sweeps over tracked files —
+milliseconds against a suite measured in minutes — so they are unconditional,
+and placed ahead of the test phases so a dangling link does not cost a build and
+a compiler suite before it is reported.
 
 ### The verified tree
 
@@ -415,28 +452,31 @@ failing closed is the point, because a hook that silently did nothing when the
 gate was missing would let a commit past every check on this page.
 
 The project's own `bin/precommit` used to be that hook body. It was deleted once
-the trampoline stopped naming it; what it checked now lives in two places:
+the trampoline stopped naming it; what it checked now lives in three places:
 
 - **The workspace's shared commit gate**, for everything every project wants:
   commit identity (author and committer emails must be `@users.noreply.github.com`,
   so a personal address never reaches public history), the staged-file scan
   (compiled binaries, stray `.log` files, non-ASCII filenames), the
-  `tools/gates/baselines.json` ratchet, and formatting.
+  `tools/gates/baselines.json` ratchet, formatting, and documentation coverage —
+  every tracked `docs/*.md` linked from [index.md](index.md).
 - **This project's seam in the workspace** (`projects/promise/precommit-guard/`),
   for the checks only Promise wants: `catalog-coverage` — every directory under
   `modules/` has a `[modules.<name>]` entry in `catalog.toml`, and every catalog
   module shipping source is named in `CLAUDE.md` and
   [standard-library.md](standard-library.md) — and `test-sleeps`, the
   `sleep()`-as-synchronization guard ([code-style.md](code-style.md)).
+- **`bin/verify`'s structural phase**, for the sweeps that need no staged set —
+  the four in [The structural sweeps](#the-structural-sweeps) above.
 
-Documentation coverage — every tracked `docs/*.md` linked from
-[index.md](index.md) — is carried by the shared gate.
-
-**Two sweeps are currently carried by neither** (T2160): the host-tool-lookup
-check (`// path-ok:` markers, T2108/T2116) and the test-temp-path check (T1963).
-Their implementations and tests are still in `tools/build/common/`; what they
-lost is a caller. Until that item is closed, those two rules hold by review
-rather than by a gate.
+The split is not arbitrary: a check that needs the **staged set** can only run
+inside the hook, and a sweep that reads the **index** has no reason to wait for
+one. Where the two overlap — `catalog-coverage` and `test-sleeps` are checked in
+both — the cost is one rule asked at two moments, not two implementations to keep
+in sync, since the hook's copy lives in the workspace and this repository's in
+`structuralChecks`. Nothing here implements the commit-time half, and adding a
+second copy of it would be a rule spelled twice with no way to notice when the
+two disagree.
 
 ## Staleness Check
 

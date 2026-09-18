@@ -7,9 +7,9 @@ import (
 )
 
 // The build takes no toolchain binary from the host (T2108). This file is what
-// keeps that true: a structural guard over the tracked Go sources, run by
-// bin/precommit beside the other two, and by the tools test suite against this
-// very tree.
+// keeps that true: a structural guard over the tracked Go sources, named in
+// structuralChecks beside its three siblings so bin/verify runs it, and run by
+// the tools test suite against this very tree.
 //
 // It exists because the rule previously lived only in a commit message and a
 // code comment. T2108 removed the PATH fallback from the LLVM and llvm-dlltool

@@ -103,7 +103,7 @@ Edit and commit gates run locally (fast, synchronous). Periodic and platform gat
 
 ### Non-ratchet commit checks
 
-Not every commit-time check is a ratcheted metric. The pre-commit hook (`tools/build/common/precommit.go`, documented in [build-tools.md](build-tools.md#pre-commit-hook-binprecommit)) also enforces pass/fail invariants that have no baseline to move: commit identity, staged-file rules, formatting, and three **documentation checks** (`common.CheckDocs`, T1675):
+Not every commit-time check is a ratcheted metric. Pass/fail invariants that have no baseline to move are enforced elsewhere, and which tool carries which is [build-tools.md](build-tools.md#pre-commit-hook-binprecommit-guard)'s to say: the hook (`bin/precommit-guard`) takes the checks that need the staged set — commit identity, staged-file rules, formatting, the ratchet below — and `bin/verify`'s structural phase takes the sweeps that do not, among them three **documentation checks** (`common.CheckDocs`, T1675):
 
 - **Dangling Markdown links** -- every relative `.md` link target across all git-tracked Markdown must exist on disk. Scoped by `git ls-files`, so generated and untracked trees are skipped without an ignore list.
 - **Index coverage** -- every tracked `docs/*.md` is linked from `docs/index.md`. Top level only; `docs/archive/` is intentionally unindexed.
@@ -188,14 +188,13 @@ The `coverage` entry above is **Pending** (has direction but no value -- will be
 7. If improvement: updates `baselines.json` in-place, stages it with the commit
 8. Queries tracker for active exceptions (gate ID + tracker bug ID + expiry)
 
-**Defense-in-depth:** The `.githooks/pre-commit` hook runs a lightweight check that `baselines.json` values only improve vs. the committed version. Informational and Pending entries are skipped. The hook also rejects commits when running the formatter would introduce changes — Go is checked in-process via `go/format`, Promise by shelling out to `bin/promise format -check` (the same formatter `bin/verify` runs) — so unformatted code never reaches origin and surfaces as a spurious diff the next time someone runs verify.
+**Defense-in-depth:** The `.githooks/pre-commit` hook runs a lightweight check that `baselines.json` values only improve vs. the committed version. Informational and Pending entries are skipped. The hook also rejects commits when running the formatter would introduce changes, so unformatted code never reaches origin and surfaces as a spurious diff the next time someone runs verify. Both are the commit gate's, not this repository's — see [build-tools.md](build-tools.md#pre-commit-hook-binprecommit-guard).
 
 **Key files:**
 - `tools/build/common/verify_summary.go` -- `GateValues` type + IO, `ParseTestSummaryLine`
 - `tools/build/common/hash.go` -- `WorktreeHash`, the content identity gate values are stamped with
 - `tools/build/common/baselines.go` -- `Baseline` struct (3-state), and the ratchet directions `bin/run` judges against. Reading only: nothing here moves a baseline.
 - `tools/build/common/verify.go` -- writes `gate-values.json` after verify
-- `tools/build/common/precommit.go` -- defense-in-depth baseline check
 - `tools/gates/baselines.json` -- per-platform baseline state
 - `.claude/skills/commit/SKILL.md` -- workflow integration
 

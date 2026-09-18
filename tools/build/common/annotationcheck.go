@@ -162,8 +162,8 @@ type annotationSpec struct {
 // all of this the document drifts exactly as language-design.md §8.3 did:
 // thirteen missing rows is what an unchecked table looks like after two years.
 //
-// A tree with no compiler source is not a Promise checkout (RunPreCommit is
-// also exercised against bare temp repos), so the check scopes itself out. A
+// A tree with no compiler source is not a Promise checkout (RunStructuralChecks
+// is also exercised against bare temp repos), so the check scopes itself out. A
 // tree that *has* the compiler but not the document is a finding — that is the
 // document having been deleted, not the check being out of scope.
 func checkAnnotationCoverage(root string) error {

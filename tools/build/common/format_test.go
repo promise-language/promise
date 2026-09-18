@@ -640,7 +640,7 @@ func TestFindPromiseFilesExcludesGeneratedAndHiddenDirs(t *testing.T) {
 
 // --- FormatGo: the repair mode of the formatted:go pair ---
 //
-// UnformattedGoFiles, its measure mode, is covered in precommit_test.go. These
+// UnformattedGoFiles, its measure mode, is covered in structural_test.go. These
 // cover the half that WRITES: what it produces, what it leaves alone, and that
 // the two modes agree about which files are subject to formatting at all.
 

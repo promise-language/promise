@@ -153,23 +153,3 @@ func TestCheckHostToolLookups_ErrorsWhenGitCannotList(t *testing.T) {
 		t.Errorf("error should name the failing step, got: %v", err)
 	}
 }
-
-// TestCheckHostToolLookups_ThisTreeIsClean runs the guard over the real
-// checkout, so bin/verify fails on a violation and not only bin/precommit. The
-// pre-commit hook is the other half; neither alone covers both the maintainer's
-// commits and a plain verify run.
-//
-// It reads the index, so a brand-new file is covered from the moment it is
-// `git add`ed and not before — which is also when the hook would see it.
-func TestCheckHostToolLookups_ThisTreeIsClean(t *testing.T) {
-	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !Exists(filepath.Join(root, ".git")) {
-		t.Skip("not a git checkout — the guard reads the index")
-	}
-	if err := CheckHostToolLookups(root); err != nil {
-		t.Errorf("%v", err)
-	}
-}

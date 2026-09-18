@@ -534,8 +534,8 @@ func TestAnnotationCoverageUnparsableSemaFileIsAnError(t *testing.T) {
 // --- scope ---
 
 func TestAnnotationCoverageNoCompilerScopesItselfOut(t *testing.T) {
-	// RunPreCommit is exercised against bare temp repos; a tree with no
-	// compiler source is not a Promise checkout.
+	// RunStructuralChecks is exercised against bare temp repos; a tree with
+	// no compiler source is not a Promise checkout.
 	withAnnotationGaps(t, nil)
 	root := t.TempDir()
 	if err := checkAnnotationCoverage(root); err != nil {

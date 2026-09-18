@@ -209,8 +209,8 @@ var catalogCoverageDocs = []string{"CLAUDE.md", "docs/standard-library.md"}
 //     catalogCoverageDocs — so a new module cannot land without appearing in
 //     the two inventories agents read.
 //
-// A tree with no catalog.toml is not a Promise checkout (RunPreCommit is also
-// exercised against bare temp repos), so the check scopes itself out entirely
+// A tree with no catalog.toml is not a Promise checkout (RunStructuralChecks is
+// also exercised against bare temp repos), so the check scopes itself out entirely
 // rather than erroring.
 func checkCatalogCoverage(root string) error {
 	catalogPath := filepath.Join(root, "catalog.toml")

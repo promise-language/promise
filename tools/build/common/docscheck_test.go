@@ -211,7 +211,7 @@ func TestDocIndexBasenameMatchDoesNotSatisfy(t *testing.T) {
 }
 
 func TestDocIndexMissingIndexScopesItselfOut(t *testing.T) {
-	// RunPreCommit also runs against bare temp repos with no docs/index.md.
+	// RunStructuralChecks also runs against bare temp repos with no docs/index.md.
 	root := docsRepo(t, map[string]string{"a.md": "# A\n"})
 	if err := checkDocIndex(root); err != nil {
 		t.Fatalf("a tree with no docs/index.md must be a no-op, got: %v", err)
@@ -359,9 +359,9 @@ func TestParseCatalogModulesIgnoresNonModuleSections(t *testing.T) {
 }
 
 func TestCatalogCoverageNoCatalogScopesItselfOut(t *testing.T) {
-	// RunPreCommit is exercised against bare temp repos with no
+	// RunStructuralChecks is exercised against bare temp repos with no
 	// catalog.toml; the check must scope out rather than error, or it
-	// takes down the whole pre-commit hook outside this repo.
+	// takes down every structural sweep outside this repo.
 	root := docsRepo(t, map[string]string{"a.md": "# A\n"})
 	if err := checkCatalogCoverage(root); err != nil {
 		t.Fatalf("a tree with no catalog.toml must be a no-op, got: %v", err)
@@ -466,8 +466,8 @@ func TestCheckDocsReportsAllFourChecksNotJustTheFirst(t *testing.T) {
 }
 
 func TestCheckDocsBareRepoIsNoOp(t *testing.T) {
-	// RunPreCommit calls CheckDocs unconditionally, and its own tests run
-	// against bare temp repos with no docs/, no index, no catalog and no
+	// RunStructuralChecks calls CheckDocs unconditionally, and its own tests
+	// run against bare temp repos with no docs/, no index, no catalog and no
 	// compiler source.
 	root := docsRepo(t, map[string]string{"README.md": "# Hi\n"})
 	if err := CheckDocs(root); err != nil {

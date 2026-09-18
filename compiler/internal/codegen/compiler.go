@@ -340,7 +340,11 @@ type Compiler struct {
 	// must NOT free its some-path result: the inner aliases the caller's still-
 	// owned value, so freeing it double-frees ("bad header magic") when the
 	// caller drops the param. Populated per function via setBorrowedValueParams.
-	borrowedValueParams map[string]bool
+	// The mapped value is the param's DECLARED type: the `go` spawn sites read it
+	// to duplicate a refcounted sharable handle at the boundary (T2162), since a
+	// param has no drop binding to read the type off. Everyone else asks only
+	// about membership, through isBorrowedValueParam.
+	borrowedValueParams map[string]types.Type
 
 	// B0290: Tracks enums currently being processed by dupEnumElementInPlace
 	// to detect recursive types and prevent infinite codegen.
@@ -2458,13 +2462,13 @@ type compilerState struct {
 	blockTempFloorEnv    int            // T1329
 	blockTempFloorEnum   int            // T1329
 	tempTrackingEnabled  bool
-	panicExitBlock       *ir.Block       // T0262: prevent cross-function block references
-	coroutineReturnBlock *ir.Block       // T0262: prevent cross-function block references
-	thisRecvIsOwned      bool            // T0428: true when current method has ~this receiver
-	currentOpValueParams map[string]bool // T0897: borrowed value params of the current operator
-	borrowedValueParams  map[string]bool // T0945: borrowed value params of the current function/method
-	discardedExpr        ast.Expr        // T1029
-	discardAliasArgPtrs  []value.Value   // T1029
+	panicExitBlock       *ir.Block             // T0262: prevent cross-function block references
+	coroutineReturnBlock *ir.Block             // T0262: prevent cross-function block references
+	thisRecvIsOwned      bool                  // T0428: true when current method has ~this receiver
+	currentOpValueParams map[string]bool       // T0897: borrowed value params of the current operator
+	borrowedValueParams  map[string]types.Type // T0945: borrowed value params of the current function/method, by declared type
+	discardedExpr        ast.Expr              // T1029
+	discardAliasArgPtrs  []value.Value         // T1029
 
 	// The "what kind of function body am I in" flags. A body synthesized through
 	// saveState is always a plain function of its own, never a continuation of the

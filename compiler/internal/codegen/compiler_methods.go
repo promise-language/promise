@@ -486,13 +486,19 @@ func (c *Compiler) setOperatorValueParams(name string, sig *types.Signature) {
 
 // setBorrowedValueParams populates c.borrowedValueParams with the borrowed
 // value parameters of the function/method whose body is about to be compiled
-// (T0945). A borrowed value param is a plain (non-`~`) or `&` parameter that is
-// not variadic and not reference-typed: the caller retains ownership, so the
-// callee must not free its contents. `~` (RefMut) and variadic params are owned
+// (T0945), mapping each to its DECLARED type. A borrowed value param is a plain
+// (non-`~`) or `&` parameter that is not variadic and not reference-typed: the
+// caller retains ownership, so the callee must not free its contents. `~` (RefMut) and variadic params are owned
 // by the callee (they receive scope-exit drop bindings) and are excluded.
 // Reference-typed params (MutRef/SharedRef) never reach the droppable-temp path,
 // so they are excluded too. Call wherever a function body's compilation context
 // is established (alongside c.currentRetType), like setOperatorValueParams.
+//
+// T2162: the map carries the type rather than a bare bool because the `go` spawn
+// sites need it — a refcounted sharable handle arriving through a borrowed param
+// must be duplicated at the boundary (§17.4), and the param has no drop binding
+// to read the type off. Membership is still the only question most callers ask;
+// they go through isBorrowedValueParam.
 func (c *Compiler) setBorrowedValueParams(sig *types.Signature) {
 	c.borrowedValueParams = nil
 	if sig == nil {
@@ -510,10 +516,19 @@ func (c *Compiler) setBorrowedValueParams(sig *types.Signature) {
 			continue // ref-typed: the elvis result would be a ref, never tracked
 		}
 		if c.borrowedValueParams == nil {
-			c.borrowedValueParams = make(map[string]bool)
+			c.borrowedValueParams = make(map[string]types.Type)
 		}
-		c.borrowedValueParams[p.Name()] = true
+		c.borrowedValueParams[p.Name()] = p.Type()
 	}
+}
+
+// isBorrowedValueParam reports whether name is a borrowed value parameter of the
+// function/method currently being compiled (T0945). Membership in
+// c.borrowedValueParams is the whole answer; the mapped type is only read by the
+// `go` spawn sites (T2162).
+func (c *Compiler) isBorrowedValueParam(name string) bool {
+	_, ok := c.borrowedValueParams[name]
+	return ok
 }
 
 // lookupAnyMethod finds a method, getter, or setter by name, dispatching to

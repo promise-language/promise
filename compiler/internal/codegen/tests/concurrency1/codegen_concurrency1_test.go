@@ -1634,3 +1634,288 @@ func TestGoroutineExitSkipsFreeForTask(t *testing.T) {
 	codegentest.AssertContains(t, ir, "skip_free:")
 	codegentest.AssertContains(t, ir, "do_free:")
 }
+
+// T2162: §17.4 ("Ownership Across Goroutines") requires a refcounted `sharable
+// handle to be DUPLICATED where it crosses a `go` boundary — "the goroutine's
+// handle is created before the spawner's can drop". The B0163 loops read the
+// handle type off the captured name's DROP BINDING, which a borrowed PARAMETER
+// never has (the caller owns it), so a channel arriving as a parameter crossed
+// as a bare borrow. The caller's drop — an NLL early drop at the call, which is
+// its last use, or scope exit — then freed the channel under the running
+// goroutine. The spawner must emit the chdup refcount bump before the ramp.
+func TestT2162_GoBlockChannelParamRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		consume(Channel[int] ch, Channel[int] done) {
+			go { x := <-ch; done.send(1); };
+		}
+		main() {
+			ch := channel[int](capacity: 1);
+			done := channel[int](capacity: 1);
+			ch.send(9);
+			consume(ch, done);
+			r := <-done;
+		}
+	`)
+	consumeIR := codegentest.ExtractFunction(ir, "__user.consume")
+	codegentest.AssertContains(t, consumeIR, "chdup.inc")
+	codegentest.AssertContains(t, consumeIR, "atomicrmw add")
+	// The retain precedes the ramp call, so the goroutine's handle exists before
+	// the spawner returns and the caller's drop can run.
+	dupIdx := strings.Index(consumeIR, "chdup.inc")
+	rampIdx := strings.Index(consumeIR, "call i8* @.goroutine.")
+	if dupIdx < 0 || rampIdx < 0 || dupIdx > rampIdx {
+		t.Fatalf("expected chdup.inc before the goroutine ramp in consume:\n%s", consumeIR)
+	}
+	// And the goroutine releases what the spawn retained — an unpaired bump
+	// would pin the channel forever (5 allocations leaked).
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Channel[int].drop"`)
+}
+
+// T2162: a captured channel LOCAL keeps the pre-existing B0163 path (one inline
+// refcount bump, no chdup null-check blocks). The parameter arm must not also
+// fire for it — a double retain would pin the channel and leak it.
+func TestT2162_GoBlockChannelLocalSingleRetain(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			done := channel[int](capacity: 1);
+			ch.send(9);
+			go { x := <-ch; done.send(1); };
+			r := <-done;
+		}
+	`)
+	// ExtractFunc (not ExtractFunction) — `@.goroutine.main(` also appears at the
+	// ramp call site inside @main, which would capture the wrong function.
+	mainIR := codegentest.ExtractFunc(ir, ".goroutine.main")
+	codegentest.AssertNotContains(t, mainIR, "chdup.inc")
+	// Exactly two bumps for the two captured locals — no extra from the new arm.
+	if got := strings.Count(mainIR, "atomicrmw add"); got != 2 {
+		t.Fatalf("expected 2 refcount bumps for 2 captured channel locals, got %d:\n%s", got, mainIR)
+	}
+}
+
+// T2162: the fast `go f(ch)` path (genGoCallExpr) has the same parameter gap.
+// The retain pairs with the goroutine-side argBorrowDrop release.
+func TestT2162_GoCallChannelParamRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		worker(Channel[int] ch, Channel[int] done) {
+			x := <-ch;
+			done.send(1);
+		}
+		consume(Channel[int] ch, Channel[int] done) {
+			go worker(ch, done);
+		}
+		main() {
+			ch := channel[int](capacity: 1);
+			done := channel[int](capacity: 1);
+			ch.send(9);
+			consume(ch, done);
+			r := <-done;
+		}
+	`)
+	consumeIR := codegentest.ExtractFunction(ir, "__user.consume")
+	codegentest.AssertContains(t, consumeIR, "chdup.inc")
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Channel[int].drop"`)
+}
+
+// T2162: the via-block call path (genGoCallExprViaBlock, reached by a method
+// call) carries the same arm. The receiver is a pure value type so §17.4's
+// separate receiver-borrow rejection does not mask the case under test.
+func TestT2162_GoCallViaBlockChannelParamRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type Relay {
+			int bias `+"`value"+`;
+			forward(this, Channel[int] ch, Channel[int] done) {
+				x := <-ch;
+				done.send(this.bias);
+			}
+		}
+		consume(Channel[int] ch, Channel[int] done) {
+			r := Relay(bias: 1);
+			go r.forward(ch, done);
+		}
+		main() {
+			ch := channel[int](capacity: 1);
+			done := channel[int](capacity: 1);
+			ch.send(9);
+			consume(ch, done);
+			r := <-done;
+		}
+	`)
+	consumeIR := codegentest.ExtractFunction(ir, "__user.consume")
+	codegentest.AssertContains(t, consumeIR, "chdup.inc")
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Channel[int].drop"`)
+}
+
+// T2162: Ref[T] is `sendable `sharable too, so a Ref parameter captured by a go
+// block is duplicated by the same rule — arcdup bumps strong_count, and the
+// goroutine drops its own handle. Before the fix this read a freed, zeroed Arc.
+func TestT2162_GoBlockRefParamRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		consume(Ref[int] r, Channel[int] done) {
+			go { done.send(r.borrow); };
+		}
+		main() {
+			r := Ref[int](7);
+			done := channel[int](capacity: 1);
+			consume(r, done);
+			v := <-done;
+		}
+	`)
+	consumeIR := codegentest.ExtractFunction(ir, "__user.consume")
+	codegentest.AssertContains(t, consumeIR, "arcdup.inc")
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
+}
+
+// T2162: the parameter arm is confined to refcounted sharable handles. A Copy
+// param crosses by value and must produce no retain — nothing to drop either,
+// so a stray bump would be an unpaired increment on a non-handle.
+func TestT2162_CopyParamNoRetain(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		consume(int n, Channel[int] done) {
+			go { done.send(n + 1); };
+		}
+		main() {
+			done := channel[int](capacity: 1);
+			consume(41, done);
+			v := <-done;
+		}
+	`)
+	consumeIR := codegentest.ExtractFunction(ir, "__user.consume")
+	codegentest.AssertNotContains(t, consumeIR, "arcdup.inc")
+	// One retain, for the `done` channel param; the int param adds none.
+	if got := strings.Count(consumeIR, "atomicrmw add"); got != 1 {
+		t.Fatalf("expected exactly 1 refcount bump (the channel param), got %d:\n%s", got, consumeIR)
+	}
+}
+
+// T2162: a `string` parameter keeps T1196's deep-copy treatment — it is not a
+// refcounted handle, so the new arm must not divert it into a refcount bump.
+func TestT2162_StringParamStillDups(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		emit(string v, Channel[string] out) {
+			go { out.send(v + "!"); };
+		}
+		main() {
+			out := channel[string](capacity: 1);
+			emit("a" + "b", out);
+			r := <-out;
+			out.close();
+		}
+	`)
+	emitIR := codegentest.ExtractFunction(ir, "__user.emit")
+	codegentest.AssertContains(t, emitIR, "@promise_string_new(")
+}
+
+// T2162: Weak[T] is `sendable `sharable like Ref[T], so a Weak parameter
+// captured by a go block takes the same spawn-site duplication — weakdup bumps
+// weak_count, and the goroutine drops its own handle at coroutine scope exit.
+func TestT2162_GoBlockWeakParamRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		consume(Weak[int] w, Channel[int] done) {
+			go {
+				u := w.upgrade();
+				if r := u { done.send(r.borrow); }
+			};
+		}
+		main() {
+			r := Ref[int](5);
+			w := r.downgrade();
+			done := channel[int](capacity: 1);
+			consume(w, done);
+			v := <-done;
+		}
+	`)
+	consumeIR := codegentest.ExtractFunction(ir, "__user.consume")
+	codegentest.AssertContains(t, consumeIR, "weakdup.inc")
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Weak[int].drop"`)
+}
+
+// T2162: a generic spawner reaches the arm with c.typeSubst active, so the
+// parameter's declared type is `Ref[T]` with T unbound — borrowedValueParamType
+// must substitute before retainSpawnHandle can classify it, or the Arc is not
+// retained and the caller's drop frees it under the goroutine. Twin of the
+// generic-channel Promise case, on the Ref branch.
+func TestT2162_GenericSpawnerRefParamRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		consume[T](Ref[T] r, Channel[int] done) {
+			go { u := r.clone(); done.send(1); };
+		}
+		main() {
+			r := Ref[int](5);
+			done := channel[int](capacity: 1);
+			consume[int](r, done);
+			v := <-done;
+		}
+	`)
+	consumeIR := codegentest.ExtractFunction(ir, `"consume[int]"`)
+	codegentest.AssertContains(t, consumeIR, "arcdup.inc")
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
+}
+
+// T2162: the fast `go f(r)` path deliberately retains channels only. Ref[T] and
+// Weak[T] args are unretained there for a LOCAL too, so retaining just the
+// parameter half would be arbitrary — that whole gap is T2163. Pins the
+// boundary, so closing T2163 is a deliberate change rather than a silent one.
+func TestT2162_GoCallRefParamNotRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		worker(Ref[int] r, Channel[int] done) {
+			done.send(r.borrow);
+		}
+		consume(Ref[int] r, Channel[int] done) {
+			go worker(r, done);
+		}
+		main() {
+			r := Ref[int](5);
+			done := channel[int](capacity: 1);
+			consume(r, done);
+			v := <-done;
+		}
+	`)
+	consumeIR := codegentest.ExtractFunction(ir, "__user.consume")
+	codegentest.AssertNotContains(t, consumeIR, "arcdup.inc")
+	// The `done` channel param IS retained on this path, so exactly one bump.
+	if got := strings.Count(consumeIR, "atomicrmw add"); got != 1 {
+		t.Fatalf("expected exactly 1 refcount bump (the channel param), got %d:\n%s", got, consumeIR)
+	}
+}
+
+// T2162 neighbour: a channel LOCAL captured by the via-block call path
+// (`go obj.method(...)`). This is the pre-existing B0163 branch that T2162's
+// parameter arm now sits beside as its `else`; nothing covered it before, so a
+// regression there would surface only as a leak or a use-after-free.
+func TestT2162_GoCallViaBlockChannelLocalRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type Relay {
+			int bias `+"`value"+`;
+			forward(this, Channel[int] ch, Channel[int] done) {
+				x := <-ch;
+				done.send(this.bias);
+			}
+		}
+		main() {
+			ch := channel[int](capacity: 1);
+			done := channel[int](capacity: 1);
+			ch.send(9);
+			r := Relay(bias: 1);
+			go r.forward(ch, done);
+			v := <-done;
+		}
+	`)
+	// The spawner is main's coroutine; ExtractFunc skips the ramp call site.
+	mainIR := codegentest.ExtractFunc(ir, ".goroutine.main")
+	// Two captured channel locals, one inline B0163 bump each — no chdup blocks,
+	// which is what distinguishes the local path from T2162's parameter arm.
+	codegentest.AssertNotContains(t, mainIR, "chdup.inc")
+	if got := strings.Count(mainIR, "atomicrmw add"); got != 2 {
+		t.Fatalf("expected 2 refcount bumps for 2 captured channel locals, got %d:\n%s", got, mainIR)
+	}
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Channel[int].drop"`)
+}

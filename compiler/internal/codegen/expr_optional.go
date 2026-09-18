@@ -1043,7 +1043,7 @@ func (c *Compiler) dupBorrowedEnumParam(expr ast.Expr, val value.Value, retType 
 	if !ok {
 		return val, false
 	}
-	if c.borrowedValueParams == nil || !c.borrowedValueParams[ident.Name] {
+	if !c.isBorrowedValueParam(ident.Name) {
 		return val, false
 	}
 	// An operator method's value operand is ALSO a borrowed value param, but its
@@ -1137,7 +1137,7 @@ func (c *Compiler) optionalPushElemNeedsDup(typ types.Type) (*types.Optional, ty
 // arrayElemNeedsEscapeDup (the single-source per-array escape predicate). Returns
 // the resolved element type and true when so, else (nil, false).
 func (c *Compiler) borrowedArrayParamEscapeDup(name string, typ types.Type) (types.Type, bool) {
-	if c.borrowedValueParams == nil || !c.borrowedValueParams[name] {
+	if !c.isBorrowedValueParam(name) {
 		return nil, false
 	}
 	if elemT, _, ok := c.arrayElemNeedsEscapeDup(typ); ok {

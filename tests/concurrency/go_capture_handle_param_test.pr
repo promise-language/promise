@@ -1,0 +1,478 @@
+// T2162: a refcounted `sharable handle reaching a goroutine from a BORROWED
+// PARAMETER must be duplicated at the spawn boundary (docs/language-design.md
+// §17.4). Codegen only bumped the refcount when the captured name had a drop
+// binding, which a parameter never has — the caller owns it. The caller's drop
+// (an NLL early drop at the call, which is its last use, or scope exit) then
+// freed the referent under the running goroutine: a null-mutex segfault on the
+// receive path, a zeroed read otherwise.
+//
+// Every case below spawns from a helper that takes the handle as a PARAMETER and
+// makes the call the caller's LAST use of it, so the early drop fires. Each joins
+// over a `done` channel — deterministically, never by sleeping (T1632) — so the
+// goroutine's assertions count (T2014) and drop accounting cannot race.
+// --- go { } block, receive from a channel parameter ------------------------
+consume_recv(channel[int] ch, channel[int] done) {
+  go {
+    x := <-ch;
+    done.send(x!);
+  };
+}
+
+recv_from_channel_param() `test {
+  ch := channel[int](4);
+  done := channel[int](1);
+  ch.send(9);
+  consume_recv(ch, done); // ch's last use — the NLL early drop fires here
+  assert((<-done)! == 9, "channel param recv");
+}
+
+// Same, with the parameters declared in the opposite order: the shape that
+// segfaulted rather than reading zero.
+consume_recv_swapped(channel[int] done, channel[int] ch) {
+  go {
+    x := <-ch;
+    done.send(x!);
+  };
+}
+
+recv_from_channel_param_swapped() `test {
+  ch := channel[int](4);
+  done := channel[int](1);
+  ch.send(9);
+  consume_recv_swapped(done, ch);
+  assert((<-done)! == 9, "channel param recv, swapped order");
+}
+
+// Iterating a CLOSED channel parameter — the goroutine walks the buffer and then
+// re-reads the closed flag, both through the freed struct before the fix.
+consume_for_in(channel[int] ch, channel[int] done) {
+  go {
+    int sum = 0;
+    for v in ch {
+      sum = sum + v;
+    }
+    done.send(sum);
+  };
+}
+
+for_in_closed_channel_param() `test {
+  ch := channel[int](4);
+  done := channel[int](1);
+  ch.send(1);
+  ch.send(2);
+  ch.close();
+  consume_for_in(ch, done);
+  assert((<-done)! == 3, "for-in over closed channel param");
+}
+
+// A goroutine that blocks on an empty channel parameter: it parks with the
+// channel's mutex in G.park_mutex, so a freed channel corrupts the wake path
+// rather than just the first read.
+consume_blocking(channel[int] ch, channel[int] ready, channel[int] done) {
+  go {
+    ready.send(1);
+    x := <-ch;
+    done.send(x!);
+  };
+}
+
+recv_blocks_on_empty_channel_param() `test {
+  ch := channel[int](1);
+  ready := channel[int](1);
+  done := channel[int](1);
+  consume_blocking(ch, ready, done);
+  assert((<-ready)! == 1, "goroutine started"); // running, about to park
+  ch.send(42);
+  assert((<-done)! == 42, "channel param recv after park");
+}
+
+// --- go f(ch) — the fast call path -----------------------------------------
+
+worker_recv(channel[int] ch, channel[int] done) {
+  x := <-ch;
+  done.send(x!);
+}
+
+consume_go_call(channel[int] ch, channel[int] done) {
+  go worker_recv(ch, done);
+}
+
+go_call_channel_param() `test {
+  ch := channel[int](4);
+  done := channel[int](1);
+  ch.send(7);
+  consume_go_call(ch, done);
+  assert((<-done)! == 7, "go f(ch) channel param");
+}
+
+// --- go obj.method(ch) — the via-block call path ----------------------------
+
+// A pure value type: the receiver is Copy, so §17.4's receiver-borrow rule does
+// not apply and the spawn reaches genGoCallExprViaBlock with `ch` as a capture.
+type Relay {
+  int bias `value;
+
+  forward(channel[int] ch, channel[int] done) {
+    x := <-ch;
+    done.send(x! + this.bias);
+  }
+}
+
+consume_go_method(channel[int] ch, channel[int] done) {
+  r := Relay(bias: 100);
+  go r.forward(ch, done);
+}
+
+go_method_call_channel_param() `test {
+  ch := channel[int](4);
+  done := channel[int](1);
+  ch.send(5);
+  consume_go_method(ch, done);
+  assert((<-done)! == 105, "go obj.method(ch) channel param");
+}
+
+// --- Ref[T] parameter -------------------------------------------------------
+
+consume_ref(Ref[int] r, channel[int] done) {
+  go {
+    done.send(r.borrow);
+  };
+}
+
+ref_param_captured_by_go_block() `test {
+  r := Ref[int](7);
+  done := channel[int](1);
+  consume_ref(r, done); // r's last use — the Arc was freed here before
+  assert((<-done)! == 7, "Ref param capture");
+}
+
+// --- Two goroutines over one channel parameter ------------------------------
+// Each spawn duplicates independently, so the referent outlives both.
+
+consume_twice(channel[int] ch, channel[int] done) {
+  go {
+    x := <-ch;
+    done.send(x!);
+  };
+  go {
+    x := <-ch;
+    done.send(x!);
+  };
+}
+
+two_goroutines_share_one_channel_param() `test {
+  ch := channel[int](4);
+  done := channel[int](2);
+  ch.send(3);
+  ch.send(4);
+  consume_twice(ch, done);
+  int sum = (<-done)! + (<-done)!;
+  assert(sum == 7, "two goroutines share one channel param");
+}
+
+// --- Generic function: the handle type is only known after substitution ------
+
+consume_generic[T](channel[T] ch, channel[int] done) {
+  go {
+    x := <-ch;
+    if v := x {
+      done.send(1);
+    }
+  };
+}
+
+generic_channel_param() `test {
+  ch := channel[string](2);
+  done := channel[int](1);
+  ch.send("hi");
+  consume_generic[string](ch, done);
+  assert((<-done)! == 1, "generic channel param");
+}
+
+// --- Negative: a Copy parameter must not be retained ------------------------
+// Guards the new arm against firing on anything that is not a refcounted handle.
+
+consume_copy(int n, channel[int] done) {
+  go {
+    done.send(n * 2);
+  };
+}
+
+copy_param_captured_by_go_block() `test {
+  done := channel[int](1);
+  consume_copy(21, done);
+  assert((<-done)! == 42, "copy param not retained");
+}
+
+// --- The spawner is a lambda or a method, not a free function ----------------
+// Both establish their own borrowed-param set (expr_lambda.go / compiler_methods.go),
+// so both must see the retain.
+
+lambda_channel_param() `test {
+  done := channel[int](1);
+  f := |channel[int] ch, channel[int] out| {
+    go {
+      x := <-ch;
+      out.send(x!);
+    };
+  };
+  ch := channel[int](4);
+  ch.send(13);
+  f(ch, done);
+  assert((<-done)! == 13, "lambda channel param captured by go");
+}
+
+// A heap receiver alongside the channel parameter: `this` takes the T1219
+// snapshot path while `ch` takes the retain path, in the same capture list.
+type Holder {
+  int tag;
+
+  spawn(channel[int] ch, channel[int] done) {
+    go {
+      x := <-ch;
+      done.send(x! + this.tag);
+    };
+  }
+}
+
+method_channel_param() `test {
+  h := Holder(tag: 1);
+  ch := channel[int](4);
+  done := channel[int](1);
+  ch.send(20);
+  h.spawn(ch, done);
+  assert((<-done)! == 21, "method channel param captured by go");
+}
+
+// --- Release pairing: every spawn-site retain must be balanced ---------------
+// The retain is only sound if the goroutine releases it on EVERY exit path, so
+// these cover the paths that do not run the ordinary scope cleanup. A missed
+// release does not fail an assertion — it shows up as a LEAK outcome, which is
+// what these tests are really asserting.
+
+// A goroutine that panics while holding a retained channel parameter. The panic
+// is recovered and discarded by the go block (a non-failable scope), so only the
+// leak check can see whether the duplicated handle was released.
+panics_holding_param(channel[int] ch, channel[int] done) {
+  go {
+    done.send(1);
+    channel[int]? nothing = none;
+    x := nothing!; // panics here, still holding the retained `ch`
+    x.send(0);
+  };
+}
+
+goroutine_panic_releases_retained_param() `test {
+  ch := channel[int](4);
+  done := channel[int](1);
+  panics_holding_param(ch, done);
+  assert((<-done)! == 1, "goroutine ran before panicking");
+}
+
+// N spawns over one channel parameter: N retains must pair with N releases.
+spawn_many(channel[int] ch, channel[int] done) {
+  for i in 0..8 {
+    go {
+      x := <-ch;
+      done.send(x!);
+    };
+  }
+}
+
+loop_spawns_over_one_channel_param() `test {
+  ch := channel[int](8);
+  done := channel[int](8);
+  for i in 0..8 {
+    ch.send(i);
+  }
+  spawn_many(ch, done);
+  int sum = 0;
+  for i in 0..8 {
+    sum = sum + (<-done)!;
+  }
+  assert(sum == 28, "all eight goroutines ran");
+}
+
+// `go! { }` — a failable goroutine exits through the failable-aggregate path
+// rather than the plain one, on both the success and the raise route.
+boom!(int n) int {
+  if n < 0 {
+    raise error("negative");
+  }
+  return n;
+}
+
+failable_spawn(channel[int] ch) failable_task[int] {
+  return go! {
+    x := <-ch;
+    return boom(x!)?^;
+  };
+}
+
+failable_go_block_channel_param() `test {
+  ch := channel[int](4);
+  ch.send(11);
+  t := failable_spawn(ch);
+  v := (<-t)?!;
+  assert(v == 11, "failable go block channel param");
+}
+
+failable_go_block_channel_param_error() `test {
+  ch := channel[int](4);
+  ch.send(-1);
+  t := failable_spawn(ch);
+  got := false;
+  v := (<-t)? e {
+    got = true;
+    0
+  };
+  assert(got, "error surfaced from failable go block");
+  assert(v == 0, "recovery value");
+}
+
+// --- Weak[T] parameter ------------------------------------------------------
+// `Weak[T]` is `sendable `sharable like `Ref[T]`, so it takes the same
+// duplication. Dropping a weak handle while a strong one survives frees nothing,
+// so make the weak handle the LAST one: the helper's `Ref` is gone by the time
+// the goroutine runs, and only the spawn-site retain keeps the allocation alive
+// for `upgrade()` to read. (Pre-fix this is a silent read of freed memory that
+// happens to answer correctly — the leak check, not the assertion, is what
+// catches an unbalanced retain here.)
+
+make_weak() Weak[int] {
+  r := Ref[int](5);
+  return r.downgrade(); // the strong ref dies with this frame
+}
+
+consume_weak(Weak[int] w, channel[int] done) {
+  go {
+    u := w.upgrade();
+    if r := u {
+      done.send(r.borrow);
+    } else {
+      done.send(-1);
+    }
+  };
+}
+
+weak_param_is_last_handle() `test {
+  done := channel[int](1);
+  w := make_weak();
+  consume_weak(w, done); // w's last use — the early drop fires here
+  assert((<-done)! == -1, "upgrade fails once the strong ref is gone");
+}
+
+// --- Ref[T] parameter on the via-block (method) path ------------------------
+// The Ref branch of the retain, reached through `go obj.method(...)` rather than
+// a go block. Fails pre-fix with a zeroed read.
+
+type RefRelay {
+  int bias `value;
+
+  forward(Ref[int] r, channel[int] done) {
+    done.send(r.borrow + this.bias);
+  }
+}
+
+consume_ref_method(Ref[int] r, channel[int] done) {
+  relay := RefRelay(bias: 100);
+  go relay.forward(r, done);
+}
+
+ref_param_via_block_method() `test {
+  r := Ref[int](7);
+  done := channel[int](1);
+  consume_ref_method(r, done);
+  assert((<-done)! == 107, "Ref param on the via-block path");
+}
+
+// --- The races the retain has to win ----------------------------------------
+
+// Fire-and-forget: the spawning function returns and the caller drops the
+// channel immediately, never joining. Nothing but the spawn-site retain orders
+// the caller's drop against the goroutine's first read; the harness's goroutine
+// drain (T1639) is what makes the outcome deterministic rather than a sleep.
+// Segfaults at 0x0 pre-fix.
+fire_and_forget(channel[int] ch) {
+  go {
+    x := <-ch;
+  };
+}
+
+no_join_channel_param() `test {
+  ch := channel[int](1);
+  ch.send(1);
+  fire_and_forget(ch);
+  assert(true, "spawn-and-drop must not read freed memory");
+}
+
+// 32 goroutines contending on one retained channel parameter while the caller's
+// early drop runs concurrently — the atomic bump has to be visible to all of
+// them. Pre-fix this faults at 0xdededededededede, the allocator's freed-memory
+// poison, which is the use-after-free stated plainly.
+fanout(channel[int] ch, channel[int] done) {
+  for i in 0..32 {
+    go {
+      x := <-ch;
+      done.send(x!);
+    };
+  }
+}
+
+high_contention_channel_param() `test {
+  ch := channel[int](32);
+  done := channel[int](32);
+  for i in 0..32 {
+    ch.send(1);
+  }
+  fanout(ch, done);
+  int sum = 0;
+  for i in 0..32 {
+    sum = sum + (<-done)!;
+  }
+  assert(sum == 32, "all 32 goroutines received");
+}
+
+// --- A generic TYPE's method -------------------------------------------------
+// monoCtx and typeSubst are both active here, so borrowedValueParamType has to
+// substitute the parameter's declared type before the handle can be classified.
+// Segfaults pre-fix, like the plain method case.
+
+type Pipe[T] {
+  T seed;
+
+  pump(channel[int] ch, channel[int] done) {
+    go {
+      x := <-ch;
+      done.send(x!);
+    };
+  }
+}
+
+generic_type_method_channel_param() `test {
+  p := Pipe[string](seed: "s");
+  ch := channel[int](4);
+  done := channel[int](1);
+  ch.send(77);
+  p.pump(ch, done);
+  assert((<-done)! == 77, "generic type method channel param");
+}
+
+// --- Negative: a VARIADIC channel parameter is not a handle ------------------
+// setBorrowedValueParams excludes variadics, so the retain arm must not fire —
+// the parameter is a vector of channels, and the vector's own drop owns them.
+// Guards the exclusion, which T2162 touched when the map started carrying types.
+
+fanin(channel[int] done, ...channel[int] chans) {
+  go {
+    done.send(chans.len);
+  };
+}
+
+variadic_channel_param() `test {
+  a := channel[int](1);
+  b := channel[int](1);
+  done := channel[int](1);
+  fanin(done, a, b);
+  assert((<-done)! == 2, "variadic channel params are not retained");
+}

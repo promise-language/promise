@@ -881,6 +881,17 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 	var entries []constant.Constant
 	var nulls []nullVtableSlot
 	for _, m := range methods {
+		// T1952: AllVirtualMethods() walks parents first, so for a view that
+		// itself inherits and overrides a member it hands back the ANCESTOR's
+		// method object — while sema resolves a call on the view to the view's
+		// own override. Every shape derived from m below (the adapter's
+		// signature, the boxed-receiver thunk, the unimplemented stub) must be
+		// the one the view's call sites actually read, so resolve the view's own
+		// member first. For a structural interface, which has no parents, this is
+		// m itself and nothing changes.
+		if own := c.lookupMethodForMethod(view, m); own != nil {
+			m = own
+		}
 		ownerName := c.resolveMethodOwner(concrete, m.Name())
 		mangledName := mangleMethodNameForMethod(ownerName, m)
 		// T0468: Prefer the concrete's mono name if it has its own (possibly
@@ -1584,6 +1595,65 @@ func isInFirstParentChain(concrete, target *types.Named) bool {
 	return false
 }
 
+// slotShapeDiffers reports whether the concrete method's LLVM shape differs from
+// the shape the slot's declaring type promises — the same relaxations
+// needsViewAdapter covers, restated without needing a substitution.
+//
+// AllVirtualMethods() hands back the PARENT's method objects unsubstituted, so a
+// generic parent's `T` must never be compared against a concrete `int` here.
+// Every test below is decidable on the raw signatures: arity, failability, and
+// whether the result is absent / optional / plain. A covariant return (`U` for a
+// structural `T`) is deliberately NOT a difference — both are {i8*, i8*}, so the
+// slot's ABI matches and only the returned value's own vtable pointer is at
+// stake, which is a separate defect (T2182).
+func slotShapeDiffers(concrete, abstract *types.Signature) bool {
+	if len(concrete.Params()) != len(abstract.Params()) {
+		return true // extra defaulted params — the adapter supplies them
+	}
+	if concrete.CanError() != abstract.CanError() {
+		return true // non-failable for failable — the adapter wraps the result
+	}
+	if (concrete.Result() == nil) != (abstract.Result() == nil) {
+		return true
+	}
+	_, concreteOpt := concrete.Result().(*types.Optional)
+	_, abstractOpt := abstract.Result().(*types.Optional)
+	return concreteOpt != abstractOpt // T for T? — the adapter wraps as `some`
+}
+
+// firstParentSlotShapesMatch reports whether concrete's own vtable is usable
+// unchanged when the value is viewed as target: every slot target declares must
+// be filled by a function whose LLVM shape is the one target's call sites read.
+//
+// Prefix-compatible slot ORDERING (isInFirstParentChain) is necessary but not
+// sufficient. A relaxed match (T1952) — `close(~this)` satisfying `close!(~this)`
+// — leaves the concrete's own slot holding a `void (i8*)*` where the view's call
+// site bitcasts to `{ i1, i8* } (i8*)*` and reads an error flag the callee never
+// wrote. The concrete's own vtable cannot be adapted in place, because a call
+// dispatched through the CONCRETE as a static type reads its own shape from the
+// same slot; the adaptation therefore belongs to the view vtable.
+//
+// Both sides are resolved with lookupMethodForMethod, which finds the NEAREST
+// override. That matters for the target as much as for the concrete:
+// AllVirtualMethods() walks parents first, so for a middle type it hands back the
+// ancestor's method object, while sema resolves a call on the middle type to the
+// middle type's own override. Comparing against the ancestor would report a
+// difference the middle type's call sites never see, and swap in a view vtable
+// adapted to the wrong shape.
+func (c *Compiler) firstParentSlotShapesMatch(concrete, target *types.Named) bool {
+	for _, m := range target.AllVirtualMethods() {
+		tm := c.lookupMethodForMethod(target, m)
+		cm := c.lookupMethodForMethod(concrete, m)
+		if tm == nil || cm == nil || tm == cm {
+			continue // abstract slot, or the target's own method already fills it
+		}
+		if slotShapeDiffers(cm.Sig(), tm.Sig()) {
+			return false
+		}
+	}
+	return true
+}
+
 // isStructuralView reports whether a Named type is a structural interface represented
 // as a {vtable, instance} fat pointer. A `structural type that is ITSELF a pure value
 // type is not a view: it has a flat value struct, it can never be satisfied structurally
@@ -1692,8 +1762,10 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 		return val
 	}
 
-	// First parent chain → vtable is prefix-compatible, no swap needed
-	if isInFirstParentChain(fromNamed, toNamed) {
+	// First parent chain AND every slot keeps its shape → the concrete's own
+	// vtable is usable as-is, no swap needed. A relaxed match that changed a
+	// slot's LLVM shape falls through to the view vtable below (T1952).
+	if isInFirstParentChain(fromNamed, toNamed) && c.firstParentSlotShapesMatch(fromNamed, toNamed) {
 		return val
 	}
 

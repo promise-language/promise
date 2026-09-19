@@ -1055,6 +1055,7 @@ Structural satisfaction uses **relaxed signature matching**: the concrete type's
 - **Failable**: a non-failable concrete method satisfies a failable interface method (but not vice versa). The adapter wraps the result in a success failable struct.
 - **Optional return**: a concrete method returning `T` satisfies an interface requiring `T?`. The adapter wraps the result as `some`.
 - **Covariant return**: a concrete method returning `U` satisfies an interface requiring `T` (or `T?`) when `T` is a structural interface and `U` satisfies `T`. The adapter thunk coerces the return value's vtable to the target interface's view. This applies to both non-generic (`Writer`) and generic (`Iterator[int]`) structural return types.
+- **Receiver**: the concrete receiver may be **less** demanding than the requirement's, never more — a `this` (shared) method satisfies a `~this` requirement, but a `~this` method never satisfies a `this` one, which would let a shared borrow of the view mutate through it (§6.2). An explicitly declared `is` is stricter still: it requires the borrow kinds to match exactly, so a requirement written `close!(~this)` implemented as `close(this)` is a declaration error naming both. (The explicit-`is` half is enforced today; implicit structural satisfaction does not yet compare receivers at all — tracked as T2185.)
 
 Structural interfaces can also declare **abstract factory methods** — static constructors that enable generic factory patterns:
 
@@ -1079,7 +1080,9 @@ Json j = load[Json]("...");
 
 Abstract factory methods declared without a return type get an **implicit `Self` return**. Failable abstract factories (`tryParse!(string data) \`abstract \`factory;`) get implicit `Self` return. Factory methods must match factory-to-factory: an instance method does not satisfy a factory requirement and vice versa.
 
-When a value crosses a type boundary through structural satisfaction (or through a second+ parent), the compiler emits a **view-specific vtable** ordered by the target interface's slot layout. The value struct's vtable pointer is swapped to this view vtable at the coercion point (variable declaration, assignment, function argument, or return statement). For methods with relaxed signature differences, the vtable slot points to an adapter thunk rather than the method directly.
+When a value crosses a type boundary to a view whose slot layout **or slot shapes** differ from the concrete's own vtable — structural satisfaction, a second-or-later parent, or a first-parent crossing where a relaxed match changed a slot's shape — the compiler emits a **view-specific vtable** ordered by the target interface's slot layout. The value struct's vtable pointer is swapped to this view vtable at the coercion point (variable declaration, assignment, function argument, or return statement). For methods with relaxed signature differences, the view's vtable slot points to an adapter thunk rather than the method directly.
+
+A type's **own** vtable always carries the shapes that type's own declarations promise, so the adaptation belongs to the view and never to the concrete. A slot cannot hold both: with `Child is Parent` where `Parent` declares `close!(~this)` and `Child` overrides it non-failably, a call through `Child` as a static type reads that slot as `void`, while a call through `Parent` reads the same slot as a failable struct. Rewriting the slot would fix one caller and break the other.
 
 #### Protocol Interfaces (`` `structural(protocol: true) ``)
 

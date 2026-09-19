@@ -75,12 +75,11 @@ The structural interfaces the platform publishes — `Format`, `Parse`, `Reader`
 
 Relying on structural satisfaction is still correct for user code composing with an interface it did not know about. It is not correct for a published platform type, where the conformance is part of the contract and should be checked at the declaration.
 
-**Exceptions.** Four sets of platform types satisfy a protocol but cannot say so yet. The first is a language rule; the other three are compiler limitations with tracker items, not a judgement that the conformance is unwanted — when an item closes, the clause goes in and its bullet comes out.
+**Exceptions.** Three sets of platform types satisfy a protocol but cannot say so yet. The first is a language rule; the other two are compiler limitations with tracker items, not a judgement that the conformance is unwanted — when an item closes, the clause goes in and its bullet comes out.
 
 - **Enums cannot declare `is` at all** (grammar). `json.JsonValue` therefore conforms to `Format` by signature only; the near-miss check accepts it via the explained-name gate. This is the one exception that is a language rule rather than a defect — see §5.4 of `docs/language-design.md`.
 - **`Reader` / `Writer` on non-generic heap I/O types** — `io.File`, `io.BufferedReader`, `io.BufferedWriter`, `gzip.GunzipReader`, `gzip.GzipWriter`, `net.TcpStream`, `tls.TlsStream`, `os.ProcessInput`, `os.ProcessOutput`, `http._PlainTransport`, `http._TlsTransport` — is **T1882**.
 - **`Builder` cannot declare `is Writer` and `Scanner` cannot declare `is Reader`** — both implement the requirement non-failably, which an explicit `is` rejects on an interface carrying default methods — **T1933**.
-- **`Closer` on a type whose `close` is non-failable** — `http.Client`, `std.MutexGuard[T]`. Declaring it compiles and then miscompiles the boxed call, so the declaration is strictly worse than the structural match it replaces — **T1952**.
 
 ### Naming Conventions
 

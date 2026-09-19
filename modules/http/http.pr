@@ -264,10 +264,7 @@ type Pool {
   }
 }
 
-// No `is Closer` (T1734): Client.close(~this) is non-failable where Closer
-// requires close!(~this), and the explicit-`is` vtable path miscompiles that
-// relaxed match (T1952). Client satisfies Closer structurally in the meantime.
-type Client `public `doc("A reusable HTTP/1.1 client with redirect following, keep-alive connection reuse, and automatic gzip response decoding. Speaks both http:// and https://; by default an https:// request verifies the server certificate against the system trust store, which set_tls_config can override. Create once and reuse for many requests to the same host. Not safe for concurrent use — the connection pool is mutated per request, so use one Client per goroutine.") {
+type Client is Closer `public `doc("A reusable HTTP/1.1 client with redirect following, keep-alive connection reuse, and automatic gzip response decoding. Speaks both http:// and https://; by default an https:// request verifies the server certificate against the system trust store, which set_tls_config can override. Create once and reuse for many requests to the same host. Not safe for concurrent use — the connection pool is mutated per request, so use one Client per goroutine.") {
   // The TLS configuration slot: empty until set_tls_config is called or the
   // first https:// request materialises the system-trust-store default into it.
   // See _connect_transport for why this is a zero-or-one vector and why it is

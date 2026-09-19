@@ -1,0 +1,256 @@
+// T1952: a value crossing to a FIRST parent whose slot shapes it changed by a
+// relaxed match must get a view vtable with an adapter, not the concrete's own
+// vtable.
+//
+// `std.Closer` requires `close!(~this)`. A non-failable `close(~this)` is a
+// documented relaxed match (docs/language-design.md §5.3), so the concrete's own
+// vtable slot holds a `void (i8*)*` while the Closer call site bitcasts to
+// `{ i1, i8* } (i8*)*` and reads an error flag the callee never wrote. Whether
+// that crashed depended on what happened to be in the result register, which is
+// why the IR assertions in
+// compiler/internal/codegen/tests/regress11/t1952_test.go are the real guard —
+// these pin the observable behaviour.
+//
+// Cells (a) and (c) passing is what made the bug invisible, so all three are here.
+// ---- The three-cell matrix ----
+type _HA `doc("Non-failable close, NO `is` — satisfies Closer structurally.") {
+  int closed;
+  close(~this) `doc("Marks the handle closed. Releases nothing.") {
+    this.closed = this.closed + 1;
+  }
+}
+
+type _HB is Closer `doc("Non-failable close WITH `is Closer` — the reported bug.") {
+  int closed;
+  close(~this) `doc("Marks the handle closed. Releases nothing.") {
+    this.closed = this.closed + 1;
+  }
+}
+
+type _HC is Closer `doc("Failable close WITH `is Closer` — the exact spelling.") {
+  int closed;
+  close!(~this) `doc("Marks the handle closed. Releases nothing.") {
+    this.closed = this.closed + 1;
+  }
+}
+
+structural_crossing_runs_close_and_returns() `test {
+  Closer c = _HA(closed: 0);
+  c.close()?!;
+  assert(true, "(a) structural crossing returned from close");
+}
+
+explicit_is_crossing_runs_close_and_returns() `test {
+  Closer c = _HB(closed: 0);
+  c.close()?!;
+  // Reaching here at all is the fix: the caller used to read an error flag out
+  // of a register @_HB.close never wrote, and raised on whatever it found.
+  assert(true, "(b) explicit-`is` crossing returned from close");
+}
+
+exact_failable_close_crossing_runs_close_and_returns() `test {
+  Closer c = _HC(closed: 0);
+  c.close()?!;
+  assert(true, "(c) exact close!(~this) crossing returned from close");
+}
+
+// A relaxed close that raises nothing must not be reported as raising. The
+// adapter builds the success half of the failable struct, so a handler must not
+// fire — this is the assertion the "did we get here" ones above cannot make.
+explicit_is_crossing_reports_no_error() `test {
+  Closer c = _HB(closed: 0);
+  bool raised = false;
+  c.close()? e {
+    raised = true;
+  };
+  assert(!raised, "a non-failable close reports success through the view");
+}
+
+structural_crossing_reports_no_error() `test {
+  Closer c = _HA(closed: 0);
+  bool raised = false;
+  c.close()? e {
+    raised = true;
+  };
+  assert(!raised, "the structural crossing agrees — same shape, same answer");
+}
+
+// The fix changes what sits in field 0 of the boxed value, so the downcast that
+// reads it must keep working.
+//
+// Deliberately `is` and not `as`: narrowing a view back to its concrete type with
+// `as` double-frees the instance and segfaults at scope exit (T2186). That is
+// pre-existing — it reproduces with and without this fix — so this file tests the
+// predicate only. Add the `as` form when T2186 lands.
+explicit_is_crossing_still_downcasts() `test {
+  Closer c = _HB(closed: 0);
+  assert(c is _HB, "a boxed explicit-`is` value still answers `is` for its concrete type");
+  assert(!(c is _HC), "and does not answer for an unrelated Closer");
+  c.close()?!;
+}
+
+// ---- One slot, two shapes: plain `is` inheritance ----
+//
+// `_P` declares close!(~this); `_Q` relaxes it to close(~this); `_R` keeps the
+// relaxed spelling. A call through `_Q` reads that slot as void, a call through
+// `_P` reads it as a failable struct. The concrete's own vtable therefore cannot
+// be adapted in place — only the `_P` crossing gets a view vtable.
+
+type _P `doc("Root with a failable close.") {
+  int mark;
+  close!(~this) `doc("Marks 1.") {
+    this.mark = 1;
+  }
+}
+
+type _Q is _P `doc("Relaxes the parent's close to non-failable.") {
+  close(~this) `doc("Marks 2.") {
+    this.mark = 2;
+  }
+}
+
+type _R is _Q `doc("Keeps the relaxed spelling.") {
+  close(~this) `doc("Marks 3.") {
+    this.mark = 3;
+  }
+}
+
+middle_parent_crossing_keeps_its_own_shape() `test {
+  _Q q = _R(mark: 0);
+  q.close();
+  assert(q.mark == 3, "dispatch through _Q reaches _R.close");
+}
+
+root_parent_crossing_adapts_to_the_failable_shape() `test {
+  _P p = _R(mark: 0);
+  p.close()?!;
+  assert(p.mark == 3, "dispatch through _P reaches _R.close and returns");
+}
+
+root_parent_crossing_reports_no_error() `test {
+  _P p = _R(mark: 0);
+  bool raised = false;
+  p.close()? e {
+    raised = true;
+  };
+  assert(!raised, "the adapter reports success, not a stale register");
+  assert(p.mark == 3, "and close still ran");
+}
+
+// ---- The other two relaxations, on a first parent ----
+
+type _Src `doc("Requirement returning an optional.") {
+  peek(~this) int? `doc("Absent by default.") {
+    return none;
+  }
+}
+
+type _Fixed is _Src `doc("Relaxes the optional return to a bare value.") {
+  peek(~this) int `doc("Always 7.") {
+    return 7;
+  }
+}
+
+optional_return_relaxation_wraps_through_the_view() `test {
+  _Src s = _Fixed();
+  if v := s.peek() {
+    assert(v == 7, "the adapter wrapped the bare return as `some` and carried the value");
+  } else {
+    assert(false, "the adapter must wrap the bare return as `some`, not `none`");
+  }
+}
+
+type _Emit `doc("Requirement with one parameter.") {
+  int last_n;
+  int last_flags;
+  send(~this, int n) `doc("Records n.") {
+    this.last_n = n;
+  }
+}
+
+type _Wide is _Emit `doc("Relaxes by adding a trailing defaulted parameter.") {
+  send(~this, int n, int flags = 7) `doc("Records n and flags.") {
+    this.last_n = n;
+    this.last_flags = flags;
+  }
+}
+
+extra_defaulted_param_is_supplied_through_the_view() `test {
+  _Emit e = _Wide(last_n: 0, last_flags: 0);
+  e.send(1);
+  assert(e.last_n == 1, "the declared argument reached the override");
+  assert(e.last_flags == 7, "and the adapter supplied the omitted one with its default");
+}
+
+// ---- Two relaxations stacked: the view's shape, not the ancestor's ----
+//
+// `_RWide` relaxes `_Q` (extra defaulted param) which already relaxes `_P` (void
+// for failable). That second relaxation is what forces the `_Q` crossing to build
+// a view vtable at all — and its slot must carry `_Q`'s VOID shape, because that
+// is what a call site with static type `_Q` reads. Deriving it from `_P` instead
+// puts a failable-shaped adapter in a slot the caller reads as void.
+//
+// These pin the observable behaviour — the right override runs, with the right
+// default, and nothing reports a spurious error. They do NOT detect the
+// ancestor-shape mismatch itself: that direction is slot-wider-than-call-site,
+// which on x86-64 SysV just leaves two result registers the caller ignores, so
+// these pass either way. TestT1952ViewVtableUsesTheViewsOwnShapeNotTheAncestors
+// in compiler/internal/codegen/tests/regress11/t1952_test.go is what guards it,
+// by asserting the adapter's LLVM return type directly.
+
+type _RWide is _Q `doc("Relaxes _Q further by adding a trailing defaulted parameter.") {
+  close(~this, int bump = 4) `doc("Marks with the bump value.") {
+    this.mark = bump;
+  }
+}
+
+middle_parent_crossing_adapts_to_the_middle_shape() `test {
+  _Q q = _RWide(mark: 0);
+  q.close();
+  assert(q.mark == 4, "dispatch through _Q reaches _RWide.close with its default");
+}
+
+root_parent_crossing_of_a_double_relaxation() `test {
+  _P p = _RWide(mark: 0);
+  p.close()?!;
+  assert(p.mark == 4, "dispatch through _P adapts both relaxations at once");
+}
+
+root_parent_crossing_of_a_double_relaxation_reports_no_error() `test {
+  _P p = _RWide(mark: 0);
+  bool raised = false;
+  p.close()? e {
+    raised = true;
+  };
+  assert(!raised, "stacked relaxations still report success");
+  assert(p.mark == 4, "and the override still ran");
+}
+
+// ---- The parents used as themselves ----
+//
+// No crossing happens, so these are direct calls — the guard that giving a
+// subtype a view vtable did not disturb the type that declared the slot.
+
+parents_used_as_themselves_are_unaffected() `test {
+  _P p = _P(mark: 0);
+  p.close()?!;
+  assert(p.mark == 1, "_P's own failable close runs unchanged");
+
+  _Q q = _Q(mark: 0);
+  q.close();
+  assert(q.mark == 2, "_Q's own relaxed close runs unchanged");
+}
+
+requirement_defaults_run_when_used_directly() `test {
+  _Src s = _Src();
+  if v := s.peek() {
+    assert(false, "_Src.peek is absent by default, got {v}");
+  } else {
+    assert(true, "_Src.peek returns none when not overridden");
+  }
+
+  _Emit e = _Emit(last_n: 0, last_flags: 0);
+  e.send(3);
+  assert(e.last_n == 3, "_Emit's own send runs unchanged");
+  assert(e.last_flags == 0, "and leaves the field only _Wide writes untouched");
+}

@@ -595,13 +595,46 @@ func ImplementsInst(x Type, ifaceInst *Instance) bool {
 // abstract interface method signature after substituting the interface's generic
 // type params (subst) and mapping the interface's Self type (self) to the
 // implementing type (replacement). It uses the same relaxed rules as structural
-// satisfaction (Implements) — see identicalSignaturesWithSelf. This exists so the
-// explicit-`is` override-validation path can reuse the exact comparator the
-// structural path already uses. Self is stored as the declaring *Named (not a
-// TypeParam), so Substitute leaves it intact for identicalSignaturesWithSelf.
+// satisfaction (Implements) — see identicalSignaturesWithSelf — plus one the
+// structural path does not apply: the receiver's borrow kind must match exactly.
+// This exists so the explicit-`is` override-validation path can reuse the exact
+// comparator the structural path already uses. Self is stored as the declaring
+// *Named (not a TypeParam), so Substitute leaves it intact for
+// identicalSignaturesWithSelf.
 func SatisfiesAbstract(concrete, abstract *Signature, subst map[*TypeParam]Type, self, replacement *Named) bool {
 	substAbstract := Substitute(abstract, subst).(*Signature)
+	if !ReceiverBorrowMatches(concrete, substAbstract) {
+		return false
+	}
 	return identicalSignaturesWithSelf(concrete, substAbstract, self, replacement)
+}
+
+// ReceiverBorrowMatches reports whether the concrete method's receiver has the
+// same borrow kind (`this` vs `~this`) as the requirement's. It is the single
+// definition of the rule: SatisfiesAbstract rejects on it, and sema's
+// reportOverrideMismatch asks the same question to choose its wording. Spelling
+// the condition out at the diagnostic site instead would let the message drift
+// from the rejection — the reader would get "expected X, found X" with two
+// identical signatures, since Signature.String() does not print the receiver.
+//
+// This is the one rule an explicitly declared `is` applies that implicit
+// structural satisfaction does not, and the asymmetry is a known GAP, not a
+// design: §5.3 of docs/language-design.md states the end-state rule for both
+// paths (a concrete receiver may be less demanding than the requirement's, never
+// more), and the structural half — where a `~this` method satisfying a shared
+// requirement lets a shared borrow of the view mutate through it, contrary to
+// §6.2 — is tracked as T2185. An `is` clause is a *claim* about a specific
+// requirement, so a `close(this)` that cannot mutate anything, written against a
+// `close!(~this)` meant to release a resource, is exactly the drift the explicit
+// clause exists to catch (T1952).
+func ReceiverBorrowMatches(concrete, abstract *Signature) bool {
+	if concrete == nil || abstract == nil {
+		return true
+	}
+	if concrete.recv == nil || abstract.recv == nil {
+		return true // receiver-less member (`factory / `global / `mono) — matched factory-to-factory elsewhere
+	}
+	return concrete.recv.ref == abstract.recv.ref
 }
 
 // IsUnlowerableStreamAdapter reports whether adapting `concrete` to satisfy

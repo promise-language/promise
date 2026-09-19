@@ -245,14 +245,25 @@ cloneable_produces_an_independent_copy() `test {
 // ---- Closer ----
 
 mutex_guard_closes_directly() `test {
-  // MutexGuard[T] does NOT declare `is Closer` — its close(~this) is
-  // non-failable where Closer requires close!(~this), and the explicit-`is`
-  // vtable path miscompiles that relaxed match (T1952). It still satisfies
-  // Closer structurally; this pins the direct call the type publishes.
+  // MutexGuard[T] declares `is Closer` (T1952 restored it): its close(~this) is
+  // non-failable where Closer requires close!(~this), a documented relaxed match
+  // (§5.3) that the crossing now adapts. This pins the direct call the type
+  // publishes; the boxed form is covered in
+  // tests/e2e/mutex_guard_box_structural_test.pr.
   Mutex[int] m = Mutex[int](5);
   guard := m.lock();
   assert(guard.borrow == 5, "guard reads the protected value");
   guard.close();
+}
+
+relaxed_closer_boxes_and_closes() `test {
+  // T1952: a non-failable close(~this) under an explicit `is Closer`. The box
+  // installs a view vtable whose slot is an adapter wrapping the void result
+  // into the failable struct Closer's call site reads — without it the caller
+  // read an error flag out of a register the callee never wrote.
+  _RelaxedCloser h = _RelaxedCloser(fd: 7);
+  Closer c = h;
+  c.close()?!;
 }
 
 file_handle_types_satisfy_closer() `test {
@@ -266,6 +277,12 @@ file_handle_types_satisfy_closer() `test {
 type _ExactCloser is Closer {
   int fd;
   close!(~this) `doc("Consuming, failable close — the shape io.File and friends use.") {
+  }
+}
+
+type _RelaxedCloser is Closer {
+  int fd;
+  close(~this) `doc("Non-failable close — the documented relaxed match (§5.3) http.Client and MutexGuard[T] use.") {
   }
 }
 

@@ -46,11 +46,6 @@ func TestT1734DriftedParseIsRejectedAtTheDeclaration(t *testing.T) {
 func TestT1734DriftedCloseIsRejectedAtTheDeclaration(t *testing.T) {
 	// std.Closer requires close!(~this). A close that takes a required extra
 	// argument cannot satisfy it, and the error names the method.
-	//
-	// Note this does NOT cover the receiver: `close(this)` against `close!(~this)`
-	// is accepted today, because *Signature does not carry the receiver, so
-	// nothing compares receiver ownership. That hole is T1952, filed from this
-	// sweep — add a case here when it lands.
 	errs := checkErrs(t, `
 		type Handle is Closer {
 			int fd;
@@ -59,6 +54,74 @@ func TestT1734DriftedCloseIsRejectedAtTheDeclaration(t *testing.T) {
 		main() {}
 	`)
 	expectError(t, errs, "abstract method 'close'")
+}
+
+func TestT1952ReceiverBorrowKindMustMatchUnderExplicitIs(t *testing.T) {
+	// T1952: std.Closer requires close!(~this). A shared `this receiver is not
+	// among §5.3's relaxations, so an explicit `is` rejects it — and the message
+	// names the receiver, because Signature.String() does not print it and the
+	// generic "expected X, found Y" arm would print two identical signatures.
+	errs := checkErrs(t, `
+		type Handle is Closer {
+			int fd;
+			close(this) {}
+		}
+		main() {}
+	`)
+	expectError(t, errs, "the requirement takes a ~this receiver but Handle.close takes this")
+}
+
+func TestT1952MutatingReceiverCannotClaimASharedRequirement(t *testing.T) {
+	// The other direction of the same rule. A requirement that promises a shared
+	// (read-only) borrow may not be implemented by a method that mutates — that
+	// would let a caller holding a `& borrow of the view mutate through it.
+	errs := checkErrs(t, `
+		type Touchable `+t1734Tick+`structural {
+			touch!(this) `+t1734Tick+`abstract;
+		}
+		type Counter is Touchable {
+			int n;
+			touch!(~this) { this.n = 1; }
+		}
+		main() {}
+	`)
+	expectError(t, errs, "the requirement takes a this receiver but Counter.touch takes ~this")
+}
+
+func TestT1952StructuralSatisfactionDoesNotYetCompareReceivers(t *testing.T) {
+	// Pins a known GAP, not a blessing: implicit structural satisfaction compares
+	// params, failability and result but never the receiver, so a `~this method
+	// satisfies a shared-receiver requirement and `s.emit(1)` below mutates
+	// through what §6.2 calls a read-only borrow. That is T2185; §5.3 states the
+	// end-state rule (a concrete receiver may be less demanding than the
+	// requirement's, never more). This test exists so closing T2185 is a
+	// deliberate, visible change here rather than a silent one — the idiomatic
+	// requirement is written with no receiver at all, so the fix is a sweep that
+	// spells `emit(~this, int n)` across the seven affected test units.
+	checkOK(t, `
+		type Sink `+t1734Tick+`structural {
+			emit(int n) `+t1734Tick+`abstract;
+		}
+		type Counter {
+			int total;
+			emit(~this, int n) { this.total = this.total + n; }
+		}
+		main() { Sink s = Counter(total: 0); s.emit(1); }
+	`)
+}
+
+func TestT1952NonFailableCloseIsStillAcceptedUnderExplicitIs(t *testing.T) {
+	// The relaxation T1952 restored on http.Client and std.MutexGuard[T]: a
+	// non-failable close(~this) satisfies Closer's close!(~this). Sema accepts it
+	// (Closer carries no default methods, so the T1376 exactness gate does not
+	// fire) and codegen now adapts it at the crossing rather than miscompiling.
+	checkOK(t, `
+		type Handle is Closer {
+			int fd;
+			close(~this) {}
+		}
+		main() {}
+	`)
 }
 
 // --- The conforming spellings the sweep moved std and the catalog onto. ---
@@ -110,10 +173,6 @@ func TestT1734RelaxedMatchIsStillAcceptedUnderExplicitIs(t *testing.T) {
 	// The wide integers declare `is Parse` while their parse! carries an extra
 	// defaulted `base` parameter. That is a documented relaxed match, and Parse
 	// carries no default methods, so an explicit `is` accepts it.
-	//
-	// A non-failable close(~this) under `is Closer` is accepted by sema too, but
-	// codegen then miscompiles the boxed call (T1952), which is why the sweep
-	// leaves http.Client and std.MutexGuard[T] structurally conforming instead.
 	checkOK(t, `
 		type Word is Parse {
 			int _n `+t1734Tick+`value;

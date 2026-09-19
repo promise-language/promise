@@ -132,6 +132,18 @@ func (c *Checker) reportUnlowerableStreamAdapter(td *ast.TypeDecl, am types.Abst
 		am.Declarer, name, td.Name, name)
 }
 
+// receiverSpelling renders a signature's receiver the way it is written in
+// source — `this` for a shared borrow, `~this` for a mutable one — so a receiver
+// mismatch can name both sides (T1952). Its one caller has already established
+// that both receivers are present; "none" is the inert fallback for a
+// receiver-less member (`factory / `global / `mono), which never reaches here.
+func receiverSpelling(sig *types.Signature) string {
+	if sig == nil || sig.Recv() == nil {
+		return "none"
+	}
+	return sig.Recv().Ref().String() + "this"
+}
+
 // reportOverrideMismatch emits a diagnostic for a concrete method that does not
 // satisfy the inherited abstract requirement it overrides. It anchors the error
 // at the overriding MethodDecl when the type declares it directly, else at the
@@ -147,6 +159,19 @@ func (c *Checker) reportOverrideMismatch(td *ast.TypeDecl, am types.AbstractMeth
 		}
 	}
 	substAbstract := types.Substitute(am.Method.Sig(), subst).(*types.Signature)
+	// A receiver mismatch needs its own wording: Signature.String() does not
+	// print the receiver, so the generic "expected X, found Y" arm below would
+	// print two identical signatures and name nothing (T1952). Ask types for the
+	// verdict rather than restating it, so the message can never describe a
+	// different condition than the one SatisfiesAbstract rejected on.
+	if !types.ReceiverBorrowMatches(override.Sig(), substAbstract) {
+		c.errorf(pos, "type %s cannot satisfy abstract method '%s' from %s: the requirement takes a %s receiver but %s.%s takes %s. An explicit `is` does not relax the receiver's borrow kind — declare %s with a %s receiver.",
+			td.Name, am.Method.Name(), am.Declarer,
+			receiverSpelling(substAbstract), td.Name, am.Method.Name(),
+			receiverSpelling(override.Sig()),
+			am.Method.Name(), receiverSpelling(substAbstract))
+		return
+	}
 	// Failability is the common case (T1376) — give it targeted wording.
 	if override.Sig().CanError() && !substAbstract.CanError() {
 		c.errorf(pos, "type %s cannot satisfy abstract method '%s' from %s: a failable method %s%s cannot satisfy a non-failable requirement %s%s",

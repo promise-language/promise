@@ -895,7 +895,7 @@ func TestOptionalStructuralInterfaceDropOnReassign(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		type Iter is Iterator[int] {
 			int val;
-			next() int? { return none; }
+			next(~this) int? { return none; }
 		}
 		make_iter() Iterator[int] {
 			return Iter(val: 1);
@@ -918,7 +918,7 @@ func TestOptionalStructuralInterfaceEnvDropRTTI(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		type Iter is Iterator[int] {
 			int val;
-			next() int? { return none; }
+			next(~this) int? { return none; }
 		}
 		make_iter() Iterator[int] {
 			return Iter(val: 1);
@@ -952,7 +952,7 @@ func TestIfUnwrapOptionalStructuralNoDropFlagClear(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		type Iter is Iterator[int] {
 			int val;
-			next() int? { return none; }
+			next(~this) int? { return none; }
 		}
 		make_iter() Iterator[int] {
 			return Iter(val: 1);

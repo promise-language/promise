@@ -1,4 +1,13 @@
 // T1887: Boxing a MutexGuard[T] as Closer must not double-drop the guard.
+//
+// T1952 declared `is Closer` on MutexGuard[T] — its close(~this) is non-failable
+// where Closer requires close!(~this), a documented relaxed match (§5.3). The
+// boxed guard is exercised here by scope-exit DROP only: calling `c.close()?!`
+// through the box segfaults on a null view-vtable slot, because every MutexGuard
+// member is `native and the view-vtable shim factory only synthesizes `clone`.
+// That is T2183 (T1932's checklist entry 6a) and it reproduces identically with
+// and without the `is` clause, so it is not this file's to work around. Add the
+// explicit-close case when T2183 lands — do not add it before.
 box_closer_only() `test {
   Mutex[int] m = Mutex[int](value: 1);
   Closer c = m.lock();

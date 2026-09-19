@@ -53,8 +53,12 @@ test_url_with_port() `test(exclude: wasm) {
 }
 
 test_url_no_path() `test(exclude: wasm) {
-  _Url u = _parse_url("http://10.0.0.1")?!;
-  assert(u.host == "10.0.0.1", "ip host");
+  // 192.0.2.x is RFC 5737 TEST-NET-1, reserved for documentation — the
+  // IP-literal counterpart of the example.com and localhost the tests above
+  // use. Any IPv4 literal exercises this path; a real RFC1918 address (10.x,
+  // 192.168.x, 172.16-31.x) reads as an internal host and is refused at commit.
+  _Url u = _parse_url("http://192.0.2.1")?!;
+  assert(u.host == "192.0.2.1", "ip host");
   assert(u.port == 80, "default port");
   assert(u.path == "/", "default path");
 }
@@ -1611,4 +1615,14 @@ test_write_all_resumes_after_partial_write() `test(exclude: wasm, timeout: "20s"
   conn.close()?!;
   assert((<-received)! == 4000000, "every byte of a 4 MB write reached the peer");
   listener.close()?!;
+}
+
+client_satisfies_closer_boxed() `test(exclude: wasm) {
+  // T1952: Client.close(~this) is non-failable where Closer requires
+  // close!(~this) — a documented relaxed match (§5.3). `is Closer` is declared,
+  // so the crossing must install a view vtable whose slot adapts the void result
+  // into the failable struct Closer's call site reads. Before the fix the caller
+  // read an error flag out of a register the callee never wrote.
+  Closer c = Client.create();
+  c.close()?!;
 }

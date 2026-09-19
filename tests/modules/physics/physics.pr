@@ -1,5 +1,5 @@
 // physics: module that also depends on utils (diamond with geometry).
-use utils "./utils";
+use utils "../utils";
 
 type Velocity `public {
   int vx;

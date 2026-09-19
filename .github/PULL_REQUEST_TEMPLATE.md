@@ -13,7 +13,7 @@ Fill in the sections below and tick the checklist. Delete anything not relevant.
 
 ## Checklist
 
-- [ ] **Tests pass** locally (`bin/verify --wasm`); added/updated tests for the change.
+- [ ] **Tests pass** locally (`bin/verify`); added/updated tests for the change.
 - [ ] **CLA acknowledged** — I have signed the Contributor License Agreement
       (see [`CONTRIBUTING.md`](../CONTRIBUTING.md) and
       [`INDIVIDUAL_CLA.md`](../INDIVIDUAL_CLA.md) /

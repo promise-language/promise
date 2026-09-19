@@ -32,7 +32,7 @@ bin/promise test examples/...
 | [09_patterns/](09_patterns/) | Design patterns | Builder, state machine, command dispatch |
 | [11_wasm/](11_wasm/) | WebAssembly | Cross-target compilation, raw `wasm_import`, WIT bindings via `wasi_preview_2` |
 
-WebAssembly examples are exercised on their target during `bin/verify --wasm` (wasm32-wasi via wasmtime) and `bin/verify --wasm-web` (wasm32-web via Node.js).
+WebAssembly examples are exercised on their target by the WASM gates — `bin/gate wasm-test` (wasm32-wasi via wasmtime) and `bin/gate wasm-web-test` (wasm32-web via Node.js), or `bin/test --wasm` / `bin/test --wasm-web` by hand. They are not part of `bin/verify`, which is host-scoped.
 
 ## Further Reading
 

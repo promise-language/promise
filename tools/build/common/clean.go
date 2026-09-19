@@ -17,11 +17,15 @@ type CleanOptions struct {
 	Quiet bool
 }
 
-// errCleanWithShared refuses --clean combined with --shared on bin/test and
-// bin/verify. A test run never clears the shared home — clearing
-// ~/.promise/cache is an operator's explicit `bin/clean --shared` — and --clean
-// clears only the repo-local .promise-home, which a --shared run does not use.
-var errCleanWithShared = errors.New("--clean cannot be combined with --shared: bin/test and bin/verify never clear the shared ~/.promise (run bin/clean --shared for that), and --clean clears only the repo-local .promise-home, which a --shared run does not use")
+// errCleanWithShared refuses --clean combined with --shared on bin/test. A test
+// run never clears the shared home — clearing ~/.promise/cache is an operator's
+// explicit `bin/clean --shared` — and --clean clears only the repo-local
+// .promise-home, which a --shared run does not use.
+//
+// bin/verify no longer has the pair to refuse: it takes no --shared, because a
+// flag that moved where a run measured while the blessing it wrote said nothing
+// about it made "blessed" mean two things (T2170).
+var errCleanWithShared = errors.New("--clean cannot be combined with --shared: bin/test never clears the shared ~/.promise (run bin/clean --shared for that), and --clean clears only the repo-local .promise-home, which a --shared run does not use")
 
 // CleanTarget returns the directory Clean removes: <root>/.promise-home by
 // default, ~/.promise/cache with shared.

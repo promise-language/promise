@@ -14,7 +14,7 @@ type Wrapper `public `doc("A string wrapper that satisfies the Parse structural 
       }
       s = s + string.from_bytes(buf[:n]);
     }
-    return Wrapper(value: s);
+    return Wrapper(value: move s);
   }
 
   format!(this, Writer ~w) `public `doc("Writes the wrapper value.") {

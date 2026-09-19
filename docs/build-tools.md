@@ -9,7 +9,7 @@ This document describes the Promise compiler's build tooling system. All build t
 ```bash
 ./make        # compile all tools to bin/
 bin/build                       # build the compiler
-bin/verify --wasm               # full pre-commit check
+bin/verify                      # full pre-commit check
 ```
 
 The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries into `bin/`. Each binary embeds a hash of the `tools/` source files and refuses to run if the source has changed, prompting you to re-run `./make`.
@@ -19,7 +19,7 @@ The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries i
 | Binary | Purpose |
 |--------|---------|
 | `bin/build` | Build the compiler binary (`bin/promise`). Handles ANTLR parser generation, resource embedding, LLVM detection, and Go compilation. |
-| `bin/verify` | Pre-commit verification: format, build, check, and test. Supports `--shared`, `--wasm`, `--clean`. |
+| `bin/verify` | Pre-commit verification: build, repair, check, then the `integration` gate, measured in-process and judged. Supports `--clean`, `--push`, `--lock-timeout`. No variant flags. |
 | `bin/test` | Run test suites. Modes: `go`, `promise`, `all`. Supports `--wasm`, `--clean`. |
 | `bin/format` | Format Go code (`gofmt`) and Promise code (`promise format`). |
 | `bin/check` | Run `go vet` over every Go module, reporting the findings this project's authors can act on — diagnostics in the generated parser are excluded. The same implementation the `checked:go` gate measures; `go vet` has no general `-fix`, so this is the check-only form of the pair. |
@@ -294,30 +294,57 @@ Release builds compile with `-tags embed_llvm` to enable the embedded tool extra
 
 ## Verify Pipeline (`bin/verify`)
 
-The verify tool orchestrates the full pre-commit check:
+Verify is a list of named steps, run in order, stopping at the first failure —
+which it names, so `structure: docs: dangling link` sends the reader to the sweep
+rather than to a phase they have to identify first:
 
-0. **Clear the blessing** — delete `.workspace/verified-tree` (see below)
-1. **Format** — `gofmt -w .` in compiler/, then `promise format` on all `.pr` files
-2. **Build** — full build pipeline (see above)
-3. **Check** — `bin/check`'s own implementation: `go vet` over every Go module's packages, with the generated `internal/parser` excluded from the package list *and* from the findings. Both exclusions are needed — `go vet` reports diagnostics in a package's dependencies, so naming the packages alone does not keep the generated ones out of the answer.
-3b. **Structure** — `common.RunStructuralChecks`, the sweeps over tracked sources described below
-4. **Go tests** — `go test ./...` in compiler/, then tools/build, then flows/
-5. **Promise tests (host)** — `promise test tests/... modules/... examples/...`
-6. **Promise tests (WASM)** — if `--wasm` flag, same with `-target wasm32-wasi`
-7. **Record the blessing** — write the tree id of the verified content (see below)
+| Step | Does |
+|------|------|
+| `lock` | Serialize concurrent verify runs across the host (see below) |
+| `clear` | Delete `.workspace/verified-tree` — drop any previous blessing (see below) |
+| `clean` | `--clean` only: wipe `.promise-home/` so the run starts cold |
+| `cache` | Point `PROMISE_HOME` at the repo-local `.promise-home/` |
+| `build` | The full build pipeline (see above) |
+| `format go` | `gofmt -w .` |
+| `format promise` | `promise format` on all `.pr` files |
+| `check go` | `bin/check`'s own implementation: `go vet` over every Go module's packages, with the generated `internal/parser` excluded from the package list *and* from the findings. Both exclusions are needed — `go vet` reports diagnostics in a package's dependencies, so naming the packages alone does not keep the generated ones out of the answer. |
+| `check structure` | `common.RunStructuralChecks`, the sweeps over tracked sources described below |
+| `integration` | Measure the `integration` gate and judge it — **this step is verify's verdict** |
+| `record` | Bless the tree the measurement passed on (see below) |
+| `push` | `--push` only: `git push` |
 
-**A Go-suite failure ends the run.** All three Go suites in step 4 run — their
-failures are cheap and belong on screen together — but if any of them failed,
-verify prints its summary and stops. Step 5 and step 6 do not run: when the
-compiler's own unit tests are broken, the tens of thousands of Promise tests
-have nothing to add, and every Promise row of the summary says
-`not run (go tests failed)` rather than reporting a `0s` failure for a phase
-that never happened. The closing `FAILED:` line names the suite that stopped
-the run.
+**The build precedes the repairs**, and that ordering is load-bearing:
+`promise format` is the formatter the compiler carries, and `integration`
+*measures* whether anything is still unformatted. Repairing with a stale binary
+and then being judged by the fresh one would fail every change that touches the
+formatter, and on a fresh clone — no binary yet — verify would not repair at all
+before being judged on it.
+
+### The test phase is `integration`, in process
+
+Verify does not run suites of its own. The `integration` step calls
+`MeasureContractGateParts`, the same Go entry point `bin/run integration` and
+`bin/gate integration` reach, and verify's verdict is the judge's verdict on that
+envelope — the same `judge()` and the same terms in
+[`tools/gates/`](gate-system.md#baselines).
+
+**One measurement, one meaning of "blessed."** Verify used to run `RunGoTests` +
+`RunPromiseTests` itself, so "bin/verify passed" and "integration passed" were two
+answers about one tree that could differ, and only the first wrote the record the
+commit guard reads — a tree the gate had passed three times was still refused as
+unverified (T2170). Two consequences follow, both deliberate:
+
+- **Verify reports no metric `integration` does not.** Its `gate-values.json`
+  sidecar is exactly the envelope's metrics; the `wasm_*` keys it used to add
+  described suites `integration` does not measure.
+- **A failing Go suite no longer skips the Promise suites.** The composition
+  measures every part, because a partial envelope is a measurement of something
+  other than `integration` — which is the divergence being removed. Each part's
+  own output streams to stderr as it runs.
 
 ### The structural sweeps
 
-Step 3b runs `common.RunStructuralChecks` — every check named in
+The `check structure` step runs `common.RunStructuralChecks` — every check named in
 `structuralChecks` (`tools/build/common/structural.go`):
 
 | Name | What it rejects |
@@ -351,28 +378,46 @@ milliseconds against a suite measured in minutes — so they are unconditional,
 and placed ahead of the test phases so a dangling link does not cost a build and
 a compiler suite before it is reported.
 
-### The verified tree
+### The blessing
 
-Steps 0 and 7 are the writing end of a two-ended contract with the commit gate.
-Verify records the tree it blessed at `.workspace/verified-tree` — one git tree
-object id, in the gitignored per-clone `.workspace/` directory — and the commit
-gate refuses a commit whose staged tree is not that one. `verifiedtree.go` holds
-the writing end; the reading end is `bin/precommit-guard`, provisioned by
-`workspace setup` and never built here, so the record's path is spelled at both
-ends. That is the contract, not duplicated logic: the two ends compute different
-things.
+**A tree is blessed iff `integration` measured it and the judge passed it.** The
+record is one git tree object id at `.workspace/verified-tree`, in the gitignored
+per-clone `.workspace/` directory, and the commit gate refuses a commit whose
+staged tree is not that one. `blessing.go` holds the writing end; the reading end
+is `bin/precommit-guard`, provisioned by `workspace setup` and never built here,
+so the record's path is spelled at both ends. That is the contract, not
+duplicated logic: the two ends compute different things.
+
+**Whoever judged that measurement records it**, through one rule
+(`blessIfPassed`): `bin/verify`'s `record` step, `bin/run integration`, and
+`bin/run integration --verdict` — the entry point the flow asks for a verdict on
+an envelope it produced by running the gate itself. So one passing `integration`
+measurement of a tree is sufficient for the commit guard whoever ran it. It used
+to be sufficient only when `bin/verify` ran it, which is how a flow that ran the
+gate three times, green each time, still could not commit (T2170).
+
+**Only the whole may be cited.** The rule refuses any gate but `integration`, any
+verdict but a pass, and any envelope whose tree is not the tree standing here now
+— so a green `tested:go`, a red run, and a measurement of content that has since
+been edited all bless nothing.
+
+**The measurement says which tree it is about.** A gate run stamps the envelope
+with the tree identity it saw, taken after the build and again when the
+measurement is done; if the two differ the envelope carries no identity and the
+run reports that it measured less than a full one. An edit made while a
+twenty-minute measurement runs therefore blesses nothing, rather than being
+blessed by a run that never saw it (T2008).
 
 **The comparison is content against content — there is no clock on either side.**
 A tree blessed last week and untouched since is still blessed; a tree edited five
 seconds after verify passed is not. Formatting rides that same comparison: verify
-*repairs* (`gofmt -w`, `promise format`) in step 1 and records in step 7, so the
-blessed tree is always the formatted tree and unformatted content cannot be
-blessed at all.
+*repairs* (`gofmt -w`, `promise format`) before it measures, so the blessed tree
+is always the formatted tree and unformatted content cannot be blessed at all.
 
 Three details are load-bearing:
 
-- **Step 0 clears before anything else runs**, immediately after the host lock is
-  taken. A run that dies mid-way — a red step, a Ctrl+C, a crash — must leave
+- **The `clear` step runs before anything else**, immediately after the host lock
+  is taken. A run that dies mid-way — a red step, a Ctrl+C, a crash — must leave
   nothing blessed, or the gate would honour a record describing content the dead
   run had already begun changing.
 - **The tree is computed over a temp index seeded from a copy of the real index**,
@@ -389,17 +434,33 @@ Three details are load-bearing:
   Recording checks the entry and fails naming it, rather than producing a tree
   that can never be staged.
 
-Recording is a hard failure, unlike the gate-values sidecar, which only warns: a
-silently skipped record is indistinguishable from a pass and would refuse every
-later commit with no way to tell why. Outside a git checkout there is no commit
-to gate, so recording reports a no-op instead.
+Recording is a hard failure in verify, unlike the gate-values sidecar, which only
+warns: a silently skipped record is indistinguishable from a pass and would refuse
+every later commit with no way to tell why. Outside a git checkout there is no
+commit to gate, so recording reports a no-op instead.
+
+**The identity function is this project's only for now.** The end state is that
+the flow defines the tree identity and how a passing measurement is recorded, and
+every managed project calls those primitives; `blessing.go`'s callers are shaped
+for that swap.
 
 ### Flags
 
-- `--local` — use `.promise-home/` in the repo instead of `~/.promise` (default; avoids polluting user home)
-- `--shared` — use `~/.promise` shared cache instead of the local `.promise-home/`
-- `--wasm` — include wasm32-wasi target tests (requires `wasmtime`)
-- `--clean` — wipe the repo-local `.promise-home/` first and run the Go suites with `-count=1`; refused with `--shared`
+Verify takes **no variant flags**. `--wasm`, `--wasm-web`, `--shared` and
+`--local` are unknown-flag errors, not silent no-ops: each used to change what a
+run measured or where, while the record it wrote said none of it, so
+`bin/verify` and `bin/verify --shared --wasm` blessed the same tree id for two
+different measurements. The WASM suites remain their own gates
+([gate-system.md](gate-system.md)), asked for by name.
+
+What survives cannot change what is measured or what a blessing means:
+
+- `--clean` — wipe the repo-local `.promise-home/` first, so the run starts cold.
+  Colder caches, identical suites: `integration` spells its own commands, and a
+  verify flag may not redefine them.
+- `--push` — `git push`, after the blessing is recorded and never before.
+- `--lock-timeout=<dur>` — bound the wait for the host lock, which happens before
+  any measurement. Absent, the wait is unbounded.
 
 ### Progress rendering
 
@@ -421,17 +482,26 @@ between modes is a bug.
 Two rules make this work end to end:
 
 - **Only the outermost process detects the terminal, and it says so
-  explicitly.** `bin/verify` captures the compiler's stdout, so a `promise test`
-  child can never see the user's terminal itself. Verify tests its own stdout
-  and passes `-progress <mode>` down. The multi-file `promise test` parent does
-  the same in reverse: it always spawns children with `-progress full`, because
-  it re-parses their `pass`/`FAIL`/`LEAK`/… lines to build the per-file counts.
-  Quiet and in-place rendering are properties of the display layer of the
-  outermost process, never of what a child writes on the wire.
-- **The in-place line goes to stderr, never stdout.** Verify captures stdout, so
-  a carriage return written there would land in the text the failure extractor
-  parses, or in a redirected log. `bin/verify > log 2>&1` therefore contains no
-  carriage returns at all.
+  explicitly.** The measurement captures the suite's stdout, so a `promise test`
+  child can never see the user's terminal itself. The outermost process tests
+  its own stdout and passes `-progress <mode>` down. The multi-file
+  `promise test` parent does the same in reverse: it always spawns children with
+  `-progress full`, because it re-parses their `pass`/`FAIL`/`LEAK`/… lines to
+  build the per-file counts. Quiet and in-place rendering are properties of the
+  display layer of the outermost process, never of what a child writes on the
+  wire.
+- **The in-place line goes to stderr, never stdout.** The suite's output is
+  captured and parsed for its summary line, so a carriage return written to
+  stdout would land in that text, or in a redirected log.
+
+**The suites stream to stderr, and verify's own summary to stdout.** A gate's
+stdout carries an envelope and nothing else, so every measurement puts its
+human output on stderr — and verify measures through the gate. What an agent
+reads is therefore `bin/verify > log 2>&1`: each suite's own `FAILED:` block as
+it happens, then the `Verify Summary`. Verify does not re-state those blocks
+under its summary; a second copy assembled from a buffer was the same text
+twice, and holding a twenty-minute suite's output until the end makes a working
+run and a wedged one look alike.
 
 Override with `promise test -progress auto|full|plain|tty`, or with the
 `PROMISE_PROGRESS` environment variable (same spellings), which forces a mode

@@ -7,8 +7,9 @@
 # the generated parser is committed.
 set -euo pipefail
 
-# wasmtime — the runtime for `bin/test --wasm` / `bin/verify --wasm`, which is
-# the documented pre-commit gate. CI installs it via the bytecode-alliance
+# wasmtime — the runtime for `bin/test --wasm` and the `wasm-test` gate. The
+# pre-commit gate is `bin/verify`, which is host-scoped and does not need it.
+# CI installs it via the bytecode-alliance
 # action; there is no devcontainer feature for it, so use the official script.
 if ! command -v wasmtime >/dev/null 2>&1; then
   echo "==> installing wasmtime"
@@ -35,4 +36,4 @@ fi
 
 echo "==> done. Next:"
 echo "    bin/build         # fetches pinned LLVM + musl CRT on first run (~1 GB cache)"
-echo "    bin/verify --wasm # format + check + full suite"
+echo "    bin/verify        # build + repair + check + the integration gate"

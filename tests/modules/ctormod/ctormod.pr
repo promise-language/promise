@@ -4,7 +4,7 @@
 type Holder `public {
   int[] data;
 
-  new(~this, int[] codes) `public {
+  new(~this, int[] move codes) `public {
     this.data = codes;
   }
 }

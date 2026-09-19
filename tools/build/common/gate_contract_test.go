@@ -528,14 +528,16 @@ func TestProjectTerms_AreScopedToTheHostTarget(t *testing.T) {
 }
 
 // The same gap, end to end, through the program that makes landing decisions:
-// an envelope reporting failures passes with no term applied, because the
-// baseline for that metric lives under a different target. This is precisely
-// what `bin/run tested:go` did on windows-amd64 at 5600e002.
+// an envelope reporting failures, with no term applied because the baseline for
+// that metric lives under a different target. This is precisely what
+// `bin/run tested:go` did on windows-amd64 at 5600e002 — and there it answered
+// "acceptable" over seven failing tests.
 //
-// TestIntegration_PartMetricsAreJudged asserts the repository's data has no
-// such hole. This asserts what the hole COSTS, which is what makes that data
-// assertion worth keeping: without it the verdict is not merely unjudged, it is
-// affirmatively "acceptable".
+// It now answers no. A metric nobody set a rule for has not been cleared, and
+// the verdict says which: a gate reporting numbers it holds no terms for is
+// refused rather than waved through. TestIntegration_PartMetricsAreJudged
+// asserts the repository's data has no such hole; this asserts that a hole,
+// wherever one opens, costs a refusal and not a false pass.
 func TestJudgeStdin_ABaselineOnAnotherTargetIsNoTermHere(t *testing.T) {
 	const envelope = `{"schema_version":1,"gate":"tested:go","target":"nosuchos-nosucharch","metrics":[{"name":"go_test_failures","type":"int","value":7}]}`
 	const seeded = `{"value": 0, "direction": "exact"}`
@@ -547,7 +549,7 @@ func TestJudgeStdin_ABaselineOnAnotherTargetIsNoTermHere(t *testing.T) {
 	}{
 		"seeded only on another target": {
 			baselines:      `{"` + foreignTarget + `": {"go_test_failures": ` + seeded + `}}`,
-			wantAcceptable: true, // seven failing tests, and the verdict is yes
+			wantAcceptable: false, // seven failing tests and no term: not judged is not a pass
 			wantTerm:       false,
 		},
 		"seeded on this host": {
@@ -557,9 +559,10 @@ func TestJudgeStdin_ABaselineOnAnotherTargetIsNoTermHere(t *testing.T) {
 		},
 		"tracked here but informational": {
 			// The third state, and it judges exactly as little as no entry at
-			// all — which is why the data test refuses it as a term.
+			// all — which is why the data test refuses it as a term, and why it
+			// reaches the same verdict as no entry at all: unjudged.
 			baselines:      `{"` + HostTarget() + `": {"go_test_failures": {"type": "informational"}}}`,
-			wantAcceptable: true,
+			wantAcceptable: false,
 			wantTerm:       false,
 		},
 	} {
@@ -613,6 +616,141 @@ func TestBaselines_KnowEveryPlatformThisProjectShips(t *testing.T) {
 		if !slices.Contains(requiredPlatforms, platform) {
 			t.Errorf("%s carries a block for %q, which this project does not ship — either it belongs in requiredPlatforms or the block is dead data the sweep now demands upkeep of",
 				baselinesFile, platform)
+		}
+	}
+}
+
+// --- Parts, and the tree a measurement speaks for ---
+
+// integrationLeaves is what `integration` expands to, in the order a reader of
+// the summary sees it. Spelled here so a change to the composition has to be a
+// change to this list too — a part silently added or dropped is a row a reader
+// of bin/verify's summary would never miss.
+var integrationLeaves = []string{
+	"formatted:go", "formatted:promise", "builds",
+	"checked:go", "checked:promise", "tested:go", "tested:promise",
+}
+
+// TestMeasureContractGateParts_OnePartPerLeafInOrder pins the detail bin/verify
+// renders its summary from: one PartResult per LEAF gate, named exactly as
+// `bin/run` addresses it.
+func TestMeasureContractGateParts_OnePartPerLeafInOrder(t *testing.T) {
+	stubGateBuild(t, buildFails())
+	_, parts, err := MeasureContractGateParts(t.TempDir(), "integration")
+	if err != nil {
+		t.Fatalf("integration: %v", err)
+	}
+	var got []string
+	for _, p := range parts {
+		got = append(got, p.Gate)
+	}
+	if !slices.Equal(got, integrationLeaves) {
+		t.Errorf("parts = %v, want %v", got, integrationLeaves)
+	}
+	for _, name := range got {
+		if !IsContractGate(name) {
+			t.Errorf("part %q is not a gate anyone can run — a summary row must be a command", name)
+		}
+	}
+}
+
+// TestMeasureContractGateParts_AgreeWithTheEnvelope: the parts are a VIEW of the
+// same measurement, not a second one. If they could disagree, bin/verify's
+// summary would describe a run other than the one it was judged on — which is
+// the whole defect T2170 is about, reintroduced one level down.
+func TestMeasureContractGateParts_AgreeWithTheEnvelope(t *testing.T) {
+	stubGateBuild(t, buildFails())
+	root := t.TempDir()
+	env, parts, err := MeasureContractGateParts(root, "integration")
+	if err != nil {
+		t.Fatalf("integration: %v", err)
+	}
+	var fromParts []Metric
+	var reasons int
+	for _, p := range parts {
+		fromParts = append(fromParts, p.Metrics...)
+		if p.Incomplete != "" {
+			reasons++
+		}
+	}
+	if len(fromParts) != len(env.Metrics) {
+		t.Fatalf("parts carry %d metrics, the envelope %d", len(fromParts), len(env.Metrics))
+	}
+	for i := range fromParts {
+		if fromParts[i] != env.Metrics[i] {
+			t.Errorf("metric %d: part has %+v, envelope has %+v", i, fromParts[i], env.Metrics[i])
+		}
+	}
+	if reasons == 0 {
+		t.Error("a failing build must leave a reason on the parts that could not measure")
+	}
+
+	// And the wrapper every other caller uses reports the same envelope.
+	stubGateBuild(t, buildFails())
+	plain, err := MeasureContractGate(root, "integration")
+	if err != nil {
+		t.Fatalf("integration: %v", err)
+	}
+	if len(plain.Metrics) != len(env.Metrics) || plain.Gate != env.Gate || plain.Incomplete != env.Incomplete {
+		t.Errorf("MeasureContractGate reported %+v, want the same as MeasureContractGateParts %+v", plain, env)
+	}
+}
+
+// TestRunContractGate_StampsTheTreeItMeasured: a measurement has to say what it
+// is about, or the judging layer cannot tell a verdict on the content in front
+// of it from a verdict on content that no longer exists (T2008).
+func TestRunContractGate_StampsTheTreeItMeasured(t *testing.T) {
+	root := vtRepo(t)
+	writeFile(t, root, "a.txt", "a\n")
+	vtGit(t, root, "add", "-A")
+	vtGit(t, root, "commit", "-q", "-m", "base")
+	stubGateBuild(t, &fakeBuild{})
+
+	var out bytes.Buffer
+	if err := runContractGate(root, []string{"formatted:go", "--envelope"}, &out); err != nil {
+		t.Fatalf("runContractGate: %v", err)
+	}
+	var env Envelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("envelope does not parse: %v (%s)", err, out.String())
+	}
+	here, err := treeIdentity(root)
+	if err != nil {
+		t.Fatalf("treeIdentity: %v", err)
+	}
+	if env.Tree != here {
+		t.Errorf("envelope tree = %q, want the tree it measured %q", env.Tree, here)
+	}
+}
+
+// TestRunContractGate_AMachineGateCarriesNoTree: fit measures the machine, so
+// there is no tree for it to speak for — and an identity stamped there would
+// invite blessing a tree on the strength of a disk-space measurement.
+func TestRunContractGate_AMachineGateCarriesNoTree(t *testing.T) {
+	var out bytes.Buffer
+	if err := runContractGate(t.TempDir(), []string{"fit", "--envelope"}, &out); err != nil {
+		t.Fatalf("runContractGate: %v", err)
+	}
+	var env Envelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("envelope does not parse: %v (%s)", err, out.String())
+	}
+	if env.Tree != "" {
+		t.Errorf("fit carried tree %q, want none", env.Tree)
+	}
+}
+
+// TestJoinIncomplete: a run may measure less than a full one for more than one
+// reason, and a reason that replaced another would hide it.
+func TestJoinIncomplete(t *testing.T) {
+	for _, tc := range []struct{ a, b, want string }{
+		{"", "", ""},
+		{"one", "", "one"},
+		{"", "two", "two"},
+		{"one", "two", "one; two"},
+	} {
+		if got := joinIncomplete(tc.a, tc.b); got != tc.want {
+			t.Errorf("joinIncomplete(%q, %q) = %q, want %q", tc.a, tc.b, got, tc.want)
 		}
 	}
 }

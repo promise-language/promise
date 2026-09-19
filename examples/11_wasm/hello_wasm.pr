@@ -15,8 +15,8 @@
 //
 // Test on each target:
 //   bin/promise test examples/11_wasm/hello_wasm.pr
-//   bin/verify --wasm        # runs all tests under wasm32-wasi
-//   bin/verify --wasm-web    # runs all tests under wasm32-web (Node.js)
+//   bin/test --wasm          # runs all tests under wasm32-wasi
+//   bin/test --wasm-web      # runs all tests under wasm32-web (Node.js)
 main() `test(expected: "Hello from Promise on WebAssembly!") {
   print_line("Hello from Promise on WebAssembly!");
 }

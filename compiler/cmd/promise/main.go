@@ -7653,7 +7653,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 		var modInfo *sema.ModuleInfo
 		var err error
 		if module.IsLocalPath(u.Path) {
-			modInfo, err = loader.load(u.Path)
+			modInfo, err = loader.load(u.Path, loader.projectRoot)
 		} else {
 			modInfo, err = loader.loadRemote(u.Path, "", u.Alias)
 		}
@@ -7690,17 +7690,45 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 	return scopes, loader.allModInfos, loader.depOrder, mt, loader
 }
 
+// localModuleIdentity is a local module's globally unique name: its resolved
+// directory expressed relative to the project root, slash-separated, so one
+// directory has one identity however it was addressed. A module outside the
+// project root (reached by `..`, or a replace pointing elsewhere) has no
+// project-relative name and keeps its absolute path, which is still unique.
+func localModuleIdentity(projectRoot, absDir string) string {
+	root, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return absDir
+	}
+	rel, err := filepath.Rel(root, absDir)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return absDir
+	}
+	return "./" + filepath.ToSlash(rel)
+}
+
 // load recursively loads a local module and all its dependencies.
 // Returns a cached result if the module was already loaded.
 // Detects circular dependencies via the visiting set.
-// modPath can be a relative path (joined with projectRoot) or an absolute path.
-func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
+// modPath can be a relative path or an absolute path.
+//
+// baseDir is what a RELATIVE modPath is resolved against, and it is the
+// directory holding the promise.toml of whoever wrote the `use`: the project
+// root for the root project's own imports, and the importing MODULE's own
+// directory for a module's dependencies. docs/module-system.md §"Local module
+// transitivity" requires exactly that — "a local module's local paths are
+// relative to ITS own promise.toml, not the parent project's" — and resolving
+// every path against one project root instead made the same `use` line in one
+// file mean different directories depending on which entry point started the
+// compilation. That is how `bin/promise check <module>` and a build driving the
+// same module through its parent came to disagree about where `./geometry` is.
+func (ml *moduleLoader) load(modPath, baseDir string) (*sema.ModuleInfo, error) {
 	// Resolve absolute directory for dedup and cycle detection
 	var modDir string
 	if filepath.IsAbs(modPath) {
 		modDir = modPath
 	} else {
-		modDir = filepath.Join(ml.projectRoot, modPath)
+		modDir = filepath.Join(baseDir, modPath)
 	}
 	absDir, err := filepath.Abs(modDir)
 	if err != nil {
@@ -7746,9 +7774,12 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	}
 
 	// Compute globally unique identity for this module.
-	// For local modules, this is the relative path from project root.
+	// For local modules, this is the relative path from project root — derived
+	// from the RESOLVED directory, not the import string. Two modules in
+	// different directories may now both write `use x "./x"`, so the string is
+	// no longer unique; the directory always is.
 	// loadRemote() overrides this with the normalized URL for remote modules.
-	globalID := module.GlobalIdentityForLocal(modPath)
+	globalID := module.GlobalIdentityForLocal(localModuleIdentity(ml.projectRoot, absDir))
 	irPrefix := module.SanitizeIRPrefix(globalID)
 
 	// Check for duplicate global identities — two different directories resolving to the same identity
@@ -7842,7 +7873,7 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	}
 
 	// Recursively load this module's own dependencies
-	depScopes, err := ml.loadDeps(merged, modPath)
+	depScopes, depIdentities, err := ml.loadDeps(merged, modPath, absDir)
 	if err != nil {
 		return nil, err
 	}
@@ -7851,7 +7882,7 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	var semaInfo *sema.Info
 	var errs []error
 	tModSema := time.Now()
-	semaInfo, errs = sema.CheckWithTarget(merged, depScopes, ml.target)
+	semaInfo, errs = sema.CheckWithIdentities(merged, depScopes, ml.target, nil, nil, depIdentities)
 	ml.modSemaTime += time.Since(tModSema)
 	ml.modTimings.Declare += semaInfo.Timings.Declare
 	ml.modTimings.Define += semaInfo.Timings.Define
@@ -7903,7 +7934,7 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 		CanonicalName:  modCfg.Name, // display only (from promise.toml)
 		GlobalIdentity: globalID,    // globally unique identity for dedup and cache
 		IRPrefix:       irPrefix,    // sanitized prefix for IR symbols
-		Path:           modPath,
+		Path:           globalID,
 		File:           merged,
 		SemaInfo:       semaInfo,
 		AbsDir:         absDir,
@@ -7912,9 +7943,16 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 
 	// Cache the loaded module and register for codegen.
 	// depOrder is post-order DFS: deps are added before dependents.
+	//
+	// Registered under globalID, not the import string: one directory reached as
+	// "./utils" by the project and as "../utils" by a module in a subdirectory is
+	// ONE module, and the second `use` of it returns from ml.loaded above without
+	// reaching this line. Keyed by the string, the module was then absent under
+	// every spelling but the first one to arrive, and codegen panicked with an
+	// undefined module function for a module it had already compiled.
 	ml.loaded[absDir] = mi
-	ml.allModInfos[modPath] = mi
-	ml.depOrder = append(ml.depOrder, modPath)
+	ml.allModInfos[globalID] = mi
+	ml.depOrder = append(ml.depOrder, globalID)
 	return mi, nil
 }
 
@@ -7945,7 +7983,7 @@ func (ml *moduleLoader) loadRemote(remoteURL, subdir, alias string) (*sema.Modul
 					localPath = filepath.Join(ml.projectRoot, localPath)
 				}
 				localPath = filepath.Join(localPath, filepath.FromSlash(subdir))
-				mi, err := ml.load(localPath)
+				mi, err := ml.load(localPath, ml.projectRoot)
 				if err != nil {
 					return nil, fmt.Errorf("replace %s → %s: %w", remoteURL, localPath, err)
 				}
@@ -7981,7 +8019,7 @@ func (ml *moduleLoader) loadRemote(remoteURL, subdir, alias string) (*sema.Modul
 
 	// Delegate to load() which handles parsing, sema, cycle detection, etc.
 	// Use the resolved absolute path directly.
-	mi, err := ml.load(absDir)
+	mi, err := ml.load(absDir, ml.projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("remote module %s: %w", remoteURL, err)
 	}
@@ -8017,7 +8055,7 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 			ml.warnings = append(ml.warnings, fmt.Sprintf(
 				"warning: catalog module '%s' replaced with local path %q\n  catalog compatibility guarantees do not apply to replaced modules",
 				catalogName, localPath))
-			mi, err := ml.load(localPath)
+			mi, err := ml.load(localPath, ml.projectRoot)
 			if err != nil {
 				return nil, fmt.Errorf("replace %s → %s: %w", catalogName, localPath, err)
 			}
@@ -8063,7 +8101,7 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 	}
 
 	// Delegate to load() for parsing, sema, cycle detection, caching
-	mi, err := ml.load(absDir)
+	mi, err := ml.load(absDir, ml.projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("catalog module '%s': %w", catalogName, err)
 	}
@@ -8244,9 +8282,10 @@ func (ml *moduleLoader) isTopLevelPin(normalizedURL string) bool {
 
 // loadDeps scans a module's use declarations and recursively loads its dependencies.
 // Returns module scopes for sema.CheckWithModules.
-func (ml *moduleLoader) loadDeps(file *ast.File, parentPath string) (map[string]*types.Scope, error) {
+func (ml *moduleLoader) loadDeps(file *ast.File, parentPath, baseDir string) (map[string]*types.Scope, map[string]string, error) {
+	identities := map[string]string{}
 	if len(file.Uses) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	scopes := make(map[string]*types.Scope)
@@ -8261,7 +8300,7 @@ func (ml *moduleLoader) loadDeps(file *ast.File, parentPath string) (map[string]
 				depInfo, err = ml.loadCatalog(u.CatalogName)
 			}
 			if err != nil {
-				return nil, fmt.Errorf("in module '%s': %w", parentPath, err)
+				return nil, nil, fmt.Errorf("in module '%s': %w", parentPath, err)
 			}
 			if depInfo != nil {
 				depInfo.CatalogName = u.CatalogName
@@ -8275,22 +8314,23 @@ func (ml *moduleLoader) loadDeps(file *ast.File, parentPath string) (map[string]
 		var depInfo *sema.ModuleInfo
 		var err error
 		if module.IsLocalPath(u.Path) {
-			depInfo, err = ml.load(u.Path)
+			depInfo, err = ml.load(u.Path, baseDir)
 		} else {
 			depInfo, err = ml.loadRemote(u.Path, "", u.Alias)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("in module '%s': %w", parentPath, err)
+			return nil, nil, fmt.Errorf("in module '%s': %w", parentPath, err)
 		}
 		exportedScope := sema.ExportedScope(depInfo.SemaInfo, depInfo.File)
 		depInfo.InterfaceHash = module.HashModuleInterface(exportedScope)
 		scopes[u.Path] = exportedScope
+		identities[u.Path] = depInfo.Path
 	}
 
 	if len(scopes) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return scopes, nil
+	return scopes, identities, nil
 }
 
 // buildCyclePath formats a circular dependency error showing the cycle.

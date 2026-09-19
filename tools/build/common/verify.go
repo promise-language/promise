@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"slices"
 	"strings"
 	"time"
 
@@ -29,18 +27,60 @@ var ErrLockTimeout = errors.New("verify lock acquisition timed out")
 const lockRetryDelay = 500 * time.Millisecond
 
 // verifyOptions is bin/verify's command line, parsed.
+//
+// EVERY FLAG HERE IS UNABLE TO CHANGE WHAT IS MEASURED (T2170). What verify
+// measures is `integration`, whole, and a flag that could narrow or widen it
+// would make "blessed" mean different things on different invocations — which
+// is the defect this file was rewritten for. --clean wipes caches before
+// anything runs; --push acts after the blessing is recorded; --lock-timeout
+// bounds a wait that happens before any measurement. The variant options
+// --wasm, --wasm-web, --shared and --local are gone: the WASM suites are other
+// targets' gates (docs/gate-system.md), and with one cache there is nothing to
+// choose between.
 type verifyOptions struct {
-	shared  bool
-	wasm    bool
-	wasmWeb bool
-	clean   bool
-	push    bool
+	clean bool
+	push  bool
 	// lockTimeout bounds how long to wait for the host verify lock. 0 (the
 	// default, flag absent) waits UNBOUNDED — bin/verify is run on a variety of
 	// machines where any hardcoded timeout would be wrong; bounding the wait is
 	// the caller's choice via --lock-timeout (the tracker runner sets it so a
 	// lost turn can be retried).
 	lockTimeout time.Duration
+}
+
+// verifyUsage is the one spelling of what this tool accepts.
+const verifyUsage = "usage: bin/verify [--clean] [--push] [--lock-timeout=<dur>]"
+
+// retiredVerifyFlags are the variant options T2170 removed, each with what to
+// run instead.
+//
+// The refusal NAMES THE REPLACEMENT, as every other refusal in this tree does —
+// ensureRecordIgnored names the .gitignore line, the staleness check names
+// ./make. A bare usage line says the flag is gone and leaves the reader to
+// discover where the measurement went, and for the two WASM targets it went
+// somewhere that still exists and is still run on a schedule. Losing a flag and
+// losing a suite are different facts, and a caller is entitled to be told which
+// one happened.
+var retiredVerifyFlags = map[string]string{
+	"wasm":     "The wasm32-wasi suite is its own gate: `bin/gate wasm-test`, or `bin/test --wasm` by hand.",
+	"wasm-web": "The wasm32-web suite is its own gate: `bin/gate wasm-web-test`, or `bin/test --wasm-web` by hand.",
+	"shared":   "Verify measures against the repo-local .promise-home/ and nothing else; `bin/clean --shared` is what still addresses ~/.promise.",
+	"local":    "The repo-local .promise-home/ is the only cache verify uses, so there is nothing left to select.",
+}
+
+// unknownVerifyFlag refuses one argument. A retired variant option is told apart
+// from a typo, because the two need different things said to them.
+//
+// The flag is named in its two-dash spelling rather than quoted back as typed:
+// both spellings are accepted everywhere in this tool, NormalizeArgs has already
+// collapsed them by the time this is reached, and echoing the normalized form
+// would correct the reader in a spelling they may not have used.
+func unknownVerifyFlag(arg string) error {
+	if why, retired := retiredVerifyFlags[strings.TrimPrefix(arg, "-")]; retired {
+		return fmt.Errorf("--%s is no longer a flag: verify measures `integration`, which is host-scoped. %s\n%s",
+			strings.TrimPrefix(arg, "-"), why, verifyUsage)
+	}
+	return errors.New(verifyUsage)
 }
 
 // parseVerifyArgs parses bin/verify's flags and does nothing else — no lock, no
@@ -56,13 +96,6 @@ func parseVerifyArgs(args []string) (verifyOptions, error) {
 	// --lock-timeout=10m into "-lock-timeout" "10m").
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "-local":
-		case "-shared":
-			opts.shared = true
-		case "-wasm":
-			opts.wasm = true
-		case "-wasm-web":
-			opts.wasmWeb = true
 		case "-clean":
 			opts.clean = true
 		case "-push":
@@ -78,432 +111,304 @@ func parseVerifyArgs(args []string) (verifyOptions, error) {
 			}
 			opts.lockTimeout = d
 		default:
-			return verifyOptions{}, fmt.Errorf("usage: bin/verify [--shared] [--wasm] [--wasm-web] [--clean] [--push] [--lock-timeout=<dur>]")
+			return verifyOptions{}, unknownVerifyFlag(args[i])
 		}
-	}
-	if opts.shared && opts.clean {
-		return verifyOptions{}, errCleanWithShared
 	}
 	return opts, nil
 }
 
-// RunVerify orchestrates the full pre-commit verification pipeline:
-// format → build → check → test. All steps are internal calls (no subprocess).
-// Flags: -shared (use ~/.promise), -wasm (include wasm32-wasi),
-// -wasm-web (include wasm32-web via Node), -clean (wipe .promise-home and run
-// the Go suites uncached; refused with -shared), -push (git push on success).
-// Default cache is local (.promise-home/); -local is accepted for clarity.
+// verifyStep is one step of the pipeline, named as its failure will name it.
+type verifyStep struct {
+	name string
+	run  func() error
+}
+
+// verifyRun is one bin/verify run: what its steps share, and what its summary is
+// rendered from.
+//
+// The steps are a VALUE rather than a straight line of code (T2092) so their
+// order and their stop-at-the-first-failure behaviour can be asserted. RunVerify
+// itself takes a host-global lock and rebuilds the compiler, so it cannot be
+// driven by a test directly — which is how the ordering guarantees that matter
+// most (nothing is blessed before the measurement passed, nothing is pushed
+// before it was blessed) went uncovered.
+type verifyRun struct {
+	root  string
+	opts  verifyOptions
+	start time.Time
+
+	unlock func()
+	store  casWindow
+
+	// What the integration step measured and what the judge made of it. Only
+	// these cross a step boundary: the summary reads them however the run ended,
+	// and `record` blesses from them.
+	env        Envelope
+	parts      []PartResult
+	terms      map[string]term
+	acceptable bool
+}
+
+// RunVerify is the pre-commit pipeline: lock, clear the blessing, build, repair,
+// check, measure `integration`, and — only if the judge passed it — record the
+// blessing the commit guard reads.
+//
+// ITS TEST PHASE IS THE GATE, IN PROCESS. Not a spawned bin/gate and not a
+// second implementation: MeasureContractGateParts is the entry point
+// `bin/run integration` and `bin/gate integration` reach too, and verify's
+// verdict is judge()'s verdict on that envelope. Verify used to run Go and
+// Promise suites of its own, so "bin/verify passed" and "integration passed"
+// were two answers about one tree that could differ — and only the first wrote
+// the record the commit guard reads (T2170).
 func RunVerify(root string, args []string) error {
 	opts, err := parseVerifyArgs(args)
 	if err != nil {
 		return err
 	}
+	r := &verifyRun{root: root, opts: opts, start: time.Now()}
+	defer r.release()
 
-	// Acquire global lock to serialize concurrent verify runs.
-	unlock, err := acquireVerifyLock(root, opts.lockTimeout)
+	failed, err := runVerifySteps(r.steps())
+	// A run that never got the lock measured nothing, so it has no summary to
+	// print — and its caller retries rather than reading one.
+	if errors.Is(err, ErrLockTimeout) {
+		return err
+	}
+	Progress().Print(r.summary(failed).String())
+	if err != nil {
+		return err
+	}
+	Progress().Println("✅ OK to commit")
+	return nil
+}
+
+// steps is the pipeline, in order. Two orderings are load-bearing:
+//
+//   - CLEAR IS SECOND, right after the lock. A run that dies — a red step, a
+//     Ctrl+C, a crash — must leave nothing blessed, or the commit guard would
+//     honour a record describing content this run had already begun changing.
+//   - BUILD PRECEDES THE REPAIRS. `promise format` is the formatter the compiler
+//     carries, and `integration` MEASURES whether anything is still unformatted.
+//     Repairing with a stale binary and being judged by the fresh one would fail
+//     every change that touches the formatter, and on a fresh clone — no binary
+//     yet — verify would not repair at all before being judged on it.
+//
+// The rest follows from what each step costs: the sweeps are milliseconds and
+// come before the measurement, so a dangling link fails in seconds rather than
+// after a full suite.
+func (r *verifyRun) steps() []verifyStep {
+	steps := []verifyStep{
+		{"lock", r.stepLock},
+		{"clear", r.stepClear},
+	}
+	if r.opts.clean {
+		steps = append(steps, verifyStep{"clean", r.stepClean})
+	}
+	steps = append(steps,
+		verifyStep{"cache", r.stepCache},
+		verifyStep{"build", r.stepBuild},
+		verifyStep{"format go", r.stepFormatGo},
+		verifyStep{"format promise", r.stepFormatPromise},
+		verifyStep{"check go", r.stepCheckGo},
+		verifyStep{"check structure", r.stepCheckStructure},
+		verifyStep{"integration", r.stepIntegration},
+		verifyStep{"record", r.stepRecord},
+	)
+	if r.opts.push {
+		steps = append(steps, verifyStep{"push", r.stepPush})
+	}
+	return steps
+}
+
+// runVerifySteps runs the steps in order and stops at the first failure, which
+// it names. The name is the whole point: "structure: docs: dangling link" sends
+// the reader to the sweep, where a bare "dangling link" sends them hunting for
+// which phase produced it.
+//
+// Stopping is what makes the pipeline's guarantees hold by construction rather
+// than by each step re-checking: nothing is recorded after a failed measurement,
+// and nothing is pushed after a failed record.
+func runVerifySteps(steps []verifyStep) (failed string, err error) {
+	for _, s := range steps {
+		if err := s.run(); err != nil {
+			return s.name, fmt.Errorf("%s: %w", s.name, err)
+		}
+		if Interrupted() {
+			Progress().Clear()
+			return s.name, fmt.Errorf("%s: %w", s.name, errInterrupted)
+		}
+	}
+	return "", nil
+}
+
+// stepLock serializes concurrent verify runs across the host.
+func (r *verifyRun) stepLock() error {
+	unlock, err := acquireVerifyLock(r.root, r.opts.lockTimeout)
 	if err != nil {
 		if errors.Is(err, ErrLockTimeout) {
 			return err
 		}
 		return fmt.Errorf("acquire verify lock: %w", err)
 	}
-	defer unlock()
-
-	// Drop any previous blessing before doing anything else. From here on a
-	// run that dies — a failing step, a Ctrl+C, a crash — leaves nothing
-	// blessed, so the commit gate refuses rather than honouring a record that
-	// describes content this run has already begun changing.
-	if err := clearVerifiedTree(root); err != nil {
-		return fmt.Errorf("clear verified tree: %w", err)
-	}
-
-	// Clean caches first if requested. Done before SetupLocalCache so that
-	// the local home is recreated empty, and before any build/test work so
-	// the run starts from a known state.
-	if opts.clean {
-		if err := cleanLocked(root, CleanOptions{}); err != nil {
-			return fmt.Errorf("clean: %w", err)
-		}
-	}
-
-	// Default to local cache; -shared opts into ~/.promise
-	if !opts.shared {
-		if err := SetupLocalCache(root); err != nil {
-			return fmt.Errorf("setup local cache: %w", err)
-		}
-	}
-
-	start := time.Now()
-	promiseBin := filepath.Join(root, "bin", BinaryName())
-
-	// 1. Format Go
-	Progress().Println("Formatting go...")
-	if err := FormatGo(root); err != nil {
-		return fmt.Errorf("format go: %w", err)
-	}
-	if Interrupted() {
-		return errInterrupted
-	}
-
-	// 2. Format Promise (if binary exists from a prior build)
-	if Exists(promiseBin) {
-		Progress().Println("Formatting promise...")
-		if err := FormatPromiseFiles(root, promiseBin); err != nil {
-			return fmt.Errorf("format promise: %w", err)
-		}
-		fmt.Println()
-	}
-	if Interrupted() {
-		return errInterrupted
-	}
-
-	// 3. Build
-	Progress().Println("Building compiler...")
-	if err := RunBuild(root, nil); err != nil {
-		return fmt.Errorf("build: %w", err)
-	}
-	if Interrupted() {
-		return errInterrupted
-	}
-
-	// 4. Check
-	Progress().Println("Checking go...")
-	if err := RunCheck(root); err != nil {
-		return fmt.Errorf("check: %w", err)
-	}
-	if Interrupted() {
-		return errInterrupted
-	}
-
-	// 4b. The structural sweeps (T2160) — every check in structuralChecks, which
-	// is the one list of them. They read the working tree rather than a staged
-	// set, which is what lets them run here at all: verify has no staged set to
-	// look at.
-	//
-	// They live here because this is the pre-commit path this project actually
-	// uses. The git hook execs the workspace's bin/precommit-guard, which does
-	// not carry them, so between the hook losing the project's own tool and this
-	// call they held by review alone — and a rule with no enforcement is a rule
-	// that holds until the next person does not know it, which is the exact
-	// sentence that motivated the first of them. Going through the list rather
-	// than naming each check here is what keeps the next one from arriving with
-	// no caller at all.
-	//
-	// Cheap enough to be unconditional: sweeps over tracked text, milliseconds
-	// against a suite measured in minutes. Early enough to matter, too — a
-	// dangling link or an unannotated sleep() fails here in seconds instead of
-	// in the tools test suite several minutes further in.
-	Progress().Println("Checking structure...")
-	if err := RunStructuralChecks(root); err != nil {
-		return fmt.Errorf("structure: %w", err)
-	}
-	if Interrupted() {
-		return errInterrupted
-	}
-
-	// 5. (Cache clearing now happens up front via Clean.)
-
-	// What the suites cost the content-addressed store, measured from here
-	// (T2143): the build above and the toolchain warm-up inside openCASWindow
-	// come first, so anything fetched or exploded during the suites is work the
-	// TREE asked for a second time — which is the shape T2133 had and nothing
-	// measured for eighteen days.
-	//
-	// Reported to the operator, and deliberately NOT written into the gate
-	// values below. The commit gate is the only thing that moves a baseline,
-	// and this run's Go phase does not pass -count=1: it reports anywhere from
-	// one home to thirty depending on how much of the suite Go's test cache
-	// replayed (T2150). A ratchet fed from that would settle on whichever run
-	// replayed the most and then fail every full one. The gates measure with
-	// -count=1, and are where these numbers are judged.
-	store := openCASWindow(root)
-
-	// 6-8b. Go suites, then (only if they all passed) the Promise suites.
-	goFlags := goTestFlags(opts.clean)
-	res, err := runVerifyTestPhases(root, opts.wasm, opts.wasmWeb, verifySuites{
-		goTests:      func(root string) error { return RunGoTests(root, goFlags...) },
-		toolsTests:   func(root string) error { return RunToolsGoTests(root, goFlags...) },
-		flowsTests:   func(root string) (bool, error) { return RunFlowsGoTests(root, goFlags...) },
-		promiseTests: RunPromiseTests,
-	})
-	if err != nil {
-		return err
-	}
-	failures := res.failures
-	hostOutput, wasmOutput, wasmWebOutput := res.hostOutput, res.wasmOutput, res.wasmWebOutput
-	hostElapsed, wasmElapsed, wasmWebElapsed := res.hostElapsed, res.wasmElapsed, res.wasmWebElapsed
-	flowsSkipped, flowsModPresent := res.flowsSkipped, res.flowsModPresent
-
-	// 9. Summary — always printed, even on failure.
-	hostTarget := hostTargetName()
-	elapsed := time.Since(start)
-	mins := int(elapsed.Minutes())
-	secs := int(elapsed.Seconds()) % 60
-
-	Progress().Println()
-	Progress().Println("====================================================")
-	Progress().Println("  Verify Summary")
-	Progress().Println("----------------------------------------------------")
-	Progress().Printf("  Host target:  %s\n", hostTarget)
-	if res.promiseSkipped {
-		// A Go suite failed, so the Promise phases never ran and hostElapsed is
-		// genuinely 0 — say that, rather than printing a misleading "FAILED (0s)"
-		// for a phase that never happened. The FAILED: line below names which
-		// suite stopped the run, and the same wording covers the WASM rows.
-		Progress().Printf("  Host tests:   not run (go tests failed)\n")
-	} else if slices.Contains(failures, "promise tests (host)") {
-		Progress().Printf("  Host tests:   FAILED (%s)\n", hostElapsed.Round(time.Millisecond))
-	} else {
-		Progress().Printf("  Host tests:   passed (%s)\n", hostElapsed.Round(time.Millisecond))
-	}
-	if flowsSkipped && !flowsModPresent {
-		Progress().Printf("  Flows tests:  skipped (flows/ absent)\n")
-	} else if flowsSkipped {
-		Progress().Printf("  Flows tests:  skipped (SDK absent)\n")
-	} else if slices.Contains(failures, "flows go tests") {
-		Progress().Printf("  Flows tests:  FAILED\n")
-	} else {
-		Progress().Printf("  Flows tests:  passed\n")
-	}
-	if opts.wasm {
-		if res.promiseSkipped {
-			Progress().Printf("  WASM tests:   not run (go tests failed)\n")
-		} else if slices.Contains(failures, "promise tests (wasm32-wasi)") {
-			Progress().Printf("  WASM tests:   FAILED (%s)\n", wasmElapsed.Round(time.Millisecond))
-		} else {
-			Progress().Printf("  WASM tests:   passed (%s)\n", wasmElapsed.Round(time.Millisecond))
-		}
-	}
-	if opts.wasmWeb {
-		if res.promiseSkipped {
-			Progress().Printf("  WASM-web:     not run (go tests failed)\n")
-		} else if slices.Contains(failures, "promise tests (wasm32-web)") {
-			Progress().Printf("  WASM-web:     FAILED (%s)\n", wasmWebElapsed.Round(time.Millisecond))
-		} else {
-			Progress().Printf("  WASM-web:     passed (%s)\n", wasmWebElapsed.Round(time.Millisecond))
-		}
-	}
-	if line := store.SummaryLine(); line != "" {
-		Progress().Printf("  %s\n", line)
-	}
-	Progress().Printf("  Total time:   %dm%02ds\n", mins, secs)
-	Progress().Println("====================================================")
-
-	if len(failures) > 0 {
-		// Consolidated per-test failure detail — host first, WASM second.
-		// This re-states the FAILED: section from each target's output so that
-		// agents tail-reading the last ~40 lines see all failures, not just the
-		// final target's output.
-		type failureSection struct{ label, section string }
-		var sections []failureSection
-		if s := ExtractFailedSection(hostOutput); s != "" {
-			sections = append(sections, failureSection{hostTarget, s})
-		}
-		if opts.wasm {
-			if s := ExtractFailedSection(wasmOutput); s != "" {
-				sections = append(sections, failureSection{"wasm32-wasi", s})
-			}
-		}
-		if opts.wasmWeb {
-			if s := ExtractFailedSection(wasmWebOutput); s != "" {
-				sections = append(sections, failureSection{"wasm32-web", s})
-			}
-		}
-		if len(sections) > 0 {
-			Progress().Println("----------------------------------------------------")
-			Progress().Println("  Failed Tests")
-			for _, fs := range sections {
-				Progress().Println("----------------------------------------------------")
-				Progress().Printf("[%s]\n", fs.label)
-				Progress().Println(fs.section)
-			}
-		}
-
-		Progress().Printf("FAILED: %s\n", strings.Join(failures, ", "))
-		return fmt.Errorf("%s failed", strings.Join(failures, ", "))
-	}
-
-	// 10. Write gate values sidecar for commit gate.
-	gv := &GateValues{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Platform:  hostTarget,
-		Values:    make(map[string]float64),
-	}
-	if s := ParseTestSummaryLine(hostOutput); s != nil {
-		gv.Values["host_test_count"] = float64(s.Passed)
-		gv.Values["host_leak_count"] = float64(s.Leaked)
-		gv.Values["host_test_failures"] = float64(s.Failed)
-	}
-	if opts.wasm {
-		if s := ParseTestSummaryLine(wasmOutput); s != nil {
-			gv.Values["wasm_test_count"] = float64(s.Passed)
-			gv.Values["wasm_leak_count"] = float64(s.Leaked)
-			gv.Values["wasm_test_failures"] = float64(s.Failed)
-		}
-	}
-	if opts.wasmWeb {
-		if s := ParseTestSummaryLine(wasmWebOutput); s != nil {
-			gv.Values["wasm_web_test_count"] = float64(s.Passed)
-			gv.Values["wasm_web_leak_count"] = float64(s.Leaked)
-			gv.Values["wasm_web_test_failures"] = float64(s.Failed)
-		}
-	}
-	if err := WriteGateValues(root, gv); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
-	}
-
-	// 11. Bless this tree. Every step above passed and the repairs are already
-	// applied, so the recorded id is of the content a commit would carry.
-	// Recorded before --push on purpose — the one place a red run does leave
-	// something blessed: a push that fails (non-fast-forward, a network blip)
-	// has not unverified the content, and dropping the record would charge a
-	// full re-verify to get it back. Unlike the gate-values sidecar above this
-	// is a hard failure: a silently skipped record is indistinguishable from a
-	// pass, and would refuse every subsequent commit with no way to tell why.
-	if err := recordVerifiedTree(root); err != nil {
-		return fmt.Errorf("record verified tree: %w", err)
-	}
-
-	if opts.push {
-		Progress().Println("Pushing to remote...")
-		if err := RunIn(root, "git", "push"); err != nil {
-			return err
-		}
-	}
-
-	Progress().Println("✅ OK to commit")
+	r.unlock = unlock
 	return nil
 }
 
-// hostTargetName is the target triple label the verify summary reports.
-func hostTargetName() string {
-	return strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
+// release drops the host lock however the run ended.
+func (r *verifyRun) release() {
+	if r.unlock != nil {
+		r.unlock()
+	}
 }
 
-// verifySuites are the test suites runVerifyTestPhases drives, injected so the
-// phase ordering (notably the Go-failure abort) is unit-testable — RunVerify
-// itself takes a global lock and rebuilds the compiler, so it cannot be.
-type verifySuites struct {
-	goTests      func(root string) error
-	toolsTests   func(root string) error
-	flowsTests   func(root string) (skipped bool, err error)
-	promiseTests func(root, target string) (output string, err error)
+// stepClear drops any previous blessing before anything else runs.
+func (r *verifyRun) stepClear() error { return clearBlessing(r.root) }
+
+// stepClean wipes the repo-local home so the run starts from a known state.
+// It cannot change what is measured — `integration` spells its own commands —
+// only how much of the work is already cached.
+func (r *verifyRun) stepClean() error {
+	Progress().Println("Cleaning...")
+	return cleanLocked(r.root, CleanOptions{})
 }
 
-// verifyTestResults is everything the summary block needs from the test phases.
-type verifyTestResults struct {
-	failures        []string
-	hostOutput      string
-	wasmOutput      string
-	wasmWebOutput   string
-	hostElapsed     time.Duration
-	wasmElapsed     time.Duration
-	wasmWebElapsed  time.Duration
-	flowsSkipped    bool
-	flowsModPresent bool
-	// promiseSkipped records that the Promise phases never ran because a Go
-	// suite failed — the summary must say that rather than report a 0s failure.
-	promiseSkipped bool
+// stepCache points this run at the repo-local .promise-home/.
+func (r *verifyRun) stepCache() error { return SetupLocalCache(r.root) }
+
+func (r *verifyRun) stepBuild() error {
+	Progress().Println("Building compiler...")
+	return RunBuild(r.root, nil)
 }
 
-// runVerifyTestPhases runs verify's phases 6/6b/6c (Go) and 7/8/8b (Promise).
+func (r *verifyRun) stepFormatGo() error {
+	Progress().Println("Formatting go...")
+	return FormatGo(r.root)
+}
+
+func (r *verifyRun) stepFormatPromise() error {
+	Progress().Println("Formatting promise...")
+	if err := FormatPromiseFiles(r.root, filepath.Join(r.root, "bin", BinaryName())); err != nil {
+		return err
+	}
+	Progress().Println()
+	return nil
+}
+
+func (r *verifyRun) stepCheckGo() error {
+	Progress().Println("Checking go...")
+	return RunCheck(r.root)
+}
+
+// stepCheckStructure runs every check in structuralChecks, which is the one list
+// of them (T2160). They read the working tree rather than a staged set, which is
+// what lets them run here at all: verify has no staged set to look at.
 //
-// All three Go suites run first, so their failures are visible together — they
-// are the cheap ones. If any of them failed, the Promise suites do NOT run:
-// when the compiler's own unit tests are broken there is nothing to learn from
-// spending the remaining minutes on ~20k Promise tests (T1888).
+// They live here because this is the pre-commit path this project actually uses.
+// The git hook execs the workspace's bin/precommit-guard, which does not carry
+// them, so between the hook losing the project's own tool and this call they held
+// by review alone — and a rule with no enforcement is a rule that holds until the
+// next person does not know it, which is the exact sentence that motivated the
+// first of them. Going through the list rather than naming each check here is
+// what keeps the next one from arriving with no caller at all.
+func (r *verifyRun) stepCheckStructure() error {
+	Progress().Println("Checking structure...")
+	return RunStructuralChecks(r.root)
+}
+
+// stepIntegration measures the gate and judges it. This step IS verify's verdict.
+func (r *verifyRun) stepIntegration() error {
+	// What the measurement costs the content-addressed store, from here (T2143):
+	// the build above and the toolchain warm-up inside openCASWindow come first,
+	// so anything fetched or exploded below is work the TREE asked for a second
+	// time — the shape T2133 had, and nothing measured for eighteen days.
+	//
+	// Reported to the operator, and deliberately NOT written into the gate values
+	// below. This run does not pass -count=1, so its Go phase reports anywhere
+	// from one home to thirty depending on how much of the suite Go's test cache
+	// replayed (T2150); a ratchet fed from that would settle on whichever run
+	// replayed the most and then fail every full one. The gates measure with
+	// -count=1 and are where these numbers are judged.
+	r.store = openCASWindow(r.root)
+
+	// The identity of the content about to be measured. AFTER the repairs, so
+	// what a passing run blesses is the tree a commit would carry; BEFORE the
+	// measurement, so an edit made while it runs is caught rather than blessed
+	// by a run that never saw it (T2008).
+	before, _ := treeIdentity(r.root)
+
+	Progress().Println("\nMeasuring integration...")
+	env, parts, err := MeasureContractGateParts(r.root, integrationGate)
+	if err != nil {
+		return err
+	}
+	tree, moved := settledTree(r.root, before)
+	env.Tree = tree
+	env.Incomplete = joinIncomplete(env.Incomplete, moved)
+
+	caps, baselines, err := projectTerms(r.root)
+	if err != nil {
+		return err
+	}
+	r.env, r.parts = env, parts
+	acceptable, terms, detail := judge(env, caps, baselines)
+	r.acceptable, r.terms = acceptable, terms
+	if !acceptable {
+		return errors.New(detail)
+	}
+	r.writeGateValues()
+	return nil
+}
+
+// stepRecord blesses the tree the measurement passed on. The rule is
+// blessIfPassed's, shared with bin/run, so verify and the flow cannot come to
+// disagree about what a blessing means.
+func (r *verifyRun) stepRecord() error { return blessIfPassed(r.root, r.env, r.acceptable) }
+
+// stepPush is last, after the blessing is recorded. Recording first is
+// deliberate: a push that fails (non-fast-forward, a network blip) has not
+// unverified the content, and dropping the record would charge a full re-verify
+// to get it back.
+func (r *verifyRun) stepPush() error {
+	Progress().Println("Pushing to remote...")
+	return RunIn(r.root, "git", "push")
+}
+
+// writeGateValues writes the sidecar whatever advances a baseline reads.
 //
-// A returned error is an abort (Ctrl+C, missing wasmtime/node), not a test
-// failure; test failures are named in the result's failures slice.
-func runVerifyTestPhases(root string, wasm, wasmWeb bool, s verifySuites) (verifyTestResults, error) {
-	var res verifyTestResults
+// EXACTLY WHAT `integration` REPORTED, and nothing of verify's own: a number
+// only verify produced is a number no gate can reproduce, and the wasm_* keys
+// this used to add described suites `integration` does not measure at all.
+// Warning-only, unlike the blessing: a stale sidecar is refused by its own
+// worktree identity, where a missing blessing refuses every later commit.
+func (r *verifyRun) writeGateValues() {
+	gv := &GateValues{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Platform:  r.env.Target,
+		Values:    make(map[string]float64, len(r.env.Metrics)),
+	}
+	for _, m := range r.env.Metrics {
+		gv.Values[m.Name] = m.Number()
+	}
+	if err := WriteGateValues(r.root, gv); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
+	}
+}
 
-	// 6. Go tests (compiler)
-	Progress().Println("Running go tests...")
-	if err := s.goTests(root); err != nil {
-		res.failures = append(res.failures, "go tests")
+// summary is the block verify always prints, whatever became of the run.
+func (r *verifyRun) summary(failed string) verifySummary {
+	target := r.env.Target
+	if target == "" {
+		target = HostTarget()
 	}
-	if Interrupted() {
-		Progress().Clear()
-		return res, errInterrupted
+	return verifySummary{
+		Target:   target,
+		Compiler: compilerIdentity(r.root),
+		Parts:    r.parts,
+		Terms:    r.terms,
+		Failed:   failed,
+		Store:    r.store.SummaryLine(),
+		Elapsed:  time.Since(r.start),
 	}
-
-	// 6b. Tools Go tests
-	Progress().Println("Running tools go tests...")
-	if err := s.toolsTests(root); err != nil {
-		res.failures = append(res.failures, "tools go tests")
-	}
-	if Interrupted() {
-		Progress().Clear()
-		return res, errInterrupted
-	}
-
-	// 6c. Flows Go tests (skipped when flows/go.mod or flow-sdk/go.mod absent)
-	res.flowsModPresent = Exists(filepath.Join(root, "flows", "go.mod"))
-	if res.flowsModPresent {
-		Progress().Println("Running flows go tests...")
-	}
-	flowsSkipped, flowsGoErr := s.flowsTests(root)
-	res.flowsSkipped = flowsSkipped
-	if !flowsSkipped && flowsGoErr != nil {
-		res.failures = append(res.failures, "flows go tests")
-	}
-	if Interrupted() {
-		Progress().Clear()
-		return res, errInterrupted
-	}
-
-	// A broken compiler makes the Promise suites uninformative — stop here.
-	if len(res.failures) > 0 {
-		res.promiseSkipped = true
-		return res, nil
-	}
-
-	// 7. Promise tests (host)
-	Progress().Println("\nRunning promise tests (host)...")
-	hostStart := time.Now()
-	hostOutput, hostErr := s.promiseTests(root, "")
-	res.hostOutput = hostOutput
-	if hostErr != nil {
-		res.failures = append(res.failures, "promise tests (host)")
-	}
-	res.hostElapsed = time.Since(hostStart)
-	if Interrupted() {
-		Progress().Clear()
-		return res, errInterrupted
-	}
-
-	// 8. Promise tests (wasm)
-	if wasm {
-		if Which("wasmtime") == "" { // path-ok: the documented wasm32-wasi test runtime
-			return res, fmt.Errorf("wasmtime not found — install from https://wasmtime.dev/ or: winget install BytecodeAlliance.Wasmtime")
-		}
-		Progress().Println("\nRunning promise tests (wasm32-wasi)...")
-		wasmStart := time.Now()
-		wasmOutput, wasmErr := s.promiseTests(root, "wasm32-wasi")
-		res.wasmOutput = wasmOutput
-		if wasmErr != nil {
-			res.failures = append(res.failures, "promise tests (wasm32-wasi)")
-		}
-		res.wasmElapsed = time.Since(wasmStart)
-	}
-
-	// 8b. Promise tests (wasm32-web via Node)
-	if wasmWeb {
-		if Which("node") == "" { // path-ok: the documented wasm32-web test runtime (Node 20+)
-			return res, fmt.Errorf("node not found — install Node.js 20+ (https://nodejs.org/)")
-		}
-		Progress().Println("\nRunning promise tests (wasm32-web)...")
-		wasmWebStart := time.Now()
-		wasmWebOutput, wasmWebErr := s.promiseTests(root, "wasm32-web")
-		res.wasmWebOutput = wasmWebOutput
-		if wasmWebErr != nil {
-			res.failures = append(res.failures, "promise tests (wasm32-web)")
-		}
-		res.wasmWebElapsed = time.Since(wasmWebStart)
-	}
-
-	return res, nil
 }
 
 // acquireVerifyLock acquires an OS-level file lock to serialize concurrent

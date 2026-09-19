@@ -121,16 +121,24 @@ After a successful `bin/verify`, a sidecar file `.promise-home/gate-values.json`
   "platform": "darwin-arm64",
   "worktree": "9f2c...e1",
   "values": {
-    "host_test_count": 3656,
+    "unformatted_go_files": 0,
+    "unformatted_promise_files": 0,
+    "build_failures": 0,
+    "vet_findings": 0,
+    "go_test_failures": 0,
+    "host_test_count": 11186,
     "host_leak_count": 0,
-    "host_test_failures": 0,
-    "wasm_test_count": 3397,
-    "wasm_test_failures": 0
+    "host_test_failures": 0
   }
 }
 ```
 
-Gate values are a flat `map[string]float64`. Adding a new metric requires only writing a new key in `verify.go` -- no mapping code needed.
+Gate values are a flat `map[string]float64`. What verify writes is **exactly the
+`integration` envelope's metrics** and nothing of its own: verify's test phase is
+that gate, so a key here is a number some gate reported and can reproduce. It
+used to add `wasm_*` keys from suites `integration` does not measure at all
+(T2170). A new metric therefore arrives by a gate reporting it -- no mapping code
+anywhere.
 
 The `worktree` field is the **identity of the tree the values were produced from** (`common.WorktreeHash`): a SHA-256 over every file git considers part of the project -- tracked, plus untracked and not ignored -- each contributed as path, length and bytes. Two paths are excluded, each because including it would break the gate rather than for tidiness: `.promise-home/`, which holds this sidecar itself, and `tools/gates/baselines.json`, which a *passing* gate rewrites (and which is never an input to any gate value).
 
@@ -194,7 +202,8 @@ The `coverage` entry above is **Pending** (has direction but no value -- will be
 - `tools/build/common/verify_summary.go` -- `GateValues` type + IO, `ParseTestSummaryLine`
 - `tools/build/common/hash.go` -- `WorktreeHash`, the content identity gate values are stamped with
 - `tools/build/common/baselines.go` -- `Baseline` struct (3-state), and the ratchet directions `bin/run` judges against. Reading only: nothing here moves a baseline.
-- `tools/build/common/verify.go` -- writes `gate-values.json` after verify
+- `tools/build/common/verify.go` -- measures `integration` in-process, judges it, and writes that envelope's metrics to `gate-values.json`
+- `tools/build/common/blessing.go` -- the blessing: the tree identity, the record, and the one rule under which a passing `integration` verdict is recorded
 - `tools/gates/baselines.json` -- per-platform baseline state
 - `.claude/skills/commit/SKILL.md` -- workflow integration
 
@@ -250,7 +259,7 @@ The tracker knows each agent's OS and idle status, dispatching to the right targ
 2. Tracker creates platform gate runs for each required platform
 3. Tracker dispatches to idle agents on target platforms:
    - Linux agent: `git pull && bin/verify`
-   - Windows agent: `git pull && bin\verify.exe --wasm`
+   - Windows agent: `git pull && bin\verify.exe`
 4. Agent runner executes command, returns stdout/stderr to tracker
 5. Tracker parses result, updates gate status
 6. If failure: tracker creates a bug, tags with `gate,platform,<platform>`
@@ -408,13 +417,15 @@ These gates speak the contract the flow SDK and BASE share, and the SDK **fails 
 
 | | Exec line | Reads | Prints on stdout |
 |---|---|---|---|
-| Gate | `bin/gate <name> --envelope` | nothing | one envelope: `{"gate","metrics":[{"name","type","value","unit"?}…],"incomplete"?}` |
+| Gate | `bin/gate <name> --envelope` | nothing | one envelope: `{"gate","metrics":[{"name","type","value","unit"?}…],"incomplete"?,"tree"?}` |
 | Judge | `bin/run <name> --verdict` | the envelope, on stdin | one verdict: `{"acceptable":bool,"thresholds":{…},"detail":"…"}` |
 | Listing | `bin/gate --list [--json]` | nothing | the gate names, one per line (or `{"gates":[{"name","summary"}…]}`) |
 | Listing | `bin/run --list [--json]` | nothing | the same gates, plus every command `./make` builds |
 | Command | `bin/run <command> [args…]` | nothing | whatever `bin/<command>` prints; its exit status becomes this one's |
 
 `--envelope`, `--list` and `--json` are flags of the **binary**. They are not gate names and not modifiers of one; a runner appends `--envelope` last when it asks for a measurement.
+
+**`tree` is this project's own field**, as `gate` is: the git tree id the measurement speaks for, stamped only when the identity before and after the run agreed, and absent on a gate whose subject is the machine. The judging layer blesses from it ([build-tools.md](build-tools.md#the-blessing)); nothing outside this repository reads it, and the SDK carries the envelope through to the judge without decoding it.
 
 **The JSON listing is an array of objects, not of names.** A caller addresses a gate by `name`; the `summary` is for whoever reads the listing, and a field added later is ignored by a reader rather than refused — that is what an additive interface means. The distinction is not cosmetic: the flow SDK's discovery unmarshals each entry into a struct with a `name`, so a bare `["tested", …]` still parses, yields nothing, and the repository is discovered as **a machine with no gates** — a silent failure with no parse error anywhere to explain it.
 
@@ -470,6 +481,10 @@ A metric's presence here is not its term: which of `integration`'s metrics are *
 - **`thresholds` is always present in a verdict**, even when empty: a verdict without the terms it was reached from cannot be re-checked by anyone who was not there.
 - **An incomplete run is never a pass.** A run that measured less than a full one says so in `incomplete`, and the judge refuses it even when every number is within its cap — honest numbers that understate what was checked are indistinguishable from an improvement.
 - `bin/run <name>` without `--verdict` is the by-hand path: it spawns `bin/gate <name> --envelope` as a process, prints each metric beside its cap, and exits non-zero when a cap is missed. No decision rests on it.
+
+- **A measurement says which tree it is about, and a passing `integration` verdict blesses it.** A gate stamps its envelope with the tree identity it saw, taken after the build and again when the measurement is done; if the two differ it carries none, so a tree edited mid-measurement blesses nothing. Recording is the **judging** layer's, never the gate's — a gate cannot know whether its numbers are acceptable — so `bin/run integration`, `bin/run integration --verdict` and `bin/verify` all reach one rule (`blessIfPassed`), and one passing measurement of a tree is sufficient for the commit guard whoever ran it. Only the whole may be cited here too: a green part blesses nothing. See [build-tools.md](build-tools.md#the-blessing).
+
+**`bin/verify` measures this gate.** Its test phase is `integration`, run through the same in-process entry point `bin/run integration` uses, and its verdict is the judge's verdict on that envelope — so "verify passed" and "integration passed" are one answer about one tree rather than two that can differ. Verify's additions are the ones a gate may not make: it repairs first (`gofmt -w`, `promise format`), and it records the blessing.
 
 **Not yet migrated.** The tracker gates above still use `GateOutput` and are not in `bin/gate --list`, because everything listed must be runnable through `bin/run`. `integration` is host-scoped by construction — one run reports exactly one target — so the WASM suites are not an omission from it but a different target's measurement, asked for by name (`bin/gate wasm-test`, `bin/gate wasm-web-test`) and judged against that target's own block. Nothing about them belongs in `incomplete`: a reason that could never be discharged would make every host run incomplete, and no baseline moves from an incomplete run.
 

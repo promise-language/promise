@@ -932,7 +932,7 @@ helper() int { return 1; }
 
 	// Load the module (with std so sema validation passes)
 	loader := testModuleLoader(projectDir)
-	modInfo, err := loader.load("./libs/mymod")
+	modInfo, err := loader.load("./libs/mymod", loader.projectRoot)
 	if err != nil {
 		t.Fatalf("loader.load failed: %v", err)
 	}
@@ -992,7 +992,7 @@ type Bar `+"`public"+` { int y; }
 	}
 
 	loader := testModuleLoader(projectDir)
-	modInfo, err := loader.load("./mylib")
+	modInfo, err := loader.load("./mylib", loader.projectRoot)
 	if err != nil {
 		t.Fatalf("loader.load failed: %v", err)
 	}
@@ -1018,7 +1018,7 @@ func TestLoadLocalModuleNoPromiseToml(t *testing.T) {
 	}
 
 	loader := testModuleLoader(projectDir)
-	_, err := loader.load("./badmod")
+	_, err := loader.load("./badmod", loader.projectRoot)
 	if err == nil {
 		t.Fatal("expected error for missing promise.toml")
 	}
@@ -1031,7 +1031,7 @@ func TestLoadLocalModuleNoPromiseToml(t *testing.T) {
 func TestLoadLocalModuleDirNotFound(t *testing.T) {
 	projectDir := t.TempDir()
 	loader := testModuleLoader(projectDir)
-	_, err := loader.load("./nonexistent")
+	_, err := loader.load("./nonexistent", loader.projectRoot)
 	if err == nil {
 		t.Fatal("expected error for missing directory")
 	}
@@ -1056,7 +1056,7 @@ epoch = "2026.0"
 	}
 
 	loader := testModuleLoader(projectDir)
-	_, err := loader.load("./empty")
+	_, err := loader.load("./empty", loader.projectRoot)
 	if err == nil {
 		t.Fatal("expected error for module with no .pr files")
 	}
@@ -1087,7 +1087,7 @@ compute() int `+"`public"+` { return "not an int"; }
 	}
 
 	loader := testModuleLoader(projectDir)
-	_, err := loader.load("./badmod")
+	_, err := loader.load("./badmod", loader.projectRoot)
 	if err == nil {
 		t.Fatal("expected error for module with sema errors")
 	}
@@ -1130,7 +1130,7 @@ sum(int[] nums) int `+"`public"+` {
 	}
 
 	loader := testModuleLoader(projectDir)
-	modInfo, err := loader.load("./mymod")
+	modInfo, err := loader.load("./mymod", loader.projectRoot)
 	if err != nil {
 		t.Fatalf("loader.load failed: %v", err)
 	}
@@ -1161,7 +1161,7 @@ func TestLoadModuleTransitive(t *testing.T) {
 		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"moda\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modA, "lib.pr"), "helper() int `public { return 42; }\n"},
 		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"modb\"\nepoch = \"2026.0\"\n"},
-		{filepath.Join(modB, "lib.pr"), "use moda \"./moda\";\nwrap() int `public { return moda.helper(); }\n"},
+		{filepath.Join(modB, "lib.pr"), "use moda \"../moda\";\nwrap() int `public { return moda.helper(); }\n"},
 	} {
 		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
 			t.Fatal(err)
@@ -1169,7 +1169,7 @@ func TestLoadModuleTransitive(t *testing.T) {
 	}
 
 	loader := testModuleLoader(projectDir)
-	modInfo, err := loader.load("./modb")
+	modInfo, err := loader.load("./modb", loader.projectRoot)
 	if err != nil {
 		t.Fatalf("loader.load failed: %v", err)
 	}
@@ -1222,9 +1222,9 @@ func TestLoadModuleDiamond(t *testing.T) {
 		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"a\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modA, "lib.pr"), "base() int `public { return 1; }\n"},
 		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"b\"\nepoch = \"2026.0\"\n"},
-		{filepath.Join(modB, "lib.pr"), "use a \"./a\";\nfrom_b() int `public { return a.base(); }\n"},
+		{filepath.Join(modB, "lib.pr"), "use a \"../a\";\nfrom_b() int `public { return a.base(); }\n"},
 		{filepath.Join(modC, "promise.toml"), "[module]\nname = \"c\"\nepoch = \"2026.0\"\n"},
-		{filepath.Join(modC, "lib.pr"), "use a \"./a\";\nfrom_c() int `public { return a.base(); }\n"},
+		{filepath.Join(modC, "lib.pr"), "use a \"../a\";\nfrom_c() int `public { return a.base(); }\n"},
 	} {
 		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
 			t.Fatal(err)
@@ -1234,11 +1234,11 @@ func TestLoadModuleDiamond(t *testing.T) {
 	loader := testModuleLoader(projectDir)
 
 	// Load both B and C
-	_, err := loader.load("./b")
+	_, err := loader.load("./b", loader.projectRoot)
 	if err != nil {
 		t.Fatalf("loader.load(b) failed: %v", err)
 	}
-	_, err = loader.load("./c")
+	_, err = loader.load("./c", loader.projectRoot)
 	if err != nil {
 		t.Fatalf("loader.load(c) failed: %v", err)
 	}
@@ -1283,9 +1283,9 @@ func TestLoadModuleCircular(t *testing.T) {
 	for _, item := range []struct{ path, content string }{
 		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"x\"\nepoch = \"2026.0\"\n"},
-		{filepath.Join(modA, "lib.pr"), "use y \"./y\";\nfx() int `public { return 1; }\n"},
+		{filepath.Join(modA, "lib.pr"), "use y \"../y\";\nfx() int `public { return 1; }\n"},
 		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"y\"\nepoch = \"2026.0\"\n"},
-		{filepath.Join(modB, "lib.pr"), "use x \"./x\";\nfy() int `public { return 1; }\n"},
+		{filepath.Join(modB, "lib.pr"), "use x \"../x\";\nfy() int `public { return 1; }\n"},
 	} {
 		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
 			t.Fatal(err)
@@ -1293,7 +1293,7 @@ func TestLoadModuleCircular(t *testing.T) {
 	}
 
 	loader := testModuleLoader(projectDir)
-	_, err := loader.load("./x")
+	_, err := loader.load("./x", loader.projectRoot)
 	if err == nil {
 		t.Fatal("expected error for circular dependency")
 	}
@@ -1314,11 +1314,11 @@ func TestLoadModuleCircularThreeModules(t *testing.T) {
 	for _, item := range []struct{ path, content string }{
 		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(projectDir, "a", "promise.toml"), "[module]\nname = \"a\"\nepoch = \"2026.0\"\n"},
-		{filepath.Join(projectDir, "a", "lib.pr"), "use b \"./b\";\nfa() int `public { return 1; }\n"},
+		{filepath.Join(projectDir, "a", "lib.pr"), "use b \"../b\";\nfa() int `public { return 1; }\n"},
 		{filepath.Join(projectDir, "b", "promise.toml"), "[module]\nname = \"b\"\nepoch = \"2026.0\"\n"},
-		{filepath.Join(projectDir, "b", "lib.pr"), "use c \"./c\";\nfb() int `public { return 2; }\n"},
+		{filepath.Join(projectDir, "b", "lib.pr"), "use c \"../c\";\nfb() int `public { return 2; }\n"},
 		{filepath.Join(projectDir, "c", "promise.toml"), "[module]\nname = \"c\"\nepoch = \"2026.0\"\n"},
-		{filepath.Join(projectDir, "c", "lib.pr"), "use a \"./a\";\nfc() int `public { return 3; }\n"},
+		{filepath.Join(projectDir, "c", "lib.pr"), "use a \"../a\";\nfc() int `public { return 3; }\n"},
 	} {
 		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
 			t.Fatal(err)
@@ -1326,7 +1326,7 @@ func TestLoadModuleCircularThreeModules(t *testing.T) {
 	}
 
 	loader := testModuleLoader(projectDir)
-	_, err := loader.load("./a")
+	_, err := loader.load("./a", loader.projectRoot)
 	if err == nil {
 		t.Fatal("expected error for 3-module circular dependency")
 	}
@@ -1360,7 +1360,7 @@ func TestLoadModuleCanonicalName(t *testing.T) {
 	}
 
 	loader := testModuleLoader(projectDir)
-	modInfo, err := loader.load("./my-local-path")
+	modInfo, err := loader.load("./my-local-path", loader.projectRoot)
 	if err != nil {
 		t.Fatalf("loader.load failed: %v", err)
 	}
@@ -1407,13 +1407,13 @@ func TestLoadModuleSameNameDifferentPaths(t *testing.T) {
 	loader := testModuleLoader(projectDir)
 
 	// Load first module — should succeed
-	miA, err := loader.load("./mod_a")
+	miA, err := loader.load("./mod_a", loader.projectRoot)
 	if err != nil {
 		t.Fatalf("loader.load(mod_a) failed: %v", err)
 	}
 
 	// Load second module with same name but different path — should also succeed
-	miB, err := loader.load("./mod_b")
+	miB, err := loader.load("./mod_b", loader.projectRoot)
 	if err != nil {
 		t.Fatalf("loader.load(mod_b) failed: %v", err)
 	}
@@ -1915,7 +1915,7 @@ epoch = "2025.1"
 	}
 
 	loader := testModuleLoaderWithConfig(projectDir, projectCfg)
-	_, loadErr := loader.load(modDir)
+	_, loadErr := loader.load(modDir, loader.projectRoot)
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}
@@ -1956,7 +1956,7 @@ epoch = "2026.0"
 	}
 
 	loader := testModuleLoaderWithConfig(projectDir, projectCfg)
-	_, loadErr := loader.load(modDir)
+	_, loadErr := loader.load(modDir, loader.projectRoot)
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}

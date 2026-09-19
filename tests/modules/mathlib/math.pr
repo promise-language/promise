@@ -133,7 +133,7 @@ identity[T](T x) T `public {
   return x;
 }
 
-wrap[T](T x) T[] `public {
+wrap[T](T move x) T[] `public {
   T[] result = [x];
   return result;
 }
@@ -245,8 +245,12 @@ make_adder(int x)() -> int `public {
 // A module type whose method hands back its own borrowed closure field — the
 // alias filter must suppress tracking here (the holder's drop owns the env).
 type CallbackBox `public {
-  () -> int cb;
+  // Held in a vector, as tests/e2e/closure_env_call_result_test.pr holds it: a
+  // closure is a move-only single-owner value, so a method cannot hand back a
+  // bare closure FIELD — that would be a second owner of one env. Indexing the
+  // vector borrows it, which is what the alias filter is here to see.
+  (() -> int)[] cbs;
   get_cb(this)() -> int `public {
-    return this.cb;
+    return this.cbs[0];
   }
 }

@@ -1,5 +1,5 @@
 // renderer: depends on geometry, which depends on utils (3-level chain).
-use geometry "./geometry";
+use geometry "../geometry";
 
 type Canvas `public {
   int width;

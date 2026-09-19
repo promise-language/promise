@@ -198,23 +198,31 @@ func TestJudge_BaselineRatchet(t *testing.T) {
 	}
 }
 
-// An incomplete run is still judged — refusing it outright would make every
-// gate that measures less than everything permanently unpassable. What it may
-// not do is move a baseline, and the verdict says so.
-func TestJudge_IncompleteIsJudgedAndMovesNoBaseline(t *testing.T) {
+// An incomplete run is NOT acceptable, however good the numbers it did report
+// are. A verdict is a claim about a subject, and a run that did not measure its
+// whole subject has no grounds to make one — "the part I measured was fine" is
+// not "this is safe to land". The verdict names what could not be measured, so
+// the reader is sent at the gap rather than at the code.
+func TestJudge_IncompleteIsNotAcceptable(t *testing.T) {
 	caps := map[string]Threshold{"worktree_free_bytes": {Direction: AtLeast, Cap: 1}}
 	env := Envelope{Gate: "fit", Metrics: []Metric{Size("worktree_free_bytes", 50, "bytes")}, Incomplete: "no GOCACHE"}
 	ok, _, detail := judge(env, caps, nil)
-	if !ok {
-		t.Errorf("an incomplete run within its caps must still pass: %s", detail)
+	if ok {
+		t.Error("an incomplete run was judged acceptable; it measured less than its subject")
 	}
-	if !strings.Contains(detail, "no baseline may move") {
-		t.Errorf("detail must say no baseline may move from an incomplete run, got %q", detail)
+	if !strings.Contains(detail, "no GOCACHE") {
+		t.Errorf("the verdict must name what could not be measured, got %q", detail)
 	}
-	// Still fails when a cap is missed, incomplete or not.
+	// A missed cap still fails, and reports the cap rather than the gap: the
+	// numbers that WERE measured are real, and a reader fixing a cap miss must
+	// not be sent looking for a measurement problem instead.
 	env.Metrics = []Metric{Size("worktree_free_bytes", 0, "bytes")}
-	if ok, _, _ := judge(env, caps, nil); ok {
+	ok, _, detail = judge(env, caps, nil)
+	if ok {
 		t.Error("an incomplete run that misses a cap was judged acceptable")
+	}
+	if !strings.Contains(detail, "worktree_free_bytes") {
+		t.Errorf("a missed cap must be reported as such, got %q", detail)
 	}
 }
 

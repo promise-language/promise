@@ -23,7 +23,15 @@ func (c *Checker) declare(file *ast.File) {
 		alias := u.Alias
 		isGlob := alias == "_"
 
-		mod := types.NewModule(tpos(u.Pos()), alias, u.Path)
+		// The module object carries the module's global IDENTITY, not the
+		// spelling this file used to reach it: one directory is one module
+		// however it was addressed, and codegen keys on that. The scope is still
+		// resolved by spelling below — that lookup is file-local and correct.
+		modPath := u.Path
+		if id, ok := c.moduleIdentities[u.Path]; ok && id != "" {
+			modPath = id
+		}
+		mod := types.NewModule(tpos(u.Pos()), alias, modPath)
 		if u.CatalogName != "" {
 			mod.SetCatalogName(u.CatalogName)
 		}

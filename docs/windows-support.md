@@ -182,7 +182,7 @@ tools into the binary, so an installed LLVM is only needed for non-release build
 bin\build                :: embed resources + build → bin\promise.exe
 bin\build --release      :: release build with embedded LLVM tools
 bin\test --wasm          :: build + run all tests (incl. wasm32-wasi)
-bin\verify --wasm        :: format + check + all tests (pre-commit check)
+bin\verify              :: build + repair + check + the integration gate
 ```
 
 `bin\build` handles ANTLR generation (when Java is present), resource embedding,

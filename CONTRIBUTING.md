@@ -104,13 +104,19 @@ behavior (prefer batch `` `test `` functions with `assert()`).
 ## 6. Verify before committing
 
 ```sh
-bin/verify --wasm
+bin/verify
 ```
 
-This is the canonical pre-commit check: it formats Go and Promise code, runs
-`go vet`, and executes the full test suite including the WASM target. **Always
-run it before committing**, and do not commit if it fails. Add `--shared` to use
-the shared `~/.promise` cache instead of the per-clone `.promise-home/`.
+This is the canonical pre-commit check: it builds, formats Go and Promise code,
+runs `go vet` and the structural sweeps, and then measures the `integration`
+gate — the same measurement `bin/run integration` takes — so "verify passed" and
+"integration passed" are one answer about one tree. A green run blesses that
+tree, which is what the commit guard checks. **Always run it before
+committing**, and do not commit if it fails.
+
+It takes no variant flags. The WASM suites are other targets' measurements, run
+by name: `bin/test --wasm`, or the `bin/gate wasm-test` / `bin/gate wasm-web-test`
+gates.
 
 ## 7. Gates & git hooks
 

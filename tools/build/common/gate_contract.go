@@ -24,11 +24,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // MetricType is what kind of number a measurement is. The set is closed.
@@ -151,6 +153,16 @@ type Envelope struct {
 	// separate flag that could disagree with it. A baseline never moves from an
 	// incomplete run (judge.go).
 	Incomplete string `json:"incomplete_reason,omitempty"`
+	// Tree is the identity of the content these measurements speak for: the git
+	// tree id it would stage as (blessing.go). Present only when the identity
+	// before and after the measurement agreed, so a tree that moved while it was
+	// being measured carries none — and a judge holding this envelope can tell
+	// "this is about the content in front of me" from "this is about content
+	// that no longer exists". Absent on a gate whose subject is the machine.
+	//
+	// This project's own field, like `gate`: the judging layer blesses from it,
+	// and nothing outside this repository reads it.
+	Tree string `json:"tree,omitempty"`
 }
 
 // EnvelopeSchemaVersion is the wire version of the envelope above.
@@ -169,6 +181,12 @@ type contractGateDef struct {
 	// rather than silently measuring whatever artifacts happen to be on disk.
 	measuresMachine bool
 }
+
+// integrationGate is the one gate a landing decision — and a blessing — may
+// rest on. Named once because three layers test for it: the composition below,
+// bin/verify's test phase, and blessIfPassed, which refuses to bless anything
+// else (blessing.go).
+const integrationGate = "integration"
 
 // contractGates is CLOSED, and holds only gates. A name absent here is refused
 // rather than guessed at, because a runner asking for a gate this project does
@@ -225,7 +243,7 @@ var contractGates = map[string]contractGateDef{
 	// integration is what a landing decision rests on: the whole, measured at
 	// once, with nothing repaired on the way. Its parts stay separately
 	// runnable — a step fixing one failing area re-runs that area, not the set.
-	"integration": {
+	integrationGate: {
 		summary: "everything that must hold before a change may land (host)",
 		parts:   []string{"formatted", "builds", "checked", "tested"},
 	},
@@ -313,6 +331,22 @@ func unknownContractGate(name string) error {
 		name, strings.Join(ContractGateNames(), ", "))
 }
 
+// PartResult is what ONE leaf gate measured, for a caller rendering a summary
+// for a person. It is not wire: the envelope carries numbers, and a reader of it
+// cannot tell which part of a composition produced which number, or what each
+// part cost. `bin/verify` needs both to print a row per part; `bin/gate` ignores
+// it entirely.
+//
+// A composition flattens to one PartResult per LEAF, in declaration order, so
+// every row is named exactly as `bin/run` addresses it (T1871's rule: a name a
+// tool prints is a name you can type back at it).
+type PartResult struct {
+	Gate       string
+	Metrics    []Metric
+	Incomplete string
+	Elapsed    time.Duration
+}
+
 // MeasureContractGate runs one gate and returns what it measured. The error
 // means the measurement could not be OBTAINED; it never means "the numbers are
 // bad" — three failing tests is a successful run of the gate that counts them.
@@ -324,9 +358,18 @@ func unknownContractGate(name string) error {
 // against this very checkout, which would reset the ledger of whatever verify or
 // gate was measuring at the time and silently zero its numbers.
 func MeasureContractGate(root, name string) (Envelope, error) {
+	env, _, err := MeasureContractGateParts(root, name)
+	return env, err
+}
+
+// MeasureContractGateParts is MeasureContractGate, plus what each leaf measured
+// and what it cost. ONE measurement path, so an in-process caller that wants a
+// per-part summary cannot come to measure something other than what the gate
+// reports — which is the whole of what T2170 is about.
+func MeasureContractGateParts(root, name string) (Envelope, []PartResult, error) {
 	def, ok := contractGates[name]
 	if !ok {
-		return Envelope{}, unknownContractGate(name)
+		return Envelope{}, nil, unknownContractGate(name)
 	}
 	// Every gate but the machine one measures the tree AS IT IS NOW, so the
 	// build comes first — gate_build.go says why, and RunBuild's own quick
@@ -339,20 +382,28 @@ func MeasureContractGate(root, name string) (Envelope, error) {
 		_ = ensureGateBuild(root)
 	}
 	if def.measure != nil {
+		start := time.Now()
 		metrics, incomplete, err := def.measure(root)
+		elapsed := time.Since(start)
 		if err != nil {
-			return Envelope{}, err
+			return Envelope{}, nil, err
 		}
 		if metrics == nil {
 			metrics = []Metric{}
 		}
-		return Envelope{
+		env := Envelope{
 			SchemaVersion: EnvelopeSchemaVersion,
 			Gate:          name,
 			Target:        HostTarget(),
 			Metrics:       metrics,
 			Incomplete:    incomplete,
-		}, nil
+		}
+		return env, []PartResult{{
+			Gate:       name,
+			Metrics:    metrics,
+			Incomplete: incomplete,
+			Elapsed:    elapsed,
+		}}, nil
 	}
 	// A composition. Each part is measured by the same path a caller asking for
 	// that part alone would take, so the whole cannot disagree with its parts
@@ -364,18 +415,34 @@ func MeasureContractGate(root, name string) (Envelope, error) {
 		Metrics:       []Metric{},
 	}
 	var reasons []string
+	var parts []PartResult
 	for _, part := range def.parts {
-		sub, err := MeasureContractGate(root, part)
+		sub, subParts, err := MeasureContractGateParts(root, part)
 		if err != nil {
-			return Envelope{}, fmt.Errorf("%s: %w", part, err)
+			return Envelope{}, nil, fmt.Errorf("%s: %w", part, err)
 		}
 		env.Metrics = append(env.Metrics, sub.Metrics...)
+		parts = append(parts, subParts...)
 		if sub.Incomplete != "" {
 			reasons = append(reasons, part+": "+sub.Incomplete)
 		}
 	}
 	env.Incomplete = strings.Join(reasons, "; ")
-	return env, nil
+	return env, parts, nil
+}
+
+// joinIncomplete adds one more reason to a run's incomplete reason. A run may
+// measure less than a full one for more than a reason at a time, and a reason
+// that replaced another would hide it.
+func joinIncomplete(existing, add string) string {
+	switch {
+	case add == "":
+		return existing
+	case existing == "":
+		return add
+	default:
+		return existing + "; " + add
+	}
 }
 
 // parseContractGateArgs reads `<name> [--envelope]`: exactly one name, and
@@ -429,9 +496,16 @@ func runContractGate(root string, args []string, stdout io.Writer) error {
 	def, known := contractGates[name]
 	measured := known && !def.measuresMachine
 	var store casWindow
+	var beforeTree string
 	if measured {
 		_ = ensureGateBuild(root)
 		store = openCASWindow(root)
+		// The identity of the content this run is about, taken here and again
+		// when the measurement is done (settledTree). AFTER the build, because
+		// the build is allowed to move the tree — it regenerates the tracked
+		// parser when the grammar has moved — and a snapshot from before it
+		// would report every such run as a tree that changed under measurement.
+		beforeTree, _ = treeIdentity(root)
 	}
 	env, err := MeasureContractGate(root, name)
 	if err != nil {
@@ -440,12 +514,12 @@ func runContractGate(root string, args []string, stdout io.Writer) error {
 	if measured {
 		metrics, incomplete := store.Metrics()
 		env.Metrics = append(env.Metrics, metrics...)
-		if incomplete != "" {
-			if env.Incomplete != "" {
-				env.Incomplete += "; "
-			}
-			env.Incomplete += incomplete
-		}
+		env.Incomplete = joinIncomplete(env.Incomplete, incomplete)
+		// What the numbers are about. A run whose tree moved carries no
+		// identity, so nothing downstream can bless content this did not see.
+		tree, moved := settledTree(root, beforeTree)
+		env.Tree = tree
+		env.Incomplete = joinIncomplete(env.Incomplete, moved)
 	}
 	out, err := json.Marshal(env)
 	if err != nil {
@@ -560,6 +634,26 @@ func captureSplit(dir, name string, args ...string) (stdout, stderr string, err 
 	cmd.Dir = dir
 	var out, errBuf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errBuf
+	err = cmd.Run()
+	return out.String(), errBuf.String(), err
+}
+
+// captureSplitTee is captureSplit with the child's output COPIED to our stderr
+// as it arrives, and captured as well.
+//
+// For the measurements that take minutes. A gate that holds a twenty-minute
+// suite's output until it is over is indistinguishable from a wedged one while
+// it runs, and when it finally reports `go_test_failures = 3` the three names
+// are in a buffer nobody prints — the reader is told a number and sent to find
+// the tests themselves. judge.go makes the same argument about a gate's own
+// stderr, which is where this goes: OUR stdout carries the envelope and nothing
+// else, and docs/gate-system.md puts human-readable progress on stderr.
+func captureSplitTee(dir, name string, args ...string) (stdout, stderr string, err error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	var out, errBuf bytes.Buffer
+	cmd.Stdout = io.MultiWriter(os.Stderr, &out)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &errBuf)
 	err = cmd.Run()
 	return out.String(), errBuf.String(), err
 }

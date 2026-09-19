@@ -117,62 +117,6 @@ func TestParseTestSummaryLine_Empty(t *testing.T) {
 	}
 }
 
-func TestExtractFailedSection_MultiFile(t *testing.T) {
-	output := `pass (0.001s) e2e/basics.pr (3 tests)
-FAIL (0.005s) e2e/strings.pr (1/3 failed)
-  test_split
-    panic: assertion failed
-
-568 passed, 2 failed (117 files, 30.810s)
-FAILED:
-  e2e/strings.pr: test_split
-    panic: assertion failed
-  broken.pr (compilation error)
-    broken.pr:5:3: type Foo has no field 'bar'`
-
-	got := ExtractFailedSection(output)
-	if !strings.Contains(got, "e2e/strings.pr: test_split") {
-		t.Errorf("expected test_split in section, got:\n%s", got)
-	}
-	if !strings.Contains(got, "broken.pr (compilation error)") {
-		t.Errorf("expected broken.pr in section, got:\n%s", got)
-	}
-	// Must not include the "FAILED:" header line itself.
-	if strings.HasPrefix(got, "FAILED:") {
-		t.Errorf("section should not start with FAILED:, got:\n%s", got)
-	}
-}
-
-func TestExtractFailedSection_SingleFile(t *testing.T) {
-	output := `pass (0.001s) test_add
-FAIL (0.003s) test_broken
-  panic: assertion failed
-
-2 passed, 1 failed (0.423s)
-FAILED:
-  test_broken`
-
-	got := ExtractFailedSection(output)
-	if !strings.Contains(got, "test_broken") {
-		t.Errorf("expected test_broken, got:\n%s", got)
-	}
-}
-
-func TestExtractFailedSection_NoFailures(t *testing.T) {
-	output := "3 passed, 0 failed (0.010s)"
-	got := ExtractFailedSection(output)
-	if got != "" {
-		t.Errorf("expected empty string, got: %q", got)
-	}
-}
-
-func TestExtractFailedSection_Empty(t *testing.T) {
-	got := ExtractFailedSection("")
-	if got != "" {
-		t.Errorf("expected empty string for empty input, got: %q", got)
-	}
-}
-
 func TestWriteReadGateValues(t *testing.T) {
 	root := initBareGitRepo(t)
 	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
@@ -491,9 +435,12 @@ FAILED:
 )
 
 // TestVerifyReparsers_AgreeAcrossRenderModes is the T1888 constraint on the
-// consumers: verify re-parses the captured Promise output for its counts and
-// its "Failed Tests" block, and dropping the passing progress lines must not
-// change either answer.
+// consumer: the tested:promise gate re-parses the captured Promise output for
+// its counts, and dropping the passing progress lines must not change them.
+//
+// Verify no longer re-states the suite's own FAILED: block — the suite streams
+// it, so a second copy assembled from a buffer was the same text twice — so the
+// counts are what is left to agree.
 func TestVerifyReparsers_AgreeAcrossRenderModes(t *testing.T) {
 	full := ParseTestSummaryLine(capturedFullForm)
 	plain := ParseTestSummaryLine(capturedPlainForm)
@@ -505,11 +452,6 @@ func TestVerifyReparsers_AgreeAcrossRenderModes(t *testing.T) {
 	}
 	if full.Passed != 568 || full.Failed != 2 || full.Leaked != 3 || full.TimedOut != 1 {
 		t.Errorf("counts = %+v, want 568/2/3/1", *full)
-	}
-	if a, b := ExtractFailedSection(capturedFullForm), ExtractFailedSection(capturedPlainForm); a != b {
-		t.Errorf("Failed Tests section differs between render modes:\n full: %q\nplain: %q", a, b)
-	} else if !strings.Contains(a, "e2e/strings.pr: test_split") {
-		t.Errorf("section lost its content: %q", a)
 	}
 }
 
@@ -606,5 +548,122 @@ func TestWriteGateValues_UnrepresentableValue(t *testing.T) {
 	}
 	if _, err := os.Stat(gateValuesPath(root)); !os.IsNotExist(err) {
 		t.Error("a sidecar was written despite the marshal failure")
+	}
+}
+
+// --- The verify summary block ---
+
+// TestVerifySummary_ReportsWhatWasMeasured is the block pinned whole (T2170).
+//
+// It is a golden because every property that matters is a property of the TEXT:
+// one row per part named as `bin/run` addresses it, each part's own duration and
+// no other's, a FAILED form carrying the term it failed, and a part that never
+// ran saying so instead of printing 0s. It is also required to be byte-identical
+// in all three progress modes, and the way to keep that true is to have one
+// rendering with one expected output.
+func TestVerifySummary_ReportsWhatWasMeasured(t *testing.T) {
+	s := verifySummary{
+		Target:   "darwin-arm64",
+		Compiler: "2026.10-8d0a3d1 (identity 12e9f923)",
+		Parts: []PartResult{
+			{Gate: "formatted:go", Metrics: []Metric{Count("unformatted_go_files", 0)}, Elapsed: 400 * time.Millisecond},
+			{Gate: "checked:promise", Metrics: []Metric{Count("promise_check_errors", 2)}, Elapsed: 63 * time.Second},
+			{Gate: "tested:promise", Incomplete: "the build did not complete, so the Promise suite did not run"},
+		},
+		Terms: map[string]term{
+			"unformatted_go_files": {Kind: "baseline", Direction: "exact", Value: 0},
+			"promise_check_errors": {Kind: "cap", Direction: "at_most", Value: 0},
+		},
+		Failed:  "integration",
+		Store:   "CAS: 0 B over the wire",
+		Elapsed: 21*time.Minute + 14*time.Second,
+	}
+	const want = `
+====================================================
+  Verify Summary
+----------------------------------------------------
+  Target:          darwin-arm64
+  Compiler:        2026.10-8d0a3d1 (identity 12e9f923)
+  formatted:go     passed (400ms)
+  checked:promise  FAILED (1m3s)
+                     promise_check_errors is 2, cap at_most 0
+  tested:promise   not measured
+                     the build did not complete, so the Promise suite did not run
+  CAS: 0 B over the wire
+  Total time:      21m14s
+====================================================
+FAILED: integration
+`
+	if got := s.String(); got != want {
+		t.Errorf("summary =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestVerifySummary_NothingMeasuredNamesTheStepThatStopped: a run that never
+// reached the measurement has no rows, and must say that rather than print a
+// block of zeros — which reads as a suite that ran and found nothing.
+func TestVerifySummary_NothingMeasuredNamesTheStepThatStopped(t *testing.T) {
+	got := verifySummary{Target: "linux-amd64", Compiler: "unknown", Failed: "build"}.String()
+	if !strings.Contains(got, "nothing was measured — the run stopped at: build") {
+		t.Errorf("summary must name the step that stopped the run:\n%s", got)
+	}
+	if strings.Contains(got, "0s)") {
+		t.Errorf("a run that measured nothing must not print durations:\n%s", got)
+	}
+}
+
+// TestVerifySummary_AGreenRunNamesNoFailure: the FAILED: line is the tail
+// marker, so it must not appear on a run that passed.
+func TestVerifySummary_AGreenRunNamesNoFailure(t *testing.T) {
+	got := verifySummary{
+		Target:   "linux-amd64",
+		Compiler: "unknown",
+		Parts:    []PartResult{{Gate: "tested:go", Metrics: []Metric{Count("go_test_failures", 0)}, Elapsed: time.Second}},
+		Elapsed:  time.Minute,
+	}.String()
+	if strings.Contains(got, "FAILED") {
+		t.Errorf("a green run must print no FAILED marker:\n%s", got)
+	}
+	if !strings.Contains(got, "tested:go    passed (1s)") {
+		t.Errorf("a passing part must report its own duration:\n%s", got)
+	}
+}
+
+// TestParseCompilerIdentity covers the line naming the compiler that produced
+// the numbers: the version, and enough of the identity to tell two builds apart.
+func TestParseCompilerIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		want string
+		ok   bool
+	}{
+		{
+			"version and identity",
+			`{"version":"2026.10-8d0a3d1","channel":"stable","commit":"8d0a3d12","identity":"12e9f923de115e25d6271da689749f27"}`,
+			"2026.10-8d0a3d1 (identity 12e9f923)", true,
+		},
+		{"no identity", `{"version":"2026.10-dev"}`, "2026.10-dev", true},
+		{"short identity is not truncated", `{"version":"v","identity":"abc"}`, "v (identity abc)", true},
+		{"not json", "promise version 2026.10", "", false},
+		{"no version", `{"identity":"12e9f923"}`, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseCompilerIdentity(tc.out)
+			if ok != tc.ok || got != tc.want {
+				t.Errorf("parseCompilerIdentity(%q) = (%q, %v), want (%q, %v)", tc.out, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// TestCompilerIdentity_UnknownWhenThereIsNoCompiler: the line is non-fatal by
+// construction. A run that failed at the build step has no binary to ask, and a
+// summary that refused to print because of it would withhold the failure it
+// exists to report.
+func TestCompilerIdentity_UnknownWhenThereIsNoCompiler(t *testing.T) {
+	got := compilerIdentity(t.TempDir())
+	if !strings.HasPrefix(got, "unknown (") {
+		t.Errorf("compilerIdentity with no binary = %q, want an unknown line", got)
 	}
 }

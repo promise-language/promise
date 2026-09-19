@@ -24,7 +24,7 @@ func TestRunVerify_UnknownFlagReturnsUsageError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown flag, got nil")
 	}
-	const want = "usage: bin/verify [--shared] [--wasm] [--wasm-web] [--clean] [--push] [--lock-timeout=<dur>]"
+	const want = verifyUsage
 	if err.Error() != want {
 		t.Errorf("got %q, want %q", err.Error(), want)
 	}
@@ -46,15 +46,11 @@ func TestParseVerifyArgs_EveryFlagSetsItsOption(t *testing.T) {
 		args []string
 		want verifyOptions
 	}{
-		{"local", []string{"--local"}, verifyOptions{}},
-		{"shared", []string{"--shared"}, verifyOptions{shared: true}},
-		{"wasm", []string{"--wasm"}, verifyOptions{wasm: true}},
-		{"wasm-web", []string{"--wasm-web"}, verifyOptions{wasmWeb: true}},
 		{"clean", []string{"--clean"}, verifyOptions{clean: true}},
 		{"push", []string{"--push"}, verifyOptions{push: true}},
 		{"lock-timeout", []string{"--lock-timeout=100ms"}, verifyOptions{lockTimeout: 100 * time.Millisecond}},
 		{"lock-timeout separate value", []string{"--lock-timeout", "10m"}, verifyOptions{lockTimeout: 10 * time.Minute}},
-		{"single dash", []string{"-wasm"}, verifyOptions{wasm: true}},
+		{"single dash", []string{"-clean"}, verifyOptions{clean: true}},
 		{"none", nil, verifyOptions{}},
 		// 0 is not "do not wait" — it is the zero value the absent flag leaves
 		// behind, which acquireVerifyLockIn reads as "wait indefinitely". Anyone
@@ -62,17 +58,12 @@ func TestParseVerifyArgs_EveryFlagSetsItsOption(t *testing.T) {
 		// the opposite, so the collision is pinned rather than left to be
 		// rediscovered.
 		{"zero timeout is the unbounded sentinel", []string{"--lock-timeout=0s"}, verifyOptions{}},
-		{"repeated flag", []string{"--wasm", "--wasm"}, verifyOptions{wasm: true}},
+		{"repeated flag", []string{"--clean", "--clean"}, verifyOptions{clean: true}},
 		{"last timeout wins", []string{"--lock-timeout=1s", "--lock-timeout=2s"}, verifyOptions{lockTimeout: 2 * time.Second}},
 		{
 			"all together",
-			[]string{"--wasm", "--wasm-web", "--clean", "--push", "--lock-timeout=1s"},
-			verifyOptions{wasm: true, wasmWeb: true, clean: true, push: true, lockTimeout: time.Second},
-		},
-		{
-			"shared with everything but clean",
-			[]string{"--shared", "--wasm", "--wasm-web", "--push", "--lock-timeout=1s"},
-			verifyOptions{shared: true, wasm: true, wasmWeb: true, push: true, lockTimeout: time.Second},
+			[]string{"--clean", "--push", "--lock-timeout=1s"},
+			verifyOptions{clean: true, push: true, lockTimeout: time.Second},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,24 +78,56 @@ func TestParseVerifyArgs_EveryFlagSetsItsOption(t *testing.T) {
 	}
 }
 
-// TestParseVerifyArgs_CleanWithSharedIsRefused pins the one combination the
-// parser rejects. A verify run never clears the shared ~/.promise — that is an
-// operator's explicit bin/clean --shared — and --clean clears only the
-// repo-local .promise-home, which a --shared run never uses, so the pair asks
-// either for a clean of the shared home or for nothing. Refusing at the parser
-// puts the refusal ahead of the lock, the clean and the build.
-func TestParseVerifyArgs_CleanWithSharedIsRefused(t *testing.T) {
-	for _, args := range [][]string{
-		{"--shared", "--clean"},
-		{"--clean", "--wasm", "--shared"},
+// TestParseVerifyArgs_VariantOptionsAreRefused is the flag half of "one
+// measurement, one meaning of blessed" (T2170).
+//
+// --wasm, --wasm-web, --shared and --local each used to change what a run
+// measured or where it measured it, while the record it wrote said none of it:
+// `bin/verify` and `bin/verify --shared --wasm` blessed the same tree id for two
+// different measurements. They are REFUSED rather than ignored — a silent no-op
+// would leave every caller that still passes one believing it got the suite it
+// asked for, and the WASM suites are real measurements, addressed by name
+// (`bin/gate wasm-test`, `bin/gate wasm-web-test`).
+func TestParseVerifyArgs_VariantOptionsAreRefused(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		// names is what the refusal must point the caller at: losing a flag and
+		// losing a suite are different facts, and the two WASM suites are still
+		// measured, by name, on a schedule.
+		names string
+	}{
+		{[]string{"--wasm"}, "bin/gate wasm-test"},
+		{[]string{"--wasm-web"}, "bin/gate wasm-web-test"},
+		{[]string{"--shared"}, "bin/clean --shared"},
+		{[]string{"--local"}, ".promise-home/"},
+		{[]string{"--clean", "--wasm"}, "bin/gate wasm-test"},
+		{[]string{"--shared", "--clean"}, "bin/clean --shared"},
+		{[]string{"-wasm"}, "bin/gate wasm-test"},
 	} {
-		got, err := parseVerifyArgs(args)
-		if !errors.Is(err, errCleanWithShared) {
-			t.Errorf("parseVerifyArgs(%v) = %v, want errCleanWithShared", args, err)
+		got, err := parseVerifyArgs(tc.args)
+		if err == nil {
+			t.Errorf("parseVerifyArgs(%v) = %+v, want a refusal", tc.args, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.names) {
+			t.Errorf("parseVerifyArgs(%v) = %q, want it to name %q", tc.args, err, tc.names)
+		}
+		if !strings.Contains(err.Error(), verifyUsage) {
+			t.Errorf("parseVerifyArgs(%v) = %q, want it to carry the usage line", tc.args, err)
 		}
 		if got != (verifyOptions{}) {
 			t.Errorf("a rejected command line must yield zero options, got %+v", got)
 		}
+	}
+}
+
+// TestParseVerifyArgs_ATypoIsNotARetiredFlag: the two refusals are different on
+// purpose. A retired option names where its measurement went; a mistyped one has
+// nowhere to point, and inventing a destination for it would be a lie.
+func TestParseVerifyArgs_ATypoIsNotARetiredFlag(t *testing.T) {
+	_, err := parseVerifyArgs([]string{"--wsam"})
+	if err == nil || err.Error() != verifyUsage {
+		t.Errorf("parseVerifyArgs(--wsam) = %v, want exactly the usage line", err)
 	}
 }
 
@@ -234,311 +257,134 @@ func TestAcquireVerifyLock_ClearsOnUnlock(t *testing.T) {
 	}
 }
 
-// verifyPhaseStubs builds a verifySuites whose suites all pass, plus counters
-// recording how many times each was invoked.
-type verifyPhaseCounts struct{ goN, toolsN, flowsN, promiseN int }
+// stepLog is a pipeline of steps that record the order they ran in, so the
+// guarantees that matter — stop at the first failure, never push what was not
+// blessed — can be asserted without taking a host lock or building a compiler
+// (T2092). RunVerify's real pipeline is asserted separately, by name.
+type stepLog struct {
+	ran []string
+}
 
-func stubSuites(c *verifyPhaseCounts, goErr, toolsErr, flowsErr error) verifySuites {
-	return verifySuites{
-		goTests:    func(string) error { c.goN++; return goErr },
-		toolsTests: func(string) error { c.toolsN++; return toolsErr },
-		flowsTests: func(string) (bool, error) { c.flowsN++; return false, flowsErr },
-		promiseTests: func(_, _ string) (string, error) {
-			c.promiseN++
-			return "1 passed, 0 failed (1 files, 0.001s)", nil
-		},
+func (l *stepLog) step(name string, err error) verifyStep {
+	return verifyStep{name, func() error {
+		l.ran = append(l.ran, name)
+		return err
+	}}
+}
+
+// verifyStepNames is the pipeline as a caller would read it.
+func verifyStepNames(opts verifyOptions) []string {
+	r := &verifyRun{root: "/nowhere", opts: opts}
+	var names []string
+	for _, s := range r.steps() {
+		names = append(names, s.name)
+	}
+	return names
+}
+
+// TestVerifySteps_Order pins the sequence, which is where verify's guarantees
+// live: the blessing is cleared before anything can change the tree, the build
+// precedes the repairs (so `promise format` is the formatter `integration` then
+// measures), the measurement precedes the record, and the record precedes the
+// push.
+func TestVerifySteps_Order(t *testing.T) {
+	want := []string{
+		"lock", "clear", "cache", "build",
+		"format go", "format promise",
+		"check go", "check structure",
+		"integration", "record",
+	}
+	if got := verifyStepNames(verifyOptions{}); !slices.Equal(got, want) {
+		t.Errorf("steps = %v, want %v", got, want)
 	}
 }
 
-// TestRunVerifyTestPhases_GoFailureSkipsPromise is the T1888 abort: when the
-// compiler's Go tests fail there is nothing to learn from spending the
-// remaining minutes on ~20k Promise tests, so they must not run.
-func TestRunVerifyTestPhases_GoFailureSkipsPromise(t *testing.T) {
-	var c verifyPhaseCounts
-	res, err := runVerifyTestPhases(t.TempDir(), true /*wasm*/, true, /*wasmWeb*/
-		stubSuites(&c, errors.New("boom"), nil, nil))
-	if err != nil {
-		t.Fatalf("unexpected abort error: %v", err)
+// TestVerifySteps_OptionalStepsSitWhereTheyBelong covers the two conditional
+// steps. --clean must run before the cache is set up (it recreates the home
+// empty), and --push must be last of all, after the record.
+func TestVerifySteps_OptionalStepsSitWhereTheyBelong(t *testing.T) {
+	both := verifyStepNames(verifyOptions{clean: true, push: true})
+	if i, j := slices.Index(both, "clean"), slices.Index(both, "cache"); i < 0 || i > j {
+		t.Errorf("clean at %d, cache at %d — clean must precede the cache setup: %v", i, j, both)
 	}
-	if c.promiseN != 0 {
-		t.Errorf("promise tests ran %d times after a Go failure; want 0", c.promiseN)
+	if got, want := both[len(both)-1], "push"; got != want {
+		t.Errorf("last step = %q, want %q: %v", got, want, both)
 	}
-	if !res.promiseSkipped {
-		t.Error("promiseSkipped should be set so the summary can say why")
+	if got, want := both[len(both)-2], "record"; got != want {
+		t.Errorf("step before push = %q, want %q: %v", got, want, both)
 	}
-	if len(res.failures) != 1 || res.failures[0] != "go tests" {
-		t.Errorf("failures = %v, want [go tests]", res.failures)
-	}
-	// The cheap suites still all run, so their failures are visible together.
-	if c.goN != 1 || c.toolsN != 1 || c.flowsN != 1 {
-		t.Errorf("go/tools/flows ran %d/%d/%d times; want 1/1/1", c.goN, c.toolsN, c.flowsN)
-	}
-}
-
-// TestRunVerifyTestPhases_ToolsOrFlowsFailureSkipsPromise confirms the abort is
-// keyed on any of the three Go suites, not just the compiler's.
-func TestRunVerifyTestPhases_ToolsOrFlowsFailureSkipsPromise(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		tools, flows error
-		wantFailure  string
-	}{
-		{"tools", errors.New("boom"), nil, "tools go tests"},
-		{"flows", nil, errors.New("boom"), "flows go tests"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var c verifyPhaseCounts
-			res, err := runVerifyTestPhases(t.TempDir(), false, false,
-				stubSuites(&c, nil, tc.tools, tc.flows))
-			if err != nil {
-				t.Fatalf("unexpected abort error: %v", err)
-			}
-			if c.promiseN != 0 {
-				t.Errorf("promise tests ran %d times; want 0", c.promiseN)
-			}
-			if !res.promiseSkipped {
-				t.Error("promiseSkipped should be set")
-			}
-			if len(res.failures) != 1 || res.failures[0] != tc.wantFailure {
-				t.Errorf("failures = %v, want [%s]", res.failures, tc.wantFailure)
-			}
-		})
-	}
-}
-
-// The "Go suites green → all three Promise phases run" half is covered by
-// TestRunVerifyTestPhases_AllTargetsRunWhenGoIsGreen below, which asserts
-// strictly more (per-target ordering and exact per-target output) and satisfies
-// the runtime probes with stubs. A second copy gated on
-// `Which("wasmtime") || Which("node")` lived here until T2116 removed it: it ran
-// on some machines and skipped on others, which is the property this file's
-// tests exist to eliminate.
-
-// TestRunVerifyTestPhases_HostOnlyRunsOnePromisePhase covers the default
-// (no --wasm/--wasm-web) path.
-func TestRunVerifyTestPhases_HostOnlyRunsOnePromisePhase(t *testing.T) {
-	var c verifyPhaseCounts
-	res, err := runVerifyTestPhases(t.TempDir(), false, false, stubSuites(&c, nil, nil, nil))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if c.promiseN != 1 {
-		t.Errorf("promise tests ran %d times; want 1 (host only)", c.promiseN)
-	}
-	if res.wasmOutput != "" || res.wasmWebOutput != "" {
-		t.Errorf("wasm output should be empty when not requested: %+v", res)
-	}
-}
-
-// fakeToolPath puts executable stubs named after each tool on PATH, so the
-// wasm phases' Which() probes resolve without wasmtime or Node.js installed.
-// The stubs are never executed — runVerifyTestPhases only asks whether they
-// exist before calling the (injected) promise-test suite.
-func fakeToolPath(t *testing.T, names ...string) {
-	t.Helper()
-	dir := t.TempDir()
-	for _, n := range names {
-		p := filepath.Join(dir, n+ExeSuffix())
-		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
+	for _, name := range []string{"clean", "push"} {
+		if slices.Contains(verifyStepNames(verifyOptions{}), name) {
+			t.Errorf("%q must not run without its flag", name)
 		}
 	}
-	t.Setenv("PATH", dir)
 }
 
-// TestRunVerifyTestPhases_AllTargetsRunWhenGoIsGreen is the deterministic twin
-// of the wasmtime/node-gated test above: with the tool probes satisfied by
-// stubs, all three Promise phases must run and their per-target output be kept
-// separately, on every machine.
-func TestRunVerifyTestPhases_AllTargetsRunWhenGoIsGreen(t *testing.T) {
-	fakeToolPath(t, "wasmtime", "node")
-	var c verifyPhaseCounts
-	var targets []string
-	s := stubSuites(&c, nil, nil, nil)
-	s.promiseTests = func(_, target string) (string, error) {
-		targets = append(targets, target)
-		return "out:" + target, nil
-	}
-	res, err := runVerifyTestPhases(t.TempDir(), true, true, s)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got, want := strings.Join(targets, ","), ",wasm32-wasi,wasm32-web"; got != want {
-		t.Errorf("promise phases ran for %q, want %q (host first)", got, want)
-	}
-	if res.hostOutput != "out:" || res.wasmOutput != "out:wasm32-wasi" || res.wasmWebOutput != "out:wasm32-web" {
-		t.Errorf("per-target output was mixed up: %+v", res)
-	}
-	if res.promiseSkipped || len(res.failures) != 0 {
-		t.Errorf("a green run must record no failures: %+v", res)
-	}
-}
-
-// TestRunVerifyTestPhases_PromiseFailuresNamePerTarget confirms a Promise
-// failure is attributed to the target that produced it, and — unlike a Go
-// failure — never sets promiseSkipped, so the summary reports elapsed times
-// rather than "not run".
-func TestRunVerifyTestPhases_PromiseFailuresNamePerTarget(t *testing.T) {
-	fakeToolPath(t, "wasmtime", "node")
-	var c verifyPhaseCounts
-	s := stubSuites(&c, nil, nil, nil)
-	s.promiseTests = func(_, target string) (string, error) {
-		return "captured " + target, errors.New("tests failed")
-	}
-	res, err := runVerifyTestPhases(t.TempDir(), true, true, s)
-	if err != nil {
-		t.Fatalf("unexpected abort error: %v", err)
-	}
-	want := []string{"promise tests (host)", "promise tests (wasm32-wasi)", "promise tests (wasm32-web)"}
-	if !slices.Equal(res.failures, want) {
-		t.Errorf("failures = %v, want %v", res.failures, want)
-	}
-	if res.promiseSkipped {
-		t.Error("promiseSkipped must stay false when the Promise phases actually ran")
-	}
-	// The captured output is what ExtractFailedSection re-parses for the
-	// "Failed Tests" block — a failing phase must still hand it back.
-	if res.hostOutput == "" || res.wasmOutput == "" || res.wasmWebOutput == "" {
-		t.Errorf("output of a failing phase was dropped: %+v", res)
-	}
-}
-
-// TestRunVerifyTestPhases_MissingWasmToolAborts covers the two hard aborts:
-// asking for a target whose runner is not installed is an error, not a test
-// failure, and it happens before that phase's suite is invoked.
-func TestRunVerifyTestPhases_MissingWasmToolAborts(t *testing.T) {
-	for _, tc := range []struct {
-		name           string
-		present        []string
-		wasm, wasmWeb  bool
-		wantErr        string
-		wantPromiseRun int
-	}{
-		{"wasmtime", nil, true, false, "wasmtime not found", 1},
-		{"node", []string{"wasmtime"}, true, true, "node not found", 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fakeToolPath(t, tc.present...)
-			var c verifyPhaseCounts
-			res, err := runVerifyTestPhases(t.TempDir(), tc.wasm, tc.wasmWeb, stubSuites(&c, nil, nil, nil))
-			if err == nil {
-				t.Fatalf("expected an abort, got none (res %+v)", res)
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("error = %v, want it to mention %q", err, tc.wantErr)
-			}
-			if c.promiseN != tc.wantPromiseRun {
-				t.Errorf("promise phases ran %d times, want %d (abort before the missing one)", c.promiseN, tc.wantPromiseRun)
-			}
-		})
-	}
-}
-
-// TestRunVerifyTestPhases_AllGoSuitesFailListedTogether pins the other half of
-// the abort rule: the three Go suites all run before the decision, so a run
-// with several broken ones names them all rather than stopping at the first.
-func TestRunVerifyTestPhases_AllGoSuitesFailListedTogether(t *testing.T) {
-	var c verifyPhaseCounts
+// TestRunVerifySteps_StopsAtTheFirstFailureAndNamesIt is what makes the ordering
+// above a guarantee rather than an intention: a step that failed ends the run,
+// so nothing downstream has to re-check what happened upstream.
+func TestRunVerifySteps_StopsAtTheFirstFailureAndNamesIt(t *testing.T) {
+	var l stepLog
 	boom := errors.New("boom")
-	res, err := runVerifyTestPhases(t.TempDir(), false, false, stubSuites(&c, boom, boom, boom))
-	if err != nil {
-		t.Fatalf("unexpected abort error: %v", err)
+	failed, err := runVerifySteps([]verifyStep{
+		l.step("build", nil),
+		l.step("check go", boom),
+		l.step("integration", nil),
+	})
+	if failed != "check go" {
+		t.Errorf("failed step = %q, want %q", failed, "check go")
 	}
-	want := []string{"go tests", "tools go tests", "flows go tests"}
-	if !slices.Equal(res.failures, want) {
-		t.Errorf("failures = %v, want %v", res.failures, want)
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want it to wrap boom", err)
 	}
-	if c.promiseN != 0 {
-		t.Errorf("promise tests ran %d times; want 0", c.promiseN)
+	if !strings.HasPrefix(err.Error(), "check go: ") {
+		t.Errorf("err = %q, want it to name the step that failed", err)
 	}
-	// hostElapsed stays zero, which is exactly why the summary prints
-	// "not run (go tests failed)" instead of a misleading "FAILED (0s)".
-	if res.hostElapsed != 0 {
-		t.Errorf("hostElapsed = %v, want 0 for a phase that never ran", res.hostElapsed)
-	}
-}
-
-// TestRunVerifyTestPhases_SkippedFlowsIsNotAFailure covers the flows suite's
-// third state: absent SDK reports skipped, and a skipped suite must neither be
-// recorded as a failure nor stop the Promise phases.
-func TestRunVerifyTestPhases_SkippedFlowsIsNotAFailure(t *testing.T) {
-	var c verifyPhaseCounts
-	s := stubSuites(&c, nil, nil, nil)
-	s.flowsTests = func(string) (bool, error) { c.flowsN++; return true, errors.New("ignored when skipped") }
-	res, err := runVerifyTestPhases(t.TempDir(), false, false, s)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !res.flowsSkipped {
-		t.Error("flowsSkipped should be reported so the summary can say why")
-	}
-	if len(res.failures) != 0 {
-		t.Errorf("failures = %v, want none — a skipped suite is not a failure", res.failures)
-	}
-	if c.promiseN != 1 {
-		t.Errorf("promise tests ran %d times; want 1", c.promiseN)
-	}
-	// flows/go.mod does not exist under a temp root, so the summary picks the
-	// "flows/ absent" wording rather than "SDK absent".
-	if res.flowsModPresent {
-		t.Error("flowsModPresent should be false for a root with no flows/go.mod")
+	if want := []string{"build", "check go"}; !slices.Equal(l.ran, want) {
+		t.Errorf("ran %v, want %v — nothing may run after a failure", l.ran, want)
 	}
 }
 
-// withInterruptAt runs the phase suites with the Ctrl+C flag raised by the
-// named suite, so the phase runner's Interrupted() checkpoints can be exercised
-// without a real signal. The flag is package-global, so it is always cleared.
-func withInterruptAt(t *testing.T, s *verifySuites, at string) {
-	t.Helper()
+// TestRunVerifySteps_PushNeedsARecordedBlessing pins the one step whose effect
+// leaves the machine: --push is downstream of the record, so a blessing that
+// could not be written stops the run before anything is published.
+func TestRunVerifySteps_PushNeedsARecordedBlessing(t *testing.T) {
+	var l stepLog
+	_, err := runVerifySteps([]verifyStep{
+		l.step("integration", nil),
+		l.step("record", errors.New("not gitignored")),
+		l.step("push", nil),
+	})
+	if err == nil {
+		t.Fatal("a failed record must fail the run")
+	}
+	if slices.Contains(l.ran, "push") {
+		t.Errorf("pushed after a record that failed: %v", l.ran)
+	}
+}
+
+// TestRunVerifySteps_InterruptStopsBeforeTheNextStep covers Ctrl+C. The pipeline
+// stops between steps rather than mid-step, and reports the step it had reached.
+func TestRunVerifySteps_InterruptStopsBeforeTheNextStep(t *testing.T) {
 	t.Cleanup(func() { interrupted.Store(0) })
-	raise := func() { interrupted.Store(1) }
-	switch at {
-	case "go":
-		inner := s.goTests
-		s.goTests = func(r string) error { raise(); return inner(r) }
-	case "tools":
-		inner := s.toolsTests
-		s.toolsTests = func(r string) error { raise(); return inner(r) }
-	case "flows":
-		inner := s.flowsTests
-		s.flowsTests = func(r string) (bool, error) { raise(); return inner(r) }
-	case "promise":
-		inner := s.promiseTests
-		s.promiseTests = func(r, tgt string) (string, error) { raise(); return inner(r, tgt) }
-	default:
-		t.Fatalf("unknown interrupt point %q", at)
+	var l stepLog
+	failed, err := runVerifySteps([]verifyStep{
+		l.step("build", nil),
+		{"check go", func() error {
+			l.ran = append(l.ran, "check go")
+			interrupted.Store(1)
+			return nil
+		}},
+		l.step("integration", nil),
+	})
+	if !errors.Is(err, errInterrupted) {
+		t.Fatalf("err = %v, want errInterrupted", err)
 	}
-}
-
-// TestRunVerifyTestPhases_InterruptStopsAtNextCheckpoint covers all four Ctrl+C
-// checkpoints. The pipeline stops between phases rather than mid-phase, so each
-// one must return errInterrupted without starting the next suite.
-func TestRunVerifyTestPhases_InterruptStopsAtNextCheckpoint(t *testing.T) {
-	fakeToolPath(t, "wasmtime", "node")
-	for _, tc := range []struct {
-		at                                        string
-		wantGo, wantTools, wantFlows, wantPromise int
-	}{
-		{"go", 1, 0, 0, 0},
-		{"tools", 1, 1, 0, 0},
-		{"flows", 1, 1, 1, 0},
-		{"promise", 1, 1, 1, 1}, // host ran; wasm and wasm-web must not
-	} {
-		t.Run(tc.at, func(t *testing.T) {
-			var c verifyPhaseCounts
-			s := stubSuites(&c, nil, nil, nil)
-			withInterruptAt(t, &s, tc.at)
-			_, err := runVerifyTestPhases(t.TempDir(), true, true, s)
-			if !errors.Is(err, errInterrupted) {
-				t.Fatalf("err = %v, want errInterrupted", err)
-			}
-			if c.goN != tc.wantGo || c.toolsN != tc.wantTools ||
-				c.flowsN != tc.wantFlows || c.promiseN != tc.wantPromise {
-				t.Errorf("ran go/tools/flows/promise %d/%d/%d/%d, want %d/%d/%d/%d",
-					c.goN, c.toolsN, c.flowsN, c.promiseN,
-					tc.wantGo, tc.wantTools, tc.wantFlows, tc.wantPromise)
-			}
-		})
+	if failed != "check go" {
+		t.Errorf("failed step = %q, want the step the run had reached", failed)
+	}
+	if want := []string{"build", "check go"}; !slices.Equal(l.ran, want) {
+		t.Errorf("ran %v, want %v", l.ran, want)
 	}
 }
 
@@ -571,7 +417,7 @@ func TestRunVerify_HonoursTheParsedLockTimeout(t *testing.T) {
 		t.Fatalf("acquireVerifyLockIn: %v", err)
 	}
 
-	// A stale blessing to watch: clearVerifiedTree is RunVerify's first step
+	// A stale blessing to watch: clearBlessing is RunVerify's first step
 	// after the lock, so this file surviving proves the run gave up at the lock
 	// and never entered the pipeline.
 	root := t.TempDir()
@@ -638,7 +484,7 @@ func runVerifyStringArgs(fset *token.FileSet, file *ast.File) map[string][]strin
 func TestRunVerifyStringArgs(t *testing.T) {
 	const src = `package p
 func f() {
-	RunVerify(dir, []string{"--shared", "--lock-timeout=30s"})
+	RunVerify(dir, []string{"--clean", "--lock-timeout=30s"})
 	RunVerify(dir, []string{"--push"})
 	RunVerify(dir, nil)
 	RunClean(dir, []string{"--push"})

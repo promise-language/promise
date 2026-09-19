@@ -1,5 +1,5 @@
 // geometry: module that depends on utils.
-use utils "./utils";
+use utils "../utils";
 
 type Point2D `public {
   int x;

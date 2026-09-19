@@ -22,7 +22,7 @@
 //
 // Run:
 //   bin/promise test --target wasm32-web examples/11_wasm/web_console.pr
-//   bin/verify --wasm-web
+//   bin/test --wasm-web
 _console_log(string msg) `extern("promise_console_log") `wasm_import("promise_env", "log") `target(web);
 
 test_console_log_links() `test `target(web) {

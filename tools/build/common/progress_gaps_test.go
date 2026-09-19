@@ -377,14 +377,16 @@ func TestStdWriters_ResolveAtWriteTime(t *testing.T) {
 }
 
 // TestHostTargetName covers the label the verify summary prints: lowercase OS,
-// a dash, the Go arch.
+// a dash, the Go arch. It is HostTarget — the same spelling the baselines are
+// keyed by and the envelope carries — because the summary now reports the
+// target of the envelope it was rendered from.
 func TestHostTargetName(t *testing.T) {
-	got := hostTargetName()
+	got := HostTarget()
 	want := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 	if got != want {
-		t.Errorf("hostTargetName() = %q, want %q", got, want)
+		t.Errorf("HostTarget() = %q, want %q", got, want)
 	}
 	if strings.ToLower(got) != got {
-		t.Errorf("hostTargetName() = %q, want it lowercase", got)
+		t.Errorf("HostTarget() = %q, want it lowercase", got)
 	}
 }

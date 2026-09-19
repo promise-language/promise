@@ -95,7 +95,7 @@ type i128 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `pub
   }
   decode!(Decoder ~d) Self `factory `public `doc("Decodes from a decimal string.") {
     string s = d.decode_string();
-    Scanner r = Scanner(s: s);
+    Scanner r = Scanner(s: move s);
     return i128.parse(r, 10);
   }
 }
@@ -165,7 +165,7 @@ type u128 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `pub
   }
   decode!(Decoder ~d) Self `factory `public `doc("Decodes from a decimal string.") {
     string s = d.decode_string();
-    Scanner r = Scanner(s: s);
+    Scanner r = Scanner(s: move s);
     return u128.parse(r, 10);
   }
 }
@@ -253,7 +253,7 @@ type i256 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `pub
   }
   decode!(Decoder ~d) Self `factory `public `doc("Decodes from a decimal string.") {
     string s = d.decode_string();
-    Scanner r = Scanner(s: s);
+    Scanner r = Scanner(s: move s);
     return i256.parse(r, 10);
   }
 }
@@ -323,7 +323,7 @@ type u256 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `pub
   }
   decode!(Decoder ~d) Self `factory `public `doc("Decodes from a decimal string.") {
     string s = d.decode_string();
-    Scanner r = Scanner(s: s);
+    Scanner r = Scanner(s: move s);
     return u256.parse(r, 10);
   }
 }
@@ -411,7 +411,7 @@ type i512 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `pub
   }
   decode!(Decoder ~d) Self `factory `public `doc("Decodes from a decimal string.") {
     string s = d.decode_string();
-    Scanner r = Scanner(s: s);
+    Scanner r = Scanner(s: move s);
     return i512.parse(r, 10);
   }
 }
@@ -481,7 +481,7 @@ type u512 is Ordered, Hashable, Format, Parse, Encodable, Decodable `native `pub
   }
   decode!(Decoder ~d) Self `factory `public `doc("Decodes from a decimal string.") {
     string s = d.decode_string();
-    Scanner r = Scanner(s: s);
+    Scanner r = Scanner(s: move s);
     return u512.parse(r, 10);
   }
 }

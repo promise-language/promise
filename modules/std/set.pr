@@ -14,7 +14,7 @@ type Set[T: Hashable + Equal] is Cloneable, Format `public {
     for slot in this._map._buckets {
       match slot {
         Slot.Used(k, _) => {
-          result.add(k);
+          result.add(move k);
         },
         _ => {
         },
@@ -68,10 +68,10 @@ type Set[T: Hashable + Equal] is Cloneable, Format `public {
   union(Set[T] other) Set[T] {
     Set[T] result = Set[T]();
     for elem in this.to_vector() {
-      result.add(elem);
+      result.add(move elem);
     }
     for elem in other.to_vector() {
-      result.add(elem);
+      result.add(move elem);
     }
     return result;
   }
@@ -80,7 +80,7 @@ type Set[T: Hashable + Equal] is Cloneable, Format `public {
     Set[T] result = Set[T]();
     for elem in this.to_vector() {
       if other.contains(elem) {
-        result.add(elem);
+        result.add(move elem);
       }
     }
     return result;
@@ -90,7 +90,7 @@ type Set[T: Hashable + Equal] is Cloneable, Format `public {
     Set[T] result = Set[T]();
     for elem in this.to_vector() {
       if !other.contains(elem) {
-        result.add(elem);
+        result.add(move elem);
       }
     }
     return result;

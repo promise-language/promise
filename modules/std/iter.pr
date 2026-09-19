@@ -5,7 +5,7 @@ type Iterator[T] `structural(protocol: true) `public `doc("Structural iterator p
 
   // --- Intermediate (lazy) ---
 
-  filter(~this, (T) -> bool pred) Iterator[T] `public `doc("Keeps elements matching the predicate.") {
+  filter(~this, (T) -> bool move pred) Iterator[T] `public `doc("Keeps elements matching the predicate. Consumes `pred` (pass `move`).") {
     return _FnIter[T](_next: move || -> T? {
       while true {
         if v := this.next() {
@@ -41,7 +41,7 @@ type Iterator[T] `structural(protocol: true) `public `doc("Structural iterator p
     });
   }
 
-  take_while(~this, (T) -> bool pred) Iterator[T] `public `doc("Yields elements while predicate holds, then stops.") {
+  take_while(~this, (T) -> bool move pred) Iterator[T] `public `doc("Yields elements while predicate holds, then stops. Consumes `pred` (pass `move`).") {
     bool done = false;
     return _FnIter[T](_next: move || -> T? {
       if done {
@@ -58,7 +58,7 @@ type Iterator[T] `structural(protocol: true) `public `doc("Structural iterator p
     });
   }
 
-  skip_while(~this, (T) -> bool pred) Iterator[T] `public `doc("Skips elements while predicate holds, then yields the rest.") {
+  skip_while(~this, (T) -> bool move pred) Iterator[T] `public `doc("Skips elements while predicate holds, then yields the rest. Consumes `pred` (pass `move`).") {
     bool skipping = true;
     return _FnIter[T](_next: move || -> T? {
       while true {
@@ -93,7 +93,7 @@ type Iterator[T] `structural(protocol: true) `public `doc("Structural iterator p
 
   // --- Type-changing (method-level generics) ---
 
-  map[R](~this, (T) -> R fn) Iterator[R] `public `doc("Transforms each element using the given function.") {
+  map[R](~this, (T) -> R move fn) Iterator[R] `public `doc("Transforms each element using the given function. Consumes `fn` (pass `move`).") {
     return _FnIter[R](_next: move || -> R? {
       if v := this.next() {
         return fn(v);
@@ -133,7 +133,7 @@ type Iterator[T] `structural(protocol: true) `public `doc("Structural iterator p
     });
   }
 
-  flat_map[R](~this, (T) -> Iterator[R] fn) Iterator[R] `public `doc("Maps each element to an iterator and flattens.") {
+  flat_map[R](~this, (T) -> Iterator[R] move fn) Iterator[R] `public `doc("Maps each element to an iterator and flattens. Consumes `fn` (pass `move`).") {
     Iterator[R]? current = none;
     return _FnIter[R](_next: move || -> R? {
       while true {

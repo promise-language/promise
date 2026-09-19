@@ -16,7 +16,7 @@
 //
 // Run:
 //   bin/promise test --target wasm32-wasi examples/11_wasm/wasi_clock.pr
-//   bin/verify --wasm
+//   bin/test --wasm
 use wasi_preview_2;
 
 test_datetime_value_type() `test {

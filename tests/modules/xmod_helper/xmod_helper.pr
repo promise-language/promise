@@ -2,8 +2,13 @@ transform[T](T val) T `public {
   return val;
 }
 
-double_vec[T](T[] items) T[] `public {
-  T[] result = T[]();
+// Concrete in its element type, deliberately. Doubling needs TWO owned copies
+// of each element, and Promise has no bound that says "T is duplicable" — a
+// generic body is checked with T unbound, where move-then-use is unsound. It
+// only ever compiled because every instantiation was `int`, a Copy value type.
+// Cross-module GENERIC dispatch is covered by transform[T] and wrap[T] above.
+double_vec(int[] items) int[] `public {
+  int[] result = int[]();
   for item in items {
     result.push(move item);
     result.push(item);

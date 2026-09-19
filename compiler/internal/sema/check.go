@@ -52,6 +52,7 @@ type Checker struct {
 	yieldFound          bool                             // true if at least one yield seen in current generator func
 	modules             []*types.Module                  // all modules from use declarations
 	moduleScopes        map[string]*types.Scope          // pre-loaded module scopes (catalog name or path → scope)
+	moduleIdentities    map[string]string                // import spelling → module's global identity (see NewModule below)
 	target              TargetInfo                       // compile target for `target(cond)` filtering (zero = no filtering)
 	pendingNarrowings   []NarrowedVar                    // post-divergence narrowings to apply before next statement
 	narrowedVariants    map[string]*IsNarrowing          // T0993: enum subjects narrowed to a variant in the current scope (var name → narrowing); save/restore around narrowed if-blocks
@@ -292,10 +293,27 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 // triggers maps method names to unimported embedded module entries; loader loads a module's
 // declarations on demand. Both may be nil to disable unimported-module protocol checking.
 func CheckWithProtocols(file *ast.File, moduleScopes map[string]*types.Scope, target TargetInfo, triggers map[string][]ProtocolTriggerEntry, loader ProtocolModuleLoader) (*Info, []error) {
+	return CheckWithIdentities(file, moduleScopes, target, triggers, loader, nil)
+}
+
+// CheckWithIdentities is CheckWithProtocols plus the map from each `use`
+// spelling in THIS file to the global identity of the module it resolved to.
+//
+// The two are not the same string once a module's own local paths resolve
+// against its own promise.toml (docs/module-system.md §"Local module
+// transitivity"): one directory is `"./utils"` to the project and `"../utils"`
+// to a module beside it. Downstream keys on identity — codegen maps a module
+// object's path to an IR prefix — so a module object carrying the spelling
+// misses, and the call falls back to the bare alias and finds no function.
+//
+// The map is per-FILE, never global: two modules may each write `use x "./x"`
+// for different directories, and one shared map would collapse them.
+func CheckWithIdentities(file *ast.File, moduleScopes map[string]*types.Scope, target TargetInfo, triggers map[string][]ProtocolTriggerEntry, loader ProtocolModuleLoader, identities map[string]string) (*Info, []error) {
 	c := &Checker{
-		moduleScopes: moduleScopes,
-		target:       target,
-		file:         file,
+		moduleScopes:     moduleScopes,
+		moduleIdentities: identities,
+		target:           target,
+		file:             file,
 		info: &Info{
 			Types:                    make(map[ast.Expr]types.Type),
 			Objects:                  make(map[*ast.IdentExpr]types.Object),

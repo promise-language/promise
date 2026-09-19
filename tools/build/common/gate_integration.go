@@ -26,8 +26,20 @@ package common
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 )
+
+// nameFiles prints what a count stands for, on stderr where a person reads it
+// and where every gate's human output goes. The metric is the machine's half of
+// the same answer; a reader told "3" and not WHICH three has to go and find them
+// — and for a gate whose subject is repaired by a command they already have,
+// that is the whole of the work. measureLatestInvariant sets the precedent.
+func nameFiles(what string, files []string) {
+	for _, f := range files {
+		fmt.Fprintf(os.Stderr, "%s: %s\n", what, f)
+	}
+}
 
 // measureFormattedGo counts Go files gofmt would rewrite, without rewriting
 // them.
@@ -36,6 +48,7 @@ func measureFormattedGo(root string) ([]Metric, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("checking Go formatting: %w", err)
 	}
+	nameFiles("unformatted", files)
 	return []Metric{Count("unformatted_go_files", len(files))}, "", nil
 }
 
@@ -59,6 +72,7 @@ func measureFormattedPromise(root string) ([]Metric, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("checking Promise formatting: %w", err)
 	}
+	nameFiles("unformatted", files)
 	return []Metric{Count("unformatted_promise_files", len(files))}, "", nil
 }
 
@@ -194,7 +208,11 @@ func measureTestedGo(root string) ([]Metric, string, error) {
 	if err := ensureGateBuild(root); err != nil {
 		return []Metric{}, buildDidNotComplete("the Go suites did not run", err), nil
 	}
-	return measureTestedGoWith(root, captureSplit)
+	// Teed, unlike the two sweeps above: this one takes minutes, and a run that
+	// holds its output until the end is indistinguishable from a wedged one
+	// while it is going — and then reports a COUNT of failures whose names are
+	// in a buffer nobody prints. captureSplitTee says more about why.
+	return measureTestedGoWith(root, captureSplitTee)
 }
 
 // measureTestedGoWith is measureTestedGo with the child call as a parameter. A

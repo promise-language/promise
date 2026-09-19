@@ -8,7 +8,7 @@ type Scanner `public `doc("Wraps a string for byte-by-byte reading. Satisfies Re
   string src;
   int pos;
 
-  new(~this, string s) {
+  new(~this, string move s) {
     this.src = s;
     this.pos = 0;
   }
@@ -38,6 +38,6 @@ type Scanner `public `doc("Wraps a string for byte-by-byte reading. Satisfies Re
 }
 
 scan![T: Parse](string s) T `public `doc("Parses a value of type T from a string.") {
-  Scanner r = Scanner(s: s);
+  Scanner r = Scanner(s: s.clone());
   return T.parse(r);
 }

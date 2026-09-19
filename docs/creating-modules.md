@@ -582,14 +582,18 @@ All tests must pass. Check for leaks in the output.
 ### 5.2 Run the full test suite
 
 ```bash
-bin/verify --wasm
+bin/verify
 ```
 
 This runs:
-- `go vet` on the compiler
-- All Go unit tests
-- All Promise tests (including WASM target)
-- Code formatting check
+- The build
+- The repairs: `gofmt -w`, `promise format`
+- `go vet` on the compiler, and the structural sweeps
+- The `integration` gate — formatting, build, checkers and the host suites,
+  measured and judged exactly as `bin/run integration` measures and judges them
+
+The WASM suites are a different target's measurement, asked for by name:
+`bin/test --wasm`, or the `wasm-test` gate.
 
 **Do not commit if verify fails.**
 
@@ -639,7 +643,7 @@ Update `docs/standard-library.md` with the new module:
 Before committing:
 
 - [ ] All module tests pass (`bin/promise test modules/<name>/`)
-- [ ] Full verify passes (`bin/verify --wasm`)
+- [ ] Full verify passes (`bin/verify`)
 - [ ] WASM target compiles (even if most APIs are excluded via `\`target`)
 - [ ] Stress tests show no flakiness (`bin/promise test -stress 100 modules/<name>/`)
 - [ ] Coverage is adequate (`bin/promise test -coverage modules/<name>/`)

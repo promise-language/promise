@@ -94,14 +94,25 @@ type term struct {
 // is derived — the best a metric has been — and ratchets in its declared
 // direction. A metric carrying both must satisfy both.
 //
-// AN INCOMPLETE RUN IS STILL JUDGED. What an incomplete run may not do is move
-// a floor: honest numbers that understate the subject would lower a bar for a
+// AN INCOMPLETE RUN IS NOT ACCEPTABLE. A verdict is a claim about a subject,
+// and a run that did not measure its whole subject has no grounds to make one:
+// "the part I measured was fine" is not "this is safe to land", and the
+// difference is invisible at the call site precisely where it matters most —
+// a build that died, a suite that never ran, a tree that moved mid-measurement.
+// Reporting that as acceptable turns the one gate a landing decision rests on
+// into a coin flip weighted by how much of it happened to run.
+//
+// The cost is real and is the right cost: a gate that cannot measure its
+// subject blocks, loudly, naming what it could not measure, instead of passing
+// a change nothing checked. What an incomplete run ALSO may not do is move a
+// floor — honest numbers that understate the subject would lower a bar for a
 // reason that is not about the code, and a ratchet by construction never moves
-// back. Refusing the verdict instead would make every gate that measures less
-// than everything — and `integration` is one, by design — permanently
-// unpassable, which is indistinguishable at the call site from a broken gate.
-// This judge never moves a baseline at all, and nothing else in this
+// back. This judge never moves a baseline at all, and nothing else in this
 // repository does either: advancing one is the workspace's job.
+//
+// AN UNJUDGED MEASUREMENT IS NOT A PASS EITHER. A gate whose metrics carry
+// neither a cap nor a baseline has reported numbers nobody set a rule for, and
+// answering "acceptable" to that is a guess wearing a verdict's clothes.
 func judge(env Envelope, caps map[string]Threshold, baselines map[string]Baseline) (acceptable bool, terms map[string]term, detail string) {
 	terms = map[string]term{}
 	var failed []string
@@ -131,10 +142,12 @@ func judge(env Envelope, caps map[string]Threshold, baselines map[string]Baselin
 	switch {
 	case len(failed) > 0:
 		return false, terms, strings.Join(failed, "; ") + incomplete
+	case env.Incomplete != "":
+		return false, terms, "this run did not measure its whole subject, so it cannot report the change safe to land: " + env.Incomplete
 	case len(terms) == 0:
-		return true, terms, "nothing here is judged: no metric this gate reported has a cap or a baseline" + incomplete
+		return false, terms, "no metric this gate reported carries a cap or a baseline, so nothing was judged — an unjudged measurement is not a pass"
 	default:
-		return true, terms, "every judged metric is within its terms" + incomplete
+		return true, terms, "every judged metric is within its terms"
 	}
 }
 
@@ -154,6 +167,16 @@ func projectTerms(root string) (map[string]Threshold, map[string]Baseline, error
 		return caps, b, nil
 	}
 	return caps, map[string]Baseline{}, nil
+}
+
+// metricWithinTerm reports whether m satisfies the term it was judged on. One
+// spelling, because two readers of the same verdict — bin/run's per-metric table
+// and bin/verify's per-part summary — must agree about which metric failed.
+func metricWithinTerm(m Metric, t term) bool {
+	if t.Kind == "cap" {
+		return withinCap(m, Threshold{Direction: Direction(t.Direction), Cap: t.Value})
+	}
+	return checkRatchet(t.Direction, t.Value, m.Number())
 }
 
 func withinCap(m Metric, t Threshold) bool {
@@ -200,6 +223,10 @@ func JudgeStdin(root, name string, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("rendering the verdict for %s: %w", name, err)
 	}
+	// The flow's path: it spawned the gate, so this is the first party in the
+	// tree that knows the measurement passed. Before the write, and on stderr if
+	// it fails, so the one object this prints on stdout is unaffected either way.
+	reportBlessing(root, env, acceptable)
 	_, err = out.Write(append(body, '\n'))
 	return err
 }
@@ -228,10 +255,31 @@ func runOneGate(root, name string, stdout io.Writer) error {
 		return err
 	}
 	fmt.Fprint(stdout, renderVerdict(env, caps, baselines))
-	if acceptable, _, detail := judge(env, caps, baselines); !acceptable {
+	acceptable, _, detail := judge(env, caps, baselines)
+	reportBlessing(root, env, acceptable)
+	if !acceptable {
 		return fmt.Errorf("%s: %s", name, detail)
 	}
 	return nil
+}
+
+// reportBlessing records the blessing a passing verdict earns, and tells the
+// operator on stderr when it could not.
+//
+// HERE, AND NOT IN THE GATE, because only this layer holds a verdict: a gate
+// reports numbers and is deliberately incapable of knowing whether they are
+// acceptable. Both of this layer's modes record — the by-hand `bin/run <gate>`
+// and the `--verdict` mode the flow asks for after running the gate itself —
+// which is what makes one passing `integration` measurement sufficient for the
+// commit guard whoever ran it, instead of only when bin/verify did (T2170).
+//
+// It never changes the verdict. bin/run answers "is this measurement
+// acceptable"; a blessing that could not be written does not make an acceptable
+// measurement unacceptable, it means the commit guard will ask for another run.
+func reportBlessing(root string, env Envelope, acceptable bool) {
+	if err := blessIfPassed(root, env, acceptable); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
 }
 
 // renderVerdict prints each measurement beside the term it was judged on. This
@@ -249,11 +297,7 @@ func renderVerdict(env Envelope, caps map[string]Threshold, baselines map[string
 		judged, mark := "not judged", " "
 		if t, ok := terms[m.Name]; ok {
 			judged, mark = t.Kind+" "+t.Direction+" "+formatCap(t.Value), "✗"
-			within := checkRatchet(t.Direction, t.Value, m.Number())
-			if t.Kind == "cap" {
-				within = withinCap(m, Threshold{Direction: Direction(t.Direction), Cap: t.Value})
-			}
-			if within {
+			if metricWithinTerm(m, t) {
 				mark = "✓"
 			}
 		}

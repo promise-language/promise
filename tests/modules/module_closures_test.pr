@@ -37,7 +37,7 @@ test_bound_module_closure_result() `test {
 // The mirror case: a module TYPE's method handing back its borrowed `cb` field.
 // Freeing that result here would double-free the env `box`'s drop owns.
 test_module_type_aliasing_closure_result_is_not_freed() `test {
-  box := mathlib.CallbackBox(cb: mathlib.make_adder(6));
+  box := mathlib.CallbackBox(cbs: [mathlib.make_adder(6)]);
   box.get_cb();
-  assert(box.cb() == 7, "borrowed closure field survives the discarded getter");
+  assert(box.cbs[0]() == 7, "borrowed closure field survives the discarded getter");
 }

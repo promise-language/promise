@@ -2185,3 +2185,207 @@ func TestT2163_GoCallFieldReadRetained(t *testing.T) {
 	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
 	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
 }
+
+// T2171: §17.4 conditions the spawn-boundary duplication of a refcounted
+// `sharable handle on the TYPE being sharable, never on how the name carrying it
+// is bound. Both block spawn sites keyed it off the captured name's BINDING KIND
+// — an owned local's drop binding, or a borrowed value parameter — and a for-in
+// binding is neither: the element is borrowed from a container the enclosing
+// scope drops, elements and all, while the goroutine still holds the pointer. A
+// freed channel means a null mutex on the receive path.
+func TestT2171_GoBlockForInChannelBindingRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		spawn(Channel[int] done) {
+			Channel[int][] cs = [channel[int](capacity: 1)];
+			for c in cs {
+				go { x := <-c; done.send(1); };
+			}
+		}
+		main() {
+			done := channel[int](capacity: 1);
+			spawn(done);
+			r := <-done;
+		}
+	`)
+	spawnIR := codegentest.ExtractFunction(ir, "__user.spawn")
+	// TWO retains, and the count is the whole assertion: `done` is a channel
+	// PARAMETER that T2162's arm already retained, so merely finding a chdup here
+	// would pass on the broken compiler too. The second is the for-in binding.
+	if got := strings.Count(spawnIR, "\nchdup.inc"); got != 2 {
+		t.Fatalf("expected 2 channel retains (the for-in binding and the `done` param), got %d:\n%s", got, spawnIR)
+	}
+	if got := strings.Count(spawnIR, "atomicrmw add"); got != 2 {
+		t.Fatalf("expected 2 refcount bumps, got %d:\n%s", got, spawnIR)
+	}
+	// The retain precedes the ramp call, so the goroutine's handle exists before
+	// the loop ends and the container's element drop can run.
+	dupIdx := strings.Index(spawnIR, "chdup.inc")
+	rampIdx := strings.Index(spawnIR, "call i8* @.goroutine.")
+	if dupIdx < 0 || rampIdx < 0 || dupIdx > rampIdx {
+		t.Fatalf("expected chdup.inc before the goroutine ramp in spawn:\n%s", spawnIR)
+	}
+	// And the goroutine releases what the spawn retained — an unpaired bump would
+	// pin the channel forever (5 allocations leaked).
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Channel[int].drop"`)
+}
+
+// T2171: the same for `Ref[T]`, which reads the debug allocator's freed fill
+// (0xDEDEDEDEDEDEDEDE) rather than segfaulting.
+func TestT2171_GoBlockForInArcBindingRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		spawn(Channel[int] done) {
+			Ref[int][] rs = [Ref[int](7)];
+			for r in rs {
+				go { done.send(r.borrow); };
+			}
+		}
+		main() {
+			done := channel[int](capacity: 1);
+			spawn(done);
+			r := <-done;
+		}
+	`)
+	spawnIR := codegentest.ExtractFunction(ir, "__user.spawn")
+	// One arcdup for the for-in binding; the single chdup belongs to the `done`
+	// param and must stay exactly one (T2162's arm, undisturbed).
+	if got := strings.Count(spawnIR, "\narcdup.inc"); got != 1 {
+		t.Fatalf("expected 1 Ref retain for the for-in binding, got %d:\n%s", got, spawnIR)
+	}
+	if got := strings.Count(spawnIR, "\nchdup.inc"); got != 1 {
+		t.Fatalf("expected 1 channel retain for the `done` param, got %d:\n%s", got, spawnIR)
+	}
+	dupIdx := strings.Index(spawnIR, "arcdup.inc")
+	rampIdx := strings.Index(spawnIR, "call i8* @.goroutine.")
+	if dupIdx < 0 || rampIdx < 0 || dupIdx > rampIdx {
+		t.Fatalf("expected arcdup.inc before the goroutine ramp in spawn:\n%s", spawnIR)
+	}
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
+}
+
+// T2171: the via-block path (`go obj.method(…)`, the shape genGoCallExprViaBlock
+// lowers) carries the same capture list and the same gap.
+func TestT2171_ViaBlockForInBindingRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type Relay {
+			int bias `+"`value"+`;
+			fwd(this, Ref[int] r, Channel[int] done) { done.send(r.borrow + this.bias); }
+		}
+		spawn(Channel[int] done) {
+			Ref[int][] rs = [Ref[int](7)];
+			q := Relay(bias: 1);
+			for r in rs {
+				go q.fwd(r, done);
+			}
+		}
+		main() {
+			done := channel[int](capacity: 1);
+			spawn(done);
+			r := <-done;
+		}
+	`)
+	spawnIR := codegentest.ExtractFunction(ir, "__user.spawn")
+	if got := strings.Count(spawnIR, "\narcdup.inc"); got != 1 {
+		t.Fatalf("expected 1 Ref retain for the for-in binding, got %d:\n%s", got, spawnIR)
+	}
+	dupIdx := strings.Index(spawnIR, "arcdup.inc")
+	rampIdx := strings.Index(spawnIR, "call i8* @.goroutine.")
+	if dupIdx < 0 || rampIdx < 0 || dupIdx > rampIdx {
+		t.Fatalf("expected arcdup.inc before the goroutine ramp in spawn:\n%s", spawnIR)
+	}
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
+}
+
+// T2171: the new arm classifies by TYPE, so a for-in binding that is not a
+// refcounted handle is untouched. A `string[]` element is the case that would
+// notice: it DOES carry a drop binding (B0277 dup'd strings), so it must keep
+// taking the owned-local path and gain no handle retain.
+func TestT2171_GoBlockForInStringBindingNotRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		spawn() {
+			string[] xs = ["a"];
+			for s in xs {
+				go { int n = s.len; };
+			}
+		}
+		main() {
+			spawn();
+		}
+	`)
+	spawnIR := codegentest.ExtractFunction(ir, "__user.spawn")
+	codegentest.AssertNotContains(t, spawnIR, "chdup.inc")
+	codegentest.AssertNotContains(t, spawnIR, "arcdup.inc")
+	codegentest.AssertNotContains(t, spawnIR, "weakdup.inc")
+}
+
+// T2171: an aliasing binding inside a MONOMORPHIZED generic body. The capture's
+// recorded type still carries the TypeParam there, so it has to be substituted
+// before it can be classified — an unsubstituted `Channel[T]` is refused by
+// refcountedHandleElem and the handle silently crosses as a bare borrow again.
+func TestT2171_GenericForInBindingRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		relay[T](Channel[T][] cs, Channel[T] done) {
+			for c in cs {
+				go { x := <-c; done.send(x!); };
+			}
+		}
+		main() {
+			done := channel[int](capacity: 1);
+			Channel[int][] cs = [channel[int](capacity: 1)];
+			cs[0].send(3);
+			relay(cs, done);
+			r := <-done;
+		}
+	`)
+	relayIR := codegentest.ExtractFunction(ir, `"relay[int]"`)
+	if relayIR == "" {
+		t.Fatalf("expected a monomorphized relay[int] in IR:\n%s", ir)
+	}
+	// Two retains: the for-in binding and the `done` param. One would mean the
+	// substitution failed and only the (already concrete) param was classified.
+	if got := strings.Count(relayIR, "\nchdup.inc"); got != 2 {
+		t.Fatalf("expected 2 channel retains in relay[int], got %d:\n%s", got, relayIR)
+	}
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, `call void @"Channel[int].drop"`)
+}
+
+// T2171: a capture referenced ONLY inside a lambda in the block. collectBlockIdents
+// does not walk the lambda body — it reads sema's capture set (T0740) — so this
+// capture has no *ast.IdentExpr anywhere in the block. Recording a representative
+// ident instead of the type left it typeless and silently exempt from the §17.4
+// duplication; the capture set is the only place its type is reachable.
+func TestT2171_GoBlockLambdaOnlyCaptureRetained(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		spawn(Channel[int] done) {
+			Ref[int][] rs = [Ref[int](7)];
+			for r in rs {
+				go {
+					sink := done;
+					f := move || { sink.send(r.borrow); };
+					f();
+				};
+			}
+		}
+		main() {
+			done := channel[int](capacity: 1);
+			spawn(done);
+			r := <-done;
+		}
+	`)
+	spawnIR := codegentest.ExtractFunction(ir, "__user.spawn")
+	if got := strings.Count(spawnIR, "\narcdup.inc"); got != 1 {
+		t.Fatalf("expected the lambda-only Ref capture to be retained once, got %d:\n%s", got, spawnIR)
+	}
+	// The retain is still released exactly once, but by the lambda ENV's drop
+	// function: moving the handle into the env clears the coroutine's own drop
+	// flag, so the two flag-guarded scope-exit sites (normal and panic exit) are
+	// both dead. Asserting the cleared flag is what pins that hand-off — a raw
+	// count of Ref[int].drop call sites would just count the dead ones.
+	coroIR := codegentest.ExtractGoroutineCoro(t, ir)
+	codegentest.AssertContains(t, coroIR, "store i1 false, i1* %r.dropflag")
+	codegentest.AssertContains(t, coroIR, "env_drop")
+	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
+}

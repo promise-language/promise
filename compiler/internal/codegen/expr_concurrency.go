@@ -732,7 +732,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 	syntheticBlock := &ast.Block{
 		Stmts: []ast.Stmt{&ast.ExprStmt{Expr: callExpr}},
 	}
-	captureNames, captureIdents := c.collectBlockIdents(syntheticBlock, c.locals)
+	captureNames, captureTypes := c.collectBlockIdents(syntheticBlock, c.locals)
 
 	// 3. Load captured values in caller scope
 	var captureVals []value.Value
@@ -759,31 +759,9 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 		captureLLVMTypes = append(captureLLVMTypes, elemType)
 	}
 
-	// B0163: Increment refcount for captured channel variables and collect their
-	// types. T2162: also for a refcounted sharable handle arriving through a
-	// borrowed PARAMETER, which has no drop binding for the branch above to read.
-	chanTypeVB := channelStructType()
-	capturedChanTypesVB := make(map[string]types.Type)
-	for i, name := range captureNames {
-		if binding, ok := c.dropBindings[name]; ok {
-			if _, isCh := types.AsChannel(binding.valType); isCh || binding.named == types.TypChannel {
-				chPtr := c.block.NewBitCast(captureVals[i], irtypes.NewPointer(chanTypeVB))
-				rcField := c.block.NewGetElementPtr(chanTypeVB, chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRefcount)))
-				c.emitAtomicAdd(c.block, rcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
-				capturedChanTypesVB[name] = binding.valType
-			}
-		} else if paramType, isParam := c.borrowedValueParamType(name); isParam {
-			// T2162: §17.4 — the boundary duplicates the handle. The drop-binding
-			// branch above never fires for a parameter, so without this the caller's
-			// drop frees the referent under the goroutine. Recording the type here is
-			// what registers the balancing goroutine-side drop below.
-			if retained, _, ok := c.retainSpawnHandle(captureVals[i], paramType); ok {
-				captureVals[i] = retained
-				capturedChanTypesVB[name] = paramType
-			}
-		}
-	}
+	// B0163/T2162/T2171: §17.4 — duplicate every refcounted sharable handle this
+	// spawn captures, whatever kind of binding carries it. Shared with genGoBlock.
+	capturedChanTypesVB := c.retainCapturedSpawnHandles(captureNames, captureTypes, captureVals)
 
 	// B0354: Collect droppable non-channel captures for ownership transfer.
 	capturedDroppablesVB := make(map[string]types.Type)
@@ -821,12 +799,11 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 		if _, hasDrop := capturedDroppablesVB[name]; hasDrop {
 			continue // owned local — B0354 already transfers ownership
 		}
-		ident := captureIdents[name]
-		if ident == nil {
-			continue // no representative ident (e.g. lambda-only capture)
+		capType, ok := captureTypes[name]
+		if !ok {
+			continue // no recorded type (only `this`, which is snapshotted instead)
 		}
-		capType := c.info.Types[ident]
-		if c.typeSubst != nil && capType != nil {
+		if c.typeSubst != nil {
 			capType = types.Substitute(capType, c.typeSubst) // monomorphization
 		}
 		if !goElemNeedsBorrowedCaptureDup(capType) {
@@ -1260,14 +1237,29 @@ func (c *Compiler) genGoExternWrapper(ext *ExternFunc, argLLVMTypes []irtypes.Ty
 }
 
 // collectBlockIdents walks an AST block and collects all IdentExpr names referenced.
-// Returns a sorted, deduplicated list of names that exist in outerLocals, plus a
-// map from each captured name to the first *ast.IdentExpr seen for it (T0731:
-// used to resolve the capture's sema type via c.info.Types for the spawn-side
-// borrowed-heap-param dup). Names collected only through a LambdaExpr capture set
-// (which has no representative IdentExpr) are absent from the ident map.
-func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca) ([]string, map[string]*ast.IdentExpr) {
+// Returns a sorted, deduplicated list of names that exist in outerLocals, plus each
+// capture's sema TYPE — which is what every caller needs (T0731's spawn-side
+// borrowed-heap-param dup, T2171's §17.4 handle duplication).
+//
+// The type, rather than a representative *ast.IdentExpr the caller then resolves
+// through c.info.Types, is the only form that can describe a capture discovered
+// through a LambdaExpr's capture set: that capture has no ident anywhere in the
+// walked block, since the walk deliberately does not recurse into the lambda body.
+// Leaving it typeless silently exempted it from both duplications (T2171).
+//
+// `this` has no entry: genGoBlock/genGoCallExprViaBlock build its capture value
+// directly as a private snapshot (T1219/T1261), never from a type here.
+func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca) ([]string, map[string]types.Type) {
 	seen := make(map[string]bool)
-	idents := make(map[string]*ast.IdentExpr)
+	captureTypes := make(map[string]types.Type)
+	record := func(name string, typ types.Type) {
+		if typ == nil {
+			return
+		}
+		if _, recorded := captureTypes[name]; !recorded {
+			captureTypes[name] = typ
+		}
+	}
 	var walkExpr func(e ast.Expr)
 	var walkStmt func(s ast.Stmt)
 
@@ -1279,9 +1271,7 @@ func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*
 		case *ast.IdentExpr:
 			if _, ok := outerLocals[e.Name]; ok {
 				seen[e.Name] = true
-				if _, recorded := idents[e.Name]; !recorded {
-					idents[e.Name] = e
-				}
+				record(e.Name, c.info.Types[e])
 			}
 		case *ast.ThisExpr:
 			// T1219: `this` referenced inside a `go { }` block within a method.
@@ -1440,10 +1430,15 @@ func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*
 			// lambda body: sema's no-shadow rule guarantees bound names never alias
 			// an outerLocals name, and block-locals are excluded by the outerLocals
 			// filter (they are already in scope inside the coroutine).
+			// T2171: record the type from the capture set too. The lambda body is
+			// not walked, so this is the ONLY place such a capture's type is
+			// reachable, and without it a refcounted handle referenced only inside
+			// the lambda crossed the spawn boundary unduplicated.
 			for _, cv := range c.info.LambdaCaptures[e] {
 				name := cv.Obj.Name()
 				if _, ok := outerLocals[name]; ok {
 					seen[name] = true
+					record(name, cv.Obj.Type())
 				}
 			}
 		case *ast.ParenExpr:
@@ -1554,7 +1549,7 @@ func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names, idents
+	return names, captureTypes
 }
 
 // borrowedValueParamType returns the (monomorphization-substituted) declared
@@ -1571,6 +1566,75 @@ func (c *Compiler) borrowedValueParamType(name string) (types.Type, bool) {
 		typ = types.Substitute(typ, c.typeSubst) // monomorphization
 	}
 	return typ, true
+}
+
+// retainCapturedSpawnHandles emits the §17.4 spawn-site duplication for every
+// capture of a `go` block that carries a refcounted `sharable handle. It retains
+// captureVals IN PLACE and returns name → handle type, which is what registers the
+// balancing goroutine-side release (maybeRegisterDrop) and keeps the name out of
+// B0354's ownership transfer — the caller still owns its own handle.
+//
+// Both block spawn sites (genGoBlock and genGoCallExprViaBlock) share this, so the
+// classification cannot drift between them the way it did through B0163/T2162/T2171;
+// registerGoCaptureOwnership already does the same for the B0354 side.
+//
+// The three arms are disjoint from the two loops that run after it: B0354 only
+// collects names that HAVE a drop binding, and the T1197/T0731 borrowed-capture dup
+// only fires for isBorrowedValueParam. So no capture is both retained and
+// transferred, and no retain escapes without its release.
+func (c *Compiler) retainCapturedSpawnHandles(captureNames []string, captureTypes map[string]types.Type, captureVals []value.Value) map[string]types.Type {
+	chanType := channelStructType()
+	captured := make(map[string]types.Type)
+	for i, name := range captureNames {
+		if binding, ok := c.dropBindings[name]; ok {
+			// B0163: an owned local CHANNEL — the goroutine shares the pointer with the
+			// outer scope, so both call Channel.drop and the refcount prevents the
+			// double free.
+			if _, isCh := types.AsChannel(binding.valType); isCh || binding.named == types.TypChannel {
+				chPtr := c.block.NewBitCast(captureVals[i], irtypes.NewPointer(chanType))
+				rcField := c.block.NewGetElementPtr(chanType, chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRefcount)))
+				c.emitAtomicAdd(c.block, rcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+				captured[name] = binding.valType
+			}
+			// An owned local that is NOT a channel is a TRANSFER, not a duplication:
+			// B0354 hands it to the goroutine and clears the outer drop flag. That a
+			// `Ref[T]` local takes that path rather than duplicating is T2164.
+			continue
+		}
+		handleType, ok := c.borrowedValueParamType(name)
+		if !ok {
+			// T2171: no drop binding and not a parameter. What is left is a binding
+			// that ALIASES storage it does not own — a for-in binding over a vector, a
+			// fixed-size array or a map (T0971/T0978). The container's owner stays
+			// behind and drops it, elements and all, while the goroutine still holds
+			// the pointer; that is exactly the set §17.4 requires a refcounted handle
+			// to be duplicated across. Keying off the binding KIND instead is what
+			// missed them — the same mistake T2163 corrected on the fast `go f(…)` path
+			// by asking whether the argument is a BORROW. An OWNED binding (a match
+			// payload, an `if x :=` unwrap, a channel for-in element) carries a drop
+			// binding and left through the arm above instead.
+			//
+			// The type comes from collectBlockIdents, which records it for a capture
+			// reached through a lambda's capture set as well as for a plain ident.
+			handleType, ok = captureTypes[name]
+			if !ok {
+				continue // `this` — a private snapshot (T1219/T1261), never a shared handle
+			}
+			if c.typeSubst != nil {
+				handleType = types.Substitute(handleType, c.typeSubst) // monomorphization
+			}
+		}
+		// Both remaining shapes — a borrowed PARAMETER (T2162) and an aliasing
+		// binding (T2171) — are borrows whose owner stays behind, so one retain
+		// serves both. retainSpawnHandle answers "is this a refcounted handle?" and
+		// emits nothing when it is not, so an ordinary capture falls straight through.
+		if retained, _, ok := c.retainSpawnHandle(captureVals[i], handleType); ok {
+			captureVals[i] = retained
+			captured[name] = handleType
+		}
+	}
+	return captured
 }
 
 // refcountedHandleElem classifies typ as a refcounted `sharable handle —
@@ -1918,7 +1982,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	}
 
 	// Collect outer variables referenced in the block
-	captureNames, captureIdents := c.collectBlockIdents(block, c.locals)
+	captureNames, captureTypes := c.collectBlockIdents(block, c.locals)
 
 	// Load captured values and collect their types BEFORE switching context
 	var captureVals []value.Value
@@ -1941,34 +2005,10 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		captureLLVMTypes = append(captureLLVMTypes, elemType)
 	}
 
-	// B0163: Increment refcount for captured channel variables and collect their types.
-	// The goroutine shares the channel pointer with the outer scope,
-	// so both need to call Channel.drop — refcounting prevents double-free.
-	// T2162: the same duplication is owed to a refcounted sharable handle arriving
-	// through a borrowed PARAMETER, which has no drop binding to read the type off.
-	chanTypeGB := channelStructType()
-	capturedChanTypes := make(map[string]types.Type) // name → sema type for refcounted sharable handles
-	for i, name := range captureNames {
-		if binding, ok := c.dropBindings[name]; ok {
-			if _, isCh := types.AsChannel(binding.valType); isCh || binding.named == types.TypChannel {
-				chPtr := c.block.NewBitCast(captureVals[i], irtypes.NewPointer(chanTypeGB))
-				rcField := c.block.NewGetElementPtr(chanTypeGB, chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRefcount)))
-				c.emitAtomicAdd(c.block, rcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
-				capturedChanTypes[name] = binding.valType
-			}
-		} else if paramType, isParam := c.borrowedValueParamType(name); isParam {
-			// T2162: §17.4 — the boundary duplicates the handle. The drop-binding
-			// branch above never fires for a parameter, so without this the caller's
-			// drop frees the referent under the goroutine. Recording the type here is
-			// what registers the balancing goroutine-side drop below, and keeps the
-			// name out of B0354's ownership transfer (the caller still owns its own).
-			if retained, _, ok := c.retainSpawnHandle(captureVals[i], paramType); ok {
-				captureVals[i] = retained
-				capturedChanTypes[name] = paramType
-			}
-		}
-	}
+	// B0163/T2162/T2171: §17.4 — duplicate every refcounted sharable handle this
+	// spawn captures, whatever kind of binding carries it. name → sema type; shared
+	// with genGoCallExprViaBlock.
+	capturedChanTypes := c.retainCapturedSpawnHandles(captureNames, captureTypes, captureVals)
 
 	// B0354: Collect droppable non-channel captures for ownership transfer.
 	// Strings, vectors, heap user types with drop, etc. — the goroutine takes
@@ -2027,8 +2067,11 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		if _, hasDroppable := capturedDroppables[name]; hasDroppable {
 			continue // owned local: B0354 already transfers ownership
 		}
-		capType := c.info.Types[captureIdents[name]]
-		if c.typeSubst != nil && capType != nil {
+		capType, ok := captureTypes[name]
+		if !ok {
+			continue // no recorded type (only `this`, which is snapshotted instead)
+		}
+		if c.typeSubst != nil {
 			capType = types.Substitute(capType, c.typeSubst) // mirror goResultType
 		}
 		if !goElemNeedsBorrowedCaptureDup(capType) {

@@ -1,0 +1,353 @@
+// T2171: a refcounted `sharable handle reaching a goroutine from a for-in
+// BINDING — over a vector, a fixed-size array or a map — must be duplicated at
+// the spawn boundary (docs/language-design.md §17.4). The two block spawn sites
+// keyed their duplication off the captured name's BINDING KIND — an owned local's
+// drop binding, or a borrowed value parameter — and such a binding is neither: it
+// ALIASES the container's element storage, and the container's owner drops it,
+// elements and all, while the goroutine still holds the pointer. §17.4 conditions
+// the duplication on the TYPE being `sharable, never on how the name is bound.
+//
+// Every case below spawns from a helper, so the container is dropped at that
+// helper's scope exit while the goroutine still holds the handle — which is the
+// window that reads freed memory without the duplication. Each joins over a
+// `done` channel — deterministically, never by sleeping (T1632) — so the
+// goroutine's assertions count (T2014) and drop accounting cannot race. The only
+// case whose ANSWER depends on the two orders is the Weak one, and it orders them
+// explicitly with a gate channel rather than assuming a winner.
+//
+// Sibling of go_capture_handle_param_test.pr (T2162, the parameter shape) and
+// go_call_handle_arg_test.pr (T2163, the fast `go f(…)` call path).
+use std as _;
+
+// --- go { } block, Ref[T] from a vector for-in binding ---------------------
+// Before the fix this read 0xDEDEDEDEDEDEDEDE, the debug allocator's freed fill.
+spawn_ref_forin(channel[int] done) {
+  Ref[int][] rs = [Ref[int](7)];
+  for r in rs {
+    go {
+      done.send(r.borrow);
+    };
+  }
+}
+
+block_forin_ref() `test {
+  done := channel[int](capacity: 1);
+  spawn_ref_forin(done); // `rs` and its element drop here
+  assert((<-done)! == 7, "Ref from a vector for-in binding");
+}
+
+// --- go { } block, channel[T] from a vector for-in binding -----------------
+// Not limited to the Ref/Weak family T2163 was about: the B0163/T1158 channel
+// retain missed this shape too. A freed channel means a null mutex → segfault.
+spawn_chan_forin(channel[int] done) {
+  channel[int][] cs = [channel[int](capacity: 1)];
+  cs[0].send(7);
+  for c in cs {
+    go {
+      done.send((<-c)!);
+    };
+  }
+}
+
+block_forin_channel() `test {
+  done := channel[int](capacity: 1);
+  spawn_chan_forin(done);
+  assert((<-done)! == 7, "channel from a vector for-in binding");
+}
+
+// --- go obj.method(...) via-block path, Ref[T] for-in binding --------------
+type Relay {
+  int bias `value;
+
+  fwd(this, Ref[int] r, channel[int] done) `doc("Forward the referent, biased.") {
+    done.send(r.borrow + this.bias);
+  }
+}
+
+spawn_via_block_forin(channel[int] done) {
+  Ref[int][] rs = [Ref[int](7)];
+  q := Relay(bias: 1);
+  for r in rs {
+    go q.fwd(r, done);
+  }
+}
+
+via_block_forin_ref() `test {
+  done := channel[int](capacity: 1);
+  spawn_via_block_forin(done);
+  assert((<-done)! == 8, "Ref for-in binding through the via-block path");
+}
+
+// --- go { } block, Ref[T] from a MAP for-in value binding ------------------
+spawn_ref_map_forin(channel[int] done) {
+  map[string, Ref[int]] m = {
+    "a": Ref[int](11)
+  };
+  for k, v in m {
+    go {
+      done.send(v.borrow);
+    };
+  }
+}
+
+block_map_forin_ref() `test {
+  done := channel[int](capacity: 1);
+  spawn_ref_map_forin(done);
+  assert((<-done)! == 11, "Ref from a map for-in value binding");
+}
+
+// --- go { } block, Ref[T] from a FIXED-SIZE ARRAY for-in binding -----------
+// genForInArray is a separate element-storage path from genForInVector, and it
+// aliases the array's slots the same way.
+spawn_ref_array_forin(channel[int] done) {
+  Ref[int][1] rs = [Ref[int](17)];
+  for r in rs {
+    go {
+      done.send(r.borrow);
+    };
+  }
+}
+
+block_array_forin_ref() `test {
+  done := channel[int](capacity: 1);
+  spawn_ref_array_forin(done);
+  assert((<-done)! == 17, "Ref from a fixed-size array for-in binding");
+}
+
+// --- generic function: the handle type comes from the substitution ---------
+// The capture's type is resolved under monomorphization, so a `channel[T]`
+// binding in a generic body is retained exactly like a concrete one.
+relay_all[T](channel[T][] cs, channel[T] done) {
+  for c in cs {
+    go {
+      done.send((<-c)!);
+    };
+  }
+}
+
+generic_forin_channel() `test {
+  done := channel[int](capacity: 2);
+  channel[int][] cs = [channel[int](capacity: 1), channel[int](capacity: 1)];
+  cs[0].send(3);
+  cs[1].send(4);
+  relay_all(cs, done);
+  a := (<-done)!;
+  b := (<-done)!;
+  assert(a + b == 7, "channel for-in binding inside a generic function");
+}
+
+// --- go obj.method(...) via-block path, channel[T] for-in binding ----------
+// The via-block sibling of the channel case above: a freed channel is a null
+// mutex, so this one segfaults rather than reading a poisoned value.
+type Pump {
+  int tag `value;
+
+  drain(this, channel[int] c, channel[int] done) `doc("Forward one value, tagged.") {
+    done.send((<-c)! + this.tag);
+  }
+}
+
+spawn_via_chan_forin(channel[int] done) {
+  channel[int][] cs = [channel[int](capacity: 1)];
+  cs[0].send(5);
+  p := Pump(tag: 10);
+  for c in cs {
+    go p.drain(c, done);
+  }
+}
+
+via_block_forin_channel() `test {
+  done := channel[int](capacity: 1);
+  spawn_via_chan_forin(done);
+  assert((<-done)! == 15, "channel for-in binding on the via-block path");
+}
+
+// --- `this` in the capture list alongside a for-in handle binding ----------
+// `this` is threaded into the arg pack as a private snapshot (T1219/T1261) and
+// is the one capture with no recorded type. The retain indexes captureVals BY
+// POSITION, so a `this` slot sitting between the handle captures is exactly what
+// would misalign a retain onto the wrong capture.
+type Fanner {
+  int bias;
+
+  spread(this, Ref[int][] rs, channel[int] done) `doc("Spawn one goroutine per element, `go { }` form.") {
+    for r in rs {
+      go {
+        done.send(r.borrow + this.bias);
+      };
+    }
+  }
+
+  spread_via(this, Ref[int][] rs, channel[int] done) `doc("Spawn one goroutine per element, via-block form.") {
+    for r in rs {
+      go this.emit(r, done);
+    }
+  }
+
+  emit(this, Ref[int] r, channel[int] done) `doc("Forward the referent, biased.") {
+    done.send(r.borrow + this.bias);
+  }
+}
+
+spawn_with_this(channel[int] done) {
+  f := Fanner(bias: 100);
+  Ref[int][] rs = [Ref[int](7)];
+  f.spread(rs, done);
+}
+
+spawn_with_this_via(channel[int] done) {
+  f := Fanner(bias: 200);
+  Ref[int][] rs = [Ref[int](7)];
+  f.spread_via(rs, done);
+}
+
+this_plus_forin_handle_block() `test {
+  done := channel[int](capacity: 1);
+  spawn_with_this(done);
+  assert((<-done)! == 107, "`this` capture alongside a for-in handle, go block");
+}
+
+this_plus_forin_handle_via_block() `test {
+  done := channel[int](capacity: 1);
+  spawn_with_this_via(done);
+  assert((<-done)! == 207, "`this` capture alongside a for-in handle, via-block");
+}
+
+// --- a value-returning go block ---------------------------------------------
+// The awaited-task path stores a trailing value into G.result_ptr and exits
+// through different cleanup blocks than the fire-and-forget one. The container
+// dies when the spawner returns, before the task is awaited.
+spawn_task() task[int] {
+  Ref[int][] rs = [Ref[int](9)];
+  for r in rs {
+    return go {
+      r.borrow + 0
+    };
+  }
+  return go {
+    -1
+  };
+}
+
+value_block_forin_ref() `test {
+  t := spawn_task();
+  assert((<-t) == 9, "Ref for-in binding in a value-returning go block");
+}
+
+// --- the capture is referenced only inside a LAMBDA in the block -----------
+// collectBlockIdents does not walk a lambda body — it reads sema's capture set
+// instead — so this capture has no ident anywhere in the block. Recording only a
+// representative ident would leave it typeless and silently exempt from the
+// duplication; the walk records the type from the capture set for exactly this.
+spawn_lambda_forin(channel[int] done) {
+  Ref[int][] rs = [Ref[int](31)];
+  for r in rs {
+    go {
+      sink := done;
+      f := move || {
+        sink.send(r.borrow);
+      };
+      f();
+    };
+  }
+}
+
+block_forin_lambda_only_capture() `test {
+  done := channel[int](capacity: 1);
+  spawn_lambda_forin(done);
+  assert((<-done)! == 31, "Ref referenced only inside a lambda in the go block");
+}
+
+// --- go { } block, Weak[T] from a for-in binding ---------------------------
+// The strong ref and the weak vector both die in the helper, so the referent is
+// gone by the time the goroutine upgrades. What the duplication buys is that the
+// goroutine's own weak handle keeps the CONTROL BLOCK alive, so upgrade() reports
+// a clean `none` instead of reading freed memory.
+//
+// `gate` orders the two explicitly rather than assuming the goroutine is slower
+// than the spawner's scope exit (T1632): the goroutine blocks until the test —
+// which resumes only after the helper has returned and dropped both — sends. So
+// the upgrade always happens on a dead referent, on an idle laptop and on a
+// saturated runner alike.
+report_upgrade(Weak[int] w, channel[int] gate, channel[int] done) {
+  <-gate;
+  if r := w.upgrade() {
+    done.send(r.borrow);
+  } else {
+    done.send(-1);
+  }
+}
+
+spawn_weak_forin(channel[int] gate, channel[int] done) {
+  strong := Ref[int](9);
+  Weak[int][] ws = [strong.downgrade()];
+  for w in ws {
+    go {
+      report_upgrade(w, gate, done);
+    };
+  }
+}
+
+block_forin_weak() `test {
+  gate := channel[int](capacity: 1);
+  done := channel[int](capacity: 1);
+  spawn_weak_forin(gate, done); // returns → `strong` and `ws` are dropped
+  gate.send(1); // ...so the upgrade below happens after that
+  assert((<-done)! == -1, "Weak for-in binding must observe a clean none");
+}
+
+// --- the retain is balanced: the referent outlives every handle ------------
+// §17.4: "the referent cannot be freed while any handle survives". The container
+// and its clone both die in the helper and the goroutine releases what the spawn
+// retained, so the caller's original must still be readable — an over-release
+// would free the referent under it, an unbalanced retain would leak (the harness
+// fails the test either way).
+spawn_from_clone(Ref[int] keeper, channel[int] done) {
+  Ref[int][] rs = [keeper.clone()];
+  for r in rs {
+    go {
+      done.send(r.borrow);
+    };
+  }
+}
+
+forin_binding_shares_referent() `test {
+  done := channel[int](capacity: 1);
+  keeper := Ref[int](5);
+  spawn_from_clone(keeper, done);
+  assert((<-done)! == 5, "goroutine got its own handle");
+  assert(keeper.borrow == 5, "caller's handle survives the goroutine's release");
+}
+
+// --- the refcount itself, under contention ---------------------------------
+// 16 goroutines retain the SAME referent from for-in bindings and all release it
+// concurrently. Unlike the cases above this does not distinguish the bug (the
+// spawner's own handles keep the referent alive either way) — it pins the
+// invariant the fix relies on: the atomic refcount stays exact under real
+// contention, so every read is live and the allocation is freed exactly once.
+// A non-atomic or unbalanced retain shows up as a wrong total, a crash, or a leak.
+fanout(Ref[int][] rs, channel[int] done) {
+  for r in rs {
+    for i in 0..8 {
+      go {
+        done.send(r.borrow);
+      };
+    }
+  }
+}
+
+spawn_fanout(channel[int] done) {
+  keeper := Ref[int](3);
+  Ref[int][] rs = [keeper.clone(), keeper.clone()];
+  fanout(rs, done);
+}
+
+forin_handle_fanout() `test {
+  done := channel[int](capacity: 16);
+  spawn_fanout(done);
+  int total = 0;
+  for i in 0..16 {
+    total = total + (<-done)!;
+  }
+  assert(total == 48, "16 concurrent retains of one referent, got {total}");
+}

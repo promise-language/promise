@@ -1,0 +1,33 @@
+// T1752 — a validated type declared in a MODULE. The `_validate! function is
+// module-owned, so it must be declared in the module's declare phase and
+// callable from the construction site in user code.
+type Port `public `doc("A TCP port, valid only in 1..=65535.") {
+  int value `final `public;
+
+  _validate!(this) `public `doc("Raises if this instance violates the type's invariant.") {
+    if this.value < 1 || this.value > 65535 {
+      raise error("port out of range");
+    }
+  }
+}
+
+type Endpoint is Port `public `doc("A Port with a non-empty host name.") {
+  string host `final `public;
+
+  _validate!(this) `public `doc("Raises if the host name is empty.") {
+    if this.host.len == 0 {
+      raise error("empty host");
+    }
+  }
+}
+
+type Boxed[T] `public `doc("A counted box, valid only with a positive count.") {
+  T item `public;
+  int count `final `public;
+
+  _validate!(this) `public `doc("Raises if the count is not positive.") {
+    if this.count < 1 {
+      raise error("count must be positive");
+    }
+  }
+}

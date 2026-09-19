@@ -949,6 +949,22 @@ type Port {
 }
 Port(value: 80)?!;        // panics on invalid
 
+// _validate! — the type's invariant, run at every construction site
+type Fraction {
+  int num `final;
+  int den `final;
+
+  _validate!(this) `doc("Raises if this instance violates the type's invariant.") {
+    if this.den == 0 { raise error(message: "zero denominator"); }
+  }
+}
+Fraction(num: 1, den: 2)?!;   // construction is failable: ? / ^ / ?! required
+
+// Declaring _validate! makes EVERY construction path failable — `new` must be
+// `new!` and every `factory must carry `!`, even when its body cannot fail.
+// A parent's _validate! runs before its child's, both over the complete
+// instance. clone() is exempt: a clone copies an already-valid original.
+
 // raise — returns error from a ! function (not an exception)
 divide!(f64 a, f64 b) f64 {
   if b == 0.0 { raise error(message: "division by zero"); }
@@ -1071,6 +1087,7 @@ type Pt { f64 x `value; }         // field in value struct (stack)
 string id `final;                 // immutable after construction
 speak() string `abstract;         // must be overridden by child
 zero() Self `factory { ... }      // static constructor, returns Self
+_validate!(this) { ... }          // type invariant — makes construction failable
 process() `test { ... }           // test function
 process() `test(timeout: "5s") { ... }  // test with per-test timeout
 main() `test(expected: "hi") { }  // snapshot test (checks stdout)

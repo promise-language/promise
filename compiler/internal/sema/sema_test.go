@@ -12090,17 +12090,22 @@ func TestValueTypeNonCopyUserTypeField(t *testing.T) {
 	expectError(t, errs, "value field Bad.r must be a copy type")
 }
 
+// T1752 lifted the old "value type cannot have a failable new()" rule:
+// genValueTypeConstructor now merges new()'s error path into a failable result,
+// the same shape the heap path has always produced. §5.7 grants no value-type
+// exemption from validation, and a validated value type must be able to declare
+// `new!`. A failable new() on a value type now type-checks.
 func TestValueTypeFailableNew(t *testing.T) {
-	errs := checkErrs(t, `
+	checkOK(t, `
 		type Percentage {
 			int value `+"`value"+`;
-			new!(~this, int value) int {
-				if value < 0 { return error(0); }
+			new!(~this, int value) {
+				if value < 0 { raise error("negative"); }
 				this.value = value;
 			}
 		}
+		main() { p := Percentage(value: 50)?!; }
 	`)
-	expectError(t, errs, "value type Percentage cannot have a failable new() method")
 }
 
 func TestValueTypeWithNewConstructor(t *testing.T) {

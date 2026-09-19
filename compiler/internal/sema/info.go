@@ -278,6 +278,12 @@ type Info struct {
 	// error operators (?, !, ? handler) to validate their inner expression.
 	FailableExprs map[ast.Expr]bool
 
+	// ValidateSites records where codegen emits a type's _validate! chain
+	// (T1752) and in which shape. Sema owns the decision — codegen must key off
+	// this map rather than re-deriving it, so the failability sema recorded and
+	// the result-wrapping codegen emits agree by construction.
+	ValidateSites map[ast.Expr]ValidateSiteKind
+
 	// AutoPropagateExprs records failable call expressions that need implicit
 	// error propagation. Applies to: expression statements, variable declaration
 	// initializers, call arguments, binary operands, and unary operands — all
@@ -504,3 +510,20 @@ func (c *Checker) recordInstance(inst *types.Instance) {
 	}
 	c.info.Instances = append(c.info.Instances, inst)
 }
+
+// ValidateSiteKind distinguishes the two shapes a _validate! chain is emitted
+// in (T1752). The two are disjoint by construction: a wrap site is always a
+// construction expression, a propagate site always an identifier.
+type ValidateSiteKind int
+
+const (
+	// ValidateWrap is a construction expression received outside the
+	// constructed type's own construction paths. Sema also marked it failable,
+	// so codegen turns its value into `{ i1, V, i8* }` and the ordinary
+	// `?` / `^` / `?!` machinery consumes it.
+	ValidateWrap ValidateSiteKind = iota + 1
+	// ValidatePropagate is the `return <local>` of a `factory whose local holds
+	// a Self the factory itself constructed. The value stays unwrapped; a raise
+	// returns the error from the factory.
+	ValidatePropagate
+)

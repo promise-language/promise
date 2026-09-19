@@ -343,6 +343,12 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		}
 	}
 
+	// T1752: a `Self` the enclosing `factory constructed leaves by this return —
+	// run its deferred `_validate! chain now, while the instance and every temp
+	// built for the return are still owned, so a raise unwinds them. MUST precede
+	// the ownership move-out below.
+	c.emitDeferredReturnValidate(s, val)
+
 	// Clear drop flag for returned variable (it's being moved out, not dropped).
 	// B0205: When the return value was dup'd (B0189), the original variable must
 	// still be dropped at scope exit — the caller receives the dup, not the original.

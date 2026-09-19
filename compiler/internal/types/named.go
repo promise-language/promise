@@ -8,6 +8,11 @@ type ParentRef struct {
 	TypeArgs []Type // nil for non-generic parents
 }
 
+// ValidateMethodName is the reserved name of a type's invariant method
+// (docs/language-design.md §5.7 → Validation, T1752). A type declares at most
+// one; it takes a shared `this`, no parameters, no return type, and is failable.
+const ValidateMethodName = "_validate"
+
 // Named represents a named type: user-defined types and built-in primitives alike.
 // int, bool, string are Named types just like Dog and Shape.
 type Named struct {
@@ -224,6 +229,48 @@ func (n *Named) LookupMethod(name string) *Method {
 	return nil
 }
 
+// OwnValidateMethod returns the _validate! method DECLARED on this type
+// (never an inherited one), or nil. (T1752)
+func (n *Named) OwnValidateMethod() *Method {
+	for _, m := range n.methods {
+		if m.name == ValidateMethodName && !m.isGetter && !m.isSetter {
+			return m
+		}
+	}
+	return nil
+}
+
+// IsValidated reports whether a value of this type must be validated on
+// construction — the type declares a _validate! or inherits one. (T1752)
+func (n *Named) IsValidated() bool {
+	return len(n.ValidateChain()) > 0
+}
+
+// ValidateChain returns the types whose _validate! bodies run when an instance
+// of n is constructed, ROOT FIRST: every ancestor declaring its own _validate!
+// in parent-before-child order, then n itself when it declares one. A child's
+// _validate! adds to its parent's rather than overriding it, so both appear.
+// Each declaring type appears once even under a diamond. (T1752)
+func (n *Named) ValidateChain() []*Named {
+	seen := make(map[*Named]bool)
+	var chain []*Named
+	var walk func(t *Named)
+	walk = func(t *Named) {
+		if seen[t] {
+			return
+		}
+		seen[t] = true
+		for _, p := range t.parents {
+			walk(p.Named)
+		}
+		if t.OwnValidateMethod() != nil {
+			chain = append(chain, t)
+		}
+	}
+	walk(n)
+	return chain
+}
+
 // LookupUnaryMethod finds the 0-parameter (prefix-unary) variant of an operator
 // method by name, walking is-parents and structural-interface parents. Distinct
 // from LookupMethod, which returns the first same-named method regardless of arity
@@ -395,6 +442,14 @@ func (n *Named) AllVirtualMethods() []*Method {
 		}
 		if m.Sig().Recv() == nil {
 			continue // T1749: `factory / `global members have no receiver — static dispatch only
+		}
+		if m.name == ValidateMethodName {
+			// T1752: a child's _validate! ADDS to the parent's rather than
+			// overriding it — both run, parent first — so the two must never
+			// share one slot. Nothing dispatches it virtually: the chain is
+			// emitted statically at the construction expression, where the
+			// concrete type is exactly known.
+			continue
 		}
 		key := methodSlotKey(m)
 		if !seen[key] {

@@ -252,6 +252,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 			// Track factory-created locals for `final field write restriction
 			if c.inFactoryBody && s.Name != "_" && isConstructorCallExpr(s.Value) {
 				c.factoryLocals[s.Name] = true
+				c.trackDeferredValidateLocal(s.Name, s.Value) // T1752
 			}
 		}
 
@@ -347,6 +348,7 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	// Track factory-created locals for `final field write restriction
 	if c.inFactoryBody && s.Name != "_" && isConstructorCallExpr(s.Value) {
 		c.factoryLocals[s.Name] = true
+		c.trackDeferredValidateLocal(s.Name, s.Value) // T1752
 	}
 
 	// Auto-propagate failable calls in assignments within failable functions.
@@ -1221,7 +1223,15 @@ func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {
 
 	expected := c.curFunc.Result()
 
+	// T1752: returning a deferred Self is the one way it may leave the factory
+	// that built it, so this position grants the permission checkIdentExpr
+	// consumes. Saved and restored rather than cleared: a `return` nested inside
+	// this one's value expression (an if/match arm) would otherwise revoke the
+	// outer's permission mid-check.
+	savedAllowed := c.deferredSelfAllowed
+	c.deferredSelfAllowed = c.inFactoryBody
 	valType := c.checkExprWithHint(s.Value, expected)
+	c.deferredSelfAllowed = savedAllowed
 	if valType == nil {
 		return
 	}
@@ -1234,7 +1244,8 @@ func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {
 	if !types.AssignableTo(valType, expected) {
 		c.errorf(s.Pos(), "cannot return %s from function returning %s", valType, expected)
 	}
-	c.checkFailableEscape(s.Value) // T0976: reject bare failable in non-failable fn
+	c.markDeferredValidateReturn(s) // T1752: run the deferred `_validate! chain here
+	c.checkFailableEscape(s.Value)  // T0976: reject bare failable in non-failable fn
 }
 
 // checkGoBlockReturn type-checks a `return` inside a `go {}` / `go! {}` block

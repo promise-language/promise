@@ -749,8 +749,57 @@ func (c *Checker) validateNewMethod(named *types.Named, m *types.Method, d *ast.
 	if m.IsAbstract() {
 		c.errorf(pos, "new() method on %s must not be abstract", d.Name)
 	}
-	// Value types cannot have a failable new() — that rule lives in
-	// markValueType so it also covers types classified after Define (T1527).
+	// T1752 lifted the old "value type cannot have a failable new()" rule:
+	// genValueTypeConstructor now merges new()'s error path into a failable
+	// result, the same shape the heap path has always produced. §5.7 grants no
+	// value-type exemption from validation, and a validated value type must be
+	// able to declare `new!`.
+}
+
+// validateValidateMethod checks a _validate! invariant method's shape
+// (docs/language-design.md §5.7 → Validation, T1752). The method is the type's
+// invariant: it must read every field and mutate none, so the receiver is a
+// shared `this`; it takes no parameters and returns nothing; and it must be
+// failable, since raising is how it rejects an instance.
+//
+// pos is the declaration site (the method's own, when available).
+func (c *Checker) validateValidateMethod(owner string, m *types.Method, pos ast.Pos, isStructural, isNative bool) {
+	sig := m.Sig()
+	if sig == nil {
+		return
+	}
+	name := types.ValidateMethodName
+	if sig.Recv() == nil {
+		// A `factory / `global / `mono member has no receiver, so it cannot be
+		// an invariant over an instance.
+		c.errorf(pos, "%s! on %s must be an instance method taking a shared 'this' receiver — it is the type's invariant, not a constructor", name, owner)
+	} else if sig.Recv().Ref() == types.RefMut {
+		c.errorf(pos, "%s! on %s must take a shared 'this' receiver, not '~this' — an invariant reads every field and mutates none", name, owner)
+	}
+	if !sig.CanError() {
+		c.errorf(pos, "%s on %s must be failable — write '%s!' — raising is how it rejects an instance", name, owner, name)
+	}
+	if len(sig.Params()) > 0 {
+		c.errorf(pos, "%s! on %s must take no parameters — it validates the instance it is called on", name, owner)
+	}
+	if sig.Result() != nil && sig.Result() != types.TypVoid {
+		c.errorf(pos, "%s! on %s must not declare a return type — it either raises or returns nothing", name, owner)
+	}
+	if len(sig.TypeParams()) > 0 {
+		c.errorf(pos, "%s! on %s must not be generic — a type has exactly one invariant", name, owner)
+	}
+	if m.IsAbstract() {
+		c.errorf(pos, "%s! on %s must not be abstract — an invariant is inherited and run in addition to the parent's, never overridden", name, owner)
+	}
+	if m.IsNative() {
+		c.errorf(pos, "%s! on %s must not be native", name, owner)
+	}
+	if isStructural {
+		c.errorf(pos, "`structural interface %s must not declare %s! — satisfying an interface must not impose an invariant on an unrelated type", owner, name)
+	}
+	if isNative {
+		c.errorf(pos, "native type %s must not declare %s!", owner, name)
+	}
 }
 
 // validateFactoryMethod checks that a `factory method has a valid signature:
@@ -989,17 +1038,6 @@ func (c *Checker) markValueType(named *types.Named, d *ast.TypeDecl, report bool
 		if report {
 			c.errorf(d.Pos(), "value type %s cannot override '%s' from %s: value types dispatch statically, so a value child may add methods but not override them",
 				d.Name, m.Name(), parent.Obj().Name())
-		}
-		return false
-	}
-
-	// Validate: value types cannot have a failable new() — codegen builds the
-	// value struct inline and doesn't support error propagation in that path.
-	// Checked here rather than in validateNewMethod so late-classified value
-	// types (T1527) are covered by the same rule.
-	if nm := lookupOwnMethod(named, "new"); nm != nil && nm.Sig() != nil && nm.Sig().CanError() {
-		if report {
-			c.errorf(d.Pos(), "value type %s cannot have a failable new() method", d.Name)
 		}
 		return false
 	}

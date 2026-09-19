@@ -215,7 +215,19 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 		}
 	}
 
-	return c.block.NewLoad(internalType, alloca)
+	built := c.block.NewLoad(internalType, alloca)
+
+	// T1752: a payload-carrying variant constructor is a construction expression
+	// like any other — the enum's `_validate! runs here. The alloca already holds
+	// the finished value, so it doubles as the shared `this` receiver. Enums do
+	// not inherit, so the chain is a single link. No-op unless sema marked this
+	// a validate site. The enum temp tracked just above owns any droppable
+	// payload, so an error path drains it exactly as a discarded temp.
+	if chain := c.constructionValidateChain(e, c.info.Types[member.Target]); len(chain) > 0 {
+		recvPtr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
+		return c.wrapWithValidateChain(built, recvPtr, chain)
+	}
+	return built
 }
 
 // --- Match expressions ---

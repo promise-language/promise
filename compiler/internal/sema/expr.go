@@ -255,6 +255,14 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 	allowSliceType := c.sliceTypeAllowed
 	c.sliceTypeAllowed = false
 
+	// T1752: same save/clear pattern for the deferred-Self permission. A local
+	// holding a Self the enclosing `factory constructed may only be named as a
+	// member-access target or as the `return` value; the two trusted sites grant
+	// it, checkIdentExpr consumes it, and clearing here means every other
+	// position — a call argument, a container push, a capture — rejects.
+	allowDeferredSelf := c.deferredSelfAllowed
+	c.deferredSelfAllowed = false
+
 	// T1393: snapshot/clear the match-value-discarded signal so it applies only
 	// to the immediate expression (a match STATEMENT), not to nested sub-exprs.
 	discardMatchValue := c.matchValueDiscarded
@@ -328,14 +336,18 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 		typ = types.TypNone
 
 	case *ast.IdentExpr:
+		c.deferredSelfAllowed = allowDeferredSelf // T1752: republish for the consumer
 		typ = c.checkIdentExpr(e)
+		c.deferredSelfAllowed = false
 
 	case *ast.ThisExpr:
 		typ = c.checkThisExpr(e)
 
 	case *ast.ParenExpr:
-		c.typeHint = hint // propagate through parentheses
+		c.typeHint = hint                         // propagate through parentheses
+		c.deferredSelfAllowed = allowDeferredSelf // T1752: parens are transparent here too
 		typ = c.checkExpr(e.Expr)
+		c.deferredSelfAllowed = false
 		// Failability propagates through parentheses so operators bind to a
 		// parenthesized failable expression — e.g. `(<-t)?!`, `(<-go! f())?!`,
 		// `(f())?^` (T1379).
@@ -446,6 +458,8 @@ func (c *Checker) checkIdentExpr(e *ast.IdentExpr) types.Type {
 		}
 		return c.selfType()
 	}
+
+	c.rejectDeferredSelfEscape(e) // T1752
 
 	obj := c.lookup(e.Name)
 	if obj == nil {
@@ -1329,10 +1343,11 @@ func (c *Checker) checkConstructorCall(e *ast.CallExpr, named *types.Named) type
 
 	// If the type has an explicit new() constructor, route through parameter checking
 	if named.HasNew() {
-		return c.checkNewConstructorCall(e, named, subst)
+		c.checkNewConstructorCall(e, named, subst)
+	} else {
+		c.resolveImplicitConstructorArgs(e, named, subst)
 	}
-
-	c.resolveImplicitConstructorArgs(e, named, subst)
+	c.markValidatedConstruction(e, named) // T1752
 	return named
 }
 
@@ -1491,12 +1506,14 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 	// If the type has an explicit new() constructor, route through parameter checking
 	if origin.HasNew() {
 		c.checkNewConstructorCall(e, origin, subst)
+		c.markValidatedConstruction(e, inst) // T1752
 		c.recordInstance(inst)
 		c.recordType(e.Callee, inst)
 		return inst
 	}
 
 	c.resolveImplicitConstructorArgs(e, origin, subst)
+	c.markValidatedConstruction(e, inst) // T1752
 
 	// Record the Instance so collectUnresolvedInstances can find it in info.Types
 	// when the Instance contains TypeParams (e.g., AppError[T] inside a generic
@@ -1673,6 +1690,17 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 	}
 
 	if sig.Result() != nil {
+		// T1752: a payload-carrying variant constructor (`E.V(x)`) is a
+		// construction expression like any other — its enum's invariant runs
+		// here. `sig.Recv() == nil` plus a member callee naming a variant is
+		// exactly that shape, and never a `factory / method call.
+		if sig.Recv() == nil {
+			if mem, ok := e.Callee.(*ast.MemberExpr); ok {
+				if en := extractEnumType(sig.Result()); en != nil && en.LookupVariant(mem.Field) != nil {
+					c.markValidatedEnumConstruction(e, sig.Result())
+				}
+			}
+		}
 		return sig.Result()
 	}
 	return types.TypVoid
@@ -1842,6 +1870,7 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 	// target (e.g., `int[].filled(...)` static factory). Grant the
 	// permission before recursing; checkExpr snapshots+clears it.
 	c.sliceTypeAllowed = true
+	c.deferredSelfAllowed = true // T1752: reading/writing a field does not let the instance escape
 	target := c.checkExpr(e.Target)
 	if target == nil {
 		return nil

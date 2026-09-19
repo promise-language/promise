@@ -1,0 +1,753 @@
+// T1752 — `_validate!`: a type invariant every construction path must satisfy.
+// docs/language-design.md §5.7 → Validation.
+//
+// The chain runs at the construction expression, except for a `Self` built
+// inside its own `factory, which defers to that factory's `return` — after any
+// post-construction `final fixups. A factory call site never re-validates.
+type Port {
+  int value `final;
+
+  _validate!(this) `doc("Raises if this instance violates the type's invariant.") {
+    if this.value < 1 || this.value > 65535 {
+      raise error("port out of range: " + this.value.to_string());
+    }
+  }
+}
+
+validate_accepts_a_valid_instance() `test {
+  Port p = Port(value: 80)?!;
+  assert(p.value == 80, "a valid port constructs");
+}
+
+validate_rejects_an_invalid_instance() `test {
+  string msg = "";
+  Port p = Port(value: -5)? e {
+    msg = e.message.clone();
+    Port(value: 1)?!
+  };
+  assert(msg == "port out of range: -5", "field-init validated, got: {msg}");
+  assert(p.value == 1, "the handler's recovery value is used");
+}
+
+// --- factories --------------------------------------------------------------
+
+type Gauge {
+  int reading `final;
+  string tag `final;
+
+  _validate!(this) {
+    if this.reading < 0 {
+      raise error("negative reading");
+    }
+  }
+
+  // Uses the post-construction `final privilege: the PLACEHOLDER violates the
+  // invariant, and validation must never observe it.
+  sample!(int hi, int lo) Self `factory {
+    g := Self(reading: -1, tag: "placeholder");
+    g.reading = hi * 100 + lo;
+    g.tag = "sampled";
+    return g;
+  }
+
+  // Inline construction in the return position: validated in place, and the
+  // error auto-propagates out of the factory.
+  direct!(int v) Self `factory {
+    return Self(reading: v, tag: "direct");
+  }
+}
+
+factory_placeholder_is_never_validated() `test {
+  Gauge g = Gauge.sample(3, 7)?!;
+  assert(g.reading == 307, "validation saw only the finished value");
+  assert(g.tag == "sampled", "the `final fixup landed");
+}
+
+factory_return_validates_the_deferred_self() `test {
+  string msg = "";
+  Gauge g = Gauge.sample(-1, 0)? e {
+    msg = e.message.clone();
+    Gauge.direct(0)?!
+  };
+  assert(msg == "negative reading", "the factory raised at its return, got: {msg}");
+}
+
+factory_inline_return_validates() `test {
+  string msg = "";
+  Gauge g = Gauge.direct(-2)? e {
+    msg = e.message.clone();
+    Gauge.direct(0)?!
+  };
+  assert(msg == "negative reading", "inline construction validated, got: {msg}");
+}
+
+// A construction with no post-construction fixup window — one not bound to a
+// local — validates in place, wherever it sits. A branching return is the case
+// that matters: each arm builds its own Self, and neither is reachable for a
+// `final fixup, so deferring either would leave it unvalidated.
+type Branching {
+  int value `final;
+
+  _validate!(this) {
+    if this.value < 1 {
+      raise error("bad: " + this.value.to_string());
+    }
+  }
+
+  pick!(bool hi) Self `factory {
+    return if hi {
+      Self(value: 443)
+    } else {
+      Self(value: 80)
+    };
+  }
+
+  pick_bad!(bool bad) Self `factory {
+    return if bad {
+      Self(value: -1)
+    } else {
+      Self(value: 5)
+    };
+  }
+}
+
+factory_branching_return_validates_every_arm() `test {
+  Branching a = Branching.pick(true)?!;
+  assert(a.value == 443, "the hi arm constructs");
+  Branching b = Branching.pick(false)?!;
+  assert(b.value == 80, "the lo arm constructs");
+
+  string msg = "";
+  Branching bad = Branching.pick_bad(true)? e {
+    msg = e.message.clone();
+    Branching.pick_bad(false)?!
+  };
+  assert(msg == "bad: -1", "the violating arm was validated, got: {msg}");
+}
+
+// A nested factory result passes through unchanged: the inner factory already
+// validated it, and the outer one does not re-validate. That the chain runs
+// exactly ONCE is not observable at runtime (a second run over a valid
+// instance is a no-op), so it is pinned in the IR by
+// TestT1752NestedFactoryValidatesOnce in compiler/internal/codegen/tests/regress8.
+type Counted {
+  int n `final;
+
+  _validate!(this) {
+    if this.n < 0 {
+      raise error("negative");
+    }
+  }
+
+  inner!(int n) Self `factory {
+    return Self(n: n);
+  }
+  outer!(int n) Self `factory {
+    return Self.inner(n);
+  }
+}
+
+nested_factory_result_passes_through() `test {
+  Counted c = Counted.outer(5)?!;
+  assert(c.n == 5, "the nested factory produced the value");
+
+  string msg = "";
+  Counted bad = Counted.outer(-1)? e {
+    msg = e.message.clone();
+    Counted.inner(0)?!
+  };
+  assert(msg == "negative", "the inner factory still rejects, got: {msg}");
+}
+
+// --- inheritance ------------------------------------------------------------
+
+type Base {
+  int a `final;
+  _validate!(this) {
+    if this.a < 0 {
+      raise error("base: a negative");
+    }
+  }
+}
+
+type Derived is Base {
+  int b `final;
+  _validate!(this) {
+    // Sees the COMPLETE instance — its own field and the parent's.
+    if this.b < this.a {
+      raise error("derived: b below a");
+    }
+  }
+}
+
+inherited_chain_accepts_a_valid_instance() `test {
+  Derived d = Derived(a: 1, b: 2)?!;
+  assert(d.a == 1 && d.b == 2, "both fields set");
+}
+
+inherited_parent_validate_runs_first() `test {
+  // Violates BOTH invariants. The parent's runs first, so its message surfaces.
+  string msg = "";
+  Derived d = Derived(a: -1, b: -5)? e {
+    msg = e.message.clone();
+    Derived(a: 0, b: 0)?!
+  };
+  assert(msg == "base: a negative", "parent invariant ran first, got: {msg}");
+}
+
+inherited_child_validate_sees_parent_fields() `test {
+  string msg = "";
+  Derived d = Derived(a: 5, b: 1)? e {
+    msg = e.message.clone();
+    Derived(a: 0, b: 0)?!
+  };
+  assert(msg == "derived: b below a", "child invariant ran over the whole instance, got: {msg}");
+}
+
+// --- new! + _validate! ------------------------------------------------------
+
+type Clamped {
+  int value `final;
+
+  new!(~this, int raw) {
+    if raw > 1000 {
+      raise error("raw too large");
+    }
+    this.value = raw * 2;
+  }
+
+  _validate!(this) {
+    if this.value < 0 {
+      raise error("negative after doubling");
+    }
+  }
+}
+
+new_and_validate_share_one_failable_construction() `test {
+  Clamped ok = Clamped(raw: 4)?!;
+  assert(ok.value == 8, "new() computed the field");
+
+  string fromNew = "";
+  Clamped a = Clamped(raw: 2000)? e {
+    fromNew = e.message.clone();
+    Clamped(raw: 1)?!
+  };
+  assert(fromNew == "raw too large", "new()'s own error surfaced, got: {fromNew}");
+
+  string fromValidate = "";
+  Clamped b = Clamped(raw: -3)? e {
+    fromValidate = e.message.clone();
+    Clamped(raw: 1)?!
+  };
+  assert(fromValidate == "negative after doubling", "the invariant ran after new(), got: {fromValidate}");
+}
+
+// --- pure value types (§5.7: no value-type exemption) -----------------------
+
+type Ratio {
+  int num `value;
+  int den `value;
+
+  _validate!(this) {
+    if this.den == 0 {
+      raise error("zero denominator");
+    }
+  }
+}
+
+value_type_construction_is_failable() `test {
+  Ratio r = Ratio(num: 1, den: 2)?!;
+  assert(r.num == 1 && r.den == 2, "a valid ratio constructs");
+
+  string msg = "";
+  Ratio bad = Ratio(num: 1, den: 0)? e {
+    msg = e.message.clone();
+    Ratio(num: 0, den: 1)?!
+  };
+  assert(msg == "zero denominator", "a value type's invariant is enforced, got: {msg}");
+}
+
+// --- generics ---------------------------------------------------------------
+
+type Boxed[T] {
+  T item;
+  int count `final;
+
+  _validate!(this) {
+    if this.count < 1 {
+      raise error("count must be positive");
+    }
+  }
+}
+
+generic_instance_validates() `test {
+  Boxed[int] b = Boxed[int](item: 7, count: 2)?!;
+  assert(b.count == 2, "generic instance validated");
+
+  string msg = "";
+  Boxed[string] s = Boxed[string](item: "x", count: 0)? e {
+    msg = e.message.clone();
+    Boxed[string](item: "y", count: 1)?!
+  };
+  assert(msg == "count must be positive", "the invariant monomorphized, got: {msg}");
+}
+
+// --- enums ------------------------------------------------------------------
+
+enum Temperature {
+  Celsius(int degrees),
+  Kelvin(int degrees),
+  Unspecified,
+
+  _validate!(this) {
+    match this {
+      Temperature.Kelvin(d) => {
+        if d < 0 {
+          raise error("kelvin below absolute zero");
+        }
+      },
+      _ => {
+      },
+    }
+  }
+}
+
+enum_payload_variant_validates() `test {
+  Temperature t = Temperature.Kelvin(300)?!;
+  int got = match t {
+    Temperature.Kelvin(d) => d, _ => -1,
+  };
+  assert(got == 300, "a valid payload variant constructs");
+
+  string msg = "";
+  Temperature bad = Temperature.Kelvin(-1)? e {
+    msg = e.message.clone();
+    Temperature.Kelvin(0)?!
+  };
+  assert(msg == "kelvin below absolute zero", "the enum invariant ran, got: {msg}");
+
+  // A payload variant the invariant does not constrain still goes through
+  // validation — it just passes.
+  Temperature warm = Temperature.Celsius(20)?!;
+  int c = match warm {
+    Temperature.Celsius(d) => d, _ => -1,
+  };
+  assert(c == 20, "an unconstrained payload variant validates and passes, got {c}");
+}
+
+enum_fieldless_variant_has_no_state_to_validate() `test {
+  // A plain enumerated value is not a construction expression at all, so it
+  // needs no `?` / `^` / `?!`.
+  Temperature t = Temperature.Unspecified;
+  bool unspecified = match t {
+    Temperature.Unspecified => true, _ => false,
+  };
+  assert(unspecified, "a fieldless variant is unaffected");
+}
+
+// --- the clone exemption is scoped to the clone's own type -------------------
+
+type Guarded {
+  int n `final;
+
+  _validate!(this) {
+    if this.n < 0 {
+      raise error("guarded negative");
+    }
+  }
+}
+
+type Copier {
+  int n `final;
+
+  _validate!(this) {
+    if this.n < 0 {
+      raise error("copier negative");
+    }
+  }
+
+  // Self(...) is exempt here. A DIFFERENT validated type is not — building one
+  // inside a clone body still runs its invariant, so it needs an operator.
+  clone() Self {
+    Guarded probe = Guarded(n: this.n)?!;
+    return Self(n: probe.n);
+  }
+}
+
+clone_exempts_its_own_type_but_not_others() `test {
+  Copier c = Copier(n: 3)?!;
+  Copier copy = c.clone();
+  assert(copy.n == 3, "the clone copied, got {copy.n}");
+
+  // Both invariants are still LIVE outside the clone body — the exemption must
+  // not have switched either of them off.
+  string outer = "";
+  Copier bad = Copier(n: -1)? e {
+    outer = e.message.clone();
+    Copier(n: 0)?!
+  };
+  assert(outer == "copier negative", "Copier's invariant still runs, got: {outer}");
+
+  string inner = "";
+  Guarded g = Guarded(n: -1)? e {
+    inner = e.message.clone();
+    Guarded(n: 0)?!
+  };
+  assert(inner == "guarded negative", "Guarded's invariant still runs, got: {inner}");
+}
+
+enum Bounded `clone {
+  Level(int n),
+  Unset,
+
+  _validate!(this) {
+    match this {
+      Bounded.Level(n) => {
+        if n < 0 {
+          raise error("negative level");
+        }
+      },
+      _ => {
+      },
+    }
+  }
+}
+
+enum_clone_exempts_its_own_variants() `test {
+  Bounded b = Bounded.Level(7)?!;
+  Bounded c = b.clone();
+  int got = match c {
+    Bounded.Level(n) => n, _ => -1,
+  };
+  assert(got == 7, "the enum clone copied, got {got}");
+
+  // Still live outside the clone body.
+  string msg = "";
+  Bounded bad = Bounded.Level(-1)? e {
+    msg = e.message.clone();
+    Bounded.Level(0)?!
+  };
+  assert(msg == "negative level", "the enum invariant still runs, got: {msg}");
+
+  Bounded unset = Bounded.Unset;
+  bool isUnset = match unset {
+    Bounded.Unset => true, _ => false,
+  };
+  assert(isUnset, "a fieldless variant needs no handling");
+}
+
+// --- clone (§5.7: a clone copies an already-valid original) -----------------
+
+type Document `clone {
+  string title `final;
+  int pages `final;
+
+  _validate!(this) {
+    if this.pages < 1 {
+      raise error("no pages");
+    }
+  }
+}
+
+synthesized_clone_does_not_validate() `test {
+  Document d = Document(title: "a heap-allocated title", pages: 3)?!;
+  Document c = d.clone();
+  assert(c.pages == 3, "the clone is an identical copy");
+  assert(c.title == "a heap-allocated title", "including its heap fields");
+
+  // The exemption is for clone() only — ordinary construction still validates.
+  string msg = "";
+  Document bad = Document(title: "t", pages: 0)? e {
+    msg = e.message.clone();
+    Document(title: "t", pages: 1)?!
+  };
+  assert(msg == "no pages", "a `clone type still validates on construction, got: {msg}");
+}
+
+type Manual {
+  string tag `final;
+  int size `final;
+
+  _validate!(this) {
+    if this.size < 1 {
+      raise error("empty");
+    }
+  }
+
+  // A hand-written clone gets the same exemption, which is what keeps a
+  // validated type satisfiable as `Cloneable` (clone() Self is not failable).
+  clone() Self {
+    return Self(tag: this.tag.clone(), size: this.size);
+  }
+}
+
+hand_written_clone_does_not_validate() `test {
+  Manual m = Manual(tag: "a heap-allocated tag", size: 2)?!;
+  Manual c = m.clone();
+  assert(c.size == 2 && c.tag == "a heap-allocated tag", "the copy is independent and unvalidated");
+
+  string msg = "";
+  Manual bad = Manual(tag: "t", size: 0)? e {
+    msg = e.message.clone();
+    Manual(tag: "t", size: 1)?!
+  };
+  assert(msg == "empty", "a hand-written clone does not disable the invariant, got: {msg}");
+}
+
+// --- leak discipline --------------------------------------------------------
+//
+// A failing invariant runs over a COMPLETE instance, so the error path must
+// free it — including its transitive heap fields. The batch harness's
+// alloc-count check is the assertion; the loop makes any per-iteration leak
+// unmistakable.
+
+type Heavy {
+  string label `final;
+  int size `final;
+
+  _validate!(this) {
+    if this.size < 0 {
+      raise error("negative size");
+    }
+  }
+
+  build!(int size) Self `factory {
+    h := Self(label: "a label long enough to force a heap allocation", size: 0);
+    h.size = size;
+    return h;
+  }
+}
+
+raise_from_field_init_frees_the_instance() `test {
+  int i = 0;
+  while i < 100 {
+    bool raised = false;
+    Heavy h = Heavy(label: "a label long enough to force a heap allocation", size: -1)? e {
+      raised = true;
+      Heavy(label: "ok", size: 0)?!
+    };
+    assert(raised, "rejected");
+    i = i + 1;
+  }
+}
+
+raise_through_a_propagating_frame_frees_the_instance() `test {
+  int i = 0;
+  while i < 100 {
+    bool raised = false;
+    Heavy h = make_heavy(-1)? e {
+      raised = true;
+      Heavy(label: "ok", size: 0)?!
+    };
+    assert(raised, "rejected through a propagating frame");
+    i = i + 1;
+  }
+}
+
+make_heavy!(int size) Heavy {
+  return Heavy(label: "another heap-allocated label value", size: size);
+}
+
+raise_from_a_factory_return_frees_the_local() `test {
+  int i = 0;
+  while i < 100 {
+    bool raised = false;
+    Heavy h = Heavy.build(-1)? e {
+      raised = true;
+      Heavy.build(0)?!
+    };
+    assert(raised, "the factory's deferred validation unwound its local");
+    i = i + 1;
+  }
+}
+
+// --- construction contexts ---------------------------------------------------
+//
+// A validated construction is an ordinary failable expression, so it has to work
+// everywhere one does. These cover the positions with distinct codegen paths.
+
+takes_a_port(Port p) int {
+  return p.value;
+}
+
+validated_construction_as_a_call_argument() `test {
+  int n = takes_a_port(Port(value: 8)?!);
+  assert(n == 8, "argument position");
+
+  // …and auto-propagating out of the argument position.
+  string msg = "";
+  int m = call_with_bad_port()? e {
+    msg = e.message.clone();
+    -1
+  };
+  assert(msg == "port out of range: -1", "propagated from the argument, got: {msg}");
+}
+
+call_with_bad_port!() int {
+  return takes_a_port(Port(value: -1));
+}
+
+validated_construction_pushed_into_a_container() `test {
+  Port[] ports = [];
+  int i = 1;
+  while i <= 3 {
+    ports.push(Port(value: i * 10)?!);
+    i = i + 1;
+  }
+  assert(ports.len == 3 && ports[2].value == 30, "pushed into a vector");
+}
+
+validated_construction_inside_a_goroutine() `test {
+  done := channel[int](1);
+  go {
+    Port p = Port(value: 42)?!;
+    done.send(p.value);
+  };
+  int got = (<-done) ?: 0;
+  assert(got == 42, "constructed inside a goroutine");
+}
+
+type Server {
+  Port port;
+  string name;
+}
+
+validated_construction_as_a_field_of_another_type() `test {
+  Server s = Server(port: Port(value: 8080)?!, name: "web");
+  assert(s.port.value == 8080, "the validated field is set");
+
+  // The enclosing type is NOT validated, but its field's construction is — so
+  // the failure propagates out of the enclosing construction.
+  string msg = "";
+  Server bad = make_server(-1)? e {
+    msg = e.message.clone();
+    Server(port: Port(value: 1)?!, name: "fallback")
+  };
+  assert(msg == "port out of range: -1", "the field's invariant propagated, got: {msg}");
+}
+
+make_server!(int v) Server {
+  return Server(port: Port(value: v), name: "x");
+}
+
+// --- deferral on a value type, and a generic inherited chain -----------------
+
+// A value type's factory uses the same `final fixup window. Its chain receiver
+// is a pointer to the value struct — there is no instance pointer.
+type Scaled {
+  int num `value `final;
+  int den `value `final;
+
+  _validate!(this) {
+    if this.den == 0 {
+      raise error("zero denominator");
+    }
+  }
+
+  build!(int n, int d) Self `factory {
+    r := Self(num: 0, den: 0); // the placeholder violates the invariant
+    r.num = n;
+    r.den = d;
+    return r;
+  }
+}
+
+value_type_factory_defers_to_its_return() `test {
+  Scaled r = Scaled.build(3, 4)?!;
+  assert(r.num == 3 && r.den == 4, "fixed before validation, got {r.num}/{r.den}");
+
+  string msg = "";
+  Scaled bad = Scaled.build(1, 0)? e {
+    msg = e.message.clone();
+    Scaled.build(0, 1)?!
+  };
+  assert(msg == "zero denominator", "the deferred chain ran at the return, got: {msg}");
+}
+
+// A GENERIC child inheriting a GENERIC validated parent. Each link is named
+// against its own monomorphized instance, parent first.
+type GBase[T] {
+  T tag;
+  int lo `final;
+  _validate!(this) {
+    if this.lo < 0 {
+      raise error("base: lo negative");
+    }
+  }
+}
+
+type GChild[T] is GBase[T] {
+  int hi `final;
+  _validate!(this) {
+    if this.hi < this.lo {
+      raise error("child: hi below lo");
+    }
+  }
+}
+
+generic_inherited_chain_runs_parent_first() `test {
+  GChild[string] c = GChild[string](tag: "x", lo: 1, hi: 5)?!;
+  assert(c.hi == 5 && c.lo == 1, "constructed");
+
+  string a = "";
+  GChild[string] bad = GChild[string](tag: "x", lo: -1, hi: 0)? e {
+    a = e.message.clone();
+    GChild[string](tag: "y", lo: 0, hi: 0)?!
+  };
+  assert(a == "base: lo negative", "the generic parent ran first, got: {a}");
+
+  // A second instantiation monomorphizes its own chain.
+  string b = "";
+  GChild[int] bad2 = GChild[int](tag: 7, lo: 5, hi: 1)? e {
+    b = e.message.clone();
+    GChild[int](tag: 0, lo: 0, hi: 0)?!
+  };
+  assert(b == "child: hi below lo", "the generic child ran, got: {b}");
+}
+
+// An enum variant carrying a HEAP payload whose invariant rejects it: the enum
+// constructor temp owns that payload, so the error path must drop it.
+enum Tagged {
+  Named(string label),
+  Empty,
+
+  _validate!(this) {
+    match this {
+      Tagged.Named(l) => {
+        if l.len < 3 {
+          raise error("label too short");
+        }
+      },
+      _ => {
+      },
+    }
+  }
+}
+
+raise_from_an_enum_payload_frees_it() `test {
+  int i = 0;
+  while i < 100 {
+    string msg = "";
+    // Concatenated so the payload is a heap string, not a .rodata literal —
+    // a literal would free nothing and the check would prove nothing.
+    Tagged t = Tagged.Named("ab" + "")? e {
+      msg = e.message.clone();
+      Tagged.Empty
+    };
+    assert(msg == "label too short", "rejected");
+    i = i + 1;
+  }
+}
+
+raise_from_a_generic_heap_element_frees_it() `test {
+  int i = 0;
+  while i < 100 {
+    string msg = "";
+    Boxed[string] b = Boxed[string](item: "a heap allocated " + "element value", count: 0)? e {
+      msg = e.message.clone();
+      Boxed[string](item: "ok", count: 1)?!
+    };
+    assert(msg == "count must be positive", "rejected");
+    i = i + 1;
+  }
+}

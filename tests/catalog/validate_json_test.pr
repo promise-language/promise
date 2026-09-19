@@ -1,0 +1,98 @@
+// T1752 — a `serializable type's synthesized `decode` must satisfy the type's
+// `_validate!` invariant. Before T1752 a type could be validated OR
+// deserializable, never both: validation in a constructor made the synthesized
+// `decode` fail to compile (`:0:0: unknown parameter …`), and validation in a
+// factory was silently bypassed — `decode` constructed straight through
+// field-init, producing an instance no construction path in the type would
+// produce and punching a hole through the `final guarantee.
+//
+// `decode` is a `factory ending in `return Self(args)`, so the ordinary rule
+// covers it with no special case: the construction validates, and `decode` is
+// already `!`, so the raise propagates to whoever asked for the value.
+use json;
+
+type Port `serializable {
+  int value `final;
+
+  _validate!(this) `doc("Raises if this instance violates the type's invariant.") {
+    if this.value < 1 || this.value > 65535 {
+      raise error("port out of range: " + this.value.to_string());
+    }
+  }
+}
+
+decode_of_a_valid_payload_round_trips() `test {
+  Port p = Port(value: 80)?!;
+  string wire = json.encode_string(p)?!;
+  Port back = json.decode_string[Port](move wire)?!;
+  assert(back.value == 80, "a valid payload survives the round trip");
+}
+
+decode_of_an_invalid_payload_raises() `test {
+  // The `Port(-5)` case from the item: decode must raise rather than produce
+  // an instance no construction path in the type would produce.
+  string wire = "\{\"value\":-5}";
+  string msg = "";
+  Port back = json.decode_string[Port](move wire)? e {
+    msg = e.message.clone();
+    Port(value: 1)?!
+  };
+  assert(msg == "port out of range: -5", "decode enforced the invariant, got: {msg}");
+  assert(back.value == 1, "the handler's recovery value is used");
+}
+
+// A nested validated field is validated by its own decode, so a bad inner
+// payload is rejected even though the outer type's invariant says nothing
+// about it.
+//
+// The `flatten field is declared FIRST deliberately. With a heap field ahead of
+// it (`string host; Port port `flatten;`) this leaks one allocation — T2187, a
+// pre-existing codegen bug unrelated to `_validate!`: a heap field already
+// moved into a partially-built instance is freed with `pal_free` alone when a
+// LATER constructor argument raises. It reproduces with a plain `new!` on the
+// pristine tree, so it is not fixed here. Restore the other field order once
+// T2187 lands — it is the stronger test.
+type Endpoint `serializable {
+  Port port `flatten;
+  string host;
+}
+
+decode_validates_a_nested_field() `test {
+  string wire = "\{\"value\":-1,\"host\":\"example.com\"}";
+  bool raised = false;
+  Endpoint e2 = json.decode_string[Endpoint](move wire)? e {
+    raised = true;
+    Endpoint(port: Port(value: 1)?!, host: "fallback")
+  };
+  assert(raised, "the nested Port's invariant rejected the payload");
+  assert(e2.host == "fallback", "the handler's recovery value is used");
+}
+
+// The failure path must not leak: the instance validation rejects is COMPLETE,
+// so its transitive heap fields need freeing too. The batch harness's
+// alloc-count check is the assertion; the loop makes a per-iteration leak
+// unmistakable.
+type Labelled `serializable {
+  string label `final;
+  int size `final;
+
+  _validate!(this) {
+    if this.size < 0 {
+      raise error("negative size");
+    }
+  }
+}
+
+decode_failure_does_not_leak() `test {
+  int i = 0;
+  while i < 100 {
+    string wire = "\{\"label\":\"a label long enough to force a heap allocation\",\"size\":-1}";
+    bool raised = false;
+    Labelled l = json.decode_string[Labelled](move wire)? e {
+      raised = true;
+      Labelled(label: "ok", size: 0)?!
+    };
+    assert(raised, "rejected");
+    i = i + 1;
+  }
+}

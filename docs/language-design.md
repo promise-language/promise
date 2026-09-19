@@ -1735,7 +1735,8 @@ allocate + zero-init + RTTI
   → new() body [if has new]
   → `final fields frozen
   → instance returned
-  → _validate!() at the receiving site [if declared; parent's first]
+  → _validate!() at the construction expression [if declared; parent's first]
+        (deferred to the enclosing `factory's `return` for a Self it built)
   → ... use ...
   → drop() [if has drop, at scope exit]
   → field drops [compiler-inserted, reverse order]
@@ -1761,20 +1762,42 @@ type Port {
 
 The receiver is a **shared** borrow, so validation reads every field and mutates none. A
 `` _validate! `` is therefore never part of the `` `final `` audit surface described above.
+The name is **reserved**: a getter or setter may not take it, since one would shadow the
+invariant at every `x._validate` while leaving the invariant itself in place.
 
-**It runs once, at the receiving site** — the first point the value is received by code
-outside the type's own construction paths. Every path is covered: field-init, `new`, a
-`` `factory ``, and the `` `serializable ``-synthesized `decode`. A factory that obtains a
-`Self` from another factory does not re-validate it; only the outermost result is validated.
+**It runs exactly once, at the construction expression** — the point the value is first
+received by code outside the type's own construction paths. Every path is covered: field-init,
+`new`, a `` `factory ``, and the `` `serializable ``-synthesized `decode` (which is a factory
+ending in `return Self(…)`, so it needs no special case).
+
+The one exception is a `Self` constructed **inside a `` `factory `` on that same type**: that
+instance is still under construction, since the factory may go on to reassign its `` `final ``
+fields, so validation is **deferred to the factory's `return`** — the point it leaves the
+type's own construction paths, after the fixups are finished. A **factory call site never
+re-validates**: the factory already did. So a factory that obtains a `Self` from another
+factory passes it through untouched, and a factory that builds a *different* validated type
+(a child it returns, say) validates it at that construction, not at its own `return`. The
+latter is why such a factory must itself be `!` — the construction inside it is a failable
+expression, and the ordinary rules force the marker onto the signature.
 
 **It runs after construction is complete**, over a fully-initialized instance. A factory may
 therefore construct with placeholder values and fix `` `final `` fields afterwards (see
 above) without validation ever observing the intermediate state. Where a parent also declares
-`` _validate! ``, the parent's runs first, and both see the complete instance.
+`` _validate! ``, the parent's runs first, and both see the complete instance — a child's
+`` _validate! `` *adds to* its parent's rather than overriding it.
 
 **A `Self` constructed inside its own factory must leave by `return`.** Stashing it, or
-letting it escape by any other route, is rejected — the receiving-site rule has no point at
-which to fire.
+letting it escape by any other route, is rejected — the deferral has no other point at which
+to fire. Reading and writing its fields is of course still allowed; that is the whole point of
+the deferral.
+
+Deferral applies to a `Self` **bound to a local**, which is precisely what opens the fixup
+window: only a named binding can be reassigned afterwards. A `Self` built anywhere else in the
+factory has no such window — nothing can reach it to change it — so it is validated in place,
+including each arm of a `return if … { Self(…) } else { Self(…) }`. An **error operator on a
+deferred binding is rejected**: the chain has not run at that point, so there is no failure for
+`?` / `^` / `?!` to handle, and honouring one instead would validate *before* the fixup and
+leave the fixed value unvalidated.
 
 **Every construction path on a validated type is failable.** `new` must be declared `new!`,
 every `` `factory `` must be declared `!`, and field-init at a call site is a failable
@@ -1790,10 +1813,19 @@ alike in this: neither needs `!` for storage, and both need it once they declare
 `` _validate! ``. There is no value-type exemption.
 
 `clone()` does not validate: a clone is an identical copy of an instance that was already
-valid. Enums whose variants carry payloads follow the same rules as any other instance; plain
-enumerated values have no state to validate.
+valid. This covers the compiler-synthesized `` `clone `` and a hand-written `clone()` alike —
+a `Self(…)` built inside either is exempt. It has to be both, because `Cloneable` declares
+`clone() Self` with no `!` (see `modules/std/clone.pr`), so a validated type could not
+otherwise satisfy it.
 
-> Tracked: T1752
+The exemption is scoped to the clone's **own** type. Building some *other* validated value
+inside a clone body still runs that value's invariant — a clone is not a blanket opt-out for
+every invariant within reach.
+
+Enums whose variants carry payloads follow the same rules as any other instance. A
+**fieldless variant is a plain enumerated value** with no state to validate — it is not a
+construction expression at all, so naming one needs no `?` / `^` / `?!`, even on an enum whose
+other variants carry payloads.
 
 #### Definite-Assignment Analysis
 

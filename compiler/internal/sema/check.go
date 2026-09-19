@@ -67,6 +67,31 @@ type Checker struct {
 	protocolTriggers     map[string][]ProtocolTriggerEntry // method name → unimported module entries (nil = disabled)
 	protocolModuleLoader ProtocolModuleLoader              // on-demand loader callback (nil = disabled)
 	loadedProtocolScopes map[string]*types.Scope           // cache of on-demand loaded module scopes
+
+	// T1752: construction expressions inside the current `factory body that
+	// build the factory's own Self, and the locals bound to them. Validation is
+	// deferred from such a construction to the factory's `return` — the point
+	// the instance leaves the type's own construction paths, after any
+	// post-construction `final fixups.
+	factoryDeferredCtors  map[ast.Expr]bool
+	factoryDeferredLocals map[string]bool
+	// T1752: grants the CURRENT sub-expression permission to name a deferred
+	// Self local. Only the two positions that do not let the instance escape —
+	// a member access target and a `return` value — set it. Snapshot/cleared at
+	// checkExpr entry exactly like sliceTypeAllowed, so it cannot leak into a
+	// sibling expression; every other position therefore rejects by default.
+	deferredSelfAllowed bool
+	// T1752: the type or enum whose clone() body is being checked, else nil.
+	// §5.7 exempts clone from validation — a clone is an identical copy of an
+	// instance that was already valid — so a Self built there is not a validate
+	// site. Covers the compiler-synthesized `clone as well as a hand-written
+	// one, which is what keeps a validated type satisfiable as `Cloneable`
+	// (whose clone() Self is not failable).
+	//
+	// It holds the OWNER, not a bool, because the exemption is for copying THIS
+	// instance: building some OTHER validated value inside a clone body still
+	// validates it.
+	cloneBodyOwner types.Type
 }
 
 // paramDefault pairs a parameter that declares a default with its AST default
@@ -288,6 +313,7 @@ func CheckWithProtocols(file *ast.File, moduleScopes map[string]*types.Scope, ta
 			ErrorHandlerTypes:        make(map[*ast.ErrorHandlerExpr]types.Type),
 			TypeRefs:                 make(map[ast.TypeRef]types.Type),
 			FailableExprs:            make(map[ast.Expr]bool),
+			ValidateSites:            make(map[ast.Expr]ValidateSiteKind),
 			AutoPropagateExprs:       make(map[ast.Expr]bool),
 			OptionalRecoveryHandlers: make(map[ast.Expr]bool),
 			OptionalHandlers:         make(map[ast.Expr]bool),
@@ -323,6 +349,7 @@ func CheckWithProtocols(file *ast.File, moduleScopes map[string]*types.Scope, ta
 	c.validateEnumNoSelfRefRecursion(file) // T0628: reject directly-recursive enums before codegen stack-overflows
 	c.validateConstructors(file)           // Validate: constructor inheritance (after all types defined)
 	c.validateAbstractOverrides(file)      // T1376: reject concrete overrides with incompatible signatures
+	c.validateInvariantMethods(file)       // T1752: _validate! shape + every construction path on a validated type is failable
 	c.validateProtocolAnnotations(file)    // T1731: validate `structural(protocol: true) placement
 	c.checkProtocolNearMisses(file)        // T1731+T1732: reject protocol near-miss signatures (in-scope + unimported)
 	c.validateBuiltins()                   // Validate: .pr files declare all required operators/methods/fields
@@ -385,6 +412,7 @@ func DeclareAndDefineWithProtocols(file *ast.File, moduleScopes map[string]*type
 			ErrorHandlerTypes:        make(map[*ast.ErrorHandlerExpr]types.Type),
 			TypeRefs:                 make(map[ast.TypeRef]types.Type),
 			FailableExprs:            make(map[ast.Expr]bool),
+			ValidateSites:            make(map[ast.Expr]ValidateSiteKind),
 			AutoPropagateExprs:       make(map[ast.Expr]bool),
 			OptionalRecoveryHandlers: make(map[ast.Expr]bool),
 			OptionalHandlers:         make(map[ast.Expr]bool),
@@ -415,6 +443,7 @@ func DeclareAndDefineWithProtocols(file *ast.File, moduleScopes map[string]*type
 	c.validateEnumNoSelfRefRecursion(file) // T0628: reject directly-recursive enums before codegen stack-overflows
 	c.validateConstructors(file)           // Validate: constructor inheritance
 	c.validateAbstractOverrides(file)      // T1376: reject concrete overrides with incompatible signatures
+	c.validateInvariantMethods(file)       // T1752: _validate! shape + every construction path on a validated type is failable
 	c.validateProtocolAnnotations(file)    // T1731: validate `structural(protocol: true) placement
 	c.checkProtocolNearMisses(file)        // T1731+T1732: reject protocol near-miss signatures (in-scope + unimported)
 
@@ -697,14 +726,25 @@ func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
 			c.inNewBody = true
 			c.checkMethodBody(d.Name, md, m)
 			c.inNewBody = savedInNew
+		} else if md.Name == "clone" && !m.IsFactory() {
+			savedCloneOwner := c.cloneBodyOwner // T1752
+			c.cloneBodyOwner = named
+			c.checkMethodBody(d.Name, md, m)
+			c.cloneBodyOwner = savedCloneOwner
 		} else if m.IsFactory() {
 			savedInFactory := c.inFactoryBody
 			savedFactoryLocals := c.factoryLocals
+			savedDeferredCtors := c.factoryDeferredCtors
+			savedDeferredLocals := c.factoryDeferredLocals
 			c.inFactoryBody = true
 			c.factoryLocals = make(map[string]bool)
+			c.factoryDeferredCtors = make(map[ast.Expr]bool)
+			c.factoryDeferredLocals = make(map[string]bool)
 			c.checkMethodBody(d.Name, md, m)
 			c.inFactoryBody = savedInFactory
 			c.factoryLocals = savedFactoryLocals
+			c.factoryDeferredCtors = savedDeferredCtors
+			c.factoryDeferredLocals = savedDeferredLocals
 		} else if m.Placement() == types.PlaceType {
 			// `global methods: no Self, no this
 			savedCurType := c.curType
@@ -855,7 +895,14 @@ func (c *Checker) checkEnumDecl(d *ast.EnumDecl) {
 		if m == nil || m.Sig() == nil {
 			continue
 		}
+		savedCloneOwner := c.cloneBodyOwner // T1752: same clone exemption for enums
+		if md.Name == "clone" && !m.IsFactory() {
+			c.cloneBodyOwner = enum
+		} else {
+			c.cloneBodyOwner = nil
+		}
 		c.checkMethodBody(d.Name, md, m)
+		c.cloneBodyOwner = savedCloneOwner
 	}
 }
 

@@ -216,12 +216,34 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			var valStruct value.Value = constant.NewUndef(userValueType())
 			valStruct = c.block.NewInsertValue(valStruct, vtablePtr2, 0)
 			valStruct = c.block.NewInsertValue(valStruct, rawPtr, 1)
+			// T1752: new() has finished, so the instance is complete — run its
+			// `_validate! chain here. A raise merges into the SAME result as
+			// new()'s own, so the caller sees one failable construction.
+			var validateErrResult value.Value
+			var validateErrBlock *ir.Block
+			if chain := c.constructionValidateChain(e, typ); len(chain) > 0 {
+				vErrBlock, vErrVal := c.emitValidateChain(rawPtr, chain)
+				okTail := c.block
+				c.block = vErrBlock
+				validateErrResult = c.wrapError(vErrVal, constructorResultType)
+				validateErrBlock = c.block
+				c.block.NewBr(mergeBlock)
+				c.block = okTail
+			}
 			okResult := c.wrapOk(valStruct, constructorResultType)
+			okEnd := c.block
 			c.block.NewBr(mergeBlock)
 
 			// Merge: phi between error and ok results
 			c.block = mergeBlock
-			phi := c.block.NewPhi(ir.NewIncoming(errResult, errBlock), ir.NewIncoming(okResult, okBlock))
+			incomings := []*ir.Incoming{
+				ir.NewIncoming(errResult, errBlock),
+				ir.NewIncoming(okResult, okEnd),
+			}
+			if validateErrResult != nil {
+				incomings = append(incomings, ir.NewIncoming(validateErrResult, validateErrBlock))
+			}
+			phi := c.block.NewPhi(incomings...)
 			return phi
 		}
 	} else {
@@ -581,7 +603,10 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 	valStruct = c.block.NewInsertValue(valStruct, vtablePtr, 0)
 	valStruct = c.block.NewInsertValue(valStruct, rawPtr, 1)
 
-	return valStruct
+	// T1752: the instance is complete — run its `_validate! chain and hand the
+	// caller a failable result. No-op unless sema marked this a validate site.
+	validated, _ := c.emitConstructionValidate(e, valStruct, rawPtr, typ)
+	return validated
 }
 
 // resolveDropFuncForTemp returns the cleanup function for a heap-allocated
@@ -717,8 +742,46 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 		}
 		thisPtr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
 		args := append([]value.Value{thisPtr}, argVals...)
-		c.block.NewCall(fn, args...)
-		return c.block.NewLoad(valueStructType, alloca)
+		newResult := c.block.NewCall(fn, args...)
+
+		// T1752: a failable new() on a value type. The value struct is built in
+		// place, so the error path yields a zero struct and the ok path loads
+		// the finished one; both merge into one failable result, exactly as the
+		// heap path does. A pure value type's fields are all `value (hence
+		// Copy), so there is nothing to drop on the error path.
+		if newMethod != nil && newMethod.Sig().CanError() {
+			resultType := computeResultType(valueStructType)
+			newResultType := newResult.Type().(*irtypes.StructType)
+			tag := c.block.NewExtractValue(newResult, 0)
+
+			errBlock := c.newBlock("new.err")
+			okBlock := c.newBlock("new.ok")
+			mergeBlock := c.newBlock("new.merge")
+			c.block.NewCondBr(tag, errBlock, okBlock)
+
+			c.block = errBlock
+			errVal := c.block.NewExtractValue(newResult, resultErrIdx(newResultType))
+			errResult := c.wrapError(errVal, resultType)
+			c.block.NewBr(mergeBlock)
+
+			c.block = okBlock
+			built := c.block.NewLoad(valueStructType, alloca)
+			okResult, wrapped := c.emitConstructionValidate(e, built, thisPtr, typ)
+			if !wrapped {
+				okResult = c.wrapOk(okResult, resultType)
+			}
+			okEnd := c.block
+			c.block.NewBr(mergeBlock)
+
+			c.block = mergeBlock
+			return c.block.NewPhi(
+				ir.NewIncoming(errResult, errBlock),
+				ir.NewIncoming(okResult, okEnd))
+		}
+
+		built := c.block.NewLoad(valueStructType, alloca)
+		validated, _ := c.emitConstructionValidate(e, built, thisPtr, typ)
+		return validated
 	}
 
 	// Implicit constructor: match arguments to field names
@@ -814,6 +877,11 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 		}
 	}
 
+	// T1752: §5.7 grants no value-type exemption — a validated value type's
+	// construction is failable for exactly the same reason a heap type's is.
+	if chain := c.constructionValidateChain(e, typ); len(chain) > 0 {
+		return c.wrapWithValidateChain(val, c.valueStructRecvPtr(val), chain)
+	}
 	return val
 }
 

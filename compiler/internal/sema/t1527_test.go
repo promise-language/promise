@@ -228,14 +228,14 @@ func TestT1527ValueNewtypeCannotHaveDrop(t *testing.T) {
 	expectError(t, errs, "value type EntityId cannot have a drop() method")
 }
 
-// The failable-new() rule moved into markValueType so it also covers types
-// classified after Define; it must still fire for a plain value type.
-func TestT1527ValueTypeFailableNewStillRejected(t *testing.T) {
-	errs := checkErrs(t, `
-		type Pt { int x `+vt+`; new!(int v) { this.x = v; } }
-		main() {}
+// T1752 lifted the failable-new() rejection for value types — the value-struct
+// constructor now merges new()'s error path into a failable result. The
+// receiver rule still applies: new() takes ~this.
+func TestT1527ValueTypeFailableNewNowAccepted(t *testing.T) {
+	checkOK(t, `
+		type Pt { int x `+vt+`; new!(~this, int v) { if v < 0 { raise error("neg"); } this.x = v; } }
+		main() { p := Pt(v: 1)?!; }
 	`)
-	expectError(t, errs, "value type Pt cannot have a failable new() method")
 }
 
 // A value type dispatches statically, so an abstract method on one could never
@@ -452,16 +452,14 @@ func TestT1527ValueNewtypeOwnNewAllowed(t *testing.T) {
 	expectValueType(t, info, "EntityId")
 }
 
-// A failable new() on a LATE-classified value type is the case the rule moved
-// out of validateNewMethod for: at Define time EntityId is not yet known to be
-// a value type, so the check has to run again once it is.
-func TestT1527ValueNewtypeFailableNewRejected(t *testing.T) {
-	errs := checkErrs(t, `
+// A failable new() on a LATE-classified value newtype is accepted since T1752,
+// for the same reason as the plain value type above.
+func TestT1527ValueNewtypeFailableNewNowAccepted(t *testing.T) {
+	checkOK(t, `
 		type Hash128 { u128 value `+vt+`; }
 		type EntityId is Hash128 { new!(~this, u128 v) { this.value = v; } }
-		main() {}
+		main() { e := EntityId(v: 1u128)?!; }
 	`)
-	expectError(t, errs, "value type EntityId cannot have a failable new() method")
 }
 
 // An abstract method on a value NEWTYPE (classified after Define) is rejected

@@ -139,6 +139,19 @@ func (e *Enum) LookupMethod(name string) *Method {
 	return nil
 }
 
+// OwnValidateMethod returns this enum's _validate! method, or nil. Enums do not
+// inherit, so there is nothing to chain — every declared _validate! is its
+// own. (T1752)
+func (e *Enum) OwnValidateMethod() *Method {
+	return e.LookupMethod(ValidateMethodName)
+}
+
+// IsValidated reports whether constructing a variant of this enum must run a
+// _validate! invariant. (T1752)
+func (e *Enum) IsValidated() bool {
+	return e.OwnValidateMethod() != nil
+}
+
 // LookupUnaryMethod searches for the 0-param (prefix-unary) variant of an
 // operator method by name (T0883), mirroring (*Named).LookupUnaryMethod.
 func (e *Enum) LookupUnaryMethod(name string) *Method {

@@ -6,9 +6,45 @@ import (
 	"testing"
 )
 
+// No test in this package asks the HOST what it has installed. Which programs a
+// machine carries is a fact about the machine, so a test that consults it runs
+// a different check on every one: `sh` as a stand-in runtime made the tests
+// below green wherever Git's usr/bin was on PATH and red everywhere else, and
+// they landed on a commit that bypassed the pre-commit gate, so no host without
+// it ever ran them (T2166). The probe is answered here, once, for the whole
+// package.
+//
+// The value is a sentinel rather than a plausible path: the product only asks
+// whether it is empty, and anything that later tried to EXECUTE it should fail
+// loudly rather than reach some real program.
+func init() {
+	findRuntime = func(name string) string { return "stubbed-runtime:" + name }
+}
+
+// stubRuntimeMissing makes the probe report one runtime absent — how the test
+// ABOUT the probe states its premise, instead of hoping this host lacks a
+// program with some unlikely name.
+func stubRuntimeMissing(t *testing.T, name string) {
+	t.Helper()
+	saved := findRuntime
+	findRuntime = func(n string) string {
+		if n == name {
+			return ""
+		}
+		return saved(n)
+	}
+	t.Cleanup(func() { findRuntime = saved })
+}
+
 // The cross-target suites take minutes and need a toolchain this host may not
 // have, so the runner is a seam: these tests pin which summary field becomes
 // which metric, which is the part that silently reports the wrong number.
+//
+// The fixtures name a runtime NO machine can have. That is the regression
+// guard: if the probe ever goes back to consulting PATH directly, every test
+// naming it fails on every host — where naming the real wasmtime/node would
+// leave them green on any machine that happens to have those, which is the
+// whole bug.
 func TestTargetSuite_SummaryFieldsBecomeTheBaselinedMetrics(t *testing.T) {
 	const summary = "10586 passed, 3 failed, 930 skipped, 2 leaked (814 files, 270.680s)"
 	stub := func(root, target string) (string, error) { return summary, nil }
@@ -18,10 +54,10 @@ func TestTargetSuite_SummaryFieldsBecomeTheBaselinedMetrics(t *testing.T) {
 		suite targetSuite
 		want  map[string]int64
 	}{
-		{targetSuite{target: "wasm32-wasi", runtime: "sh", prefix: "wasm"}, map[string]int64{
+		{targetSuite{target: "wasm32-wasi", runtime: "stub-runtime", prefix: "wasm"}, map[string]int64{
 			"wasm_test_failures": 3, "wasm_leak_count": 2, "wasm_test_count": 10586,
 		}},
-		{targetSuite{target: "wasm32-web", runtime: "sh", prefix: "wasm_web"}, map[string]int64{
+		{targetSuite{target: "wasm32-web", runtime: "stub-runtime", prefix: "wasm_web"}, map[string]int64{
 			"wasm_web_test_failures": 3, "wasm_web_leak_count": 2, "wasm_web_test_count": 10586,
 		}},
 	} {
@@ -52,6 +88,7 @@ func TestTargetSuite_SummaryFieldsBecomeTheBaselinedMetrics(t *testing.T) {
 // that never ran is the one failure mode an incomplete reason exists to
 // prevent — a ratchet would take it as the best this tree has ever been.
 func TestTargetSuite_AMissingRuntimeMeasuresNothing(t *testing.T) {
+	stubRuntimeMissing(t, "no-such-runtime-anywhere")
 	stub := func(root, target string) (string, error) {
 		t.Error("the suite ran without its runtime present")
 		return "", nil
@@ -74,7 +111,7 @@ func TestTargetSuite_AMissingRuntimeMeasuresNothing(t *testing.T) {
 func TestTargetSuite_NoSummaryIsAnError(t *testing.T) {
 	stubGateBuild(t, &fakeBuild{})
 	stub := func(root, target string) (string, error) { return "nothing parseable here", nil }
-	suite := targetSuite{target: "wasm32-wasi", runtime: "sh", prefix: "wasm"}
+	suite := targetSuite{target: "wasm32-wasi", runtime: "stub-runtime", prefix: "wasm"}
 	metrics, _, err := measureTargetSuite(t.TempDir(), suite, stub)
 	if err == nil {
 		t.Fatalf("a suite that printed no summary measured %+v", metrics)

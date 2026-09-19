@@ -66,11 +66,23 @@ type targetSuite struct {
 	prefix  string
 }
 
+// findRuntime answers whether this host carries a target's runtime. It is the
+// one question in these measurements whose subject is the MACHINE rather than
+// the tree, which is exactly why it is a seam: a test that stubs the runner
+// precisely so it needs no toolchain must not then be decided by what this
+// machine happens to have on PATH (T2166, the same class as T2116). The
+// product binding is Which — the probe itself is legitimate: it gates on a
+// runtime that EXECUTES a built artifact without contributing to it, which
+// docs/code-style.md §"Host tools in Go sources" names as one of the three
+// lookups that hold, and docs/gate-system.md says `tested:wasm` needs wasmtime
+// present.
+var findRuntime = Which
+
 // measureTargetSuite is the body both cross-target suites share, with the
 // runner as a parameter so a test can pin which summary field becomes which
 // metric without a WASM toolchain or a four-minute suite.
 func measureTargetSuite(root string, s targetSuite, runSuite suiteRunner) ([]Metric, string, error) {
-	if Which(s.runtime) == "" { // path-ok: the documented runtime for this target
+	if findRuntime(s.runtime) == "" {
 		return []Metric{}, fmt.Sprintf(
 			"%s is not installed, so the %s suite did not run", s.runtime, s.target), nil
 	}

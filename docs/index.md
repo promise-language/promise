@@ -47,7 +47,7 @@ mcp__tracker__list --tag <basename>     # --tag large-integers, for large-intege
 - [release-automation.md](release-automation.md) — GitHub release pipeline: prebuilt blobs, hash-embedded manifest, thin/full + stub builds, publishing.
 - [windows-support.md](windows-support.md) — Native MSVC ABI, Windows SDK, self-contained compiler binary.
 - [wasm-bindings.md](wasm-bindings.md) — WIT/WebIDL ingestion for safe WASM host bindings.
-- [web-apps.md](web-apps.md) — Promise on the web: the `wasm32-web` reactor execution model, host→guest delivery, bounded pumps, and event channels.
+- [web-apps.md](web-apps.md) — Promise on the web: the `wasm32-web` reactor execution model, host→guest delivery, bounded pumps and event channels; then build output and hosting, the `web` module, DOM access, size and startup, and testing a web app.
 - [size-optimization.md](size-optimization.md) — Binary size across targets: canaries, the size gate, `promise size`, and the optimization ladder. WASM is covered today.
 
 ## Infrastructure

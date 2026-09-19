@@ -3,13 +3,16 @@
 > **Tag:** `web-apps` — remaining work to complete this document: `mcp__tracker__list --tag web-apps`
 
 > This document owns **Promise on the web**: what it takes to build a browser
-> application in Promise, compiled to `wasm32-web`. Today that is the execution
-> model — the reactor top level the browser drives, how the host calls *into*
-> Promise code, and the re-entrancy, preemption, lifetime, and delivery rules
-> that follow from a host owning the thread — which is the part everything else
-> rests on. It is also a prerequisite for WebIDL `callback` support — see
+> application in Promise, compiled to `wasm32-web`. Sections 1 through 17
+> specify the execution model — the reactor top level the browser drives, how
+> the host calls *into* Promise code, and the re-entrancy, preemption, lifetime,
+> and delivery rules that follow from a host owning the thread — which is the
+> part everything else rests on. It is also a prerequisite for WebIDL `callback`
+> support — see
 > [promise-language/promise#25](https://github.com/promise-language/promise/issues/25)
-> — but nothing here is WebIDL-specific or bindgen-specific.
+> — but nothing there is WebIDL-specific or bindgen-specific. Sections 18
+> through 22 specify the application path around it: build output and hosting,
+> the `web` module, DOM access, size and startup, and testing.
 >
 > Related: [wasm-bindings.md](wasm-bindings.md) owns the IDL→bindings story and
 > the `promise bind` pipeline; [runtime-architecture.md](runtime-architecture.md)
@@ -640,7 +643,157 @@ with its own version-pinning question (`bin/verify` runs only `tests/ modules/
 examples/ tools/stub/`, so nothing consumed by reference is exercised); it is
 tracked separately and this work neither carries it nor waits on it.
 
-## 18. Non-goals
+## 18. Build output and hosting
+
+A `wasm32-web` build produces two files: the WebAssembly module, and a
+JavaScript loader beside it taking its name from the output. The loader is what
+a page imports; it instantiates the module, supplies the host imports the
+runtime needs, and calls `_initialize`. Which loaders exist, what each `init`
+takes, and which imports are the base set are the artifact contract, and
+[wasm-bindings.md](wasm-bindings.md) §"Browser JS Glue" owns it.
+
+Three things follow for the page, and they belong here rather than there.
+
+**A page loads exactly one loader.** Each loader instantiates the module itself,
+so importing two gives the page two independent instances with two heaps — and
+the one the page is talking to is whichever it happened to call `init` on.
+
+**The loader is named after the build output**, so its name collides with any
+other `.js` of that name in the output directory. A project must therefore not
+share a name with a binding module it consumes: a project named `web` writes a
+`web.js` that overwrites the `web` module's own glue.
+
+**The files are served over HTTP, not opened from disk.** Instantiation streams
+the module through `fetch`, which a `file://` page cannot do, and
+`WebAssembly.instantiateStreaming` rejects a response whose `Content-Type` is
+not `application/wasm`. Any static file server that sets that type satisfies
+both; Promise ships no server component for this, and a page needs no build step
+beyond `promise build`.
+
+A minimal page for an application that uses the `web` module (§19):
+
+```html
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>counter</title>
+<script type="module">
+  import { init } from "./web.js";
+  await init("./app.wasm");
+</script>
+```
+
+For a program with no bindings the bootstrap loader is the equivalent entry
+point — see [wasm-bindings.md](wasm-bindings.md) §"Usage" for its form.
+
+Loading the page is `_initialize` (§4). A reactor program's life continues
+across every later host entry, so the `await` above resolving means setup
+finished, not that the program ended; §13 owns termination.
+
+## 19. The `web` module
+
+`web.events`, `web.on`, the subscription type and `web.terminate` — the surface
+§8, §8.1 and §13 specify — are the public API of a module named `web`, which an
+application reaches with `use web;`.
+
+**That module is external.** It is not embedded in the compiler and does not
+live in this repository; its catalog entry is a URL and a commit pin, the same
+shape as any other binding module. [wasm-bindings.md](wasm-bindings.md) §"Why
+External, Not Embedded" and §"`web` Module (External Catalog)" own that decision
+and the pin's shape; [community-catalog.md](community-catalog.md) owns how a
+project overrides the pin to take a different revision.
+
+The module has two halves, produced differently:
+
+| Half | Origin | Specified by |
+|---|---|---|
+| Web API types — `web.document`, `web.console`, elements, events | generated from WebIDL (§20) | the IDL |
+| `web.events`, `web.on`, the subscription type and its `dropped` count, `web.terminate` | hand-written over the Layer 1 surface of §14 | §8, §8.1, §13 |
+
+The second row is the load-bearing one: **no IDL describes the reactor
+surface.** It is ordinary Promise code written against the two exports and one
+import of §14, it ships in the same module as the generated half so that an
+application needs one `use`, and this document is what specifies it.
+
+## 20. Reaching the DOM
+
+An application reaches the DOM through the generated half of the `web` module
+(§19). Each Web API interface becomes a `` `target(web) `` type wrapping an
+opaque handle into the loader's JS object table; attributes become `get`/`set`
+properties and operations become methods.
+[wasm-bindings.md](wasm-bindings.md) §"WebIDL Parser", §"Type Mapping" and
+§"Reference Table and Ownership" own that mapping and the handle discipline.
+
+**The IDL is the published standard, not a hand-kept copy.** The bindings are
+generated from the curated WebIDL extraction of the W3C and WHATWG
+specifications, pinned by revision, so a change in the binding surface traces to
+a spec revision rather than to an edit.
+
+**An application does not run `promise bind` for standard Web APIs.** It writes
+`use web;` and gets the generated bindings with the module.
+`promise bind webidl` is the path for a host API that no standard describes — a
+vendor extension, an embedder's own API, or a single function the page supplies
+directly, as `examples/11_wasm/web_console.pr` does with a hand-declared
+`wasm_import`.
+
+**Host objects are named roots on the module.** `web.document` and `web.console`
+are what a program writes (§14.2); a handle is an implementation detail of the
+binding, never something an application constructs.
+
+Handles are owned: a wrapper releases its handle when it drops, so exactly one
+wrapper exists per handle. Events are the same machinery, and §12 specifies how
+that interacts with the queue and with subscription close.
+
+## 21. Size and startup
+
+On this target the binary is a download, and its size is a cost the user pays
+before the first line of Promise code runs.
+[size-optimization.md](size-optimization.md) owns size across every target — the
+canaries, the size gate, `promise size`, and the optimization ladder — and
+nothing about measurements or thresholds is restated here.
+
+What is specific to the web target is the startup path and where size sits in
+it:
+
+```
+fetch → compile (streaming, during download) → instantiate → _initialize → first pump
+```
+
+Because `WebAssembly.instantiateStreaming` compiles the module *as it arrives*,
+compilation overlaps the download instead of following it — which is the second
+reason the `application/wasm` response type of §18 matters. A response the
+browser will not stream is not only a correctness problem: it serializes two
+phases that are meant to overlap.
+
+A page ships a release build (`--release`), where link-time optimization across
+every module is what keeps the download to the code the program actually
+reaches.
+
+## 22. Testing a web application
+
+§17 specifies how the Layer 1 primitive is tested. An application is tested the
+way every other Promise program is — `bin/test --wasm-web` and
+`bin/verify --wasm-web` run the suite for `wasm32-web`, and a single file is
+`bin/promise test -target wasm32-web <file>` — with one difference that decides
+what those runs can prove.
+
+The runner for this target is Node with an embedded harness
+(`compiler/cmd/promise/wasm_web_harness.js`). The harness implements the base
+PAL imports and stubs **every other** `promise_env` import as a no-op returning
+zero, so a binding no host implements still links and still runs.
+
+> **A headless `wasm32-web` test can assert on what the guest computes for
+> itself, and on nothing the host is supposed to answer.** A stubbed import
+> returning zero is indistinguishable from a working one that returned zero.
+
+So the headless layer covers computation, the standard library, ownership and
+drop accounting, goroutines, channels and `select`, formatting, and the fact
+that a binding declaration *links* — `examples/11_wasm/web_console.pr` is the
+worked example of a test that asserts only that last property and says so. It
+covers none of DOM behaviour, real events, or the JS→WASM direction: those need
+a browser, which is §17's third layer and lives with the `web` module rather
+than in this repository.
+
+## 23. Non-goals
 
 - **`wasm32-wasi`.** Unchanged: `_start`, run-to-completion, deadlock abort.
 - **Multi-argument and non-void-return callbacks.** The queue entry is
@@ -654,9 +807,3 @@ tracked separately and this work neither carries it nor waits on it.
   of the thread makes this a separate problem; nothing here forecloses it.
 - **Out-of-repo CI plumbing.** §17 covers testing the primitive in this repo; the
   browser-integration pipeline itself lives elsewhere.
-
-Not a non-goal, but out of scope *for this section*: the rest of the web
-application story — what `promise build --target wasm32-web` emits and how a page
-loads it, the shape of the `web` catalog module whose `web.events` / `web.on`
-surface §14 assumes, and how an application reaches the DOM. This document owns
-those; they are simply not written yet. Tracked as T1728.

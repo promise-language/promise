@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
 
 // TestCompilerRTManifestName pins the arch-qualified runtime-manifest name
@@ -341,7 +343,7 @@ func TestEmbeddedCompilerRTIsRealArchive(t *testing.T) {
 // the promise binary having no sibling compiler-rt/ (rung 1). Mirrors
 // TestFindOpenSSLInstalledLocation.
 func TestFindCompilerRTInstalledLocation(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	target := "x86_64-unknown-linux-musl"
@@ -375,7 +377,7 @@ func TestFindCompilerRTCacheRung(t *testing.T) {
 	if !hasEmbeddedCompilerRT {
 		t.Skip("no embedded compiler-rt on this platform")
 	}
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	target := "x86_64-unknown-linux-musl"
@@ -415,7 +417,7 @@ func TestFindCompilerRTStaleCacheIsRejected(t *testing.T) {
 	if !hasEmbeddedCompilerRT {
 		t.Skip("no embedded compiler-rt on this platform")
 	}
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	target := "x86_64-unknown-linux-musl"
@@ -459,7 +461,7 @@ func TestFindCompilerRTEmbeddedExtraction(t *testing.T) {
 	if !hasEmbeddedCompilerRT {
 		t.Skip("no embedded compiler-rt on this platform")
 	}
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	target := "x86_64-unknown-linux-musl"
@@ -527,7 +529,7 @@ func TestCompilerRTValidCrossArch(t *testing.T) {
 // dir it resolved. `promise doctor` is how a user diagnoses a host that cannot
 // link, so the required check must actually pass on a good host.
 func TestDoctorCheckCompilerRTAvailable(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	arch := "x86_64-linux-musl"
@@ -658,7 +660,7 @@ func TestFindCompilerRTConcurrentColdCache(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	const n = 16
 	start := make(chan struct{})
@@ -709,7 +711,7 @@ func TestFindCompilerRTConcurrentColdCache(t *testing.T) {
 // 5's MkdirAll cannot create the cache dir. Skips when rung 4 can satisfy the
 // lookup from the content-addressed store, since then rung 5 is never reached.
 func TestDoctorCheckCompilerRTMissing(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	arch := "x86_64-linux-musl"
@@ -755,7 +757,7 @@ func TestDoctorCheckCompilerRTMissing(t *testing.T) {
 // breaks all three at once, and a mistake in the per-dep arguments breaks
 // exactly one.
 func TestResolveTargetDepViewsFallThroughWhenUnhosted(t *testing.T) {
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	// An arch no manifest can carry entries for, so the Lookup miss is
 	// guaranteed regardless of which blobs this build happens to publish.

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 	"github.com/promise-language/promise/compiler/internal/module"
 )
 
@@ -18,7 +19,7 @@ import (
 // cache dir; the atomic temp-dir + rename fix makes every call observe only a
 // complete module.
 func TestExtractRaceEmbeddedModule(t *testing.T) {
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	// Reference content from the embedded FS for a byte-exact comparison.
 	want, err := embeddedModules.ReadFile("resources/modules/net/promise.toml")
@@ -90,7 +91,7 @@ func TestExtractRaceEmbeddedModule(t *testing.T) {
 // "rename ...\.path.tmp.N: Access is denied." — MoveFileEx refuses to replace
 // any existing directory, empty or not.
 func TestExtractEmbeddedModuleStaleEmptyCacheDir(t *testing.T) {
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	cacheDir, err := module.EmbeddedModuleCacheDir("net")
 	if err != nil {
@@ -181,7 +182,7 @@ func TestPublishExtractedModuleGivesUp(t *testing.T) {
 // embedded source must fail cleanly (before any cache dir is touched) rather than
 // creating an empty/partial directory.
 func TestExtractEmbeddedModuleUnknown(t *testing.T) {
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	dir, err := extractEmbeddedModule("no_such_embedded_module")
 	if err == nil {
@@ -209,7 +210,7 @@ func TestExtractEmbeddedModuleUnknown(t *testing.T) {
 // populated directory without re-extracting, and must never leave a temp sibling
 // behind. The concurrent test only hits this branch nondeterministically.
 func TestExtractEmbeddedModuleIdempotent(t *testing.T) {
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	want, err := embeddedModules.ReadFile("resources/modules/net/promise.toml")
 	if err != nil {

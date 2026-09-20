@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 	"github.com/promise-language/promise/compiler/internal/module"
 )
 
@@ -200,7 +201,7 @@ func TestAddCatalogResolvesToURL(t *testing.T) {
 	bin := locatePromiseBin(t)
 	testVerifyCompilerBin = bin
 	defer func() { testVerifyCompilerBin = "" }()
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	epoch := compilerEpochForTest(t)
 
 	// Create a local bare git repo to act as the "remote", carrying a verifiable

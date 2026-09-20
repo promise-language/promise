@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 	"github.com/promise-language/promise/compiler/internal/codegen"
 )
 
@@ -38,7 +39,7 @@ func TestSupportedTargetsIsDeterministic(t *testing.T) {
 	// PROMISE_HOME is where a disk probe would look for cached payloads.
 	// Repointing it at an empty directory must not change the answer.
 	first := supportedTargets()
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	second := supportedTargets()
 	if !slices.Equal(first, second) {
 		t.Errorf("supportedTargets() changed with PROMISE_HOME: %+v then %+v", first, second)

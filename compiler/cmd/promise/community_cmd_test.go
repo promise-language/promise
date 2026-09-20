@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 	"github.com/promise-language/promise/compiler/internal/module"
 )
 
@@ -37,7 +38,7 @@ func makeCommunityCatalogRepo(t *testing.T, modulesTOML string, indexFiles map[s
 		}
 	}
 	run("init", "--initial-branch=main")
-	run("config", "user.email", "t@t.com")
+	run("config", "user.email", "test@example.com")
 	run("config", "user.name", "T")
 	if err := os.WriteFile(filepath.Join(dir, "modules.toml"), []byte(modulesTOML), 0644); err != nil {
 		t.Fatal(err)
@@ -86,7 +87,7 @@ func makeTaggedModuleRepo(t *testing.T, cli *cliEnv, name, epoch string, good bo
 
 func TestResolveCommunityVerified(t *testing.T) {
 	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	epoch := "2026.1"
 	modulesTOML := "[modules.foo]\nurl = \"https://github.com/promise-community/foo\"\n"
 	index := map[string]string{
@@ -109,7 +110,7 @@ func TestResolveCommunityVerified(t *testing.T) {
 
 func TestResolveCommunityNoIndexForEpoch(t *testing.T) {
 	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	modulesTOML := "[modules.foo]\nurl = \"https://github.com/promise-community/foo\"\n"
 	// Only an older epoch is recorded; the project asks for 2026.3 → §9.10.
 	index := map[string]string{
@@ -133,7 +134,7 @@ func TestResolveCommunityNoIndexForEpoch(t *testing.T) {
 
 func TestResolveCommunityNotListed(t *testing.T) {
 	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	cat := makeCommunityCatalogRepo(t, "[modules.other]\nurl = \"https://github.com/promise-community/other\"\n", nil)
 	t.Setenv("PROMISE_COMMUNITY_CATALOG", cat)
 
@@ -150,7 +151,7 @@ func TestResolveCommunityNotListed(t *testing.T) {
 // runPkgUpdate.
 func TestPkgUpdateCommunityModule(t *testing.T) {
 	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	epoch := compilerEpochForTest(t)
 	url := "https://github.com/promise-community/foo"
 	oldCommit := "1111111111111111111111111111111111111111"
@@ -187,7 +188,7 @@ func TestPkgUpdateCommunityModule(t *testing.T) {
 
 func TestAddCommunityModule(t *testing.T) {
 	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	epoch := compilerEpochForTest(t)
 	commit := "abc123def456abc123def456abc123def456abcd"
 	modulesTOML := "[modules.mymod]\nurl = \"https://github.com/promise-community/mymod\"\n"
@@ -249,7 +250,7 @@ func TestVerifyLocalModuleCompat(t *testing.T) {
 		t.Skip("skipping verify integration test in short mode")
 	}
 	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	bin := locatePromiseBin(t)
 	epoch := compilerEpochForTest(t)
 
@@ -283,7 +284,7 @@ func TestVerifyLocalModuleCompat(t *testing.T) {
 // os.IsNotExist arm of fetchCommunityCatalog.
 func TestResolveCommunityNoModulesToml(t *testing.T) {
 	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	// A valid git repo with content but no modules.toml.
 	dir := t.TempDir()
@@ -296,7 +297,7 @@ func TestResolveCommunityNoModulesToml(t *testing.T) {
 		}
 	}
 	run("init", "--initial-branch=main")
-	run("config", "user.email", "t@t.com")
+	run("config", "user.email", "test@example.com")
 	run("config", "user.name", "T")
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("catalog\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -316,7 +317,7 @@ func TestResolveCommunityNoModulesToml(t *testing.T) {
 // epoch-tag engine path rather than erroring.
 func TestResolveCommunityByURLNotListed(t *testing.T) {
 	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	cat := makeCommunityCatalogRepo(t, "[modules.foo]\nurl = \"https://github.com/promise-community/foo\"\n", nil)
 	t.Setenv("PROMISE_COMMUNITY_CATALOG", cat)
 
@@ -332,7 +333,7 @@ func TestResolveCommunityByURLNotListed(t *testing.T) {
 // the function returns "".
 func TestTagForCommitNoMatch(t *testing.T) {
 	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	if got := tagForCommit("/nonexistent/repo/path", "deadbeef"); got != "" {
 		t.Errorf("tagForCommit(no tags) = %q, want \"\"", got)
 	}

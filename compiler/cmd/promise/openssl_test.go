@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
 
 // TestOpenSSLManifestName pins the arch-qualified runtime-manifest name format.
@@ -159,7 +161,7 @@ func TestOpenSSLValidWrongArch(t *testing.T) {
 // installed location (<HOME>/lib/openssl/<arch>/), findOpenSSL must resolve to
 // that dir (rung 2), the promise binary having no sibling openssl/ (rung 1).
 func TestFindOpenSSLInstalledLocation(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	target := "x86_64-unknown-linux-musl"
@@ -228,7 +230,7 @@ func TestResolveOpenSSLDirNoTLS(t *testing.T) {
 // ladder and returns a directory holding both archives. Uses the installed-
 // location rung so it does not depend on embedded archives being real.
 func TestResolveOpenSSLDirWithTLS(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	target := "x86_64-unknown-linux-musl"
@@ -268,7 +270,7 @@ func TestFindOpenSSLEmbeddedExtraction(t *testing.T) {
 	if !embeddedOpenSSLReal(t) {
 		t.Skip("build embedded only a placeholder — nothing to extract")
 	}
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	target := "x86_64-unknown-linux-musl"
@@ -309,7 +311,7 @@ func TestFindOpenSSLEmbeddedExtraction(t *testing.T) {
 // lists the resolved path. This is an informational check that must never mark
 // the environment unhealthy while TLS is unwired (T1596 / #28).
 func TestDoctorCheckOpenSSLAvailable(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	target := "x86_64-unknown-linux-musl"

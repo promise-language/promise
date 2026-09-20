@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
 
 // cliEnv drives the built promise binary as a subprocess, with its own
@@ -32,7 +34,7 @@ type cliEnv struct {
 func newCLIEnv(t *testing.T) *cliEnv {
 	t.Helper()
 	bin := locatePromiseBin(t)
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	gitconfig := filepath.Join(t.TempDir(), "gitconfig")
 	if err := os.WriteFile(gitconfig,
 		[]byte("[user]\n\temail = test@example.com\n\tname = Test\n[safe]\n\tdirectory = *\n"), 0644); err != nil {

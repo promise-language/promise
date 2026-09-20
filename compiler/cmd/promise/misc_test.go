@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 	"github.com/promise-language/promise/compiler/internal/module"
 )
 
@@ -31,7 +32,7 @@ func TestDirSize(t *testing.T) {
 func TestPrintVersionWithLdflags(t *testing.T) {
 	// When version is set via -ldflags, printVersion uses it. With no channel
 	// file and no commit stamp, the line carries only the (stable) channel (T1101).
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	oldV, oldC := version, commit
 	version = "2026.0-abc1234"
 	commit = ""
@@ -46,7 +47,7 @@ func TestPrintVersionWithLdflags(t *testing.T) {
 func TestPrintVersionWithCommit(t *testing.T) {
 	// On stable channel, commit SHA is suppressed even when the binary was built
 	// with one — epoch version string is the stable identity (T1127).
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	oldV, oldC := version, commit
 	version = "2026.0"
 	commit = "0123456789abcdef0123456789abcdef01234567"
@@ -63,7 +64,7 @@ func TestPrintVersionNextChannelBuild(t *testing.T) {
 	// On the next channel, printVersion surfaces the recorded build-id — the
 	// same identity `update check` compares against — shortened and labeled
 	// "build <sha7>" so it lines up with update check (T1101).
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	if err := module.WriteUpdateChannel(module.ChannelNext); err != nil {
 		t.Fatalf("WriteUpdateChannel: %v", err)
 	}
@@ -87,7 +88,7 @@ func TestPrintVersionNextChannelNoBuild(t *testing.T) {
 	// On the next channel before any build has been downloaded, no build-id is
 	// recorded — ReadEpochBuildID errors and the build segment is omitted (rather
 	// than printing an empty/garbage hash). The channel is still surfaced (T1101).
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	if err := module.WriteUpdateChannel(module.ChannelNext); err != nil {
 		t.Fatalf("WriteUpdateChannel: %v", err)
 	}
@@ -116,7 +117,7 @@ func TestGatherVersionInfoChannelUnreadable(t *testing.T) {
 	// never fail just because PROMISE_HOME is broken. With the channel path made
 	// unreadable (a directory, not a file), UpdateChannel errors and the channel
 	// falls back to stable — version reporting still succeeds (T1101).
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 	if err := os.Mkdir(filepath.Join(home, "channel"), 0755); err != nil {
 		t.Fatalf("mkdir channel dir: %v", err)
@@ -144,7 +145,7 @@ func TestGatherVersionInfoChannelUnreadable(t *testing.T) {
 func TestGatherVersionInfoJSON(t *testing.T) {
 	// gatherVersionInfo carries full (non-shortened) hashes; version --json
 	// encodes {version, channel, commit, build} as the authoritative source (T1101).
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	if err := module.WriteUpdateChannel(module.ChannelNext); err != nil {
 		t.Fatalf("WriteUpdateChannel: %v", err)
 	}
@@ -181,7 +182,7 @@ func TestGatherVersionInfoJSON(t *testing.T) {
 
 func TestPrintVersionFallback(t *testing.T) {
 	// When version is empty, printVersion falls back to embedded catalog epoch.
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	old := version
 	version = ""
 	defer func() { version = old }()
@@ -390,7 +391,7 @@ func TestFindLLVMToolNoPinnedToolchainFails(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("PROMISE_BLOB_MIRROR", srv.URL)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
 
 	// resolveLLVMView memoizes a resolved view for the process; a view another

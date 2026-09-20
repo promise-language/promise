@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 	"github.com/promise-language/promise/compiler/internal/module"
 )
 
@@ -74,7 +75,7 @@ func makeWorkRepo(t *testing.T) string {
 		t.Fatal(err)
 	}
 	gitRun(t, dir, "init", "--initial-branch=main")
-	gitRun(t, dir, "config", "user.email", "t@t.com")
+	gitRun(t, dir, "config", "user.email", "test@example.com")
 	gitRun(t, dir, "config", "user.name", "T")
 	return dir
 }
@@ -82,7 +83,7 @@ func makeWorkRepo(t *testing.T) string {
 // TestVerifyModuleCompatCacheHit asserts a previously cached verdict short-circuits
 // verification — no git fetch, no compiler run (compilerBin is intentionally bogus).
 func TestVerifyModuleCompatCacheHit(t *testing.T) {
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	url, commit, epoch := "github.com/you/cached", "abc123def456abc123def456abc123def456abcd", "2026.1"
 	noop := func(string) {}
 
@@ -116,7 +117,7 @@ func TestVerifyModuleCompatNoTests(t *testing.T) {
 		t.Skip("git not available")
 	}
 	bin := locatePromiseBin(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	repo := makeWorkRepo(t)
 	os.WriteFile(filepath.Join(repo, "promise.toml"), []byte("[module]\nname = \"notests\"\nepoch = \"2026.0\"\n"), 0644)
@@ -166,7 +167,7 @@ func TestVerifyModuleCompatNoTestsCompileError(t *testing.T) {
 		t.Skip("git not available")
 	}
 	bin := locatePromiseBin(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	repo := makeWorkRepo(t)
 	os.WriteFile(filepath.Join(repo, "promise.toml"), []byte("[module]\nname = \"badnotests\"\nepoch = \"2026.0\"\n"), 0644)
@@ -198,7 +199,7 @@ func TestVerifyModuleCompatNoSourceFiles(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	repo := makeWorkRepo(t)
 	os.WriteFile(filepath.Join(repo, "promise.toml"), []byte("[module]\nname = \"empty\"\nepoch = \"2026.0\"\n"), 0644)
@@ -231,7 +232,7 @@ func TestVerifyModuleCompatInvalidToml(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	repo := makeWorkRepo(t)
 	os.WriteFile(filepath.Join(repo, "promise.toml"), []byte("[module]\nname = \"badtoml\"\nepoch = \"next\"\n"), 0644)
@@ -257,7 +258,7 @@ func TestVerifyModuleCompatTransitiveDepIncompatible(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	// Dependency: no tests → compile-only path; /nonexistent/compiler fails → incompatible.
 	dep := makeWorkRepo(t)
@@ -297,7 +298,7 @@ func TestVerifyModuleCompatTransitiveNamedDepIncompatible(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	// Dependency: no tests → compile-only path; /nonexistent/compiler fails → incompatible.
 	dep := makeWorkRepo(t)
@@ -367,7 +368,7 @@ func TestResolveEpochAwareExplicitRefIncompatible(t *testing.T) {
 		t.Skip("git not available")
 	}
 	bin := locatePromiseBin(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	work := makeWorkRepo(t)
 	writeMod(t, work, "brokenref", false) // parse error → incompatible
@@ -397,7 +398,7 @@ func TestResolveEpochAwareStableFallback(t *testing.T) {
 		t.Skip("git not available")
 	}
 	bin := locatePromiseBin(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	work := makeWorkRepo(t)
 	writeMod(t, work, "stablemod", true)
@@ -429,7 +430,7 @@ func TestResolveEpochAwareHeadFallback(t *testing.T) {
 		t.Skip("git not available")
 	}
 	bin := locatePromiseBin(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	work := makeWorkRepo(t)
 	writeMod(t, work, "unver", true)
@@ -461,12 +462,12 @@ func TestResolveEpochAwareWalkBack(t *testing.T) {
 		t.Skip("git not available")
 	}
 	bin := locatePromiseBin(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	work := filepath.Join(shortRepoDir(t), "walkback")
 	os.MkdirAll(work, 0755)
 	gitRun(t, work, "init", "--initial-branch=main")
-	gitRun(t, work, "config", "user.email", "t@t.com")
+	gitRun(t, work, "config", "user.email", "test@example.com")
 	gitRun(t, work, "config", "user.name", "T")
 
 	// Commit A — good — tag epoch-2026.0
@@ -518,12 +519,12 @@ func TestResolveEpochAwareNoCompatible(t *testing.T) {
 		t.Skip("git not available")
 	}
 	bin := locatePromiseBin(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	work := filepath.Join(shortRepoDir(t), "nocompat")
 	os.MkdirAll(work, 0755)
 	gitRun(t, work, "init", "--initial-branch=main")
-	gitRun(t, work, "config", "user.email", "t@t.com")
+	gitRun(t, work, "config", "user.email", "test@example.com")
 	gitRun(t, work, "config", "user.name", "T")
 
 	writeMod(t, work, "nocompat", false) // broken
@@ -556,12 +557,12 @@ func TestResolveEpochAwareOnlyNewerEpochs(t *testing.T) {
 		t.Skip("git not available")
 	}
 	bin := locatePromiseBin(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	work := filepath.Join(shortRepoDir(t), "onlynewer")
 	os.MkdirAll(work, 0755)
 	gitRun(t, work, "init", "--initial-branch=main")
-	gitRun(t, work, "config", "user.email", "t@t.com")
+	gitRun(t, work, "config", "user.email", "test@example.com")
 	gitRun(t, work, "config", "user.name", "T")
 
 	writeMod(t, work, "onlynewer", true) // good module
@@ -607,12 +608,12 @@ func TestResolveEpochAwareCompatibleHappyPath(t *testing.T) {
 		t.Skip("git not available")
 	}
 	bin := locatePromiseBin(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	work := filepath.Join(shortRepoDir(t), "happy")
 	os.MkdirAll(work, 0755)
 	gitRun(t, work, "init", "--initial-branch=main")
-	gitRun(t, work, "config", "user.email", "t@t.com")
+	gitRun(t, work, "config", "user.email", "test@example.com")
 	gitRun(t, work, "config", "user.name", "T")
 
 	writeMod(t, work, "happy", true)
@@ -791,7 +792,7 @@ func TestVerifyLocalModuleCompatNoSourceFiles(t *testing.T) {
 // the reproducibility guarantee that an old epoch's compiler stays installable at
 // a stable location (§9.10, §7.2).
 func TestEpochCompilerBinPresent(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	epochDir := filepath.Join(home, "epochs", "2026.0", "bin")
@@ -825,12 +826,12 @@ func TestResolveEpochAwareWalksBackPastMissingManifest(t *testing.T) {
 		t.Skip("git not available")
 	}
 	bin := locatePromiseBin(t)
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	work := filepath.Join(shortRepoDir(t), "nomanifest")
 	os.MkdirAll(work, 0755)
 	gitRun(t, work, "init", "--initial-branch=main")
-	gitRun(t, work, "config", "user.email", "t@t.com")
+	gitRun(t, work, "config", "user.email", "test@example.com")
 	gitRun(t, work, "config", "user.name", "T")
 
 	// Commit A — a complete module — tag epoch-2026.0.

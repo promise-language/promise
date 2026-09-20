@@ -137,7 +137,12 @@ type Env struct {
 func NewEnv(t *testing.T) *Env {
 	t.Helper()
 	bin := Bin(t)
-	home := t.TempDir()
+	// The home, not t.TempDir: every command run under this Env materializes the
+	// llvm-view into it, so the directory holds llc.exe / opt.exe by the time
+	// cleanup runs, and on Windows those cannot be unlinked for a moment after
+	// the child exits (T2157's TempDir; the sites that kept t.TempDir are T2189).
+	// The gitconfig dir below never holds an executable and stays t.TempDir.
+	home := TempDir(t)
 	gitconfig := filepath.Join(t.TempDir(), "gitconfig")
 	if err := os.WriteFile(gitconfig,
 		[]byte("[user]\n\temail = test@users.noreply.github.com\n\tname = Test\n[safe]\n\tdirectory = *\n"), 0644); err != nil {
@@ -217,7 +222,7 @@ func CompilerEpoch(t *testing.T) string {
 	t.Helper()
 	cmd := exec.Command(Bin(t), "catalog", "list")
 	cmd.Dir = t.TempDir()
-	cmd.Env = append(os.Environ(), "PROMISE_HOME="+t.TempDir())
+	cmd.Env = append(os.Environ(), "PROMISE_HOME="+TempDir(t))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Skipf("cannot determine compiler epoch: %v\n%s", err, out)

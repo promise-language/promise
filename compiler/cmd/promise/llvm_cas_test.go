@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 	"github.com/promise-language/promise/compiler/internal/blobstore"
 )
 
@@ -618,7 +619,7 @@ func TestViewMaterializeConcurrent(t *testing.T) {
 // attempting to acquire one of those locks during the clean must block until the
 // clean is finished — the lock serialization is the whole point of the fix.
 func TestCleanViewsUnderLock(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	cacheDir := filepath.Join(home, "cache")
@@ -646,7 +647,7 @@ func TestCleanViewsUnderLock(t *testing.T) {
 // materialization locks for the full duration of the clean, so a concurrent
 // publishViewDir blocks rather than losing its staging dir mid-write (T1684).
 func TestCleanViewsUnderLockSerializes(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	cacheDir := filepath.Join(home, "cache")

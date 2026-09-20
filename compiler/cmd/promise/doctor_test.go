@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 )
 
 func TestDoctorDefaultOutput(t *testing.T) {
@@ -60,7 +62,7 @@ func TestDoctorFixFlag(t *testing.T) {
 	// materializing a view right then — the T1616 failure shape, which the
 	// per-area test packages made reachable by compiling concurrently with this
 	// one. Give the wipe its own home so it can only ever clear its own cache.
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 
 	// Java is a dev-only check, reachable only via -dev.
 	output := captureStdout(t, func() {
@@ -731,7 +733,7 @@ func seedCASBlob(t *testing.T, home, content string, mismatch bool) string {
 }
 
 func TestDoctorCheckCASClean(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 	seedCASBlob(t, home, "intact", false)
 
@@ -742,7 +744,7 @@ func TestDoctorCheckCASClean(t *testing.T) {
 }
 
 func TestDoctorCheckCASEmpty(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
 	c := doctorCheckCAS(doctorFlags{})
@@ -755,7 +757,7 @@ func TestDoctorCheckCASEmpty(t *testing.T) {
 }
 
 func TestDoctorCheckCASCorruptFails(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 	seedCASBlob(t, home, "good", false)
 	seedCASBlob(t, home, "bad", true)
@@ -773,7 +775,7 @@ func TestDoctorCheckCASCorruptFails(t *testing.T) {
 }
 
 func TestDoctorCheckCASRepairQuarantines(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 	seedCASBlob(t, home, "good", false)
 	badHash := seedCASBlob(t, home, "bad", true)
@@ -811,7 +813,7 @@ func writeCASEpochRefs(t *testing.T, home, epoch string, lines ...string) {
 // installed epoch) and staging residue are reclaimed, while a referenced blob
 // survives. Plain doctor stays read-only.
 func TestDoctorCheckCASRepairSweepsOrphans(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 	referenced := seedCASBlob(t, home, "referenced-by-epoch", false)
 	orphan := seedCASBlob(t, home, "referenced-by-nobody", false)
@@ -859,7 +861,7 @@ func detailsContain(details []string, sub string) bool {
 // allRefsReadable=false and the sweep must keep EVERY blob — including one that
 // no readable epoch references — rather than wedge that epoch's offline build.
 func TestDoctorCheckCASRepairFailSafeKeepsAll(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 	orphan := seedCASBlob(t, home, "would-be-orphan", false)
 	// An installed epoch whose blobs.refs is unreadable (a directory, not a file)
@@ -882,7 +884,7 @@ func TestDoctorCheckCASRepairFailSafeKeepsAll(t *testing.T) {
 // file, so InstalledEpochs errors), doctor --repair must NOT delete anything —
 // it reports the skip and leaves the orphan blob in place (T1009).
 func TestDoctorCheckCASRepairSkipsOnLiveSetError(t *testing.T) {
-	home := t.TempDir()
+	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 	orphan := seedCASBlob(t, home, "kept-because-liveset-errored", false)
 	// A regular file where the epochs directory is expected → InstalledEpochs

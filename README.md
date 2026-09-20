@@ -8,7 +8,7 @@ Statically-typed language designed for AI-agent efficiency — and written by AI
 
 Promise is also a bet: that an AI agent, with limited human oversight, can build large, complex, *high-quality* software — not throwaway snippets, but systems you maintain for years. This project is the first evidence: it was **built by AI agents**, on a single $200/month subscription.
 
-**Bounded-Autonomy Software Engineering (BASE)** is the methodology behind that bet, and Promise is the pilot project that validates it. The full methodology is in the [white paper](https://github.com/promise-language/reactor/blob/main/WHITEPAPER.md); here is the short version.
+**Bounded-Autonomy Software Engineering (BASE)** is the methodology behind that bet, and Promise is the pilot project that validates it. The full methodology is in the [white paper](https://promise-lang.org/base); here is the short version.
 
 Humans own intent; agents own implementation. The agent is free over the *how*, bounded by two things the human owns: durable **intent** (the what and why) and a mechanical definition of **quality** (gates and ratcheting baselines). Together these form the specification the work must satisfy — and it is *fluid*, not fixed: when the spec proves contradictory, infeasible, or outdated, the agent escalates to renegotiate the bound rather than break it. Humans make the high-level design calls, captured in decision docs; agents implement against them.
 
@@ -24,7 +24,7 @@ Building the compiler this way shows agents can build something large and real. 
 
 The first you can use today; the second is what the project is building toward.
 
-The full methodology is described in the [Bounded-Autonomy Software Engineering white paper](https://github.com/promise-language/reactor/blob/main/WHITEPAPER.md).
+The full methodology is described in the [Bounded-Autonomy Software Engineering white paper](https://promise-lang.org/base).
 
 
 **Mono-versioned catalog.** Promise manages dependency complexity for you. There are no per-package versions, no lockfiles, no version resolution. Instead, the entire ecosystem — compiler, standard library, and all catalog modules — ships as a single atomic release called an **epoch** (e.g., `2026.0`). Every module in an epoch is tested together as a unit. Your project declares which epoch it targets in `promise.toml`, and that's it. An AI agent only needs to know the epoch to generate correct imports — no version guessing.

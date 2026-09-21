@@ -93,10 +93,22 @@ func (c *Compiler) defineWasmUsleep() *ir.Func {
 }
 
 // emitWasmStart creates the WASM entry point. For wasm32-wasi this is `_start`
-// (the WASI Command convention). For wasm32-web it is `_initialize` (called
-// from JS / the Node test harness — there is no WASI runtime to invoke
-// `_start` automatically). Either way the body calls @main and then @pal_exit
-// with main's return code; the allocator self-initializes.
+// (the WASI Command convention): the body calls @main and then @pal_exit with
+// main's return code, unchanged from before this file existed.
+//
+// For wasm32-web it is `_initialize` (called from JS / the Node test harness —
+// there is no WASI runtime to invoke `_start` automatically), and it applies
+// the liveness rule of docs/wasm-web-callbacks.md §4.1: @main (via
+// wrapMainWithScheduler's isWasmWeb branch, which runs the unbounded initial
+// drain of defineWebReactorDrainFunc) returns 0 when the drain completed with
+// zero live registrations — pal_exit exactly as today — or 1 when the
+// instance is a reactor, in which case `_initialize` returns instead of
+// exiting, leaving the heap, registrations, and parked goroutines intact for
+// the host to call promise_web_pump into later. Every program that registers
+// nothing (i.e. every program that doesn't `use web;` and subscribe —
+// sched_wasm_web_delivery.go's promise_web_subscribe is the only writer of
+// live registrations) takes the pal_exit branch, so this stays bit-for-bit
+// unaffected for such programs.
 func (c *Compiler) emitWasmStart(mainFn *ir.Func) {
 	name := "_start"
 	if c.isWasmWeb {
@@ -107,11 +119,24 @@ func (c *Compiler) emitWasmStart(mainFn *ir.Func) {
 	entry := startFn.NewBlock(".entry")
 
 	// Call @main(argc=0, argv=null) — WASM has no command-line arguments
-	exitCode := entry.NewCall(mainFn,
+	result := entry.NewCall(mainFn,
 		constant.NewInt(irtypes.I32, 0),
 		constant.NewNull(irtypes.NewPointer(irtypes.I8Ptr)))
 
-	// Exit with main's return code
-	entry.NewCall(c.palExit, exitCode)
+	if c.isWasmWeb {
+		stayAlive := entry.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+		exitBlk := startFn.NewBlock("exit")
+		returnBlk := startFn.NewBlock("return")
+		entry.NewCondBr(stayAlive, returnBlk, exitBlk)
+
+		exitBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 0))
+		exitBlk.NewUnreachable()
+
+		returnBlk.NewRet(nil)
+		return
+	}
+
+	// wasm32-wasi: exit with main's return code, unconditionally.
+	entry.NewCall(c.palExit, result)
 	entry.NewUnreachable()
 }

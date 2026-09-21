@@ -83,6 +83,7 @@ An end state under discussion. Ratifying one moves it into the root above.
 
 - [proposals/debugging.md](proposals/debugging.md) — Source-level debugging: threading `Pos` through codegen as DWARF metadata so `lldb`/`gdb` can break by line.
 - [proposals/ui.md](proposals/ui.md) — Draft / RFC: the `ui` module across native desktop, WASM, and terminal.
+- [proposals/c-ffi.md](proposals/c-ffi.md) — Draft / RFC: calling C libraries (SQLite and similar) from Promise on Linux/macOS/Windows via `extern` and `raw`, static-first linking through a `promise.toml` `[native]` table.
 
 ## Research — not binding
 

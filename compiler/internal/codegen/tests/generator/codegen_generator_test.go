@@ -951,32 +951,8 @@ func TestT0436BorrowedGeneratorThisAfterOwnedDups(t *testing.T) {
 			for n in h.iter_n() {}
 		}
 	`)
-	// Find the iter_n wrapper, then the generator coroutine it calls. The
-	// wrapper allocates the yield slot and calls @.generator.N — N is unique
-	// per generator function.
-	wrapper := codegentest.ExtractFunction(ir, "T0436Gen.iter_n")
-	if wrapper == "" {
-		t.Fatal("expected T0436Gen.iter_n in IR")
-	}
-	callIdx := strings.Index(wrapper, "@.generator.")
-	if callIdx < 0 {
-		t.Fatal("expected iter_n to call a generator coroutine")
-	}
-	parenIdx := strings.Index(wrapper[callIdx:], "(")
-	if parenIdx < 0 {
-		t.Fatal("malformed coroutine call")
-	}
-	coroName := wrapper[callIdx+1 : callIdx+parenIdx] // ".generator.N"
-	gen := strings.Index(ir, "define i8* @"+coroName+"(")
-	if gen < 0 {
-		t.Fatalf("expected coroutine %s in IR", coroName)
-	}
-	rest := ir[gen:]
-	end := strings.Index(rest, "\n}\n")
-	if end < 0 {
-		end = len(rest)
-	}
-	body := rest[:end]
+	// Find the generator coroutine the iter_n wrapper calls.
+	body := coroutineOf(t, ir, "T0436Gen.iter_n")
 	// With the fix, the borrowed receiver dups the heap value via memcpy.
 	codegentest.AssertContains(t, body, "call void @llvm.memcpy")
 }

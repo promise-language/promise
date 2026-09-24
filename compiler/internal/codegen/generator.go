@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -10,6 +11,7 @@ import (
 	"github.com/llir/llvm/ir/value"
 
 	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/sema"
 	"github.com/promise-language/promise/compiler/internal/types"
 )
 
@@ -208,6 +210,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	savedInGenerator := c.inGenerator
 	savedGenCanError := c.generatorCanError
 	savedYieldSlot := c.generatorYieldSlot
+	savedGenElemType := c.generatorElemType // T2038
 	savedGenErrorSlot := c.generatorErrorSlot
 	savedGenCoroId := c.generatorCoroId
 	savedGenCleanup := c.generatorCleanup
@@ -241,6 +244,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.inCoroutine = false
 	c.inGenerator = true
 	c.generatorCanError = isFailable
+	c.generatorElemType = elemType // T2038: the destination type of every `yield`
 	c.generatorErrorSlot = nil
 	c.panicExitBlock = nil
 	c.coroutineReturnBlock = nil
@@ -478,6 +482,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.inGenerator = savedInGenerator
 	c.generatorCanError = savedGenCanError
 	c.generatorYieldSlot = savedYieldSlot
+	c.generatorElemType = savedGenElemType // T2038
 	c.generatorErrorSlot = savedGenErrorSlot
 	c.generatorCoroId = savedGenCoroId
 	c.generatorCleanup = savedGenCleanup
@@ -576,9 +581,96 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 
 // genYieldStmt generates code for a yield statement inside a generator coroutine.
 // Stores the yielded value into the yield slot, then suspends.
+//
+// T2038: `yield v` transfers ownership of v to the consumer exactly as `return v`
+// hands it to the caller (docs/language-design.md §12.4) — the consumer's for-in
+// binding owns and drops it (genForInGenerator). So the value takes the same
+// escape path as a return value: borrowed places are dup'd, a moved local's drop
+// flag is cleared and the value's own temps are claimed. The statement's other
+// temps are drained BEFORE the suspend, so a consumer that abandons the generator
+// at this yield cannot strand them in the destroyed frame.
 func (c *Compiler) genYieldStmt(s *ast.YieldStmt) {
-	val := c.genExpr(s.Value)
+	elemType := c.generatorElemType
+	if elemType != nil && c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+	if elemType != nil && c.selfSubst != nil {
+		elemType = types.SubstituteSelf(elemType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	enumCtorSnap := len(c.enumCtorTemps)
+	val, needsDup := c.genEscapingValue(s.Value, elemType)
+	boxSrcOwned := c.escapeBoxSrcOwned(s.Value, val, needsDup, elemType)
+	c.releaseEscapedValue(s.Value, val, needsDup, enumCtorSnap, true)
+	val = c.cloneYieldedBorrowAlias(val, elemType)
+	// `yield o!` moves the inner out of an OWNED optional (a local or `move` param),
+	// as the collection-literal / raise / select-send consume sites do (T1073). A
+	// borrowed param's inner was cloned just above instead; its optional stays
+	// intact for the caller (and for a later `yield o!`).
+	if !c.isBorrowedValueParam(forceUnwrapSourceName(s.Value)) {
+		c.neutralizeForceUnwrapElem(s.Value)
+	}
+	val = c.coerceReturnValue(val, s.Value, elemType, boxSrcOwned)
+	// The coerced value (an Optional wrap, a structural box) is the consumer's too.
+	c.claimStringTemp(val)
+	c.claimHeapTemp(val)
+	c.claimEnvTemp(val)
+	c.cleanupStmtLevelTemps()
 	c.emitYieldValue(val)
+}
+
+// forceUnwrapSourceName returns the variable a force-unwrap `o!` (parens and
+// nested unwraps peeled) reads from, or "" when expr is not such an unwrap.
+func forceUnwrapSourceName(expr ast.Expr) string {
+	if !isForceUnwrapElem(expr) {
+		return ""
+	}
+	for {
+		switch e := expr.(type) {
+		case *ast.ParenExpr:
+			expr = e.Expr
+			continue
+		case *ast.OptionalUnwrapExpr:
+			expr = e.Expr
+			continue
+		case *ast.IdentExpr:
+			return e.Name
+		}
+		return ""
+	}
+}
+
+// cloneYieldedBorrowAlias applies §6.2's duplicate-on-alias rule at a `yield`
+// (T2038). A function that returns one of its borrowed params by value is made
+// sound at the CALL SITE (emitReturnAliasCheckSubst compares the result with the
+// arguments); a generator's consumer has no such call site, so the yielded value
+// is compared here with every borrowed value param it could alias — `yield o!` /
+// `yield o ?: d` over a borrowed `string? o` — and deep-cloned on a runtime match,
+// leaving the caller the sole owner of its argument. A fresh value never matches.
+func (c *Compiler) cloneYieldedBorrowAlias(val value.Value, elemType types.Type) value.Value {
+	if val == nil || elemType == nil || isRefType(elemType) || !isTypeDroppable(elemType) {
+		return val
+	}
+	names := make([]string, 0, len(c.borrowedValueParams))
+	for name := range c.borrowedValueParams {
+		names = append(names, name)
+	}
+	sort.Strings(names) // deterministic IR
+	var aliasPtrs []value.Value
+	for _, name := range names {
+		paramType := c.borrowedValueParams[name]
+		if c.typeSubst != nil {
+			paramType = types.Substitute(paramType, c.typeSubst)
+		}
+		alloca := c.locals[name]
+		if alloca == nil || !isTypeDroppable(paramType) || !mayAliasByType(paramType, elemType) {
+			continue
+		}
+		arg := c.block.NewLoad(alloca.ElemType, alloca)
+		if p := extractAliasPtr(c, arg); p != nil {
+			aliasPtrs = append(aliasPtrs, p)
+		}
+	}
+	return c.cloneIfAliases(val, aliasPtrs, elemType)
 }
 
 // genForInGenerator generates a for-in loop over a generator value {handle, slot}
@@ -680,18 +772,42 @@ func (c *Compiler) genForInGenerator(s *ast.ForInStmt, genVal value.Value, elemT
 	c.continueTarget = resumeBlk
 	c.loopScopeDepth = len(c.scopeBindings)
 
+	savedLoopTempFloor := c.enterLoopTempFloor() // T1331
+
 	c.block = bodyBlk
 	curSlot := c.block.NewLoad(irtypes.I8Ptr, slotAlloca)
 	typedSlot := c.block.NewBitCast(curSlot, irtypes.NewPointer(elemLLVM))
 	elemVal := c.block.NewLoad(elemLLVM, typedSlot)
 	c.block.NewStore(elemVal, elemAlloca)
 
+	// T2038: `yield` hands the consumer an OWNED element (genYieldStmt), so the
+	// loop variable owns it and must drop it once per iteration — the same contract
+	// T1440 gave the iterator for-in (genForInCustomIter), and the one ownership
+	// already assumes (a generator binding is Owned, never a container alias). The
+	// binding sits at loopScopeDepth, so break/continue (emitScopeCleanup(
+	// loopScopeDepth)) and an early return/raise (function unwind) drop it too, and
+	// a move out of it (`last = s`) clears its drop flag. The registrations are
+	// those of an owned `move` param: each no-ops for value elements, so
+	// `stream[int]` is unchanged; a closure element owns its env (a transfer, hence
+	// the nil valueExpr) and a structural element its box. dropBindings is not
+	// pruned at scope exit, so forget a same-named earlier loop's entry first — the
+	// structural registration would otherwise mistake it for this binding's own.
+	bodyScopeStart := len(c.scopeBindings) // == c.loopScopeDepth
+	delete(c.dropBindings, s.Binding)
+	c.maybeRegisterDrop(s.Binding, elemAlloca, elemType)
+	c.maybeRegisterEnvFree(s.Binding, elemAlloca, elemType, nil)
+	c.maybeRegisterStructuralParamFree(s.Binding, elemAlloca, elemType)
 	c.genBlock(s.Body)
 
-	// After body: branch to resume
-	if c.block.Term == nil {
+	// After body: drop the element, branch to resume
+	if c.block != nil && c.block.Term == nil {
+		if len(c.scopeBindings) > bodyScopeStart {
+			cap := c.emitScopeCleanup(bodyScopeStart, false)
+			c.emitCloseErrCheck(cap, bodyScopeStart)
+		}
 		c.block.NewBr(resumeBlk)
 	}
+	c.scopeBindings = c.scopeBindings[:bodyScopeStart] // unconditional codegen-time pop
 
 	// Resume: update index, resume coroutine, then check for error (failable) or done
 	c.block = resumeBlk
@@ -708,6 +824,7 @@ func (c *Compiler) genForInGenerator(s *ast.ForInStmt, genVal value.Value, elemT
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopScopeDepth
+	c.loopTempFloor = savedLoopTempFloor // T1331
 
 	// Exit: destroy coroutine + free slots
 	c.block = exitBlk
@@ -873,7 +990,7 @@ func (c *Compiler) emitYieldValue(val value.Value) {
 	resumeBlk := c.newBlock("yield.resume")
 
 	cleanupTarget := c.generatorCleanup
-	if len(c.scopeBindings) > 0 {
+	if len(c.scopeBindings) > 0 || c.hasLiveStmtTemps() {
 		snapshot := make([]scopeBinding, len(c.scopeBindings))
 		copy(snapshot, c.scopeBindings)
 
@@ -890,8 +1007,17 @@ func (c *Compiler) emitYieldValue(val value.Value) {
 		// error and no emitCloseErrCheck follows, so a capture (only possible now
 		// that the T1390 guard fires for failable generators) would leak the error
 		// instance. Suppressing matches destructor-during-unwind semantics (T0135).
-		c.emitScopeCleanup(0, true)
+		if len(snapshot) > 0 {
+			c.emitScopeCleanup(0, true)
+		}
 		c.scopeBindings = savedScope
+		// T2038: also drop the temps of the statement suspended here — a `yield*`
+		// over a temp vector or iterator (`yield* build()`, `yield* v.iter()`) holds
+		// them across every suspend, and the statement end that normally frees them
+		// is never reached once the consumer abandons the generator. After the scope
+		// bindings, so a `yield*` sub-generator is destroyed before the temps it may
+		// still read (T1515's order).
+		c.emitDivergentStmtTempDrops()
 
 		c.block.NewBr(c.generatorCleanup)
 		c.block = savedBlock
@@ -920,10 +1046,10 @@ func (c *Compiler) genYieldDelegateStmt(s *ast.YieldDelegateStmt) {
 		}
 		c.genYieldDelegateGenerator(genVal, elem, s.Pos())
 	} else if arr, ok := iterableType.(*types.Array); ok {
-		c.genYieldDelegateArray(s.Value, arr)
+		c.genYieldDelegateArray(s.Value, arr, sema.YieldDelegateOwnsSource(c.info, s.Value))
 	} else if elem, ok := types.AsVector(iterableType); ok {
 		vecPtr := c.genExpr(s.Value)
-		c.genYieldDelegateVector(vecPtr, elem)
+		c.genYieldDelegateVector(vecPtr, elem, sema.YieldDelegateOwnsSource(c.info, s.Value))
 	} else if elem, ok := types.AsRange(iterableType); ok {
 		c.genYieldDelegateRange(s.Value, elem, iterableType)
 	} else if types.Identical(extractNamed(iterableType), types.TypString) {
@@ -1132,8 +1258,9 @@ func (c *Compiler) genYieldDelegateRange(expr ast.Expr, elemType types.Type, ite
 	c.block = exitBlk
 }
 
-// genYieldDelegateArray yields all elements from a fixed-size array.
-func (c *Compiler) genYieldDelegateArray(expr ast.Expr, arr *types.Array) {
+// genYieldDelegateArray yields all elements from a fixed-size array. srcOwned: the
+// generator owns — and `yield*` consumes — the array (see yieldDelegateElem).
+func (c *Compiler) genYieldDelegateArray(expr ast.Expr, arr *types.Array, srcOwned bool) {
 	basePtr := c.genArrayBasePtr(expr, arr)
 	elemLLVM := c.resolveType(arr.Elem())
 	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
@@ -1158,8 +1285,7 @@ func (c *Compiler) genYieldDelegateArray(expr ast.Expr, arr *types.Array) {
 	curCounter := c.block.NewLoad(irtypes.I64, counterAlloca)
 	elemPtr := c.block.NewGetElementPtr(arrType, basePtr,
 		constant.NewInt(irtypes.I32, 0), curCounter)
-	elem := c.block.NewLoad(elemLLVM, elemPtr)
-	c.emitYieldValue(elem)
+	c.emitYieldValue(c.yieldDelegateElem(elemPtr, elemLLVM, arr.Elem(), srcOwned))
 	c.block.NewBr(updateBlk)
 
 	c.block = updateBlk
@@ -1171,8 +1297,9 @@ func (c *Compiler) genYieldDelegateArray(expr ast.Expr, arr *types.Array) {
 	c.block = exitBlk
 }
 
-// genYieldDelegateVector yields all elements from a Vector.
-func (c *Compiler) genYieldDelegateVector(vecPtr value.Value, elemType types.Type) {
+// genYieldDelegateVector yields all elements from a Vector. srcOwned: the
+// generator owns — and `yield*` consumes — the vector (see yieldDelegateElem).
+func (c *Compiler) genYieldDelegateVector(vecPtr value.Value, elemType types.Type, srcOwned bool) {
 	elemLLVM := c.resolveType(elemType)
 
 	headerType := vectorHeaderType()
@@ -1200,8 +1327,7 @@ func (c *Compiler) genYieldDelegateVector(vecPtr value.Value, elemType types.Typ
 		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, curCounter)
-	elem := c.block.NewLoad(elemLLVM, elemPtr)
-	c.emitYieldValue(elem)
+	c.emitYieldValue(c.yieldDelegateElem(elemPtr, elemLLVM, elemType, srcOwned))
 	c.block.NewBr(updateBlk)
 
 	c.block = updateBlk
@@ -1211,6 +1337,29 @@ func (c *Compiler) genYieldDelegateVector(vecPtr value.Value, elemType types.Typ
 	c.block.NewBr(headerBlk)
 
 	c.block = exitBlk
+}
+
+// yieldDelegateElem loads the element at elemPtr of a Vector/Array that `yield*`
+// is delegating to, as a value the consumer owns (T2038). It is a copy: the
+// container keeps — and later drops — its own elements. The one exception is a
+// closure, whose captured environment cannot be copied (T1045): it is MOVED out
+// instead, leaving the empty closure every container drop skips, which is sound
+// only because `yield*` consumes a container the generator owns (srcOwned); the
+// ownership pass rejects closures from any other (checkYieldDelegateCopyable).
+// Copy/value elements pass through unchanged.
+func (c *Compiler) yieldDelegateElem(elemPtr value.Value, elemLLVM irtypes.Type, elemType types.Type, srcOwned bool) value.Value {
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+	elem := c.block.NewLoad(elemLLVM, elemPtr)
+	if _, isClosure := elemType.(*types.Signature); isClosure && srcOwned {
+		c.block.NewStore(constant.NewZeroInitializer(elemLLVM), elemPtr)
+		return elem
+	}
+	if dup, ok := c.dupOwnedReturnValue(elem, elemType); ok {
+		return dup
+	}
+	return elem
 }
 
 // genYieldDelegateString yields all chars from a string.

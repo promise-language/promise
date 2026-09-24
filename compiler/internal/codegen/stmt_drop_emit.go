@@ -771,6 +771,13 @@ func (c *Compiler) dropDiscardedGenerator(expr ast.Expr, result value.Value) {
 	c.block.NewCondBr(isNull, doneBlk, cleanBlk)
 
 	c.block = cleanBlk
+	if isFailable {
+		// T2038: a failable factory starts eagerly, so unless the body already
+		// finished, its first yielded value waits in the slot. A yield hands its value
+		// to the consumer, and here nobody will consume it — drop it before the
+		// destroy. (A non-failable generator's body has not run: its slot is empty.)
+		c.dropPendingYieldedValue(handle, slot, exprType)
+	}
 	c.block.NewCall(c.genDestroy, handle)
 	c.block.NewCall(c.palFree, slot)
 	if isFailable { // failable generator: also free the error slot (B0023)
@@ -780,6 +787,34 @@ func (c *Compiler) dropDiscardedGenerator(expr ast.Expr, result value.Value) {
 	c.block.NewBr(doneBlk)
 
 	c.block = doneBlk
+}
+
+// dropPendingYieldedValue drops the value a suspended (not done) generator has
+// yielded into its slot but no consumer has taken (T2038). streamType is the
+// generator's `stream[T]` type; value elements need no drop and emit nothing.
+func (c *Compiler) dropPendingYieldedValue(handle, slot value.Value, streamType types.Type) {
+	elemType, ok := types.AsStream(streamType)
+	if !ok {
+		return
+	}
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+	if !isTypeDroppable(elemType) {
+		return
+	}
+	done := c.block.NewCall(c.genDone, handle)
+	dropBlk := c.newBlock("discard.gen.pending")
+	contBlk := c.newBlock("discard.gen.pending.done")
+	c.block.NewCondBr(done, contBlk, dropBlk)
+
+	c.block = dropBlk
+	elemLLVM := c.resolveType(elemType)
+	typedSlot := c.block.NewBitCast(slot, irtypes.NewPointer(elemLLVM))
+	c.emitVariantFieldDrop(c.block.NewLoad(elemLLVM, typedSlot), elemType)
+	c.block.NewBr(contBlk)
+
+	c.block = contBlk
 }
 
 // dropDiscardedHeapType handles B0211: when an ExprStmt discards a heap-allocated

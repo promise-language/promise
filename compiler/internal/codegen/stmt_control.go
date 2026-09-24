@@ -126,222 +126,13 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// as function arguments: `return func(str_var)`). Scope cleanup frees those
 	// variables, so we must compute the return value while they're still alive.
 	var val value.Value
-	if s.Value != nil {
-		c.targetType = retType
-		// T0095/B0179/B0219/B0310/T0487: Signal genFieldAccess to dup string,
-		// Vector|Channel|Arc|Weak, and Optional[...] fields for return values.
-		// Scope cleanup after the return may drop the containing type, freeing
-		// the field — the caller needs an independent copy. Skip for borrow
-		// return types (B0179) — borrows don't own the value.
-		c.setDupFlagsForFieldAccess(retType)
-		// T0440/T1180: Signal genMethodIndex/genVectorIndex to deep-clone the heap
-		// user type out of the container slot for Optional[heap-user] return
-		// values — covers both the droppable and no-drop-but-pal-free inner
-		// shapes. Without this, `return m[k]` / `return v[i]` from a function
-		// owning the container propagates an alias that double-frees when the
-		// container drops at function exit. Routes through the shared
-		// optionalHeapDupElem recognition point so this sink stays in sync with
-		// the var-decl / assignment / mut-ref-arg escape sinks by construction.
-		if _, ok := c.optionalHeapDupElem(retType); ok {
-			c.dupHeapUserFieldAccess = true
-		}
-		// T1146: `return m[k]!` — `!` already unwrapped the Optional, so retType is
-		// the bare element type (not Optional) and the branch above is skipped. The
-		// unwrapped element aliases the map's slot; without a dup the map's drop at
-		// function exit and the caller's drop of the returned value double-free.
-		// Mirror the var-binding form (stmt.go:1133). The returned dup is claimed by
-		// claimHeapTemp(val) below so cleanup doesn't drop it.
-		if (isDroppableHeapUserType(retType) || isHeapUserNoDropPalFree(retType)) &&
-			isUnwrappedContainerIndex(s.Value) {
-			c.dupHeapUserFieldAccess = true
-		}
-		// T1488: a direct `return xs[i]` / `=> xs[i]` where xs is a FIXED-SIZE array
-		// of a bare heap-user / Map-Set / droppable-enum element. genArrayIndex only
-		// dups such an element when dupHeapUserFieldAccess is armed — T0590 arms it at
-		// var-decl (stmt_decl.go) and assignment (stmt_assign.go) RHS sites, but the
-		// direct return/arrow escape never did, so the returned value aliased the
-		// array's owned slot → the array's element-walk drop and the caller's drop of
-		// the returned value double-free at scope exit. Mirror the var-decl arming
-		// (shape = IndexExpr into an *types.Array, gated on the return type). Scoped to
-		// fixed arrays here; the Vector sibling (T1491) lives in the adjacent `else if`
-		// branch below because it must exclude the droppable-enum shape (handled by the
-		// post-hoc cloneEnumValue block below). String elements dup independently
-		// (dupStringFieldAccess); structural via setDupFlagsForFieldAccess;
-		// Optional[heap-user] via optionalHeapDupElem above.
-		if !isRefType(retType) {
-			if idx, isIdx := s.Value.(*ast.IndexExpr); isIdx {
-				tgt := c.info.Types[idx.Target]
-				if c.typeSubst != nil {
-					tgt = types.Substitute(tgt, c.typeSubst)
-				}
-				if _, isArr := tgt.(*types.Array); isArr {
-					if isDroppableHeapUserType(retType) || isHeapUserNoDropPalFree(retType) ||
-						isMapOrSetType(retType) || c.enumElemNeedsDupOnRead(retType) {
-						c.dupHeapUserFieldAccess = true
-					}
-				} else if _, isVec := types.AsVector(tgt); isVec {
-					// T1491: Vector sibling of T1488. A direct `return xs[i]` / `=> xs[i]`
-					// where xs is a Vector of a bare heap-user / Map-Set element aliases the
-					// vector's owned slot; the vector's element-walk drop and the caller's
-					// drop double-free at scope exit. EXCLUDES the droppable-enum shape
-					// (enumElemNeedsDupOnRead): the post-hoc cloneEnumValue block below
-					// already clones droppable-enum vector elements at return time — arming
-					// here too would double-clone (leak). Strings via the B0189 dup below;
-					// Optional[heap-user] via optionalHeapDupElem above.
-					if isDroppableHeapUserType(retType) || isHeapUserNoDropPalFree(retType) ||
-						isMapOrSetType(retType) {
-						c.dupHeapUserFieldAccess = true
-					}
-				}
-			}
-		}
-		// T0982: `return a ?: b` — when the return expression (peeling parens) is an
-		// inline elvis, signal genElvis so it neutralizes a handle/heap none-path
-		// owned-local default's scope-exit drop. The returned value escapes to the
-		// caller; without this the function's own scope-exit drop of the default AND
-		// the caller both free it (Mutex SEGV / Arc UAF / Map/heap double-free).
-		// Vector/string results already neutralize unconditionally (T0936).
-		prevElvisReturned := c.elvisResultReturned
-		if be, ok := unwrapDestructureParens(s.Value).(*ast.BinaryExpr); ok && be.Op == ast.BinElvis {
-			c.elvisResultReturned = true
-		}
-		// T1302: a borrow-typed return (`T&`/`T~`) that force-unwraps a
-		// `this.field!` Optional must NOT dup the inner (genOptionalForceUnwrap's
-		// T0428 Case 3B) — the caller borrows the aliased inner and never frees it,
-		// while the owner's drop still frees the original, so the dup would leak.
-		prevReturningBorrowedUnwrap := c.returningBorrowedUnwrap
-		if retType != nil && isRefType(retType) {
-			c.returningBorrowedUnwrap = true
-		}
-		val = c.genExpr(s.Value)
-		// T1385: `go! { …; return produce(5); }` — a bare failable call as the
-		// returned value auto-propagates. Unwrap it to its success value BEFORE any
-		// cleanup below (mirrors genBlockValue's trailing case); genAutoPropagateValue
-		// runs its own error-path cleanup and routes to the go-block sink via
-		// emitFailableGoBlockError.
-		if goRet && c.inFailableGoBlock && c.info.AutoPropagateExprs[s.Value] {
-			val = c.genAutoPropagateTracked(s.Value, val)
-		}
-		c.returningBorrowedUnwrap = prevReturningBorrowedUnwrap
-		c.elvisResultReturned = prevElvisReturned
-		c.dupStringFieldAccess = false
-		c.dupContainerFieldAccess = false
-		c.dupHeapUserFieldAccess = false
-		c.targetType = nil
-		// T1174: `return maybe` where maybe is a match-borrowed Optional[heap-user]
-		// binding aliases the subject's variant payload; deep-clone the inner so the
-		// returned value survives the scope-exit synth enum drop of the subject.
-		// T1184: skip for borrow return types (`T[N]&`) — a borrow return hands back
-		// an alias the caller never owns or frees (same B0179 rule the field-access
-		// dup above follows), so cloning a borrowed-array param (`echo(string[2] a)
-		// string[2]& { return a; }`) into a borrow result would leak. Owning returns
-		// still dup.
-		if !isRefType(retType) {
-			val, _ = c.dupBorrowedHeapUserPayload(s.Value, val)
-			// T1323: a borrowed (non-`~`) enum VALUE param returned by value aliases
-			// the caller's arg temp — deep-clone the variant payload so the result is
-			// independent (the enum's inline-data payload is invisible to the caller-
-			// side alias check). Enum-only; strings/containers/arrays are covered by
-			// dupBorrowedHeapUserPayload / the string dup above.
-			val, _ = c.dupBorrowedEnumParam(s.Value, val, retType)
-		}
-		val = c.wrapThisReturnValue(val, s.Value, retType)
-		val = c.wrapOperatorParamReturnValue(val, s.Value, retType) // T0897
-		val = c.maybeDupReturnedEnvCapture(val, s.Value, retType)   // T1254
-	}
-
-	// B0189: Dup return value if it's a string that might be borrowed from a
-	// Vector[string] in the current scope. The element drop loop in scope
-	// cleanup will free the vector's elements — if the return value borrows
-	// one of those elements, it would become a dangling pointer.
-	// Covers: `return strVar` (IdentExpr) and `return vec[i]` (IndexExpr).
-	// T0649: skip for borrow return types (`string&`/`string~`) — a borrow
-	// return must hand back the actual reference into existing storage (which
-	// the ownership pass guarantees outlives the call), not a fresh copy.
-	// Dup'ing here would leak: the call site treats a borrow result as a
-	// non-owned alias and never frees it. extractNamed unwraps SharedRef/MutRef
-	// so the TypString check alone fires for `string&`, hence the explicit
-	// isRefType guard.
 	needsDup := false
-	if s.Value != nil && val != nil && extractNamed(retType) == types.TypString && !isRefType(retType) {
-		if ident, ok := s.Value.(*ast.IdentExpr); ok {
-			// T0963: an operator value param returned as an owned string was already
-			// dup'd by wrapOperatorParamReturnValue (cloneOwnedReturnAlias). Dup'ing
-			// again here would leak the first copy — the caller frees the outer dup
-			// and the inner one is orphaned. The op-param dup already yields an
-			// independent heap string, so no vector-element alias survives to protect.
-			if !c.currentOpValueParams[ident.Name] {
-				needsDup = c.hasVectorStringBinding()
-			}
-		} else if idx, ok := s.Value.(*ast.IndexExpr); ok {
-			targetType := c.info.Types[idx.Target]
-			if c.typeSubst != nil {
-				targetType = types.Substitute(targetType, c.typeSubst)
-			}
-			if _, isVec := types.AsVector(targetType); isVec {
-				needsDup = true
-			}
-		}
-		if needsDup {
-			val = c.dupString(val)
-		}
-	}
-
-	// Clone return value if it's a droppable enum loaded from a vector index.
-	// Scope cleanup drops the dup'd vector (freeing its buffer and all elements) —
-	// the shallow enum copy returned by vec[i] would reference freed data.
-	// Analogous to the B0189 string dup above.
-	// T0649: skip for borrow return types (`MyEnum&`/`MyEnum~`) for the same
-	// reason as the string dup — a borrow return must hand back the actual
-	// reference, and cloning here would leak at a binding call site.
-	if s.Value != nil && val != nil && !needsDup && !isRefType(retType) {
-		if idx, ok := s.Value.(*ast.IndexExpr); ok {
-			idxTargetType := c.info.Types[idx.Target]
-			if c.typeSubst != nil {
-				idxTargetType = types.Substitute(idxTargetType, c.typeSubst)
-			}
-			if elemType, isVec := types.AsVector(idxTargetType); isVec {
-				resolvedElem := elemType
-				if c.typeSubst != nil {
-					resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
-				}
-				if enum := extractEnum(resolvedElem); enum != nil {
-					if c.enumInstanceHasDrop(resolvedElem, enum) {
-						if cloned, ok := c.cloneEnumValue(val, resolvedElem); ok {
-							val = cloned
-							needsDup = true // preserve drop flag for source vector
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// T1282: Decide whether a string→structural box at this return move-site should
-	// take ownership of the source pointer (owned source) or clone it (borrowed). This
-	// MUST be computed before the flag-clear (below) and claimStringTemp (further down),
-	// which both mutate the state we read. Owned sources — an owned var / move-param
-	// (has a drop flag) or an owned frame temp (in stmtTempMap) — take the pointer, since
-	// the move-site releases the source. Borrowed sources (literal, borrow param, field
-	// borrow) match neither and stay on the clone path.
-	retBoxSrcOwned := false
 	if s.Value != nil {
-		// Peel Optional so `Showable?` returns take the same owned/borrowed decision
-		// as a plain `Showable` return — the actual box is built inside
-		// coerceReturnToOptionalElem (T1298), which also reads c.boxSrcOwned.
-		structTarget := retType
-		if opt, isOpt := retType.(*types.Optional); isOpt {
-			structTarget = opt.Elem()
-		}
-		if named := extractNamed(structTarget); isStructuralView(named) {
-			if ident, ok := s.Value.(*ast.IdentExpr); ok {
-				// Only owned if the move-site actually clears the flag (!needsDup).
-				retBoxSrcOwned = !needsDup && c.hasDropFlag(ident.Name)
-			} else if _, tracked := c.stmtTempMap[val]; tracked {
-				retBoxSrcOwned = true
-			}
-		}
+		val, needsDup = c.genEscapingValue(s.Value, retType)
 	}
+
+	// T1282: see escapeBoxSrcOwned — MUST be computed before the move-out below.
+	retBoxSrcOwned := s.Value != nil && c.escapeBoxSrcOwned(s.Value, val, needsDup, retType)
 
 	// T1752: a `Self` the enclosing `factory constructed leaves by this return —
 	// run its deferred `_validate! chain now, while the instance and every temp
@@ -349,81 +140,10 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// the ownership move-out below.
 	c.emitDeferredReturnValidate(s, val)
 
-	// Clear drop flag for returned variable (it's being moved out, not dropped).
-	// B0205: When the return value was dup'd (B0189), the original variable must
-	// still be dropped at scope exit — the caller receives the dup, not the original.
-	// Only clear the flag when we're returning the original (no dup).
-	// T1385: `!goRet || goSink` — a fire-and-forget go block discards the returned
-	// value, so leaving the flag set lets emitScopeCleanup drop the local (no leak).
-	if s.Value != nil && !needsDup && (!goRet || goSink) {
-		if ident, ok := s.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		} else if _, ok := unwrapDestructureParens(s.Value).(*ast.CastExpr); ok {
-			// T0783: `return x as! T` aliases x's instance into the returned value;
-			// ownership now moves x at the return, so clear x's drop flag to keep
-			// codegen symmetric — otherwise x's scope-exit drop fires on the same
-			// allocation the caller now owns (double-free).
-			//
-			// T0849: the optional `as` form (Force == false) yields `T?` and is a
-			// *conditional* move (None on a failed downcast). consumeCastSubjectDropFlag
-			// reads the outermost cast's Force: `as!` clears unconditionally; `as`
-			// stores `!isMatch` so x is dropped iff the downcast failed (else the
-			// returned optional owns the aliased instance).
-			if ident := c.castSubjectMovableIdent(s.Value); ident != nil {
-				c.consumeCastSubjectDropFlag(s.Value, ident.Name)
-			}
-		}
-	}
-	// T0108: Clean up statement temps before returning. The return expression may
-	// create intermediate string temps (e.g., dupStringFieldAccess dup copies,
-	// string concat intermediaries) that are normally freed at statement end.
-	// Since return terminates the block, the post-statement cleanup never runs.
-	// Claim the return value first so it's not freed — only intermediaries are freed.
-	// T1385: same fire-and-forget gate as the drop-flag clear above — not claiming
-	// lets the cleanup below free the discarded value.
-	if s.Value != nil && val != nil && (!goRet || goSink) {
-		c.claimStringTemp(val)
-		c.claimHeapTemp(val)
-		c.claimEnvTemp(val)
-	}
-	// B0310: Claim dup'd inner string for Optional[string] return values.
-	// Without this, cleanupStmtTemps would free the dup while it's still
-	// embedded in the return value's optional struct.
-	if c.optionalStringDup != nil {
-		c.claimStringTemp(c.optionalStringDup)
-		c.optionalStringDup = nil
-	}
-	// T0366: Claim dup'd inner container for Optional[Vector|Channel|Arc|Weak] return values.
-	if c.optionalContainerDup != nil {
-		c.claimStringTemp(c.optionalContainerDup)
-		c.optionalContainerDup = nil
-	}
-	// T1317: An inline enum-constructor temp built while evaluating the return
-	// expression as a by-value(-borrow) call argument (e.g.
-	// `return f(Payload.Full(heapStr))`) is owned by the caller — the callee dups
-	// the payload (B0232) and nothing else drops the original. The statement-end
-	// drain (cleanupStmtLevelTemps) frees such a temp for a discarded call, but the
-	// return path never reaches it, so the payload leaks. Clear the flag first when
-	// the return expression is ITSELF an enum constructor (`return Payload.Full(...)`)
-	// — that temp is moved out to the caller (mirrors the B0267 var-decl / T1103
-	// container clears) — then drain the rest. A structural check (not the value's
-	// type) is required so `return g(Payload.Full(...))` where g *returns* an enum
-	// still drains the by-value arg temp rather than mistaking it for the result.
-	// The moved-out shapes are a direct constructor or a branch (match/if) whose
-	// arm values ARE the returned enum — see enumCtorTempMovesOut.
-	//
-	// T1339: bound the clear to temps at/above enumCtorSnap. Temps below the
-	// snapshot belong to an enclosing INCOMPLETE call whose by-value ctor arg is
-	// still on the stack when this return diverges mid-argument-evaluation; they are
-	// NOT this return's value, so the wholesale clear must not sweep them (doing so
-	// orphans the sibling's heap payload). The full drainEnumCtorTemps below still
-	// drops the surviving prefix on the divergent path.
-	if len(c.enumCtorTemps) > enumCtorSnap && s.Value != nil && c.enumCtorTempMovesOut(s.Value) {
-		for i := enumCtorSnap; i < len(c.enumCtorTemps); i++ {
-			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
-		}
-		c.enumCtorTemps = c.enumCtorTemps[:enumCtorSnap]
-	}
+	// Move the returned value out of this frame. T1385: `!goRet || goSink` — a
+	// fire-and-forget go block discards the returned value instead of handing it
+	// to a new owner.
+	c.releaseEscapedValue(s.Value, val, needsDup, enumCtorSnap, !goRet || goSink)
 	if c.block != nil && c.block.Term == nil {
 		c.cleanupStmtTemps()
 		c.cleanupHeapTemps()
@@ -489,6 +209,316 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		c.block.NewRet(nil)
 	} else {
 		c.block.NewRet(c.coerceReturnValue(val, s.Value, retType, retBoxSrcOwned))
+	}
+}
+
+// genEscapingValue evaluates expr as a value that ESCAPES the current frame into
+// an owner outside it, typed as destType: the caller of a `return`, or the
+// consumer of a generator's `yield` (T2038). Every place the value could still be
+// owned here — a string/container/heap-user field or element, a borrowed param or
+// payload, `this`, an operator operand, a captured env value — is dup'd so the new
+// owner holds an independent value. needsDup reports the B0189 dup: the value
+// handed out is a copy, so the source must NOT be released (B0205). Pair with
+// releaseEscapedValue once the value is final.
+func (c *Compiler) genEscapingValue(expr ast.Expr, destType types.Type) (val value.Value, needsDup bool) {
+	c.targetType = destType
+	// T0095/B0179/B0219/B0310/T0487: Signal genFieldAccess to dup string,
+	// Vector|Channel|Arc|Weak, and Optional[...] fields for return values.
+	// Scope cleanup after the return may drop the containing type, freeing
+	// the field — the caller needs an independent copy. Skip for borrow
+	// return types (B0179) — borrows don't own the value.
+	c.setDupFlagsForFieldAccess(destType)
+	// T0440/T1180: Signal genMethodIndex/genVectorIndex to deep-clone the heap
+	// user type out of the container slot for Optional[heap-user] return
+	// values — covers both the droppable and no-drop-but-pal-free inner
+	// shapes. Without this, `return m[k]` / `return v[i]` from a function
+	// owning the container propagates an alias that double-frees when the
+	// container drops at function exit. Routes through the shared
+	// optionalHeapDupElem recognition point so this sink stays in sync with
+	// the var-decl / assignment / mut-ref-arg escape sinks by construction.
+	if _, ok := c.optionalHeapDupElem(destType); ok {
+		c.dupHeapUserFieldAccess = true
+	}
+	// T1146: `return m[k]!` — `!` already unwrapped the Optional, so destType is
+	// the bare element type (not Optional) and the branch above is skipped. The
+	// unwrapped element aliases the map's slot; without a dup the map's drop at
+	// function exit and the caller's drop of the returned value double-free.
+	// Mirror the var-binding form (stmt.go:1133). The returned dup is claimed by
+	// claimHeapTemp(val) below so cleanup doesn't drop it.
+	if (isDroppableHeapUserType(destType) || isHeapUserNoDropPalFree(destType)) &&
+		isUnwrappedContainerIndex(expr) {
+		c.dupHeapUserFieldAccess = true
+	}
+	// T1488: a direct `return xs[i]` / `=> xs[i]` where xs is a FIXED-SIZE array
+	// of a bare heap-user / Map-Set / droppable-enum element. genArrayIndex only
+	// dups such an element when dupHeapUserFieldAccess is armed — T0590 arms it at
+	// var-decl (stmt_decl.go) and assignment (stmt_assign.go) RHS sites, but the
+	// direct return/arrow escape never did, so the returned value aliased the
+	// array's owned slot → the array's element-walk drop and the caller's drop of
+	// the returned value double-free at scope exit. Mirror the var-decl arming
+	// (shape = IndexExpr into an *types.Array, gated on the return type). Scoped to
+	// fixed arrays here; the Vector sibling (T1491) lives in the adjacent `else if`
+	// branch below because it must exclude the droppable-enum shape (handled by the
+	// post-hoc cloneEnumValue block below). String elements dup independently
+	// (dupStringFieldAccess); structural via setDupFlagsForFieldAccess;
+	// Optional[heap-user] via optionalHeapDupElem above.
+	if !isRefType(destType) {
+		if idx, isIdx := expr.(*ast.IndexExpr); isIdx {
+			tgt := c.info.Types[idx.Target]
+			if c.typeSubst != nil {
+				tgt = types.Substitute(tgt, c.typeSubst)
+			}
+			if _, isArr := tgt.(*types.Array); isArr {
+				if isDroppableHeapUserType(destType) || isHeapUserNoDropPalFree(destType) ||
+					isMapOrSetType(destType) || c.enumElemNeedsDupOnRead(destType) {
+					c.dupHeapUserFieldAccess = true
+				}
+			} else if _, isVec := types.AsVector(tgt); isVec {
+				// T1491: Vector sibling of T1488. A direct `return xs[i]` / `=> xs[i]`
+				// where xs is a Vector of a bare heap-user / Map-Set element aliases the
+				// vector's owned slot; the vector's element-walk drop and the caller's
+				// drop double-free at scope exit. EXCLUDES the droppable-enum shape
+				// (enumElemNeedsDupOnRead): the post-hoc cloneEnumValue block below
+				// already clones droppable-enum vector elements at return time — arming
+				// here too would double-clone (leak). Strings via the B0189 dup below;
+				// Optional[heap-user] via optionalHeapDupElem above.
+				if isDroppableHeapUserType(destType) || isHeapUserNoDropPalFree(destType) ||
+					isMapOrSetType(destType) {
+					c.dupHeapUserFieldAccess = true
+				}
+			}
+		}
+	}
+	// T0982: `return a ?: b` — when the return expression (peeling parens) is an
+	// inline elvis, signal genElvis so it neutralizes a handle/heap none-path
+	// owned-local default's scope-exit drop. The returned value escapes to the
+	// caller; without this the function's own scope-exit drop of the default AND
+	// the caller both free it (Mutex SEGV / Arc UAF / Map/heap double-free).
+	// Vector/string results already neutralize unconditionally (T0936).
+	prevElvisReturned := c.elvisResultReturned
+	if be, ok := unwrapDestructureParens(expr).(*ast.BinaryExpr); ok && be.Op == ast.BinElvis {
+		c.elvisResultReturned = true
+	}
+	// T1302: a borrow-typed return (`T&`/`T~`) that force-unwraps a
+	// `this.field!` Optional must NOT dup the inner (genOptionalForceUnwrap's
+	// T0428 Case 3B) — the caller borrows the aliased inner and never frees it,
+	// while the owner's drop still frees the original, so the dup would leak.
+	prevReturningBorrowedUnwrap := c.returningBorrowedUnwrap
+	if destType != nil && isRefType(destType) {
+		c.returningBorrowedUnwrap = true
+	}
+	val = c.genExpr(expr)
+	// T1385: `go! { …; return produce(5); }` — a bare failable call as the
+	// returned value auto-propagates. Unwrap it to its success value BEFORE any
+	// cleanup below (mirrors genBlockValue's trailing case); genAutoPropagateValue
+	// runs its own error-path cleanup and routes to the go-block sink via
+	// emitFailableGoBlockError.
+	if c.coroutineReturnBlock != nil && c.inFailableGoBlock && c.info.AutoPropagateExprs[expr] {
+		val = c.genAutoPropagateTracked(expr, val)
+	}
+	c.returningBorrowedUnwrap = prevReturningBorrowedUnwrap
+	c.elvisResultReturned = prevElvisReturned
+	c.dupStringFieldAccess = false
+	c.dupContainerFieldAccess = false
+	c.dupHeapUserFieldAccess = false
+	c.targetType = nil
+	// T1174: `return maybe` where maybe is a match-borrowed Optional[heap-user]
+	// binding aliases the subject's variant payload; deep-clone the inner so the
+	// returned value survives the scope-exit synth enum drop of the subject.
+	// T1184: skip for borrow return types (`T[N]&`) — a borrow return hands back
+	// an alias the caller never owns or frees (same B0179 rule the field-access
+	// dup above follows), so cloning a borrowed-array param (`echo(string[2] a)
+	// string[2]& { return a; }`) into a borrow result would leak. Owning returns
+	// still dup.
+	if !isRefType(destType) {
+		val, _ = c.dupBorrowedHeapUserPayload(expr, val)
+		// T1323: a borrowed (non-`~`) enum VALUE param returned by value aliases
+		// the caller's arg temp — deep-clone the variant payload so the result is
+		// independent (the enum's inline-data payload is invisible to the caller-
+		// side alias check). Enum-only; strings/containers/arrays are covered by
+		// dupBorrowedHeapUserPayload / the string dup above.
+		val, _ = c.dupBorrowedEnumParam(expr, val, destType)
+	}
+	val = c.wrapThisReturnValue(val, expr, destType)
+	val = c.wrapOperatorParamReturnValue(val, expr, destType) // T0897
+	val = c.maybeDupReturnedEnvCapture(val, expr, destType)   // T1254
+
+	// B0189: Dup return value if it's a string that might be borrowed from a
+	// Vector[string] in the current scope. The element drop loop in scope
+	// cleanup will free the vector's elements — if the return value borrows
+	// one of those elements, it would become a dangling pointer.
+	// Covers: `return strVar` (IdentExpr) and `return vec[i]` (IndexExpr).
+	// T0649: skip for borrow return types (`string&`/`string~`) — a borrow
+	// return must hand back the actual reference into existing storage (which
+	// the ownership pass guarantees outlives the call), not a fresh copy.
+	// Dup'ing here would leak: the call site treats a borrow result as a
+	// non-owned alias and never frees it. extractNamed unwraps SharedRef/MutRef
+	// so the TypString check alone fires for `string&`, hence the explicit
+	// isRefType guard.
+	if val != nil && extractNamed(destType) == types.TypString && !isRefType(destType) {
+		if ident, ok := expr.(*ast.IdentExpr); ok {
+			// T0963: an operator value param returned as an owned string was already
+			// dup'd by wrapOperatorParamReturnValue (cloneOwnedReturnAlias). Dup'ing
+			// again here would leak the first copy — the caller frees the outer dup
+			// and the inner one is orphaned. The op-param dup already yields an
+			// independent heap string, so no vector-element alias survives to protect.
+			if !c.currentOpValueParams[ident.Name] {
+				needsDup = c.hasVectorStringBinding()
+			}
+		} else if idx, ok := expr.(*ast.IndexExpr); ok {
+			targetType := c.info.Types[idx.Target]
+			if c.typeSubst != nil {
+				targetType = types.Substitute(targetType, c.typeSubst)
+			}
+			if _, isVec := types.AsVector(targetType); isVec {
+				needsDup = true
+			}
+		}
+		if needsDup {
+			val = c.dupString(val)
+		}
+	}
+
+	// Clone return value if it's a droppable enum loaded from a vector index.
+	// Scope cleanup drops the dup'd vector (freeing its buffer and all elements) —
+	// the shallow enum copy returned by vec[i] would reference freed data.
+	// Analogous to the B0189 string dup above.
+	// T0649: skip for borrow return types (`MyEnum&`/`MyEnum~`) for the same
+	// reason as the string dup — a borrow return must hand back the actual
+	// reference, and cloning here would leak at a binding call site.
+	if val != nil && !needsDup && !isRefType(destType) {
+		if idx, ok := expr.(*ast.IndexExpr); ok {
+			idxTargetType := c.info.Types[idx.Target]
+			if c.typeSubst != nil {
+				idxTargetType = types.Substitute(idxTargetType, c.typeSubst)
+			}
+			if elemType, isVec := types.AsVector(idxTargetType); isVec {
+				resolvedElem := elemType
+				if c.typeSubst != nil {
+					resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+				}
+				if enum := extractEnum(resolvedElem); enum != nil {
+					if c.enumInstanceHasDrop(resolvedElem, enum) {
+						if cloned, ok := c.cloneEnumValue(val, resolvedElem); ok {
+							val = cloned
+							needsDup = true // preserve drop flag for source vector
+						}
+					}
+				}
+			}
+		}
+	}
+	return val, needsDup
+}
+
+// escapeBoxSrcOwned is T1282's decision for an escaping value (see
+// genEscapingValue): whether a string→structural box built for destType should
+// take ownership of the source pointer (owned source) or clone it (borrowed). It
+// MUST be computed before releaseEscapedValue, which clears the drop flag and
+// claims the temp this reads. Owned sources — an owned var / move-param (has a
+// drop flag) or an owned frame temp (in stmtTempMap) — take the pointer, since the
+// move-site releases the source. Borrowed sources (literal, borrow param, field
+// borrow) match neither and stay on the clone path.
+func (c *Compiler) escapeBoxSrcOwned(expr ast.Expr, val value.Value, needsDup bool, destType types.Type) bool {
+	// Peel Optional so `Showable?` destinations take the same owned/borrowed
+	// decision as a plain `Showable` — the actual box is built inside
+	// coerceReturnToOptionalElem (T1298), which also reads c.boxSrcOwned.
+	structTarget := destType
+	if opt, isOpt := destType.(*types.Optional); isOpt {
+		structTarget = opt.Elem()
+	}
+	if named := extractNamed(structTarget); isStructuralView(named) {
+		if ident, ok := expr.(*ast.IdentExpr); ok {
+			// Only owned if the move-site actually clears the flag (!needsDup).
+			return !needsDup && c.hasDropFlag(ident.Name)
+		} else if _, tracked := c.stmtTempMap[val]; tracked {
+			return true
+		}
+	}
+	return false
+}
+
+// releaseEscapedValue moves an escaping value (see genEscapingValue) out of the
+// current frame: the moved variable's drop flag is cleared and the value's own
+// statement temps are claimed, so neither this frame's scope cleanup nor its
+// statement-end temp drain frees what the new owner now holds. expr may be nil (a
+// bare `return`). transfer is false when the value is discarded instead of handed
+// to a new owner (T1385), which leaves it owned — and dropped — here.
+func (c *Compiler) releaseEscapedValue(expr ast.Expr, val value.Value, needsDup bool, enumCtorSnap int, transfer bool) {
+	// Clear drop flag for returned variable (it's being moved out, not dropped).
+	// B0205: When the return value was dup'd (B0189), the original variable must
+	// still be dropped at scope exit — the caller receives the dup, not the original.
+	// Only clear the flag when we're returning the original (no dup).
+	// !transfer: the value is discarded rather than handed to a new owner (T1385), so
+	// leaving the flag set lets emitScopeCleanup drop the local (no leak).
+	if expr != nil && !needsDup && transfer {
+		if ident, ok := expr.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		} else if _, ok := unwrapDestructureParens(expr).(*ast.CastExpr); ok {
+			// T0783: `return x as! T` aliases x's instance into the returned value;
+			// ownership now moves x at the return, so clear x's drop flag to keep
+			// codegen symmetric — otherwise x's scope-exit drop fires on the same
+			// allocation the caller now owns (double-free).
+			//
+			// T0849: the optional `as` form (Force == false) yields `T?` and is a
+			// *conditional* move (None on a failed downcast). consumeCastSubjectDropFlag
+			// reads the outermost cast's Force: `as!` clears unconditionally; `as`
+			// stores `!isMatch` so x is dropped iff the downcast failed (else the
+			// returned optional owns the aliased instance).
+			if ident := c.castSubjectMovableIdent(expr); ident != nil {
+				c.consumeCastSubjectDropFlag(expr, ident.Name)
+			}
+		}
+	}
+	// T0108: Clean up statement temps before returning. The return expression may
+	// create intermediate string temps (e.g., dupStringFieldAccess dup copies,
+	// string concat intermediaries) that are normally freed at statement end.
+	// Since return terminates the block, the post-statement cleanup never runs.
+	// Claim the return value first so it's not freed — only intermediaries are freed.
+	// !transfer: same discard gate as the drop-flag clear above — not claiming lets
+	// the cleanup free the discarded value.
+	if expr != nil && val != nil && transfer {
+		c.claimStringTemp(val)
+		c.claimHeapTemp(val)
+		c.claimEnvTemp(val)
+	}
+	// B0310: Claim dup'd inner string for Optional[string] return values.
+	// Without this, cleanupStmtTemps would free the dup while it's still
+	// embedded in the return value's optional struct.
+	if c.optionalStringDup != nil {
+		c.claimStringTemp(c.optionalStringDup)
+		c.optionalStringDup = nil
+	}
+	// T0366: Claim dup'd inner container for Optional[Vector|Channel|Arc|Weak] return values.
+	if c.optionalContainerDup != nil {
+		c.claimStringTemp(c.optionalContainerDup)
+		c.optionalContainerDup = nil
+	}
+	// T1317: An inline enum-constructor temp built while evaluating the return
+	// expression as a by-value(-borrow) call argument (e.g.
+	// `return f(Payload.Full(heapStr))`) is owned by the caller — the callee dups
+	// the payload (B0232) and nothing else drops the original. The statement-end
+	// drain (cleanupStmtLevelTemps) frees such a temp for a discarded call, but the
+	// return path never reaches it, so the payload leaks. Clear the flag first when
+	// the return expression is ITSELF an enum constructor (`return Payload.Full(...)`)
+	// — that temp is moved out to the caller (mirrors the B0267 var-decl / T1103
+	// container clears) — then drain the rest. A structural check (not the value's
+	// type) is required so `return g(Payload.Full(...))` where g *returns* an enum
+	// still drains the by-value arg temp rather than mistaking it for the result.
+	// The moved-out shapes are a direct constructor or a branch (match/if) whose
+	// arm values ARE the returned enum — see enumCtorTempMovesOut.
+	//
+	// T1339: bound the clear to temps at/above enumCtorSnap. Temps below the
+	// snapshot belong to an enclosing INCOMPLETE call whose by-value ctor arg is
+	// still on the stack when this return diverges mid-argument-evaluation; they are
+	// NOT this return's value, so the wholesale clear must not sweep them (doing so
+	// orphans the sibling's heap payload). The full drainEnumCtorTemps below still
+	// drops the surviving prefix on the divergent path.
+	if len(c.enumCtorTemps) > enumCtorSnap && expr != nil && c.enumCtorTempMovesOut(expr) {
+		for i := enumCtorSnap; i < len(c.enumCtorTemps); i++ {
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
+		}
+		c.enumCtorTemps = c.enumCtorTemps[:enumCtorSnap]
 	}
 }
 

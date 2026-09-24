@@ -576,6 +576,7 @@ type Compiler struct {
 	inGenerator           bool        // true when compiling inside a generator coroutine body
 	generatorCanError     bool        // true when the generator body can propagate errors (B0023)
 	generatorYieldSlot    value.Value // yield_slot parameter (i8*) of current generator coro
+	generatorElemType     types.Type  // sema element type T of the current generator's stream[T] (T2038)
 	generatorErrorSlot    value.Value // error_slot alloca (i8*) for failable generators (B0023)
 	generatorCoroId       value.Value // coro.id token for current generator
 	generatorCleanup      *ir.Block   // cleanup block for current generator

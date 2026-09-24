@@ -124,16 +124,9 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 			continue
 		}
 		// T0998: only clear the arg's drop flag when the result could actually be
-		// a view of the arg — i.e. the param and (unwrapped) return types are
-		// related by assignment. A distinct owned value of an unrelated type that
-		// merely shares a sub-pointer (e.g. a `Ref` arg and a `Weak` return over
-		// the same control block) is NOT an alias; clearing the arg's flag would
-		// leak it. (`identity(T x) T` and upcast returns stay covered.)
-		relType := retType
-		if opt, ok := relType.(*types.Optional); ok {
-			relType = opt.Elem()
-		}
-		if !types.AssignableTo(paramType, relType) && !types.AssignableTo(relType, paramType) {
+		// a view of the arg (see mayAliasByType); clearing an unrelated arg's flag
+		// would leak it.
+		if !mayAliasByType(paramType, retType) {
 			continue
 		}
 
@@ -269,57 +262,78 @@ func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Sign
 		}
 	}
 
-	// T1269: a borrowed-param arg the owned result may alias. Deep-clone the result
-	// so the caller's borrow keeps sole ownership of its buffer and the escaping /
-	// discarded owned result frees an independent allocation. The clone fires ONLY
-	// when retPtr == argPtr at runtime, so a function that returns a fresh value
-	// (retPtr != argPtr) is untouched — no spurious clone, no leak, just pointer
-	// compares. Unlike the T1031 owned-local path (which clones into the SOURCE's
-	// storage and keeps the original as the binding), here the borrow must never be
-	// touched, so we clone the RESULT and hand that back — uniform for both the
-	// move-into-owned-storage and discard escape shapes.
-	if len(borrowAliasPtrs) > 0 && c.block != nil && c.block.Term == nil {
-		if retPtr := extractAliasPtr(c, result); retPtr != nil {
-			var aliases value.Value
-			for _, ap := range borrowAliasPtrs {
-				cmp := c.block.NewICmp(enum.IPredEQ, retPtr, ap)
-				if aliases == nil {
-					aliases = cmp
-				} else {
-					aliases = c.block.NewOr(aliases, cmp)
-				}
-			}
-			entryBlock := c.block
-			cloneBlock := c.newBlock("alias.borrow.clone")
-			contBlock := c.newBlock("alias.borrow.cont")
-			entryBlock.NewCondBr(aliases, cloneBlock, contBlock)
+	// T1269: a borrowed-param arg the owned result may alias. The caller's borrow
+	// keeps sole ownership of its buffer; the escaping / discarded owned result gets
+	// an independent clone. Unlike the T1031 owned-local path (which clones into the
+	// SOURCE's storage and keeps the original as the binding), here the borrow must
+	// never be touched, so we clone the RESULT and hand that back — uniform for both
+	// the move-into-owned-storage and discard escape shapes.
+	return c.cloneIfAliases(result, borrowAliasPtrs, retType)
+}
 
-			c.block = cloneBlock
-			dup, didDup := c.dupOwnedReturnValue(result, retType)
-			// dupOwnedReturnValue may split the block (null-check diamonds); the phi
-			// incoming for the clone path must use the block it actually left us in.
-			cloneEnd := c.block
-			cloneEnd.NewBr(contBlock)
+// mayAliasByType reports whether an owned value of resultType could be a view of
+// a value of paramType — i.e. the two (with an Optional result unwrapped) are
+// related by assignment (T0998). A distinct owned value of an unrelated type that
+// merely shares a sub-pointer (e.g. a `Ref` arg and a `Weak` return over the same
+// control block) is NOT an alias. (`identity(T x) T` and upcast returns stay
+// covered.)
+func mayAliasByType(paramType, resultType types.Type) bool {
+	relType := resultType
+	if opt, ok := relType.(*types.Optional); ok {
+		relType = opt.Elem()
+	}
+	return types.AssignableTo(paramType, relType) || types.AssignableTo(relType, paramType)
+}
 
-			c.block = contBlock
-			if didDup {
-				// The clone is NOT claimed as a temp: the dup helpers do not register
-				// temps, and `result` is only tracked downstream at the binding /
-				// discard site. Returning the phi lets that single tracking free the
-				// clone exactly once; the original borrow-aliasing value is discarded
-				// on the clone path and never tracked, so the caller's borrow remains
-				// the sole owner of the original buffer.
-				result = c.block.NewPhi(
-					ir.NewIncoming(result, entryBlock),
-					ir.NewIncoming(dup, cloneEnd),
-				)
-			}
-			// !didDup: no deep clone available for this droppable-but-non-clonable
-			// shape — fall through with the original result (current behavior, no
-			// regression versus today which also does nothing there).
+// cloneIfAliases deep-clones result (of resultType) when its instance pointer
+// equals any of aliasPtrs — pointers into values a borrow still owns — and returns
+// the phi of the original and the clone. The clone fires ONLY when the pointers
+// match at runtime, so a fresh result is untouched: no spurious clone, no leak,
+// just pointer compares. Shared by the call-site return check (T1269) and the
+// generator yield site (T2038).
+func (c *Compiler) cloneIfAliases(result value.Value, aliasPtrs []value.Value, resultType types.Type) value.Value {
+	if len(aliasPtrs) == 0 || c.block == nil || c.block.Term != nil {
+		return result
+	}
+	retPtr := extractAliasPtr(c, result)
+	if retPtr == nil {
+		return result
+	}
+	var aliases value.Value
+	for _, ap := range aliasPtrs {
+		cmp := c.block.NewICmp(enum.IPredEQ, retPtr, ap)
+		if aliases == nil {
+			aliases = cmp
+		} else {
+			aliases = c.block.NewOr(aliases, cmp)
 		}
 	}
+	entryBlock := c.block
+	cloneBlock := c.newBlock("alias.borrow.clone")
+	contBlock := c.newBlock("alias.borrow.cont")
+	entryBlock.NewCondBr(aliases, cloneBlock, contBlock)
 
+	c.block = cloneBlock
+	dup, didDup := c.dupOwnedReturnValue(result, resultType)
+	// dupOwnedReturnValue may split the block (null-check diamonds); the phi
+	// incoming for the clone path must use the block it actually left us in.
+	cloneEnd := c.block
+	cloneEnd.NewBr(contBlock)
+
+	c.block = contBlock
+	if didDup {
+		// The clone is NOT claimed as a temp: the dup helpers do not register
+		// temps, and `result` is only tracked downstream by its new owner. Returning
+		// the phi lets that single owner free the clone exactly once; the original
+		// borrow-aliasing value is discarded on the clone path and never tracked, so
+		// the borrow remains the sole owner of the original buffer.
+		return c.block.NewPhi(
+			ir.NewIncoming(result, entryBlock),
+			ir.NewIncoming(dup, cloneEnd),
+		)
+	}
+	// !didDup: no deep clone available for this droppable-but-non-clonable shape —
+	// fall through with the original result.
 	return result
 }
 

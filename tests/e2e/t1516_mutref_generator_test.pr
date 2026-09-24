@@ -252,9 +252,8 @@ mixed_params(string owned, int ~k) stream[string] `doc("By-value droppable param
 type Holder[T] `doc("Generic owner of a generator method with a mut-ref param.") {
   T[] items `doc("Values yielded in order.");
 
-  // Indexed rather than `for it in this.items`: a for-in with a yield in its body
-  // over a heap element type corrupts the allocator — T2038, pre-existing and
-  // unrelated to the mut-ref ABI this file covers.
+  // Each `yield this.items[i]` hands the consumer its own copy of the element
+  // (T2038); the owner keeps and later drops the original.
   drain(this, int ~count) stream[T] `doc("Yields every item, counting through the borrow.") {
     int i = 0;
     while (i < this.items.len) {

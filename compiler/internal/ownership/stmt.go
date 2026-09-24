@@ -124,14 +124,17 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 		c.tryMoveConsume(s.Value)
 		c.tryMoveConsumeCastSubject(s.Value) // T0784
 		// T1073: `yield o!` is intentionally NOT rejected for borrowed params.
-		// Unlike the collection-literal/raise/select-send consume sites, a
-		// generator yields a *borrow* of the unwrapped inner — the for-in loop var
-		// does not own/drop it and the source optional stays owned and usable after
-		// the loop, so there is no double-free. Requiring `move` here would wrongly
-		// force the caller to surrender ownership it can still use.
+		// The consumer's for-in binding owns what is yielded (T2038), but codegen
+		// deep-clones a yielded value that aliases a borrowed param
+		// (cloneYieldedBorrowAlias — §6.2's duplicate-on-alias, applied at the
+		// yield because a generator's consumer has no call site to apply it), so
+		// the source optional stays owned by the caller and usable after the loop.
+		// Requiring `move` here would wrongly force the caller to surrender
+		// ownership it can still use.
 
 	case *ast.YieldDelegateStmt:
 		c.checkExpr(s.Value)
+		c.checkYieldDelegateCopyable(s.Value) // T2038
 		c.tryMoveConsume(s.Value)
 		c.tryMoveConsumeCastSubject(s.Value) // T0784
 		// T1073: see YieldStmt — yield* also borrows, not consumes; no reject.
@@ -1926,6 +1929,32 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 			delete(c.forInTypeParamAliasBindings, s.Binding)
 		}
 	}
+}
+
+// checkYieldDelegateCopyable rejects `yield*` over a Vector/Array of closures the
+// generator does not own (T2038). The consumer owns every yielded value, so each
+// element must either be moved out of a container `yield*` consumes
+// (sema.YieldDelegateOwnsSource) or copied out of one it does not — and a closure
+// cannot be copied: its captured environment is opaque (T1045). Mirrors the
+// for-in rule that already rejects the spelled-out form, `for f in this.fns {
+// yield f; }` (T0978).
+func (c *Checker) checkYieldDelegateCopyable(expr ast.Expr) {
+	var elem types.Type
+	switch t := stripRefType(c.info.Types[expr]).(type) {
+	case *types.Array:
+		elem = t.Elem()
+	default:
+		elem, _ = types.AsVector(t)
+	}
+	if _, isClosure := elem.(*types.Signature); !isClosure {
+		return
+	}
+	if sema.YieldDelegateOwnsSource(c.info, expr) {
+		return
+	}
+	c.errorf(expr.Pos(),
+		"cannot `yield*` closures (%s) out of a collection this generator does not own; a closure cannot be copied, and every yielded value is owned by the consumer. Delegate to a local or temporary collection, or yield each closure taken with `.pop()` / `.remove()`",
+		elem)
 }
 
 // loopBindingType returns the type sema recorded for a loop binding, looked up

@@ -29,9 +29,8 @@ type ModGen `public `doc("Owns generator methods that borrow a caller's variable
     }
   }
 
-  // Yields ints rather than strings so an abandoned run stays about the borrow:
-  // breaking out of a generator that yields freshly allocated heap values leaks
-  // them regardless of the consumer (T2038), which would mask what this covers.
+  // Yields ints rather than strings so an abandoned run stays about the borrow,
+  // not the drop of a yielded heap value (module_heap_yield_* cover that, T2038).
   sep_len(this, int n, string ~sep) stream[int] `public `doc("Yields the borrowed string's length, plus i.") {
     int i = 0;
     while (i < n) {
@@ -44,8 +43,8 @@ type ModGen `public `doc("Owns generator methods that borrow a caller's variable
 type ModHolder[T] `public `doc("Generic module owner of a mut-ref generator method.") {
   T[] items `public `doc("Values yielded in order.");
 
-  // Indexed rather than for-in: a for-in with a yield in its body over a heap
-  // element type corrupts the allocator (T2038, unrelated to mut-refs).
+  // Each `yield this.items[i]` hands the consumer its own copy of the element
+  // (T2038); the owner keeps and later drops the original.
   drain(this, int ~count) stream[T] `public `doc("Yields every item, counting through the borrow.") {
     int i = 0;
     while (i < this.items.len) {

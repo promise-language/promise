@@ -3329,6 +3329,8 @@ for n in fibonacci() {
 }
 ```
 
+**`yield` transfers ownership to the consumer**, exactly as `return` does to a caller (§6.2): `next()` returns an owned `T?`. Yielding a local moves it — it is unusable after the `yield` — while yielding a borrowed place (a field, a container element, a borrowed parameter) hands the consumer an independent copy. The `for` binding owns each element and drops it at the end of the iteration unless it is moved out (`last = x`). Leaving the loop early (`break`, `return`, an error) destroys the generator, which drops everything it still owns. `yield*` over a vector or array likewise hands out one owned element per step — a copy, except that a closure cannot be copied: `yield*` over closures moves them out of a local or temporary collection it consumes, and is a compile error over any other.
+
 **`yield*` delegates to another iterable** (stream, range, array, vector, string, or iterator), yielding all of its elements inline:
 
 ```promise
@@ -3345,8 +3347,9 @@ fetchPages(string url) stream[Page] {
   string? nextUrl = url;
   while nextUrl {
     Page page = http.get(nextUrl) ? { break; };  // stop stream on error
+    nextUrl = none;
+    if link := page.nextLink { nextUrl = link.clone(); }  // read before `yield` hands `page` over
     yield page;
-    nextUrl = page.nextLink;
   }
 }
 ```

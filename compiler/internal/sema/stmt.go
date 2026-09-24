@@ -1978,6 +1978,33 @@ func (c *Checker) isRawGeneratorForIn(iterType types.Type, iterable ast.Expr) bo
 	return !c.isStructuralStreamView(iterable)
 }
 
+// YieldDelegateOwnsSource reports whether the container a `yield*` delegates to
+// is owned by the generator itself — a local variable or a call result, not held
+// through a reference — so `yield*` consumes it and may move its elements out
+// one by one. Any other container (a field, an element, a borrow) stays owned
+// elsewhere, so each element must be COPIED out to the consumer, who owns every
+// yielded value (T2038). The ownership pass rejects a delegation whose elements
+// cannot be copied out of a container it does not own; codegen moves them out of
+// one it does. Both ask here, so they agree by construction.
+func YieldDelegateOwnsSource(info *Info, expr ast.Expr) bool {
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	switch info.Types[expr].(type) {
+	case *types.SharedRef, *types.MutRef:
+		return false
+	}
+	switch expr.(type) {
+	case *ast.IdentExpr, *ast.CallExpr:
+		return true
+	}
+	return false
+}
+
 func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	iterType := c.checkExpr(s.Iterable)
 

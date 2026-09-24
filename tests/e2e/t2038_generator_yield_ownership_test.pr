@@ -1,0 +1,1190 @@
+// T2038: `yield v` transfers ownership of v to the consumer exactly as `return v`
+// hands it to a caller (docs/language-design.md §12.4). The for-in binding owns
+// each yielded element and drops it at the end of the iteration unless it is moved
+// out; abandoning the loop destroys the generator, which drops what it still owns.
+//
+// Every test here yields HEAP values: a string literal's drop is a no-op, so a
+// literal would hide both the double free (a stored binding freed again by the
+// generator) and the leak (a built value stranded in an abandoned generator).
+type Box {
+  string v;
+}
+
+type T2038Err is error {
+  int at;
+}
+
+type Holder {
+  string base;
+  Box[] boxes;
+
+  names(this, int n) stream[string] {
+    int i = 0;
+    while i < n {
+      yield "{this.base}-{i}";
+      i += 1;
+    }
+  }
+
+  // A borrowed receiver's field, yielded twice: each yield hands out a copy.
+  base_twice(this) stream[string] {
+    yield this.base;
+    yield this.base;
+  }
+
+  first_box(this) stream[Box] {
+    yield this.boxes[0];
+  }
+}
+
+// --- Generators ---
+
+fresh(int n) stream[string] {
+  int i = 0;
+  while i < n {
+    yield "s{i}";
+    i += 1;
+  }
+}
+
+indexed(string[] items) stream[string] {
+  int i = 0;
+  while i < items.len {
+    yield items[i];
+    i += 1;
+  }
+}
+
+forin(string[] items) stream[string] {
+  for it in items {
+    yield it;
+  }
+}
+
+local_moved(int n) stream[string] {
+  int i = 0;
+  while i < n {
+    string s = "l{i}";
+    yield s;
+    i += 1;
+  }
+}
+
+chained(int n) stream[string] {
+  for s in fresh(n) {
+    yield s;
+  }
+}
+
+boxes_fresh(int n) stream[Box] {
+  int i = 0;
+  while i < n {
+    yield Box(v: "b{i}");
+    i += 1;
+  }
+}
+
+box_local(int n) stream[Box] {
+  int i = 0;
+  while i < n {
+    Box b = Box(v: "k{i}");
+    yield b;
+    i += 1;
+  }
+}
+
+box_indexed(Box[] bs) stream[Box] {
+  int i = 0;
+  while i < bs.len {
+    yield bs[i];
+    i += 1;
+  }
+}
+
+opt_borrowed(string? o) stream[string] {
+  yield o!;
+  yield o!;
+}
+
+opt_moved(string? move o) stream[string] {
+  yield o!;
+}
+
+opt_local() stream[string] {
+  string? o = "q{1}";
+  yield o!;
+}
+
+elvis_borrowed(string? o) stream[string] {
+  yield o ?: "d{1}";
+}
+
+optional_elems() stream[string?] {
+  yield "o{1}";
+  yield none;
+  yield "o{2}";
+}
+
+make_strings() string[] {
+  string[] v = ["a{1}", "b{2}", "c{3}"];
+  return v;
+}
+
+delegate_vec() stream[string] {
+  string[] v = ["a{1}", "b{2}"];
+  yield * v;
+}
+
+delegate_box_vec() stream[Box] {
+  Box[] v = [Box(v: "x{1}"), Box(v: "y{2}")];
+  yield * v;
+}
+
+delegate_array() stream[string] {
+  string[2] a = ["a{1}", "b{2}"];
+  yield * a;
+}
+
+delegate_iter() stream[string] {
+  string[] v = ["a{1}", "b{2}"];
+  yield * v.iter();
+}
+
+delegate_temp_iter() stream[string] {
+  yield * make_strings().iter();
+}
+
+delegate_temp_vec() stream[string] {
+  yield * make_strings();
+}
+
+delegate_gen(int n) stream[string] {
+  yield * fresh(n);
+}
+
+// A closure cannot be copied, so `yield*` moves each one out of a collection it
+// owns (a local or a temporary); the collection drops only what is left.
+make_fns(int base)(() -> int)[] {
+  int b = base;
+  (() -> int)[] v = [|| -> b + 1, || -> b + 2, || -> b + 3];
+  return v;
+}
+
+delegate_fns_local(int base) stream[() -> int] {
+  (() -> int)[] v = make_fns(base);
+  yield * v;
+}
+
+delegate_fns_temp(int base) stream[() -> int] {
+  yield * make_fns(base);
+}
+
+delegate_fns_array() stream[() -> int] {
+  string s = "c{1}";
+  (() -> int)[2] a = [move || -> s.len, || -> 7];
+  yield * a;
+}
+
+type Names {
+  string[] items;
+
+  all(this) stream[string] {
+    yield * this.items;
+  }
+}
+
+// Every droppable element category: the consumer's binding owns and drops it.
+enum Shape {
+  Circle(string name),
+  Empty,
+}
+
+tuples(int n) stream[(string, int)] {
+  int i = 0;
+  while i < n {
+    yield ("t{i}", i);
+    i += 1;
+  }
+}
+
+shapes(int n) stream[Shape] {
+  int i = 0;
+  while i < n {
+    yield Shape.Circle("c{i}");
+    i += 1;
+  }
+}
+
+optional_boxes(int n) stream[Box?] {
+  int i = 0;
+  while i < n {
+    Box? b = Box(v: "o{i}");
+    yield b;
+    i += 1;
+  }
+}
+
+vectors(int n) stream[string[]] {
+  int i = 0;
+  while i < n {
+    yield["v{i}", "w{i}"];
+    i += 1;
+  }
+}
+
+maps(int n) stream[map[string, int]] {
+  int i = 0;
+  while i < n {
+    map[string, int] m = map[string, int]();
+    m["k{i}"] = i;
+    yield m;
+    i += 1;
+  }
+}
+
+refs(int n) stream[Ref[string]] {
+  int i = 0;
+  while i < n {
+    yield Ref[string]("r{i}");
+    i += 1;
+  }
+}
+
+closures(int base) stream[() -> int] {
+  int b = base;
+  yield || -> b + 1;
+  yield || -> b + 2;
+}
+
+// A string boxed into a structural view at the yield: the consumer owns the box.
+views(int n) stream[Format] {
+  int i = 0;
+  while i < n {
+    yield "f{i}";
+    i += 1;
+  }
+}
+
+ffresh!(int n, int fail_at) stream[string] {
+  int i = 0;
+  while i < n {
+    if i == fail_at {
+      raise T2038Err(message: "stop", at: i);
+    }
+    yield "f{i}";
+    i += 1;
+  }
+}
+
+by_index[T](T[] items) stream[T] {
+  int i = 0;
+  while i < items.len {
+    yield items[i];
+    i += 1;
+  }
+}
+
+// --- Consumers: the item's matrix (fresh values) ---
+
+fresh_read_break() `test {
+  int seen = 0;
+  for s in fresh(3) {
+    seen = s.len;
+    break;
+  }
+  assert(seen == 2, "{seen}");
+}
+
+fresh_store_break() `test {
+  string first = "";
+  for s in fresh(3) {
+    first = s;
+    break;
+  }
+  assert(first == "s0", "{first}");
+}
+
+fresh_store_all() `test {
+  string last = "";
+  for s in fresh(3) {
+    last = s;
+  }
+  assert(last == "s2", "{last}");
+}
+
+fresh_read_all() `test {
+  int n = 0;
+  for s in fresh(3) {
+    n += s.len;
+  }
+  assert(n == 6, "{n}");
+}
+
+fresh_concat_all() `test {
+  string j = "";
+  for s in fresh(3) {
+    j = j + s;
+  }
+  assert(j == "s0s1s2", "{j}");
+}
+
+fresh_discarded_binding() `test {
+  int count = 0;
+  for _ in fresh(3) {
+    count += 1;
+  }
+  assert(count == 3, "{count}");
+}
+
+fresh_continue() `test {
+  string last = "";
+  int seen = 0;
+  for s in fresh(4) {
+    seen += 1;
+    if s == "s1" {
+      continue;
+    }
+    last = s;
+  }
+  assert(seen == 4, "{seen}");
+  assert(last == "s3", "{last}");
+}
+
+fresh_push() `test {
+  string[] got = [];
+  for s in fresh(3) {
+    got.push(move s);
+  }
+  assert(got.len == 3, "{got.len}");
+  assert(got[2] == "s2", "{got[2]}");
+}
+
+// T1453: an early return out of the loop destroys the suspended generator.
+first_len(int n) int {
+  for s in fresh(n) {
+    if s.len > 0 {
+      return s.len;
+    }
+  }
+  return 0;
+}
+
+fresh_early_return() `test {
+  assert(first_len(3) == 2, "early return");
+  assert(first_len(0) == 0, "empty");
+}
+
+// --- Matrix: borrowed places (heap strings, so a missing copy would crash) ---
+
+indexed_store_all() `test {
+  string[] items = ["a{1}", "b{2}", "c{3}"];
+  string last = "";
+  for s in indexed(items) {
+    last = s;
+  }
+  assert(last == "c3", "{last}");
+  assert(items[2] == "c3", "source intact: {items[2]}");
+}
+
+indexed_read_break() `test {
+  string[] items = ["a{1}", "b{2}"];
+  int seen = 0;
+  for s in indexed(items) {
+    seen = s.len;
+    break;
+  }
+  assert(seen == 2, "{seen}");
+}
+
+indexed_store_break() `test {
+  string[] items = ["a{1}", "b{2}"];
+  string first = "";
+  for s in indexed(items) {
+    first = s;
+    break;
+  }
+  assert(first == "a1", "{first}");
+}
+
+forin_store_all() `test {
+  string[] items = ["a{1}", "b{2}", "c{3}"];
+  string last = "";
+  for s in forin(items) {
+    last = s;
+  }
+  assert(last == "c3", "{last}");
+}
+
+forin_read_all() `test {
+  string[] items = ["a{1}", "b{2}"];
+  int n = 0;
+  for s in forin(items) {
+    n += s.len;
+  }
+  assert(n == 4, "{n}");
+}
+
+forin_store_break() `test {
+  string[] items = ["a{1}", "b{2}"];
+  string first = "";
+  for s in forin(items) {
+    first = s;
+    break;
+  }
+  assert(first == "a1", "{first}");
+}
+
+// --- Moved locals and re-yielded elements ---
+
+local_moved_store_all() `test {
+  string last = "";
+  for s in local_moved(3) {
+    last = s;
+  }
+  assert(last == "l2", "{last}");
+}
+
+local_moved_break() `test {
+  string first = "";
+  for s in local_moved(3) {
+    first = s;
+    break;
+  }
+  assert(first == "l0", "{first}");
+}
+
+chained_store_all() `test {
+  string last = "";
+  for s in chained(3) {
+    last = s;
+  }
+  assert(last == "s2", "{last}");
+}
+
+chained_store_break() `test {
+  string first = "";
+  for s in chained(3) {
+    first = s;
+    break;
+  }
+  assert(first == "s0", "{first}");
+}
+
+// --- Heap user types ---
+
+boxes_fresh_store() `test {
+  Box last = Box(v: "");
+  for b in boxes_fresh(3) {
+    last = b;
+  }
+  assert(last.v == "b2", "{last.v}");
+}
+
+boxes_fresh_store_break() `test {
+  Box first = Box(v: "");
+  for b in boxes_fresh(3) {
+    first = b;
+    break;
+  }
+  assert(first.v == "b0", "{first.v}");
+}
+
+box_local_store() `test {
+  Box[] got = [];
+  for b in box_local(3) {
+    got.push(move b);
+  }
+  assert(got.len == 3, "{got.len}");
+  assert(got[1].v == "k1", "{got[1].v}");
+}
+
+box_indexed_store() `test {
+  Box[] bs = [Box(v: "i{1}"), Box(v: "j{2}")];
+  Box last = Box(v: "");
+  for b in box_indexed(bs) {
+    last = b;
+  }
+  assert(last.v == "j2", "{last.v}");
+  assert(bs[1].v == "j2", "source intact: {bs[1].v}");
+}
+
+box_indexed_break() `test {
+  Box[] bs = [Box(v: "i{1}"), Box(v: "j{2}")];
+  int seen = 0;
+  for b in box_indexed(bs) {
+    seen = b.v.len;
+    break;
+  }
+  assert(seen == 2, "{seen}");
+}
+
+// --- Generator methods (the module-hosted form of the item, here in-file) ---
+
+method_names_store() `test {
+  Holder h = Holder(base: "h{1}", boxes: []);
+  string last = "";
+  for s in h.names(3) {
+    last = s;
+  }
+  assert(last == "h1-2", "{last}");
+}
+
+method_names_break() `test {
+  Holder h = Holder(base: "h{1}", boxes: []);
+  string first = "";
+  for s in h.names(3) {
+    first = s;
+    break;
+  }
+  assert(first == "h1-0", "{first}");
+}
+
+method_field_twice() `test {
+  Holder h = Holder(base: "h{2}", boxes: []);
+  string[] got = [];
+  for s in h.base_twice() {
+    got.push(move s);
+  }
+  assert(got.len == 2, "{got.len}");
+  assert(got[0] == "h2" && got[1] == "h2", "copies");
+  assert(h.base == "h2", "receiver intact: {h.base}");
+}
+
+method_field_element() `test {
+  Holder h = Holder(base: "", boxes: [Box(v: "e{1}")]);
+  Box got = Box(v: "");
+  for b in h.first_box() {
+    got = b;
+  }
+  assert(got.v == "e1", "{got.v}");
+  assert(h.boxes[0].v == "e1", "receiver intact");
+}
+
+// --- Optionals ---
+
+opt_borrowed_store() `test {
+  string? o = "o{1}";
+  string[] got = [];
+  for s in opt_borrowed(o) {
+    got.push(move s);
+  }
+  assert(got.len == 2, "{got.len}");
+  assert(got[0] == "o1" && got[1] == "o1", "both yields");
+  assert(o! == "o1", "caller's optional intact");
+}
+
+opt_borrowed_break() `test {
+  string? o = "o{2}";
+  string first = "";
+  for s in opt_borrowed(o) {
+    first = s;
+    break;
+  }
+  assert(first == "o2", "{first}");
+  assert(o! == "o2", "caller's optional intact");
+}
+
+opt_moved_store() `test {
+  string? o = "m{1}";
+  string last = "";
+  for s in opt_moved(move o) {
+    last = s;
+  }
+  assert(last == "m1", "{last}");
+}
+
+opt_local_store() `test {
+  string last = "";
+  for s in opt_local() {
+    last = s;
+  }
+  assert(last == "q1", "{last}");
+}
+
+elvis_borrowed_present() `test {
+  string? o = "e{1}";
+  string last = "";
+  for s in elvis_borrowed(o) {
+    last = s;
+  }
+  assert(last == "e1", "{last}");
+  assert(o! == "e1", "caller's optional intact");
+}
+
+elvis_borrowed_absent() `test {
+  string? o = none;
+  string last = "";
+  for s in elvis_borrowed(o) {
+    last = s;
+  }
+  assert(last == "d1", "{last}");
+}
+
+optional_elements() `test {
+  int present = 0;
+  int absent = 0;
+  string last = "";
+  for s in optional_elems() {
+    if v := s {
+      present += 1;
+      last = v.clone();
+    } else {
+      absent += 1;
+    }
+  }
+  assert(present == 2, "{present}");
+  assert(absent == 1, "{absent}");
+  assert(last == "o2", "{last}");
+}
+
+// --- yield* ---
+
+delegate_vec_store() `test {
+  string last = "";
+  for s in delegate_vec() {
+    last = s;
+  }
+  assert(last == "b2", "{last}");
+}
+
+delegate_box_vec_store() `test {
+  Box last = Box(v: "");
+  for b in delegate_box_vec() {
+    last = b;
+  }
+  assert(last.v == "y2", "{last.v}");
+}
+
+delegate_array_store() `test {
+  string last = "";
+  for s in delegate_array() {
+    last = s;
+  }
+  assert(last == "b2", "{last}");
+}
+
+delegate_iter_store() `test {
+  string last = "";
+  for s in delegate_iter() {
+    last = s;
+  }
+  assert(last == "b2", "{last}");
+}
+
+delegate_iter_read() `test {
+  int n = 0;
+  for s in delegate_iter() {
+    n += s.len;
+  }
+  assert(n == 4, "{n}");
+}
+
+delegate_temp_iter_break() `test {
+  int seen = 0;
+  for s in delegate_temp_iter() {
+    seen = s.len;
+    break;
+  }
+  assert(seen == 2, "{seen}");
+}
+
+delegate_temp_vec_break() `test {
+  string first = "";
+  for s in delegate_temp_vec() {
+    first = s;
+    break;
+  }
+  assert(first == "a1", "{first}");
+}
+
+delegate_temp_vec_store() `test {
+  string last = "";
+  for s in delegate_temp_vec() {
+    last = s;
+  }
+  assert(last == "c3", "{last}");
+}
+
+delegate_gen_store() `test {
+  string last = "";
+  for s in delegate_gen(3) {
+    last = s;
+  }
+  assert(last == "s2", "{last}");
+}
+
+delegate_gen_break() `test {
+  string first = "";
+  for s in delegate_gen(3) {
+    first = s;
+    break;
+  }
+  assert(first == "s0", "{first}");
+}
+
+delegate_borrowed_field_strings() `test {
+  Names n = Names(items: ["p{1}", "q{2}"]);
+  string last = "";
+  for s in n.all() {
+    last = s;
+  }
+  assert(last == "q2", "{last}");
+  assert(n.items[1] == "q2", "owner keeps its elements");
+}
+
+delegate_closures_local() `test {
+  int total = 0;
+  for f in delegate_fns_local(10) {
+    total += f();
+  }
+  assert(total == 36, "{total}");
+}
+
+delegate_closures_local_break() `test {
+  int first = 0;
+  for f in delegate_fns_local(10) {
+    first = f();
+    break;
+  }
+  assert(first == 11, "{first}");
+}
+
+delegate_closures_temp_store() `test {
+  (() -> int)[] kept = [];
+  for f in delegate_fns_temp(20) {
+    kept.push(move f);
+  }
+  assert(kept.len == 3, "{kept.len}");
+  assert(kept[2]() == 23, "{kept[2]()}");
+}
+
+delegate_closures_array() `test {
+  int total = 0;
+  for f in delegate_fns_array() {
+    total += f();
+  }
+  assert(total == 9, "{total}");
+}
+
+delegate_closures_array_break() `test {
+  int first = 0;
+  for f in delegate_fns_array() {
+    first = f();
+    break;
+  }
+  assert(first == 2, "{first}");
+}
+
+// --- Element categories ---
+
+tuples_store_break() `test {
+  string last = "";
+  for t in tuples(3) {
+    (name, idx) := t;
+    last = name;
+  }
+  assert(last == "t2", "{last}");
+  int seen = 0;
+  for t in tuples(3) {
+    (name, idx) := t;
+    seen = name.len;
+    break;
+  }
+  assert(seen == 2, "{seen}");
+}
+
+enums_store_break() `test {
+  Shape last = Shape.Empty;
+  for s in shapes(3) {
+    last = s;
+  }
+  assert(last is Circle, "circle");
+  int n = 0;
+  for s in shapes(3) {
+    n += 1;
+    break;
+  }
+  assert(n == 1, "{n}");
+}
+
+optional_boxes_store_break() `test {
+  Box? last = none;
+  for b in optional_boxes(3) {
+    last = b;
+  }
+  assert(last!.v == "o2", "o2");
+  int n = 0;
+  for b in optional_boxes(3) {
+    n += 1;
+    break;
+  }
+  assert(n == 1, "{n}");
+}
+
+vectors_store_break() `test {
+  string[] last = [];
+  for v in vectors(3) {
+    last = v;
+  }
+  assert(last[1] == "w2", "{last[1]}");
+  int n = 0;
+  for v in vectors(3) {
+    n += v.len;
+    break;
+  }
+  assert(n == 2, "{n}");
+}
+
+maps_store_break() `test {
+  map[string, int] last = map[string, int]();
+  for m in maps(3) {
+    last = m;
+  }
+  assert(last["k2"]! == 2, "k2");
+  int n = 0;
+  for m in maps(3) {
+    n += m.len;
+    break;
+  }
+  assert(n == 1, "{n}");
+}
+
+refs_read_break() `test {
+  int n = 0;
+  for r in refs(3) {
+    n += r.borrow.len;
+  }
+  assert(n == 6, "{n}");
+  for r in refs(3) {
+    break;
+  }
+}
+
+closures_call_break() `test {
+  int total = 0;
+  for f in closures(10) {
+    total += f();
+  }
+  assert(total == 23, "{total}");
+  for f in closures(10) {
+    break;
+  }
+}
+
+views_read_break_store() `test {
+  string all = "";
+  for f in views(3) {
+    all = all + "{f}";
+  }
+  assert(all == "f0f1f2", "{all}");
+  for f in views(3) {
+    break;
+  }
+  Format? kept = none;
+  for f in views(3) {
+    kept = f;
+  }
+  assert("{kept!}" == "f2", "kept");
+}
+
+// --- Failable generators ---
+
+collect_failable!(int n, int fail_at) string[] {
+  string[] got = [];
+  for s in ffresh(n, fail_at)?^ {
+    got.push(move s);
+  }
+  return got;
+}
+
+first_failable!(int n) string {
+  for s in ffresh(n, 99)?^ {
+    return s;
+  }
+  return "";
+}
+
+failable_store_all() `test {
+  string[] got = collect_failable(3, 99)?!;
+  assert(got.len == 3, "{got.len}");
+  assert(got[2] == "f2", "{got[2]}");
+}
+
+failable_error_mid_stream() `test {
+  string[] got = collect_failable(3, 2)? e {
+    T2038Err te = e as! T2038Err;
+    assert(te.at == 2, "failed at {te.at}");
+    return;
+  };
+  assert(false, "expected an error, got {got.len}");
+}
+
+failable_early_return() `test {
+  string first = first_failable(3)?!;
+  assert(first == "f0", "{first}");
+}
+
+// The factory starts a failable generator eagerly, so its first yielded value
+// is already in the slot when the discarded call is destroyed.
+failable_discarded() `test {
+  ffresh(3, 99)?!;
+  assert(true, "discarded");
+}
+
+// --- Generic generator ---
+
+generic_strings_store() `test {
+  string[] items = ["g{1}", "h{2}"];
+  string last = "";
+  for s in by_index(items) {
+    last = s;
+  }
+  assert(last == "h2", "{last}");
+  assert(items[1] == "h2", "source intact");
+}
+
+generic_boxes_break() `test {
+  Box[] items = [Box(v: "g{1}"), Box(v: "h{2}")];
+  Box first = Box(v: "");
+  for b in by_index(items) {
+    first = b;
+    break;
+  }
+  assert(first.v == "g1", "{first.v}");
+}
+
+// --- Edge cases ---
+
+// The loop's index binding advances alongside an owned element binding.
+fresh_with_index() `test {
+  string last = "";
+  int last_index = -1;
+  for i, s in fresh(3) {
+    last = s;
+    last_index = i;
+  }
+  assert(last == "s2", "{last}");
+  assert(last_index == 2, "{last_index}");
+  int stopped = -1;
+  for i, s in fresh(3) {
+    if i == 1 {
+      stopped = s.len + i;
+      break;
+    }
+  }
+  assert(stopped == 3, "{stopped}");
+}
+
+// Parenthesized unwraps of a borrowed optional are recognised as borrowed too:
+// each yield hands out a copy and the caller's optional stays intact.
+opt_borrowed_parens(string? o) stream[string] {
+  yield (o!);
+  yield (o)!;
+}
+
+opt_borrowed_parens_store() `test {
+  string? o = "p{1}";
+  string[] got = [];
+  for s in opt_borrowed_parens(o) {
+    got.push(move s);
+  }
+  assert(got.len == 2, "{got.len}");
+  assert(got[0] == "p1" && got[1] == "p1", "both yields");
+  assert(o! == "p1", "caller's optional intact");
+}
+
+// A force-unwrapped FIELD is copied out to the consumer, whether it is read
+// through a borrowed receiver, a borrowed param or an owned local — the owner
+// keeps, and later drops, its own field.
+type Note {
+  string? text;
+
+  borrowed_text(this) stream[string] {
+    yield this.text!;
+  }
+}
+
+note_from_param(Note p) stream[string] {
+  yield p.text!;
+}
+
+note_from_local() stream[string] {
+  Note n = Note(text: "l{1}");
+  yield n.text!;
+}
+
+unwrap_field_borrowed_receiver() `test {
+  Note n = Note(text: "r{1}");
+  string last = "";
+  for s in n.borrowed_text() {
+    last = s;
+  }
+  assert(last == "r1", "{last}");
+  assert(n.text! == "r1", "receiver keeps its field");
+}
+
+unwrap_field_borrowed_param() `test {
+  Note n = Note(text: "p{2}");
+  string last = "";
+  for s in note_from_param(n) {
+    last = s;
+  }
+  assert(last == "p2", "{last}");
+  assert(n.text! == "p2", "caller keeps its field");
+}
+
+unwrap_field_owned_local() `test {
+  string last = "";
+  for s in note_from_local() {
+    last = s;
+  }
+  assert(last == "l1", "{last}");
+}
+
+// Generic generators: the yield-site copy and `yield*` element copy are
+// decided per instantiation.
+generic_unwrap[T](T? o) stream[T] {
+  yield o!;
+}
+
+generic_delegate[T](T[] items) stream[T] {
+  T[] v = items.clone();
+  yield * v;
+}
+
+generic_unwrap_borrowed() `test {
+  string? o = "g{3}";
+  string last = "";
+  for s in generic_unwrap(o) {
+    last = s;
+  }
+  assert(last == "g3", "{last}");
+  assert(o! == "g3", "caller's optional intact");
+}
+
+generic_delegate_strings_and_boxes() `test {
+  string[] names = ["a{1}", "b{2}"];
+  string last = "";
+  for s in generic_delegate(names) {
+    last = s;
+  }
+  assert(last == "b2", "{last}");
+  Box[] boxes = [Box(v: "x{1}"), Box(v: "y{2}")];
+  string first = "";
+  for b in generic_delegate(boxes) {
+    first = b.v.clone();
+    break;
+  }
+  assert(first == "x1", "{first}");
+}
+
+// A failable generator re-yielding another's owned elements: a mid-stream error
+// in the inner one propagates through the outer generator while the elements
+// already yielded stay owned by the consumer.
+rethrow!(int n, int fail_at) stream[string] {
+  for s in ffresh(n, fail_at)?^ {
+    yield s;
+  }
+}
+
+collect_rethrow!(int n, int fail_at) string[] {
+  string[] got = [];
+  for s in rethrow(n, fail_at)?^ {
+    got.push(move s);
+  }
+  return got;
+}
+
+failable_rethrow_ok() `test {
+  string[] got = collect_rethrow(3, 99)?!;
+  assert(got.len == 3 && got[2] == "f2", "{got.len}");
+}
+
+failable_rethrow_error() `test {
+  string[] got = collect_rethrow(3, 2)? e {
+    T2038Err te = e as! T2038Err;
+    assert(te.at == 2, "failed at {te.at}");
+    return;
+  };
+  assert(false, "expected an error, got {got.len}");
+}
+
+// The same mid-stream error surfacing through a `go! {}` block, with the
+// owned element moved out of the loop binding on each iteration.
+failable_in_go_block() `test {
+  t := go! {
+    string last = "";
+    for s in ffresh(3, 1) {
+      last = s;
+    }
+    last
+  };
+  int at = -1;
+  string got = (<-t)? e {
+    at = (e as! T2038Err).at;
+    "";
+  };
+  assert(at == 1, "error surfaced from go! block: {at}");
+  assert(got == "", "{got}");
+}
+
+// Native handle and value-struct containers are owned by the binding too.
+channels(int n) stream[channel[string]] {
+  int i = 0;
+  while i < n {
+    channel[string] c = channel[string](capacity: 1);
+    c.send("c{i}");
+    yield c;
+    i += 1;
+  }
+}
+
+sets(int n) stream[Set[string]] {
+  int i = 0;
+  while i < n {
+    Set[string] st = Set[string]();
+    st.add("e{i}");
+    yield st;
+    i += 1;
+  }
+}
+
+weaks(Ref[string] r) stream[Weak[string]] {
+  yield r.downgrade();
+  yield r.downgrade();
+}
+
+channels_store_break() `test {
+  channel[string]? kept = none;
+  for c in channels(3) {
+    kept = c;
+  }
+  string? got = <-kept!;
+  assert(got! == "c2", "c2");
+  for c in channels(3) {
+    break;
+  }
+}
+
+sets_store_break() `test {
+  Set[string] last = Set[string]();
+  for st in sets(3) {
+    last = st;
+  }
+  assert(last.contains("e2"), "e2");
+  for st in sets(3) {
+    break;
+  }
+}
+
+weaks_read_break() `test {
+  Ref[string] r = Ref[string]("w{1}");
+  int n = 0;
+  for w in weaks(r) {
+    n += 1;
+  }
+  for w in weaks(r) {
+    break;
+  }
+  assert(n == 2, "{n}");
+}

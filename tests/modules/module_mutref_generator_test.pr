@@ -55,8 +55,7 @@ module_mutref_generator_abandoned_early() `test(timeout: "5s") {
 module_mutref_heap_borrow_abandoned_early() `test(timeout: "5s") {
   // The borrow is a heap string. If the destroy path treated the mut-ref param
   // as owned it would free this frame's string. The generator yields ints, so an
-  // abandoned run stays about the borrow — breaking out of a generator that
-  // yields freshly allocated heap values leaks them (T2038, pre-existing).
+  // abandoned run stays about the borrow; module_heap_yield_* cover heap yields.
   genmod.ModGen g = genmod.ModGen(base: 1);
   string sep = "|";
   int seen = 0;
@@ -87,4 +86,42 @@ module_mutref_generator_generic_owner() `test(timeout: "5s") {
   }
   assert(icount == 2, "second instantiation write-back: {icount}");
   assert(ilast == 5, "last item: {ilast}");
+}
+
+// T2038: a module-hosted generator method yielding freshly built heap strings.
+// The consumer's binding owns each one — storing it must not double free, and
+// breaking out after one yield must not leak what the generator built.
+module_heap_yield_store_all() `test(timeout: "5s") {
+  genmod.ModGen g = genmod.ModGen(base: 4);
+  string sep = ":";
+  string last = "";
+  for s in g.tagged(3, sep) {
+    last = s;
+  }
+  assert(last == "4:2", "last yield: {last}");
+  assert(sep == ":", "the borrow is not consumed: {sep}");
+}
+
+module_heap_yield_abandoned_early() `test(timeout: "5s") {
+  genmod.ModGen g = genmod.ModGen(base: 5);
+  string sep = "/";
+  string first = "";
+  for s in g.tagged(3, sep) {
+    first = s;
+    break;
+  }
+  assert(first == "5/0", "first yield: {first}");
+  assert(sep == "/", "caller's string survives the destroy: {sep}");
+}
+
+module_heap_yield_generic_owner() `test(timeout: "5s") {
+  genmod.ModHolder[string] hs = genmod.ModHolder[string](items: ["a{1}", "b{2}"]);
+  int count = 0;
+  string last = "";
+  for s in hs.drain(count) {
+    last = s;
+  }
+  assert(count == 2, "write-back: {count}");
+  assert(last == "b2", "last item: {last}");
+  assert(hs.items[1] == "b2", "owner keeps its element: {hs.items[1]}");
 }

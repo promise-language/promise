@@ -31,6 +31,45 @@ func (c *Compiler) cleanupStmtLevelTemps() {
 	c.drainEnumCtorTempsFrom(c.blockTempFloorEnum)
 }
 
+// hasLiveStmtTemps reports whether any statement-scoped temp is still tracked in
+// the string, heap, closure-env or inline enum-constructor registry.
+func (c *Compiler) hasLiveStmtTemps() bool {
+	return len(c.stmtTemps)+len(c.heapTemps)+len(c.envTemps)+len(c.enumCtorTemps) > 0
+}
+
+// emitDivergentStmtTempDrops emits flag-guarded drops for every statement temp
+// still tracked (all four registries, from index 0) WITHOUT consuming the
+// registries: they — and the per-statement flags cleanupStmtTempsFrom resets —
+// are restored afterwards, so the normal continuation still drains the same temps
+// at its own statement end. For a divergent exit that never reaches that
+// statement end, on a path mutually exclusive with it: a generator destroyed
+// while suspended mid-statement (T2038).
+func (c *Compiler) emitDivergentStmtTempDrops() {
+	if !c.hasLiveStmtTemps() {
+		return
+	}
+	stmtTemps, stmtTempMap, mergeBound := c.stmtTemps, c.stmtTempMap, c.mergeBoundStructFlag
+	optFieldString, optFieldVector := c.optionalFieldString, c.optionalFieldVector
+	optStringDup, optContainerDup := c.optionalStringDup, c.optionalContainerDup
+	optTupleDup, optHeapDup := c.optionalTupleDup, c.optionalHeapDup
+	heapTemps, heapTempMap := c.heapTemps, c.heapTempMap
+	envTemps, envTempMap := c.envTemps, c.envTempMap
+	enumCtorTemps := c.enumCtorTemps
+
+	c.cleanupStmtTempsFrom(0)
+	c.cleanupHeapTempsFrom(0)
+	c.cleanupEnvTempsFrom(0)
+	c.drainEnumCtorTempsFrom(0)
+
+	c.stmtTemps, c.stmtTempMap, c.mergeBoundStructFlag = stmtTemps, stmtTempMap, mergeBound
+	c.optionalFieldString, c.optionalFieldVector = optFieldString, optFieldVector
+	c.optionalStringDup, c.optionalContainerDup = optStringDup, optContainerDup
+	c.optionalTupleDup, c.optionalHeapDup = optTupleDup, optHeapDup
+	c.heapTemps, c.heapTempMap = heapTemps, heapTempMap
+	c.envTemps, c.envTempMap = envTemps, envTempMap
+	c.enumCtorTemps = enumCtorTemps
+}
+
 // tempRegistries holds the heap- and closure-env temp registries of an enclosing
 // statement while a nested region is compiled against fresh, empty ones.
 type tempRegistries struct {

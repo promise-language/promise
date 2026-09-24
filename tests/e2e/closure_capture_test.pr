@@ -194,5 +194,52 @@ test_move_capture_nested_droppable_field() `test {
   assert(f() == 5, "captured outer with nested droppable inner");
 }
 
+// T2011: a `move` capture of a Copy value is a copy — the outer binding stays
+// usable, and several lambdas may capture it. (Capturing an already-moved
+// non-Copy local is now a compile error; see ownership/t2011_test.go.)
+type _T2011Point {
+  int x `value;
+  int y `value;
+}
+
+_t2011_call(int k, (int) -> string f) string {
+  return f(k);
+}
+
+// --- 12. Copy values captured by two move lambdas, then read ---
+test_t2011_copy_captured_twice_then_read() `test {
+  int n = 5;
+  p := _T2011Point(x: 1, y: 2);
+  f := move |int k| -> k + n + p.x;
+  g := move |int k| -> k + n + p.y;
+  assert(f(1) == 7, "first lambda");
+  assert(g(1) == 8, "second lambda");
+  assert(n == 5, "n still usable");
+  assert(p.x + p.y == 3, "p still usable");
+}
+
+// --- 13. Copy value move-captured inside a loop ---
+test_t2011_copy_capture_in_loop() `test {
+  int n = 5;
+  string joined = "";
+  int i = 0;
+  while (i < 3) {
+    joined = joined + _t2011_call(i, move |int k| -> "{k}:{n};");
+    i += 1;
+  }
+  assert(joined == "0:5;1:5;2:5;", "every iteration captures n");
+  assert(n == 5, "n still usable after the loop");
+}
+
+// --- 14. reassigning a moved string makes it capturable again ---
+test_t2011_reassign_then_recapture() `test {
+  string suffix = "-" + "c";
+  f := move |int k| -> "{k}{suffix}";
+  suffix = "-" + "d";
+  g := move |int k| -> "{k}{suffix}";
+  assert(f(1) == "1-c", "first env owns the first string");
+  assert(g(2) == "2-d", "second env owns the second string");
+}
+
 main() {
 }

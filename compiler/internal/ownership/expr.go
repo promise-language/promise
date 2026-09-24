@@ -607,22 +607,30 @@ func (c *Checker) tryMove(expr ast.Expr) {
 	if _, tracked := c.state[ident.Name]; !tracked {
 		return
 	}
-	// Cannot move use-bound variables (they need close() at scope exit)
-	if c.pinned[ident.Name] {
-		c.errorf(ident.Pos(), "cannot move use-bound variable '%s'", ident.Name)
-		return
-	}
 	// Borrowed parameters stay borrowed — their state is unchanged by
 	// tryMove. The T0338 check fires at consuming sites via tryMoveConsume.
 	if c.state[ident.Name] == Borrowed {
 		return
 	}
-	// Cannot move while borrowed
-	if c.borrows != nil && c.borrows.HasAnyBorrow(ident.Name) {
-		c.errorf(ident.Pos(), "cannot move '%s' while it is borrowed", ident.Name)
+	c.moveLocal(ident.Name, ident.Pos(), v.Type())
+}
+
+// moveLocal is the shared tail of every move of a non-Copy local — tryMove,
+// tryMoveConsume and a lambda `move` capture (T2011) — once the caller has
+// ruled out Copy types and Borrowed state. A use-bound variable cannot be moved
+// (it needs close() at scope exit), and a variable cannot be moved while a
+// borrow of it is live; otherwise the site is recorded for the T1498 loop
+// back-edge check and the name is marked Moved.
+func (c *Checker) moveLocal(name string, pos ast.Pos, typ types.Type) {
+	if c.pinned[name] {
+		c.errorf(pos, "cannot move use-bound variable '%s'", name)
+		return
 	}
-	c.noteLoopMoveSite(ident.Name, ident.Pos(), v.Type())
-	c.state[ident.Name] = Moved
+	if c.borrows != nil && c.borrows.HasAnyBorrow(name) {
+		c.errorf(pos, "cannot move '%s' while it is borrowed", name)
+	}
+	c.noteLoopMoveSite(name, pos, typ)
+	c.state[name] = Moved
 }
 
 // tryMoveConsume is like tryMove but enforces the T0338 check: the value
@@ -721,15 +729,7 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	if _, tracked := c.state[ident.Name]; !tracked {
 		return
 	}
-	if c.pinned[ident.Name] {
-		c.errorf(ident.Pos(), "cannot move use-bound variable '%s'", ident.Name)
-		return
-	}
-	if c.borrows != nil && c.borrows.HasAnyBorrow(ident.Name) {
-		c.errorf(ident.Pos(), "cannot move '%s' while it is borrowed", ident.Name)
-	}
-	c.noteLoopMoveSite(ident.Name, ident.Pos(), v.Type())
-	c.state[ident.Name] = Moved
+	c.moveLocal(ident.Name, ident.Pos(), v.Type())
 }
 
 // tryMoveConsumeCastSubject peels ParenExpr / CastExpr from expr and runs
@@ -3148,6 +3148,13 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	// non-`~this` method is a common closure-returning-method pattern;
 	// codegen treats the captured `this` as a borrowed pointer rather than
 	// adding it to the env-drop chain.)
+	// T2011: otherwise a move capture is a move like any other. The lambda
+	// body below resets its captures to Owned, so no ident read ever sees an
+	// already-moved capture — the capture site itself must reject it, or two
+	// envs own (and free) the same value. The Borrowed check stays ahead of
+	// the Copy skip because a borrowed `T&` local is Copy (see T0381 in
+	// tryMoveConsume); a Copy capture is a copy and leaves the outer binding
+	// usable (language-design §6.2).
 	if captures := c.info.LambdaCaptures[e]; len(captures) > 0 {
 		for _, cv := range captures {
 			if !cv.ByMove {
@@ -3167,8 +3174,14 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 				}
 				continue
 			}
-			c.noteLoopMoveSite(name, e.Pos(), cv.Obj.Type())
-			c.state[name] = Moved
+			if isCopyType(cv.Obj.Type()) {
+				continue
+			}
+			if c.state[name] == Moved {
+				c.errorf(e.Pos(), "use of moved variable '%s'", name)
+				continue
+			}
+			c.moveLocal(name, e.Pos(), cv.Obj.Type())
 		}
 	}
 

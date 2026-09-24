@@ -124,10 +124,151 @@ func TestGoTestFlags_CleanRunsUncached(t *testing.T) {
 	}
 }
 
-// TestRunTest_CleanWithSharedIsRefused: RunTest has no separate parser, so the
-// refusal is pinned at the entry point, where it must come before the clean,
-// the cache setup and the build. HOME is redirected, so a regression that took
-// the verify lock or touched ~/.promise shows up in this test's own home.
+// TestParseTestArgs_EveryFlagAndSuiteSetsItsOption covers the whole command
+// line as a pure parse, which is the point of having a parser at all: every
+// flag of bin/test used to be provable only by running the pipeline it selects
+// (T2091).
+func TestParseTestArgs_EveryFlagAndSuiteSetsItsOption(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want testOptions
+	}{
+		{"none", nil, testOptions{suite: "default"}},
+		{"go", []string{"go"}, testOptions{suite: "go"}},
+		{"promise", []string{"promise"}, testOptions{suite: "promise"}},
+		{"tools", []string{"tools"}, testOptions{suite: "tools"}},
+		{"all", []string{"all"}, testOptions{suite: "all"}},
+		{"shared", []string{"--shared"}, testOptions{suite: "default", shared: true}},
+		{"wasm", []string{"--wasm"}, testOptions{suite: "default", wasm: true}},
+		{"wasm-web", []string{"--wasm-web"}, testOptions{suite: "default", wasmWeb: true}},
+		{"clean", []string{"--clean"}, testOptions{suite: "default", clean: true}},
+		{"local is the default said out loud", []string{"--local"}, testOptions{suite: "default"}},
+		{"single dash", []string{"-wasm"}, testOptions{suite: "default", wasm: true}},
+		{"repeated flag", []string{"--clean", "--clean"}, testOptions{suite: "default", clean: true}},
+		{"last suite wins", []string{"go", "promise"}, testOptions{suite: "promise"}},
+		// --local is a no-op, not the opposite of --shared: it does not unset a
+		// --shared given alongside it. Pinned rather than left to be
+		// rediscovered by someone who writes the pair expecting the last one to
+		// win, as it does for the positional mode one line above.
+		{"local does not unset shared", []string{"--shared", "--local"}, testOptions{suite: "default", shared: true}},
+		{
+			"all together",
+			[]string{"all", "--shared", "--wasm", "--wasm-web"},
+			testOptions{suite: "all", shared: true, wasm: true, wasmWeb: true},
+		},
+		{
+			"all together, cleaning",
+			[]string{"all", "--wasm", "--wasm-web", "--clean"},
+			testOptions{suite: "all", wasm: true, wasmWeb: true, clean: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseTestArgs(tc.args)
+			if err != nil {
+				t.Fatalf("parseTestArgs(%v) = %v", tc.args, err)
+			}
+			if got != tc.want {
+				t.Errorf("parseTestArgs(%v) = %+v, want %+v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseTestArgs_CleanWithSharedIsRefused is the pure-parse half of the
+// refusal: no lock, no filesystem, no build reached before it is decided.
+//
+// The message must NAME `bin/clean --shared`, as every other refusal in this
+// tree names its replacement. Someone who typed `--shared --clean` wanted the
+// shared cache cleared, and that is still a thing they can have — by an
+// operator's explicit command rather than as a side effect of a test run. A
+// bare "cannot be combined" leaves them to discover that on their own.
+func TestParseTestArgs_CleanWithSharedIsRefused(t *testing.T) {
+	for _, args := range [][]string{
+		{"--shared", "--clean"},
+		{"go", "--clean", "--shared"},
+	} {
+		got, err := parseTestArgs(args)
+		if !errors.Is(err, errCleanWithShared) {
+			t.Errorf("parseTestArgs(%v) = %v, want errCleanWithShared", args, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "bin/clean --shared") {
+			t.Errorf("parseTestArgs(%v) = %q, want it to name bin/clean --shared", args, err)
+		}
+		if got != (testOptions{}) {
+			t.Errorf("a rejected command line must yield zero options, got %+v", got)
+		}
+	}
+}
+
+// TestParseTestArgs_Rejections covers the error paths. The last case is an
+// ordering pin: a mistyped argument is reported as a mistype even when the rest
+// of the line also happens to be a refused combination, so the message names
+// the mistake its author actually made.
+func TestParseTestArgs_Rejections(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"unknown flag", []string{"--unknown"}},
+		{"unknown suite", []string{"nope"}},
+		{"typo alongside a suite", []string{"go", "--wsam"}},
+		// NormalizeArgs splits --wasm=1 into "-wasm" "1"; bin/test has no
+		// valued flag, so the value is left over as an unknown argument.
+		{"value on a boolean flag", []string{"--wasm=1"}},
+		{"a typo is not a refused combination", []string{"--shared", "--clean", "--bogus"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseTestArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parseTestArgs(%v) = %+v, want an error", tc.args, got)
+			}
+			if err.Error() != testUsage {
+				t.Errorf("parseTestArgs(%v) = %q, want exactly the usage line", tc.args, err)
+			}
+			if got != (testOptions{}) {
+				t.Errorf("a rejected command line must yield zero options, got %+v", got)
+			}
+		})
+	}
+}
+
+// TestTestOptions_SuiteSelectsItsPhases pins which phases each mode runs. The
+// mapping is otherwise only exercised by a full bin/test run, which builds a
+// compiler first — so a mode quietly losing a suite would be caught by nothing
+// short of noticing the missing output.
+func TestTestOptions_SuiteSelectsItsPhases(t *testing.T) {
+	for _, tc := range []struct {
+		suite                          string
+		compiler, tools, promiseSuites bool
+	}{
+		{"default", true, false, true},
+		{"go", true, false, false},
+		{"promise", false, false, true},
+		{"tools", false, true, false},
+		{"all", true, true, true},
+	} {
+		t.Run(tc.suite, func(t *testing.T) {
+			opts := testOptions{suite: tc.suite}
+			if got := opts.runsCompiler(); got != tc.compiler {
+				t.Errorf("%q runsCompiler = %v, want %v", tc.suite, got, tc.compiler)
+			}
+			if got := opts.runsTools(); got != tc.tools {
+				t.Errorf("%q runsTools = %v, want %v", tc.suite, got, tc.tools)
+			}
+			if got := opts.runsPromise(); got != tc.promiseSuites {
+				t.Errorf("%q runsPromise = %v, want %v", tc.suite, got, tc.promiseSuites)
+			}
+		})
+	}
+}
+
+// TestRunTest_CleanWithSharedIsRefused is the wiring pin for the refusal
+// parseTestArgs decides: RunTest parses before the clean, the cache setup and
+// the build, so a refused command line has no side effect. HOME is redirected,
+// so a regression that took the verify lock or touched ~/.promise shows up in
+// this test's own home.
 func TestRunTest_CleanWithSharedIsRefused(t *testing.T) {
 	home := cleanTestHome(t)
 	for _, args := range [][]string{
@@ -140,6 +281,30 @@ func TestRunTest_CleanWithSharedIsRefused(t *testing.T) {
 	}
 	if promise := filepath.Join(home, ".promise"); Exists(promise) {
 		t.Errorf("a refused run must not take the verify lock or touch the shared home; %s exists", promise)
+	}
+}
+
+// TestRunTest_UnknownFlagReturnsUsageError is the wiring pin for the refusal's
+// other half, the shape bin/clean already has: a mistyped command line returns
+// the usage error without cleaning, staging a cache or building a compiler.
+// Without it, only the --shared --clean pair was pinned as reaching RunTest's
+// parse-first early return, and a typo is by far the likelier way in.
+func TestRunTest_UnknownFlagReturnsUsageError(t *testing.T) {
+	home := cleanTestHome(t)
+	root := t.TempDir()
+	err := RunTest(root, []string{"--wsam"})
+	if err == nil {
+		t.Fatal("expected a usage error for an unknown flag, got nil")
+	}
+	if err.Error() != testUsage {
+		t.Errorf("got %q, want %q", err.Error(), testUsage)
+	}
+	// Nothing ran: no local home staged in the root, no shared home touched.
+	if local := filepath.Join(root, ".promise-home"); Exists(local) {
+		t.Errorf("a refused run must not stage a cache; %s exists", local)
+	}
+	if promise := filepath.Join(home, ".promise"); Exists(promise) {
+		t.Errorf("a refused run must not touch the shared home; %s exists", promise)
 	}
 }
 

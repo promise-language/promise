@@ -20,7 +20,7 @@ The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries i
 |--------|---------|
 | `bin/build` | Build the compiler binary (`bin/promise`). Handles ANTLR parser generation, resource embedding, LLVM detection, and Go compilation. |
 | `bin/verify` | Pre-commit verification: build, repair, check, then the `integration` gate, measured in-process and judged. Supports `--clean`, `--push`, `--lock-timeout`. No variant flags. |
-| `bin/test` | Run test suites. Modes: `go`, `promise`, `all`. Supports `--wasm`, `--clean`. |
+| `bin/test` | Run test suites. Modes: `go`, `promise`, `tools`, `all`; with no mode, the CI set (`go` + `promise`, no tools). Supports `--local`/`--shared`, `--wasm`, `--wasm-web`, `--clean` — and refuses `--clean` with `--shared`, since a test run never clears the shared home. |
 | `bin/format` | Format Go code (`gofmt`) and Promise code (`promise format`). |
 | `bin/check` | Run `go vet` over every Go module, reporting the findings this project's authors can act on — diagnostics in the generated parser are excluded. The same implementation the `checked:go` gate measures; `go vet` has no general `-fix`, so this is the check-only form of the pair. |
 | `bin/coverage` | Test coverage analysis for Go packages and Promise tests. |
@@ -113,8 +113,8 @@ shared Go caches. The tools are the one package whose subject *is* the machine's
 global state, so a test that runs them for real spends the host's state to
 assert on a flag.
 
-- **Proving a flag parses is a pure-parse test** (`parseVerifyArgs`,
-  `parseCleanArgs`), never a pipeline run: `--push` pushes.
+- **Proving a flag parses is a pure-parse test** (`parseTestArgs`,
+  `parseVerifyArgs`, `parseCleanArgs`), never a pipeline run: `--push` pushes.
 - **`go clean -testcache` is host-global, so no tool runs it.** It stamps
   `$GOCACHE/testexpire.txt`, and cmd/go then treats every test result saved
   before that moment as expired — in every module, and in every clone sharing

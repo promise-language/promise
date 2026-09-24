@@ -1,67 +1,117 @@
 package common
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// RunTest builds the compiler and runs test suites.
-// Modes: "go" (compiler Go tests), "promise" (Promise tests), "tools"
-// (tools/build Go tests), "all" (go + promise + tools). With no mode it runs the
-// CI set — go + promise — and skips tools. The "tools" suite is opt-in because
-// several of its tests assume a POSIX shell/toolchain and 8.3-free temp paths, so
-// they are unreliable across CI runners; bin/verify runs them locally where that
-// environment holds. Flows are never run here (no flow-sdk workspace on CI).
-// Flags: -shared (use ~/.promise), -wasm (include wasm32-wasi),
-// -wasm-web (include wasm32-web via Node), -clean (wipe .promise-home first and
-// run the Go suites uncached; refused with -shared).
-// Default cache is local (.promise-home/); -local is accepted for clarity.
-func RunTest(root string, args []string) error {
-	start := time.Now()
-	args = NormalizeArgs(args)
+// testUsage is the one spelling of what this tool accepts.
+const testUsage = "usage: bin/test [go|promise|tools|all] [--local|--shared] [--wasm] [--wasm-web] [--clean]"
 
-	// "default" = no positional mode = the CI set (go + promise, no tools).
-	suite := "default"
-	shared := slices.Contains(args, "-shared")
-	wasm := slices.Contains(args, "-wasm")
-	wasmWeb := slices.Contains(args, "-wasm-web")
-	clean := slices.Contains(args, "-clean")
+// testOptions is one bin/test run's command line, parsed.
+type testOptions struct {
+	// suite is the positional mode: "go" (compiler Go tests), "promise"
+	// (Promise tests), "tools" (tools/build Go tests), "all" (all three), or
+	// "default" — no mode given — which is the CI set: go + promise, no tools.
+	suite string
+	// shared uses the shared ~/.promise instead of the repo-local
+	// .promise-home/. Off by default; -local says the default out loud.
+	shared bool
+	// wasm and wasmWeb add the wasm32-wasi and wasm32-web Promise suites to the
+	// host one, under wasmtime and Node respectively.
+	wasm    bool
+	wasmWeb bool
+	// clean wipes .promise-home/ first and runs the Go suites uncached.
+	clean bool
+}
 
-	for _, arg := range args {
+// runsCompiler, runsTools and runsPromise are which phases the parsed mode
+// selects. The mapping lives on the options, next to the mode that decides it,
+// so a unit test can reach it: RunTest cleans, stages a cache and builds a
+// compiler before the first phase, so a mapping inlined there could only be
+// asserted by running the whole pipeline.
+func (o testOptions) runsCompiler() bool {
+	return o.suite == "default" || o.suite == "all" || o.suite == "go"
+}
+
+func (o testOptions) runsTools() bool {
+	return o.suite == "all" || o.suite == "tools"
+}
+
+func (o testOptions) runsPromise() bool {
+	return o.suite == "default" || o.suite == "all" || o.suite == "promise"
+}
+
+// parseTestArgs parses bin/test's command line and does nothing else — no
+// clean, no cache setup, no build, no subprocess. It is separate from RunTest
+// so that flag coverage can be a pure unit test rather than a real test run:
+// proving that -clean parsed used to mean wiping a home and building a
+// compiler, and -shared -clean used to reach the shared home's removal (T2091,
+// T2095).
+//
+// A rejected command line yields the zero testOptions, so a caller that reads
+// the options before the error cannot act on a half-parsed one.
+func parseTestArgs(args []string) (testOptions, error) {
+	opts := testOptions{suite: "default"}
+	for _, arg := range NormalizeArgs(args) {
 		switch arg {
 		case "go", "promise", "tools", "all":
-			suite = arg
-		case "-local", "-shared", "-wasm", "-wasm-web", "-clean":
-			// already handled
+			opts.suite = arg
+		case "-local":
+			// explicit local — no-op (the default)
+		case "-shared":
+			opts.shared = true
+		case "-wasm":
+			opts.wasm = true
+		case "-wasm-web":
+			opts.wasmWeb = true
+		case "-clean":
+			opts.clean = true
 		default:
-			return fmt.Errorf("usage: bin/test [go|promise|tools|all] [-shared] [-wasm] [-wasm-web] [-clean]")
+			return testOptions{}, errors.New(testUsage)
 		}
 	}
-	if shared && clean {
-		return errCleanWithShared
+	// After the loop, not inside it: an unknown argument means the command line
+	// was mistyped, and answering a mistype with a complaint about a flag
+	// combination sends its author past the mistake they actually made.
+	if opts.shared && opts.clean {
+		return testOptions{}, errCleanWithShared
 	}
+	return opts, nil
+}
 
-	runCompiler := suite == "default" || suite == "all" || suite == "go"
-	runTools := suite == "all" || suite == "tools"
-	runPromise := suite == "default" || suite == "all" || suite == "promise"
+// RunTest builds the compiler and runs test suites. Its command line is
+// testUsage, parsed by parseTestArgs.
+//
+// The "tools" suite is opt-in — `bin/test tools` or `bin/test all`, never the
+// default CI set — because several of its tests assume a POSIX shell/toolchain
+// and 8.3-free temp paths, so they are unreliable across CI runners; bin/verify
+// runs them locally where that environment holds. Flows are never run here (no
+// flow-sdk workspace on CI).
+func RunTest(root string, args []string) error {
+	start := time.Now()
+	opts, err := parseTestArgs(args)
+	if err != nil {
+		return err
+	}
 
 	// Clean first if requested, before SetupLocalCache so the local home is
 	// recreated empty. The Go suites then skip saved results (goTestFlags).
-	if clean {
+	if opts.clean {
 		if err := Clean(root, CleanOptions{}); err != nil {
 			return fmt.Errorf("clean: %w", err)
 		}
 	}
 
 	// Default to local cache; -shared opts into ~/.promise
-	if !shared {
+	if !opts.shared {
 		if err := SetupLocalCache(root); err != nil {
 			return fmt.Errorf("setup local cache: %w", err)
 		}
@@ -74,31 +124,31 @@ func RunTest(root string, args []string) error {
 	}
 
 	// Compiler Go tests — the CI set.
-	if runCompiler {
+	if opts.runsCompiler() {
 		Progress().Println("\nRunning go tests (compiler)...")
-		if err := RunGoTests(root, goTestFlags(clean)...); err != nil {
+		if err := RunGoTests(root, goTestFlags(opts.clean)...); err != nil {
 			return fmt.Errorf("go tests (compiler): %w", err)
 		}
 	}
 
 	// Tools/build Go tests — opt-in only (`bin/test tools` / `bin/test all`), not
 	// part of the default CI set. See the RunTest doc comment for why.
-	if runTools {
+	if opts.runsTools() {
 		Progress().Println("\nRunning go tests (tools)...")
-		if err := RunToolsGoTests(root, goTestFlags(clean)...); err != nil {
+		if err := RunToolsGoTests(root, goTestFlags(opts.clean)...); err != nil {
 			return fmt.Errorf("go tests (tools): %w", err)
 		}
 	}
 
 	// Promise tests
-	if runPromise {
+	if opts.runsPromise() {
 		Progress().Println("\nRunning promise tests (host)...")
 		_, err := RunPromiseTests(root, "")
 		if err != nil {
 			return fmt.Errorf("promise tests (host): %w", err)
 		}
 
-		if wasm {
+		if opts.wasm {
 			if Which("wasmtime") == "" { // path-ok: the documented wasm32-wasi test runtime
 				return fmt.Errorf("wasmtime not found — install with: bin/prereqs --wasm")
 			}
@@ -109,7 +159,7 @@ func RunTest(root string, args []string) error {
 			}
 		}
 
-		if wasmWeb {
+		if opts.wasmWeb {
 			if Which("node") == "" { // path-ok: the documented wasm32-web test runtime (Node 20+)
 				return fmt.Errorf("node not found — install Node.js 20+ (see bin/prereqs)")
 			}

@@ -359,10 +359,10 @@ func TestT1926_TupleHeldBufferOfIntsMapReadDups(t *testing.T) {
 // `DerF[T] is BaseF[T]` reaches its buffer through the parent's field, which
 // AllFields() reports typed in the PARENT's type parameter — the walk still sees
 // a `duplicates_elements instance there, so the struct is un-dup-safe and the
-// read is a borrow. (The type-argument occurrence check in
-// duplicatingContainerElemTypes does NOT survive the same shape — that is T1970,
-// a separate escape; this test pins the half that works so a fix for T1970
-// cannot silently regress it.)
+// read is a borrow. (This half already worked through the TypeArgs recursion.
+// T1970 made the walks resolve the inherited field itself, via
+// types.AllFieldTypes, so the same conclusion is now reached by the direct route
+// too; this test pins that the stronger predicate still yields a borrow.)
 func TestT1926_InheritedBufferOfClosuresNoDup(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		type BaseF[T] { T[] items; }
@@ -374,6 +374,38 @@ func TestT1926_InheritedBufferOfClosuresNoDup(t *testing.T) {
 			m[0] = WrapF(f: DerF[() -> int](items: [|| -> x], n: 1));
 			w := m[0]!;
 			y := w.f.items[0]();
+		}
+		main() { probe(); }
+	`)
+	fn := codegentest.ExtractDefine(ir, "__user.probe")
+	if fn == "" {
+		t.Fatalf("probe not found in IR")
+	}
+	codegentest.AssertNotContains(t, fn, "heapdup.copy")
+}
+
+// T1970: the closure gate's SECOND escape, and the one the item did not predict.
+// `DerBare[T] is BareBase[T]` inherits a BARE PARAMETER field, so at
+// T = Vector[() -> int] the buffer is one the SUBSTITUTION produces rather than one
+// the declared field already is. Unresolved, the walk saw only the parent's unbound
+// parameter — no buffer, no closure — judged the struct dup-safe, and lowered the
+// Map read as a deep copy that zeroes the closure slot to a null {fn, env} fat
+// pointer: `fatal: segmentation fault at 0x0` on invoke, measured on the tree
+// before the fix. Resolving the inherited field makes the read a borrow.
+//
+// The sibling above (TestT1926_InheritedBufferOfClosuresNoDup) is the case where
+// the DECLARED field is already a `duplicates_elements instance, which the walk
+// saw all along; this is the case where only the substitution reveals it.
+func TestT1970_InheritedBareParamClosureContainerNoDup(t *testing.T) {
+	ir := codegentest.GenerateIR(t, `
+		type BareBase[T] { T v; }
+		type DerBare[T] is BareBase[T] { int n; }
+		probe() {
+			x := 4;
+			m := Map[int, DerBare[Vector[() -> int]]]();
+			m[0] = DerBare[Vector[() -> int]](v: [|| -> x], n: 1);
+			w := m[0]!;
+			y := w.v[0]();
 		}
 		main() { probe(); }
 	`)

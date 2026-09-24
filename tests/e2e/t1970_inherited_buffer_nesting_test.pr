@@ -1,0 +1,184 @@
+// T1970: the container-element nesting rule and the by-value read gate resolve an
+// INHERITED field through the parent chain. `Named.AllFields()` reports a parent's
+// fields unsubstituted, so an inherited field is typed in the PARENT's type
+// parameter; every field walk substituted with a map built from the CHILD's
+// parameters, which left it alone and read it as still-generic.
+// `Vector[DerV[Mutex[int]]]` was therefore accepted and segfaulted, while the
+// identical shape without inheritance was rejected.
+//
+// The compile FAILURES for the newly-covered shapes are Go tests (TestT1970_* in
+// sema, ownership and types); this file is the leak-checked runtime side — the
+// shapes that are correctly ALLOWED must still work, so resolving inherited fields
+// cannot have been bought by rejecting sound code. Type names are suffixed so the
+// shapes stay distinguishable from the neighbouring regression files sharing a
+// build.
+//
+// Every type here that inherits at all is a GENERIC child (`Der[T] is Base[T]`),
+// deliberately. A NON-generic child of a generic parent (`Der is Base[Mutex[int]]`)
+// leaks its inherited payload — the droppability fixpoint reads the declared field
+// type and sees an unbound parameter, so the child gets no synthesized drop. That
+// is T2197, a separate pre-existing defect on the drop side of the same root cause,
+// so those shapes appear only in the compile-error Go tests, which never execute.
+// Adding one here would fail on the leak whatever it was meant to assert.
+type BaseVT1970[T] {
+  T[] items;
+}
+type DerVT1970[T] is BaseVT1970[T] {
+  int n;
+}
+type MidVT1970[T] is BaseVT1970[T] {
+  int n;
+}
+type LeafVT1970[T] is MidVT1970[T] {
+  int m;
+}
+type BaseHT1970[T] {
+  T m;
+}
+type DerHT1970[T] is BaseHT1970[T] {
+  int n;
+}
+type RefBaseT1970[T] {
+  Ref[T] r;
+}
+type DerRefT1970[T] is RefBaseT1970[T] {
+  int n;
+}
+type PlainWT1970 {
+  Vector[() -> int] v;
+  int n;
+}
+type BareBaseT1970[T] {
+  T v;
+}
+type DerBareT1970[T] is BareBaseT1970[T] {
+  int n;
+}
+
+worker_t1970() int {
+  return 21;
+}
+
+// The inherited buffer over a plain element is an ordinary container: the rule
+// objects to what the buffer HOLDS, never to reaching one through a parent. The
+// duplicating read is exactly what a plain element makes sound.
+inherited_buffer_plain_element_round_trips() `test {
+  Vector[DerVT1970[int]] v = [];
+  v.push(DerVT1970[int](items: [1, 2, 3], n: 7));
+  d := v[0];
+  assert(d.items.len == 3, "inherited buffer read back");
+  assert(d.items[2] == 3, "inherited buffer contents");
+  assert(d.n == 7, "own field intact");
+  assert(v.len == 1, "source still holds its element");
+}
+
+// Two levels, so the parent bindings have to compose up the chain rather than one
+// hop. A chain that resolved only the first hop would leave the grandparent's
+// buffer typed in an unbound parameter.
+two_level_inherited_buffer_round_trips() `test {
+  Vector[LeafVT1970[string]] v = [];
+  v.push(LeafVT1970[string](items: ["a", "b"], n: 1, m: 2));
+  d := v[0];
+  assert(d.items.len == 2, "grandparent buffer read back");
+  assert(d.items[1] == "b", "grandparent buffer contents");
+  assert(d.n == 1, "parent field intact");
+  assert(d.m == 2, "own field intact");
+}
+
+// A single-owner handle in a plain inherited FIELD (not a buffer) is still a legal
+// container element — the T0508 move-only collection. Only the duplicating read is
+// refused, so push of a fresh value and `pop()`/`remove()` to take ownership must
+// keep working.
+inherited_handle_field_is_a_move_only_collection() `test {
+  Vector[DerHT1970[Mutex[int]]] v = [];
+  v.push(DerHT1970[Mutex[int]](m: Mutex[int](11), n: 1));
+  v.push(DerHT1970[Mutex[int]](m: Mutex[int](22), n: 2));
+  assert(v.len == 2, "two elements pushed");
+
+  second := v.pop()!;
+  assert(second.n == 2, "pop took the last element");
+  g := second.m.lock();
+  assert(g.borrow == 22, "the popped handle is usable");
+  g.close();
+  assert(v.len == 1, "one element left");
+}
+
+// The same move-only collection over `Task`, whose drop goes through the scheduler
+// rather than a plain handle release — a path `Mutex` does not exercise. The handle
+// is taken out of the container and awaited, so the task is joined exactly once and
+// the leak check covers the whole round trip.
+inherited_task_field_is_a_move_only_collection() `test {
+  Vector[DerHT1970[Task[int]]] v = [];
+  v.push(DerHT1970[Task[int]](m: go worker_t1970(), n: 3));
+  assert(v.len == 1, "task pushed");
+
+  taken := v.pop()!;
+  assert(taken.n == 3, "own field intact");
+  assert(<-taken.m == 21, "awaited through the inherited field");
+  assert(v.len == 0, "container emptied");
+}
+
+// memory-model.md §3: a handle held behind a refcount is not held by value, so the
+// element dup is a refcount bump rather than an alias and the read stays legal.
+// This is the false-positive guard — resolving the inherited field must not turn
+// `Ref` into a rejection, and the payload must be released exactly once.
+inherited_ref_handle_field_survives_read() `test {
+  Vector[DerRefT1970[Mutex[int]]] v = [];
+  v.push(DerRefT1970[Mutex[int]](r: Ref[Mutex[int]](Mutex[int](33)), n: 5));
+  d := v[0];
+  g := d.r.borrow.lock();
+  assert(g.borrow == 33, "refcounted handle reachable through the read");
+  g.close();
+  assert(d.n == 5, "own field intact");
+}
+
+// A Map keyed read of the same inherited-buffer shape: the nesting rule is asked at
+// every container instantiation, not only at Vector's, so the plain-element case
+// has to round-trip through Map too.
+inherited_buffer_round_trips_through_map() `test {
+  m := Map[int, DerVT1970[int]]();
+  m[0] = DerVT1970[int](items: [4, 5], n: 9);
+  d := m[0]!;
+  assert(d.items.len == 2, "map read back the inherited buffer");
+  assert(d.items[0] == 4, "map read contents");
+  assert(d.n == 9, "map read own field");
+}
+
+// A SECOND segfault this fix closes, on the closure gate rather than the nesting
+// rule. `DerBareT1970[T] is BareBaseT1970[T]` inherits a BARE PARAMETER field, so
+// the buffer is one the substitution produces: at T = Vector[() -> int] the field
+// IS a by-value container of closures. Unresolved, the walk saw only an unbound
+// parameter, judged the struct dup-safe, and the Map read deep-copied it — zeroing
+// the closure slot to a null {fn, env} fat pointer, which faults at 0x0 on invoke.
+// Resolved, the read is a borrow and the env survives.
+//
+// `PlainWT1970` is the control: spelling the same field directly always worked, and
+// the pair is what "inherited behaves identically to declared" means here.
+plain_container_of_closures_field_survives_read() `test {
+  x := 4;
+  m := Map[int, PlainWT1970]();
+  m[0] = PlainWT1970(v: [|| -> x], n: 1);
+  w := m[0]!;
+  assert(w.v[0]() == 4, "declared closure container survived the read");
+  assert(w.n == 1, "own field intact");
+}
+inherited_bare_param_bound_to_closure_container_survives_read() `test {
+  x := 4;
+  m := Map[int, DerBareT1970[Vector[() -> int]]]();
+  m[0] = DerBareT1970[Vector[() -> int]](v: [|| -> x], n: 1);
+  w := m[0]!;
+  assert(w.v[0]() == 4, "inherited closure container survived the read");
+  assert(w.n == 1, "own field intact");
+}
+
+// The inherited buffer is still a buffer for ordinary purposes: mutating the
+// element's inherited vector after a read must not disturb the container's copy,
+// because duplicating a by-value container duplicates its buffer.
+inherited_buffer_read_is_a_copy_for_plain_elements() `test {
+  Vector[DerVT1970[int]] v = [];
+  v.push(DerVT1970[int](items: [1], n: 0));
+  d := v[0];
+  d.items.push(2);
+  assert(d.items.len == 2, "the copy grew");
+  assert(v[0].items.len == 1, "the container's element did not");
+}

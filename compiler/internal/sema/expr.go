@@ -1250,7 +1250,7 @@ func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string)
 	for k, v := range subst {
 		fullSubst[k] = v
 	}
-	c.mergeParentSubstSema(named, fullSubst)
+	types.MergeParentSubst(named, fullSubst)
 
 	result := m.Sig().Result()
 	if result != nil && len(fullSubst) > 0 {
@@ -1501,7 +1501,7 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 
 	// Merge parent type param substitutions for inherited fields from generic parents.
 	// Recurse transitively: GLeaf[int] is GMid[T] is GBase[T] needs all params resolved.
-	c.mergeParentSubstSema(origin, subst)
+	types.MergeParentSubst(origin, subst)
 
 	// If the type has an explicit new() constructor, route through parameter checking
 	if origin.HasNew() {
@@ -2374,32 +2374,11 @@ func composeParentSubstWalk(n *types.Named, currentSubst map[*types.TypeParam]ty
 // chain so transitive inheritance (Leaf is Middle[int] is Base[T]) resolves all params.
 func (c *Checker) buildParentSubstMap(named *types.Named) map[*types.TypeParam]types.Type {
 	subst := make(map[*types.TypeParam]types.Type)
-	c.mergeParentSubstSema(named, subst)
+	types.MergeParentSubst(named, subst)
 	if len(subst) == 0 {
 		return nil
 	}
 	return subst
-}
-
-// mergeParentSubstSema recursively adds parent type param mappings to subst.
-func (c *Checker) mergeParentSubstSema(named *types.Named, subst map[*types.TypeParam]types.Type) {
-	for _, pr := range named.Parents() {
-		if len(pr.TypeArgs) == 0 {
-			// Non-generic parent — still recurse for its parents.
-			c.mergeParentSubstSema(pr.Named, subst)
-			continue
-		}
-		resolvedArgs := make([]types.Type, len(pr.TypeArgs))
-		for i, ta := range pr.TypeArgs {
-			resolvedArgs[i] = types.Substitute(ta, subst)
-		}
-		parentMap := types.BuildSubstMap(pr.Named.TypeParams(), resolvedArgs)
-		for k, v := range parentMap {
-			subst[k] = v
-		}
-		// Recurse into parent's parents for transitive chains.
-		c.mergeParentSubstSema(pr.Named, subst)
-	}
 }
 
 // resolveEnumMemberInst resolves variant/method on a generic enum, using inst as return type.

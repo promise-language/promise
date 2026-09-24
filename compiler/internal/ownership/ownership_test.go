@@ -16016,3 +16016,138 @@ func TestT1081MemberOptionalCastSubjectNotMovedByT1081(t *testing.T) {
 	`)
 	expectNoOwnerError(t, errs, "use of moved")
 }
+
+// T1970: the by-value READ gate (T1113) sees a single-owner handle reached through
+// an INHERITED field. Named.AllFields() reports a parent's fields unsubstituted, so
+// the handle was typed in the PARENT's *TypeParam and a substitution built from the
+// child's params left it alone — the walk read it as still-generic, the read was
+// judged dup-safe, and the duplicate aliased the container's handle (SEGV on the
+// generic child, a leak on the non-generic one). types.AllFieldTypes folds in the
+// parent chain's bindings.
+
+// Generic child of a generic parent: the handle arrives as the child's type arg,
+// but the FIELD holding it is the parent's, typed in BaseH.T.
+func TestT1970_InheritedGenericHandleFieldReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type BaseH[T] { T m; }
+		type DerHG[T] is BaseH[T] { int n; }
+		test() {
+			Vector[DerHG[Mutex[int]]] v = [];
+			v.push(DerHG[Mutex[int]](m: Mutex[int](1), n: 1));
+			b := v[0];
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// Non-generic child of a generic parent: there are no child type params at all, so
+// the walk's bare-*Named branch applied no substitution whatsoever. This is the
+// shape that escaped even the walks a TypeArgs recursion otherwise saves.
+func TestT1970_InheritedConcreteHandleFieldReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type BaseH2[T] { T m; }
+		type DerHNG is BaseH2[Mutex[int]] { int n; }
+		test() {
+			Vector[DerHNG] v = [];
+			v.push(DerHNG(m: Mutex[int](1), n: 1));
+			b := v[0];
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// Task through the same inherited-field shape — nothing in the walk is specific to
+// Mutex.
+func TestT1970_InheritedTaskFieldReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker_t1970() int { return 42; }
+		type BaseH3[T] { T t; }
+		type DerHT is BaseH3[Task[int]] { int n; }
+		test() {
+			Vector[DerHT] v = [];
+			v.push(DerHT(t: go worker_t1970(), n: 1));
+			b := v[0];
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Task[int], a single-owner native handle")
+}
+
+// Two levels of inheritance: the handle field belongs to the grandparent, so the
+// bindings must compose up the chain.
+func TestT1970_TwoLevelInheritedHandleFieldReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type BaseH4[T] { T m; }
+		type MidH[T] is BaseH4[T] { int n; }
+		type LeafH[T] is MidH[T] { int p; }
+		test() {
+			Vector[LeafH[Mutex[int]]] v = [];
+			v.push(LeafH[Mutex[int]](m: Mutex[int](1), n: 1, p: 2));
+			b := v[0];
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// The false-positive guard: the read gate never recurses TypeArgs, because a
+// refcounted handle's dup is a refcount bump rather than an alias. That must stay
+// true once the inherited field resolves to Ref[Mutex[int]] — otherwise resolving
+// inherited fields would reject sound code (memory-model.md §3).
+func TestT1970_InheritedRefHandleFieldReadAccepted(t *testing.T) {
+	// ownerOK, not expectNoOwnerError: asserting the absence of one substring
+	// would also pass if the snippet failed to type-check at all, which is how a
+	// negative test quietly stops testing anything.
+	ownerOK(t, `
+		type RefBase[T] { Ref[T] r; }
+		type DerRefH[T] is RefBase[T] { int n; }
+		test() {
+			Vector[DerRefH[Mutex[int]]] v = [];
+			v.push(DerRefH[Mutex[int]](r: Ref[Mutex[int]](Mutex[int](1)), n: 1));
+			b := v[0];
+		}
+	`)
+}
+
+// The must-use rule for `failable_task[T]` (language-design.md §17.2.1) shares the
+// same field walk, in types.ContainsFailableTask. An inherited failable_task read
+// as still-generic let the goroutine's error be discarded silently.
+func TestT1970_InheritedFailableTaskMustBeReceived(t *testing.T) {
+	errs := ownerErrs(t, `
+		produce_t1970!(int x) int { if x < 0 { raise error("neg"); } return x * 2; }
+		type FtBase[T] { T t; }
+		type FtDer is FtBase[failable_task[int]] { int n; }
+		test() {
+			h := FtDer(t: go! produce_t1970(1), n: 1);
+		}
+	`)
+	expectOwnerError(t, errs, "failable task that was never received")
+}
+
+// The cycle guard in firstFieldNestedSingleOwnerHandle's Instance-origin branch,
+// which sits directly above the AllFieldTypes walk T1970 introduced. That walk
+// allocates a substitution map and a field-type slice per call, so an unguarded
+// cycle is an infinite loop rather than merely slow: a RECURSIVE GENERIC type must
+// terminate, and must still report the handle it holds alongside the cycle.
+func TestT1970_RecursiveGenericHandleFieldReadRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type RecG[T] { RecG[T]? next; T m; }
+		test() {
+			Vector[RecG[Mutex[int]]] v = [];
+			v.push(RecG[Mutex[int]](next: none, m: Mutex[int](3)));
+			b := v[0];
+		}
+	`)
+	expectOwnerError(t, errs, "transitively contains Mutex[int], a single-owner native handle")
+}
+
+// The same recursive generic over a plain element terminates and stays readable —
+// the guard must not make recursion itself a rejection.
+func TestT1970_RecursiveGenericPlainElementReadAccepted(t *testing.T) {
+	ownerOK(t, `
+		type RecGP[T] { RecGP[T]? next; T m; }
+		test() {
+			Vector[RecGP[int]] v = [];
+			v.push(RecGP[int](next: none, m: 3));
+			b := v[0];
+		}
+	`)
+}

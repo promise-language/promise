@@ -223,25 +223,10 @@ func mergeSubstMaps(a, b map[*types.TypeParam]types.Type) map[*types.TypeParam]t
 // mergeParentSubst augments a type param substitution map with mappings for
 // inherited generic parent type params. E.g., if Derived[T] is Base[T] and
 // subst = {Derived.T → int}, this adds {Base.T → int} so that inherited
-// fields/methods using Base.T are correctly resolved.
+// fields/methods using Base.T are correctly resolved. Sema needs the same rule
+// for the same reason, so the one implementation lives in types (T1970).
 func mergeParentSubst(origin *types.Named, subst map[*types.TypeParam]types.Type) {
-	for _, pr := range origin.Parents() {
-		if len(pr.TypeArgs) == 0 {
-			// Non-generic parent — still recurse for its parents.
-			mergeParentSubst(pr.Named, subst)
-			continue
-		}
-		resolvedArgs := make([]types.Type, len(pr.TypeArgs))
-		for i, ta := range pr.TypeArgs {
-			resolvedArgs[i] = types.Substitute(ta, subst)
-		}
-		parentMap := types.BuildSubstMap(pr.Named.TypeParams(), resolvedArgs)
-		for k, v := range parentMap {
-			subst[k] = v
-		}
-		// Recurse into parent's parents for transitive chains.
-		mergeParentSubst(pr.Named, subst)
-	}
+	types.MergeParentSubst(origin, subst)
 }
 
 // collectMonoInstances deduplicates generic type instances by mangled name.

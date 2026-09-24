@@ -82,6 +82,13 @@ func isCloneableField(typ types.Type) bool {
 
 // validateCloneType checks that all fields of a `clone type are cloneable.
 // Called as a deferred pass after all types are defined (so clone() methods are registered).
+//
+// Reads the DECLARED field type, not types.AllFieldTypes: unlike the dup-safety
+// walks below, this one does not need the parent chain's bindings (T1970). An
+// inherited field typed in a generic parent's param is already judged at the
+// `is Base[Arg]` parent reference, which is itself an instantiation site and so
+// runs validateCloneInstance (T0666). Resolving it here too would report one
+// problem twice. (Verified: `type DerC is BaseC[Heapy] `clone` is rejected.)
 func (c *Checker) validateCloneType(named *types.Named, d *ast.TypeDecl) {
 	for _, f := range named.AllFields() {
 		if !isCloneableField(f.Type()) {
@@ -200,9 +207,9 @@ func (c *Checker) validateCloneInstance(pos ast.Pos, origin types.Type, typeArgs
 		// *TypeParam object). Merge the parent-arg substitution so an inherited
 		// bare-TypeParam field (`Sub[T] is Base[T] { T val; }`, Sub[Heapy]) is
 		// re-checked too — without this it stays "still generic" and slips the
-		// gate, leaking the shared heap payload at drop (mirrors codegen's
-		// mergeParentSubst). (T0666)
-		c.mergeParentSubstSema(t, subst)
+		// gate, leaking the shared heap payload at drop. (T0666; the walks below
+		// get the same merge folded into types.AllFieldTypes — T1970.)
+		types.MergeParentSubst(t, subst)
 		deferred := false
 		for _, f := range t.AllFields() {
 			if !types.ContainsTypeParam(f.Type()) {
@@ -388,9 +395,9 @@ func FirstNestedSingleOwnerHandle(typ types.Type) types.Type {
 // predicate sees through user-type and enum field nesting. (T0482/T0619)
 //
 // Recursion mirrors firstSingleOwnerHandle (Instance TypeArgs, Optional, Tuple,
-// Array) PLUS: *types.Named → each AllFields() type; *types.Enum → each variant
-// field type; generic *types.Instance over a user Named/Enum origin → the
-// origin's fields/variants under the type-arg substitution. The `native
+// Array) PLUS: *types.Named → each AllFieldTypes() type; *types.Enum → each
+// variant field type; generic *types.Instance over a user Named/Enum origin →
+// the origin's fields/variants under the type-arg substitution. The `native
 // container/handle origins (Vector, Ref, Weak, Channel, Task, Mutex,
 // MutexGuard, string) need no special case: they declare zero Promise-level
 // fields, so the field walk over them is a no-op and a cloneable container
@@ -398,6 +405,14 @@ func FirstNestedSingleOwnerHandle(typ types.Type) types.Type {
 // previously an identity list, isStdNativeContainerNamed). `seen` cycle-guards
 // on the Named/Enum pointer so recursive types (Node{Node? next},
 // JsonValue) terminate. Returns non-nil only for Task/Mutex/MutexGuard.
+//
+// Every field walk in this file reads types.AllFieldTypes rather than AllFields()
+// under a BuildSubstMap of the type's OWN params, and must keep doing so: an
+// INHERITED field is typed in the PARENT's *TypeParam, which a child-only
+// substitution leaves untouched, so the walk would read it as still-generic and
+// miss whatever the type argument put there — `Vector[DerV[Mutex[int]]]` with
+// `DerV[T] is BaseV[T]` was accepted and segfaulted for exactly that reason.
+// AllFieldTypes folds in the parent chain's bindings (T1970).
 //
 // T0675 (audit): the closed set of implicit clone-or-move sites this predicate
 // family gates is: (1) enum match-destructure move-out — codegen zero-inits the
@@ -436,9 +451,8 @@ func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) type
 				return nil
 			}
 			seen[origin] = true
-			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
-			for _, f := range origin.AllFields() {
-				if off := firstNestedSingleOwnerHandle(types.Substitute(f.Type(), subst), seen); off != nil {
+			for _, ft := range types.AllFieldTypes(origin, t.TypeArgs()) {
+				if off := firstNestedSingleOwnerHandle(ft, seen); off != nil {
 					return off
 				}
 			}
@@ -461,8 +475,8 @@ func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) type
 			return nil
 		}
 		seen[t] = true
-		for _, f := range t.AllFields() {
-			if off := firstNestedSingleOwnerHandle(f.Type(), seen); off != nil {
+		for _, ft := range types.AllFieldTypes(t, nil) {
+			if off := firstNestedSingleOwnerHandle(ft, seen); off != nil {
 				return off
 			}
 		}
@@ -542,9 +556,8 @@ func firstFieldNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool)
 				return nil
 			}
 			seen[origin] = true
-			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
-			for _, f := range origin.AllFields() {
-				if off := firstFieldNestedSingleOwnerHandle(types.Substitute(f.Type(), subst), seen); off != nil {
+			for _, ft := range types.AllFieldTypes(origin, t.TypeArgs()) {
+				if off := firstFieldNestedSingleOwnerHandle(ft, seen); off != nil {
 					return off
 				}
 			}
@@ -567,8 +580,8 @@ func firstFieldNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool)
 			return nil
 		}
 		seen[t] = true
-		for _, f := range t.AllFields() {
-			if off := firstFieldNestedSingleOwnerHandle(f.Type(), seen); off != nil {
+		for _, ft := range types.AllFieldTypes(t, nil) {
+			if off := firstFieldNestedSingleOwnerHandle(ft, seen); off != nil {
 				return off
 			}
 		}
@@ -648,9 +661,8 @@ func firstNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Signatu
 				return nil
 			}
 			seen[origin] = true
-			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
-			for _, f := range origin.AllFields() {
-				if sig := firstNestedClosure(types.Substitute(f.Type(), subst), seen); sig != nil {
+			for _, ft := range types.AllFieldTypes(origin, t.TypeArgs()) {
+				if sig := firstNestedClosure(ft, seen); sig != nil {
 					return sig
 				}
 			}
@@ -673,8 +685,8 @@ func firstNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Signatu
 			return nil
 		}
 		seen[t] = true
-		for _, f := range t.AllFields() {
-			if sig := firstNestedClosure(f.Type(), seen); sig != nil {
+		for _, ft := range types.AllFieldTypes(t, nil) {
+			if sig := firstNestedClosure(ft, seen); sig != nil {
 				return sig
 			}
 		}
@@ -796,9 +808,8 @@ func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool, topLevel 
 				return nil
 			}
 			seen[origin] = true
-			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
-			for _, f := range origin.AllFields() {
-				if sig := firstFieldNestedClosure(types.Substitute(f.Type(), subst), seen, false); sig != nil {
+			for _, ft := range types.AllFieldTypes(origin, t.TypeArgs()) {
+				if sig := firstFieldNestedClosure(ft, seen, false); sig != nil {
 					return sig
 				}
 			}
@@ -821,8 +832,8 @@ func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool, topLevel 
 			return nil
 		}
 		seen[t] = true
-		for _, f := range t.AllFields() {
-			if sig := firstFieldNestedClosure(f.Type(), seen, false); sig != nil {
+		for _, ft := range types.AllFieldTypes(t, nil) {
+			if sig := firstFieldNestedClosure(ft, seen, false); sig != nil {
 				return sig
 			}
 		}
@@ -1289,10 +1300,7 @@ func collectByValueBuffers(origin types.Type, typeArgs []types.Type, w *byValueW
 	var fieldTypes []types.Type
 	switch n := origin.(type) {
 	case *types.Named:
-		subst := types.BuildSubstMap(n.TypeParams(), typeArgs)
-		for _, f := range n.AllFields() {
-			fieldTypes = append(fieldTypes, types.Substitute(f.Type(), subst))
-		}
+		fieldTypes = types.AllFieldTypes(n, typeArgs)
 	case *types.Enum:
 		subst := types.BuildSubstMap(n.TypeParams(), typeArgs)
 		for _, v := range n.Variants() {
@@ -1614,6 +1622,12 @@ func typeToTypeRef(typ types.Type) ast.TypeRef {
 // - Copy fields: passed directly (constructor handles bitwise copy)
 // - Non-copy fields with clone(): this.field.clone()
 // - Optional non-copy fields: typed var + if-let unwrap + clone + reassign
+//
+// Reads the DECLARED field type, not types.AllFieldTypes (T1970): a field typed in
+// a generic parent's param contains a TypeParam and so already takes the deferred
+// AutoCloneExpr path below, which resolves the substitution in codegen where it is
+// concrete. Pre-resolving it here would move that field onto the concrete path
+// instead — the direction T0605 records as the regression-prone one.
 func (c *Checker) synthesizeCloneMethod(named *types.Named, _ *ast.TypeDecl) *ast.MethodDecl {
 	var stmts []ast.Stmt
 	var args []*ast.Arg

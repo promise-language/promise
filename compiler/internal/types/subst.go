@@ -12,6 +12,78 @@ func BuildSubstMap(tparams []*TypeParam, targs []Type) map[*TypeParam]Type {
 	return m
 }
 
+// MergeParentSubst augments subst with the bindings a type's parent chain
+// establishes: each ParentRef's type arguments, resolved under subst, keyed by the
+// PARENT's own type params, recursively up the chain. E.g. for `Derived[T] is
+// Base[T]` with subst = {Derived.T → int} it adds {Base.T → int}.
+//
+// It is what makes an INHERITED field resolvable under a substitution built from
+// the CHILD's params. AllFields prepends a parent's fields unsubstituted, so an
+// inherited field's declared type is expressed in the parent's *TypeParam — a
+// different object from the child's, which a child-only BuildSubstMap leaves
+// untouched. A field walk that skips this merge silently reads the inherited field
+// as "still generic" and misses whatever the type argument put there. (T1970)
+//
+// subst must be non-nil; MergeParentSubst writes into it. Callers that may have a
+// nil map (BuildSubstMap returns nil on an arity mismatch) should use FieldSubstMap.
+func MergeParentSubst(n *Named, subst map[*TypeParam]Type) {
+	for _, pr := range n.Parents() {
+		if len(pr.TypeArgs) == 0 {
+			// Non-generic parent — still recurse for its parents.
+			MergeParentSubst(pr.Named, subst)
+			continue
+		}
+		resolvedArgs := make([]Type, len(pr.TypeArgs))
+		for i, ta := range pr.TypeArgs {
+			resolvedArgs[i] = Substitute(ta, subst)
+		}
+		for k, v := range BuildSubstMap(pr.Named.TypeParams(), resolvedArgs) {
+			subst[k] = v
+		}
+		// Recurse into the parent's parents for transitive chains.
+		MergeParentSubst(pr.Named, subst)
+	}
+}
+
+// FieldSubstMap returns the substitution that resolves the declared type of every
+// field in n.AllFields(): n's own type params bound to typeArgs, plus the
+// parent-chain bindings MergeParentSubst adds. Pass a nil typeArgs for a
+// non-generic n, or for a generic one walked with its params unbound.
+//
+// Never returns nil, so the result is always safe to write into. (T1970)
+func FieldSubstMap(n *Named, typeArgs []Type) map[*TypeParam]Type {
+	// BuildSubstMap always allocates a fresh map, so taking ownership of it and
+	// letting MergeParentSubst extend it in place is safe. It returns nil on an
+	// arity mismatch, which is the case that needs the map made here instead.
+	subst := BuildSubstMap(n.TypeParams(), typeArgs)
+	if subst == nil {
+		subst = make(map[*TypeParam]Type)
+	}
+	MergeParentSubst(n, subst)
+	return subst
+}
+
+// AllFieldTypes returns the type of every field in n's instance layout, in
+// AllFields order, each resolved through FieldSubstMap. This is the form every
+// TYPE-directed field walk wants.
+//
+// AllFields itself deliberately stays declared-type and pointer-stable: sema keys
+// field defaults on the *Field pointer (Info.FieldDefaults) and codegen looks them
+// up while iterating AllFields, so returning substituted copies there would
+// silently break inherited field defaults. (T1970)
+func AllFieldTypes(n *Named, typeArgs []Type) []Type {
+	fields := n.AllFields()
+	if len(fields) == 0 {
+		return nil
+	}
+	subst := FieldSubstMap(n, typeArgs)
+	out := make([]Type, 0, len(fields))
+	for _, f := range fields {
+		out = append(out, Substitute(f.Type(), subst))
+	}
+	return out
+}
+
 // Substitute replaces all TypeParam occurrences in typ with the
 // corresponding concrete types from the subst map.
 // Returns the original type unchanged if no substitutions apply.

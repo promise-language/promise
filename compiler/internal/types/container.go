@@ -265,16 +265,18 @@ func containsFailableTask(typ Type, seen map[Type]bool) bool {
 		}
 		// Recurse a generic user type/enum origin's fields/variants under the
 		// type-arg substitution (e.g. Holder[int] whose failable_task[int] field
-		// is concrete, not reachable via TypeArgs).
+		// is concrete, not reachable via TypeArgs). AllFieldTypes rather than
+		// AllFields, so an INHERITED field typed in a generic parent's param
+		// resolves too — `DerT is BaseT[failable_task[int]]` otherwise read as
+		// still-generic and let the task's error be discarded (T1970).
 		switch origin := t.origin.(type) {
 		case *Named:
 			if seen[origin] {
 				return false
 			}
 			seen[origin] = true
-			subst := BuildSubstMap(origin.TypeParams(), t.typeArgs)
-			for _, f := range origin.AllFields() {
-				if containsFailableTask(Substitute(f.Type(), subst), seen) {
+			for _, ft := range AllFieldTypes(origin, t.typeArgs) {
+				if containsFailableTask(ft, seen) {
 					return true
 				}
 			}
@@ -297,8 +299,8 @@ func containsFailableTask(typ Type, seen map[Type]bool) bool {
 			return false
 		}
 		seen[t] = true
-		for _, f := range t.AllFields() {
-			if containsFailableTask(f.Type(), seen) {
+		for _, ft := range AllFieldTypes(t, nil) {
+			if containsFailableTask(ft, seen) {
 				return true
 			}
 		}

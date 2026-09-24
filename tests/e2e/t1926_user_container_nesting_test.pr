@@ -210,9 +210,10 @@ optional_element_buffer_round_trips() `test {
 
 // T1970 guard: the by-value property survives INHERITANCE for the closure gate —
 // `DerVT1926` reaches its buffer through the parent's field. The read must stay a
-// borrow so the env is still reachable. (The container-element nesting rule does
-// NOT survive the same shape; that escape is tracked as T1970, and a fix for it
-// must not regress this.)
+// borrow so the env is still reachable. This half already worked through the
+// TypeArgs recursion; T1970 resolved the inherited field itself, so the walk now
+// reaches the same conclusion by the direct route too, and this test pins that the
+// stronger predicate still reads the closure as a borrow rather than a dup.
 inherited_buffer_of_closures_survives_read() `test {
   y := 21;
   m := Map[int, WrapDerT1926]();

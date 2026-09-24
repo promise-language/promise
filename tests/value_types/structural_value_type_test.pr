@@ -1042,17 +1042,12 @@ t1583_enum_variant_clone_view() `test {
   v.push(T1583SampleView.missing);
   w := v.clone();
   assert(w.len == 2, "cloned length");
-  // T1982: the two bindings are named differently ON PURPOSE. `dropBindings` is
-  // keyed by bare variable name function-wide, so a SECOND match binding the same
-  // name for a structural-view payload silently registers no drop and leaks the box
-  // it was just handed. Spelling both `d` here makes this test fail on a bug that
-  // has nothing to do with what it is checking. Collapse the names once T1982 lands.
   match w[0] {
-    ok(cloned) => assert(cloned.raw_doubled == 2, "cloned variant box is independent"),
+    ok(d) => assert(d.raw_doubled == 2, "cloned variant box is independent"),
     missing => assert(false, "wrong variant in the clone"),
   }
   match v[0] {
-    ok(source) => assert(source.raw_doubled == 2, "source variant box still readable"),
+    ok(d) => assert(d.raw_doubled == 2, "source variant box still readable"),
     missing => assert(false, "wrong variant in the source"),
   }
 }
@@ -1082,18 +1077,16 @@ t1583_match_binding_view() `test {
   v.push(T1583SampleView.ok(d: t1583_counter(n: 6)));
   int seen = 0;
   match v[0] {
-    ok(bound) => {
-      seen = bound.raw_doubled;
+    ok(d) => {
+      seen = d.raw_doubled;
     },
     missing => {
       seen = -1;
     },
   }
   assert(seen == 12, "bound a boxed view payload, got {seen}");
-  // T1982 again — a second binding of the SAME name would leak here. See the note
-  // in t1583_enum_variant_clone_view.
   match v[0] {
-    ok(rebound) => assert(rebound.raw_doubled == 12, "the container's own box survived the first binding"),
+    ok(d) => assert(d.raw_doubled == 12, "the container's own box survived the first binding"),
     missing => assert(false, "wrong variant"),
   }
 }

@@ -529,29 +529,27 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 				armBorrowedSnapshot[k] = true
 			}
 		}
-		// T1155: Snapshot c.locals/c.dropFlags entries that this arm's pattern
-		// bindings will shadow, so the binding is strictly arm-scoped. Without
-		// this, an arm that rebinds the scrutinee's own name (e.g.
-		// `match b { Msg.Text(b) => ... }`) leaves c.locals["b"] pointing at the
-		// destructured (wrong-typed) alloca for the rest of the function, so a
-		// later `match b` evaluates its subject against that stale alloca and
-		// emits garbage/self-recursive control flow → runtime stack overflow.
-		// Mirrors the save/restore already done for type-binding arms in
-		// genTypeMatch.
+		// T1155: Snapshot c.locals entries that this arm's pattern bindings will
+		// shadow, so the binding is strictly arm-scoped. Without this, an arm that
+		// rebinds the scrutinee's own name (e.g. `match b { Msg.Text(b) => ... }`)
+		// leaves c.locals["b"] pointing at the destructured (wrong-typed) alloca
+		// for the rest of the function, so a later `match b` evaluates its subject
+		// against that stale alloca and emits garbage/self-recursive control flow
+		// → runtime stack overflow. Mirrors the save/restore already done for
+		// type-binding arms in genTypeMatch.
 		armBindingNames := patternBindingNames(arm.Pattern)
 		type savedLocal struct {
 			alloca   *ir.InstAlloca
 			hadLocal bool
-			dropFlag *ir.InstAlloca
-			hadDrop  bool
 		}
 		savedLocals := make(map[string]savedLocal, len(armBindingNames))
 		for _, name := range armBindingNames {
 			sl := savedLocal{}
 			sl.alloca, sl.hadLocal = c.locals[name]
-			sl.dropFlag, sl.hadDrop = c.dropFlags[name]
 			savedLocals[name] = sl
 		}
+		// T1982: the arm's drop state is arm-scoped too (restored at arm exit).
+		armDrop := c.savePatternDropNames(armBindingNames)
 		c.bindMatchPattern(arm.Pattern, subjectExpr, subject, enum, layout, enumHasDrop, subjectType, subjectDropFlag)
 
 		armVal := c.genMatchArmValue(arm, matchResultType)
@@ -581,21 +579,18 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject 
 			}
 		}
 
-		// T1155: Restore the c.locals/c.dropFlags entries this arm's bindings
-		// shadowed, so the bindings do not leak into the enclosing block or
-		// sibling arms. Re-instate the prior entry when one existed, else delete.
+		// T1155: Restore the c.locals entries this arm's bindings shadowed, so the
+		// bindings do not leak into the enclosing block or sibling arms. Re-instate
+		// the prior entry when one existed, else delete.
 		for name, sl := range savedLocals {
 			if sl.hadLocal {
 				c.locals[name] = sl.alloca
 			} else {
 				delete(c.locals, name)
 			}
-			if sl.hadDrop {
-				c.dropFlags[name] = sl.dropFlag
-			} else {
-				delete(c.dropFlags, name)
-			}
 		}
+		// T1982: likewise the drop flags/bindings (see armDrop above).
+		c.restoreDropNames(armDrop)
 
 		armEnd := c.block
 		if c.block.Term == nil {

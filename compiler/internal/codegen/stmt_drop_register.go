@@ -15,6 +15,92 @@ import (
 
 // --- drop binding ---
 
+// savedDropName is one name's entry in the name-keyed drop state (c.dropFlags,
+// c.dropBindings) at the entry of the scope that declares it (T1982). Both maps are
+// keyed by the bare variable name, function-wide, so an entry registered inside a
+// scope outlives it unless the scope restores it on exit. A stale entry then
+// answers for a later, unrelated variable of the same name: the registration
+// guards (maybeRegisterStructuralFree/ParamFree) skip the new variable's drop →
+// leak, and the name-keyed readers (reassignment drop-old, tuple-destructure
+// ownership, NLL early drops) act on the dead variable's binding → double free /
+// invalid IR.
+type savedDropName struct {
+	name       string
+	flag       *ir.InstAlloca
+	hadFlag    bool
+	binding    scopeBinding
+	hadBinding bool
+}
+
+// saveDropNames snapshots the drop state of the names a scope declares. Every
+// construct that makes a name visible only inside itself brackets that region with
+// saveDropNames/restoreDropNames. It runs for every block, so it saves only the
+// declared names: a scope that declares none allocates nothing.
+func (c *Compiler) saveDropNames(names []string) []savedDropName {
+	if len(names) == 0 {
+		return nil
+	}
+	saved := make([]savedDropName, len(names))
+	for i, name := range names {
+		saved[i].name = name
+		saved[i].flag, saved[i].hadFlag = c.dropFlags[name]
+		saved[i].binding, saved[i].hadBinding = c.dropBindings[name]
+	}
+	return saved
+}
+
+// savePatternDropNames is saveDropNames for a pattern's bindings (a match arm, an
+// `is` destructure). Unlike every other binding, sema lets a pattern binding
+// shadow an outer local of the same name, so the names' drop bindings are also
+// cleared for the pattern's scope: otherwise the registration guard sees the outer
+// entry and registers no drop for the pattern's dup'd payload (a structural view
+// box cloned by dupMatchBinding) → leak.
+func (c *Compiler) savePatternDropNames(names []string) []savedDropName {
+	saved := c.saveDropNames(names)
+	for _, name := range names {
+		delete(c.dropBindings, name)
+	}
+	return saved
+}
+
+// restoreDropNames reinstates the entries saved by saveDropNames: the prior entry
+// when there was one, else none.
+func (c *Compiler) restoreDropNames(saved []savedDropName) {
+	for _, s := range saved {
+		if s.hadFlag {
+			c.dropFlags[s.name] = s.flag
+		} else {
+			delete(c.dropFlags, s.name)
+		}
+		if s.hadBinding {
+			c.dropBindings[s.name] = s.binding
+		} else {
+			delete(c.dropBindings, s.name)
+		}
+	}
+}
+
+// declaredNames returns the names a statement list declares in its own scope —
+// the variables its var-decl statements introduce. Every other binding (loop
+// variable, pattern, handler binding) belongs to a nested construct that retires
+// its own names.
+func declaredNames(stmts []ast.Stmt) []string {
+	var names []string
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.TypedVarDecl:
+			names = append(names, s.Name)
+		case *ast.InferredVarDecl:
+			names = append(names, s.Name)
+		case *ast.UseVarDecl:
+			names = append(names, s.Name)
+		case *ast.DestructureVarDecl:
+			names = append(names, s.Names...)
+		}
+	}
+	return names
+}
+
 // isTypeDroppable returns true if maybeRegisterDrop would register a drop binding
 // for a variable of this type. Used by the return-alias check (B0345) to decide
 // whether a return value could alias a droppable argument.

@@ -1805,11 +1805,13 @@ func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestruct
 		wasBorrow bool
 	}
 	var saved []savedLocal
+	var bindingNames []string
 	for _, b := range narrow.Bindings {
 		if b.VarName != "_" {
 			prev, had := c.locals[b.VarName]
 			wasBorrow := c.matchBorrowedIdents != nil && c.matchBorrowedIdents[b.VarName]
 			saved = append(saved, savedLocal{b.VarName, prev, had, wasBorrow})
+			bindingNames = append(bindingNames, b.VarName)
 		}
 	}
 
@@ -1821,6 +1823,9 @@ func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestruct
 	// ourselves at the then-block fall-through terminator below (escape paths
 	// inside the body already walk emitScopeCleanup down to 0).
 	bindWatermark := len(c.scopeBindings)
+	// T1982: the destructure bindings' drop state is then-block-scoped, like
+	// their c.locals entries (restored below with the scope watermark).
+	isDrop := c.savePatternDropNames(bindingNames)
 	if narrow.IsEnum {
 		c.bindIsDestructureEnum(subject, narrow)
 	} else {
@@ -1856,6 +1861,7 @@ func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestruct
 		c.block.NewBr(mergeBlock)
 	}
 	c.scopeBindings = c.scopeBindings[:bindWatermark]
+	c.restoreDropNames(isDrop)
 
 	// Else branch
 	if s.Else != nil {

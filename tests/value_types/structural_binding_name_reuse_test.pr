@@ -1,0 +1,249 @@
+// T1982: a pattern binding of a `structural payload whose implementor is a heap
+// type is a deep clone of the payload's view box — the enum keeps its own box — so
+// the binding owns the clone and must drop it when its arm (or `is` then-block)
+// ends. The drop flag/binding codegen tracks for it is keyed by the variable's
+// NAME, and used to outlive the arm: a second binding of the same name found the
+// first one's entry, registered no drop, and leaked its clone. Renaming the second
+// binding hid the leak, so the leaking and the clean spelling differed only in a
+// variable name.
+//
+// Each test reuses the name `d`; the distinct-name tests are the controls.
+type Reading `structural {
+  get level int `abstract;
+}
+
+type Gauge {
+  int n;
+  get level int => this.n * 2;
+}
+
+gauge(int n) Reading {
+  return Gauge(n: n);
+}
+
+enum Sample {
+  ok(Reading d),
+  missing,
+}
+
+enum Pick {
+  first(Reading d),
+  second(Reading d),
+}
+
+enum Slot[T] {
+  full(T d),
+  empty,
+}
+
+one_match() `test {
+  s := Sample.ok(d: gauge(n: 1));
+  match s {
+    ok(d) => assert(d.level == 2, "bound payload"),
+    missing => assert(false, "wrong variant"),
+  }
+}
+
+two_matches_same_name() `test {
+  s := Sample.ok(d: gauge(n: 1));
+  match s {
+    ok(d) => assert(d.level == 2, "first match"),
+    missing => assert(false, "wrong variant"),
+  }
+  match s {
+    ok(d) => assert(d.level == 2, "second match"),
+    missing => assert(false, "wrong variant"),
+  }
+}
+
+three_matches_same_name() `test {
+  s := Sample.ok(d: gauge(n: 1));
+  match s {
+    ok(d) => assert(d.level == 2, "first match"),
+    missing => assert(false, "wrong variant"),
+  }
+  match s {
+    ok(d) => assert(d.level == 2, "second match"),
+    missing => assert(false, "wrong variant"),
+  }
+  match s {
+    ok(d) => assert(d.level == 2, "third match"),
+    missing => assert(false, "wrong variant"),
+  }
+}
+
+two_matches_distinct_names() `test {
+  s := Sample.ok(d: gauge(n: 1));
+  match s {
+    ok(d1) => assert(d1.level == 2, "first match"),
+    missing => assert(false, "wrong variant"),
+  }
+  match s {
+    ok(d2) => assert(d2.level == 2, "second match"),
+    missing => assert(false, "wrong variant"),
+  }
+}
+
+matches_in_sibling_blocks() `test {
+  s := Sample.ok(d: gauge(n: 1));
+  {
+    match s {
+      ok(d) => assert(d.level == 2, "first block"),
+      missing => assert(false, "wrong variant"),
+    }
+  }
+  {
+    match s {
+      ok(d) => assert(d.level == 2, "second block"),
+      missing => assert(false, "wrong variant"),
+    }
+  }
+}
+
+matches_on_distinct_scrutinees() `test {
+  s1 := Sample.ok(d: gauge(n: 1));
+  s2 := Sample.ok(d: gauge(n: 2));
+  match s1 {
+    ok(d) => assert(d.level == 2, "first scrutinee"),
+    missing => assert(false, "wrong variant"),
+  }
+  match s2 {
+    ok(d) => assert(d.level == 4, "second scrutinee"),
+    missing => assert(false, "wrong variant"),
+  }
+}
+
+// Sibling arms of ONE match bind the same name; the second arm is the one taken.
+sibling_arms_same_name() `test {
+  p := Pick.second(d: gauge(n: 3));
+  match p {
+    first(d) => assert(false, "wrong arm, got {d.level}"),
+    second(d) => assert(d.level == 6, "second arm"),
+  }
+}
+
+// A pattern binding may shadow an outer local. The arm's clone is dropped at arm
+// exit and the outer local is still intact (and dropped once) afterwards.
+match_binding_shadows_outer_local() `test {
+  d := gauge(n: 5);
+  s := Sample.ok(d: gauge(n: 1));
+  match s {
+    ok(d) => assert(d.level == 2, "arm sees its own binding"),
+    missing => assert(false, "wrong variant"),
+  }
+  assert(d.level == 10, "outer local survives the shadowing arm");
+}
+
+// The arm's binding must not linger past the match and swallow the drop of a
+// later local that reuses the name.
+match_then_local_same_name() `test {
+  s := Sample.ok(d: gauge(n: 1));
+  match s {
+    ok(d) => assert(d.level == 2, "arm"),
+    missing => assert(false, "wrong variant"),
+  }
+  d := gauge(n: 3);
+  assert(d.level == 6, "later local");
+}
+
+// An arm that rebinds the scrutinee's own name, twice.
+match_rebinds_scrutinee_name_twice() `test {
+  d := Sample.ok(d: gauge(n: 1));
+  match d {
+    ok(d) => assert(d.level == 2, "first rebind"),
+    missing => assert(false, "wrong variant"),
+  }
+  match d {
+    ok(d) => assert(d.level == 2, "second rebind"),
+    missing => assert(false, "wrong variant"),
+  }
+}
+
+// A nested match reuses the enclosing arm's binding name; the outer binding is
+// back in view (and still the outer payload) once the inner match ends.
+nested_match_same_name() `test {
+  s := Sample.ok(d: gauge(n: 1));
+  t := Sample.ok(d: gauge(n: 2));
+  match s {
+    ok(d) => {
+      match t {
+        ok(d) => assert(d.level == 4, "inner binding"),
+        missing => assert(false, "wrong inner variant"),
+      }
+      assert(d.level == 2, "outer binding after the inner match");
+    },
+    missing => assert(false, "wrong variant"),
+  }
+}
+
+is_destructure_twice_same_name() `test {
+  s := Sample.ok(d: gauge(n: 1));
+  if s is ok(d) {
+    assert(d.level == 2, "first destructure");
+  }
+  if s is ok(d) {
+    assert(d.level == 2, "second destructure");
+  }
+}
+
+is_destructure_shadows_outer_local() `test {
+  d := gauge(n: 5);
+  s := Sample.ok(d: gauge(n: 1));
+  if s is ok(d) {
+    assert(d.level == 2, "then-block sees its own binding");
+  }
+  assert(d.level == 10, "outer local survives the destructure");
+}
+
+match_then_is_destructure_same_name() `test {
+  s := Sample.ok(d: gauge(n: 1));
+  match s {
+    ok(d) => assert(d.level == 2, "match"),
+    missing => assert(false, "wrong variant"),
+  }
+  if s is ok(d) {
+    assert(d.level == 2, "destructure");
+  }
+}
+
+// The same two matches inside a monomorphized generic function body, once per
+// instantiation.
+levels_twice[T](T tag, Sample s) int {
+  total := 0;
+  match s {
+    ok(d) => {
+      total = total + d.level;
+    },
+    missing => {
+      total = -1;
+    },
+  }
+  match s {
+    ok(d) => {
+      total = total + d.level;
+    },
+    missing => {
+      total = -1;
+    },
+  }
+  return total;
+}
+
+generic_function_matches_same_name() `test {
+  s := Sample.ok(d: gauge(n: 1));
+  assert(levels_twice(tag: 7, s: s) == 4, "int instance");
+  assert(levels_twice(tag: "x", s: s) == 4, "string instance");
+}
+
+// A generic enum whose type argument is the structural view.
+generic_enum_payload_matches_same_name() `test {
+  Slot[Reading] s = Slot[Reading].full(d: gauge(n: 3));
+  match s {
+    full(d) => assert(d.level == 6, "first match"),
+    empty => assert(false, "wrong variant"),
+  }
+  match s {
+    full(d) => assert(d.level == 6, "second match"),
+    empty => assert(false, "wrong variant"),
+  }
+}

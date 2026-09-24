@@ -1,0 +1,336 @@
+// T1982: codegen tracks a variable's drop flag and drop binding by its NAME. Every
+// construct that makes a name visible only inside itself — a block, an error
+// handler's binding, a for-in or classic-for loop variable, a select case body —
+// must retire those entries when the name goes out of view. They used to outlive
+// it, so a LATER variable of the same name inherited the dead one's drop state:
+// a structural local registered no drop (leak), a reassignment dropped the dead
+// variable's type (invalid IR, segfault), and a borrowed tuple was taken for an
+// owned one (invalid free). Renaming the later variable hid every one of these.
+// (Match and `is` pattern bindings: tests/value_types/structural_binding_name_reuse_test.pr.)
+type Reading `structural {
+  get level int `abstract;
+}
+
+type Gauge {
+  int n;
+  get level int => this.n * 2;
+}
+
+type Fault is error {
+}
+
+type Conn {
+  int fd;
+  close(~this) {
+  }
+}
+
+gauge(int n) Reading {
+  return Gauge(n: n);
+}
+
+labelled(string s)(string, int) {
+  return (s + "!", 1);
+}
+
+words() string[] {
+  return["a" + "b", "c" + "d"];
+}
+
+fail!(int n) int {
+  if n > 0 {
+    raise Fault(message: "fault " + n.to_string());
+  }
+  if n < 0 {
+    raise error("plain " + n.to_string());
+  }
+  return n;
+}
+
+structural_local_in_sibling_blocks() `test {
+  {
+    d := gauge(n: 1);
+    assert(d.level == 2, "first block");
+  }
+  {
+    d := gauge(n: 2);
+    assert(d.level == 4, "second block");
+  }
+}
+
+structural_local_after_block_local() `test {
+  {
+    d := gauge(n: 1);
+    assert(d.level == 2, "block");
+  }
+  d := gauge(n: 2);
+  assert(d.level == 4, "after the block");
+}
+
+// The for-in binding borrows the vector's element, so destructuring it must not
+// take ownership — even though an OWNED tuple of the same name existed before.
+borrowed_tuple_after_owned_tuple_of_same_name() `test {
+  {
+    t := labelled(s: "a");
+    (a, b) := t;
+    assert(a == "a!", "owned tuple");
+    assert(b == 1, "owned tuple count");
+  }
+  (string, int)[] v = [labelled(s: "x")];
+  for t in v {
+    (s, n) := t;
+    assert(s == "x!", "borrowed tuple");
+    assert(n == 1, "borrowed tuple count");
+  }
+}
+
+int_reassigned_after_block_string() `test {
+  {
+    s := "a" + "b";
+    assert(s == "ab", "block string");
+  }
+  int s = 1;
+  s = 2;
+  assert(s == 2, "reassigned int");
+}
+
+destructured_names_in_sibling_blocks_then_int() `test {
+  {
+    (s, n) := labelled(s: "a");
+    assert(s == "a!" && n == 1, "first destructure");
+  }
+  {
+    (s, n) := labelled(s: "b");
+    assert(s == "b!" && n == 1, "second destructure");
+  }
+  int s = 1;
+  s = 2;
+  assert(s == 2, "reassigned int");
+}
+
+use_bindings_in_sibling_blocks_then_int() `test {
+  {
+    use c := Conn(fd: 1);
+    assert(c.fd == 1, "first use");
+  }
+  {
+    use c := Conn(fd: 2);
+    assert(c.fd == 2, "second use");
+  }
+  c := 5;
+  c = 6;
+  assert(c == 6, "reassigned int");
+}
+
+// A block that is an expression's value (an if-expression branch here) retires the
+// names it declares too.
+int_reassigned_after_if_expression_block_local() `test {
+  c := true;
+  r := if c {
+    s := "a" + "b";
+    s.len
+  } else {
+    0
+  };
+  int s = 1;
+  s = 2;
+  assert(r + s == 4, "reassigned int");
+}
+
+structural_local_after_match_arm_block_local() `test {
+  x := 1;
+  total := 0;
+  match x {
+    1 => {
+      d := gauge(n: 1);
+      total = d.level;
+    },
+    _ => {
+      total = 0;
+    },
+  }
+  d := gauge(n: 2);
+  assert(total + d.level == 6, "later local");
+}
+
+// A lambda body has drop state of its own; its blocks retire their names the same
+// way, and neither they nor the lambda leave anything for the enclosing function.
+structural_locals_in_lambda_sibling_blocks() `test {
+  f := |int n| -> int {
+    total := 0;
+    {
+      d := gauge(n: n);
+      total = total + d.level;
+    }
+    {
+      d := gauge(n: n + 1);
+      total = total + d.level;
+    }
+    return total;
+  };
+  d := gauge(n: 10);
+  assert(f(1) + d.level == 26, "lambda blocks and outer local");
+}
+
+int_reassigned_after_handler_binding() `test {
+  a := fail(1)? e {
+    assert(e.message == "fault 1", "handler binding");
+    0
+  };
+  e := 5;
+  e = 6;
+  assert(a + e == 6, "reassigned int");
+}
+
+handler_bindings_same_name() `test {
+  a := fail(1)? e {
+    assert(e.message == "fault 1", "first handler");
+    0
+  };
+  b := fail(2)? e {
+    assert(e.message == "fault 2", "second handler");
+    0
+  };
+  assert(a + b == 0, "both recovered");
+}
+
+int_reassigned_after_typed_handler_binding() `test {
+  a := fail(1)? e is Fault {
+    assert(e.message == "fault 1", "typed binding");
+    0
+  } else e {
+    assert(false, "wrong handler: {e.message}");
+    1
+  };
+  e := 5;
+  e = 6;
+  assert(a + e == 6, "reassigned int");
+}
+
+int_reassigned_after_typed_handler_else_binding() `test {
+  a := fail(-1)? e is Fault {
+    assert(false, "wrong handler: {e.message}");
+    1
+  } else e {
+    assert(e.message == "plain -1", "else binding");
+    0
+  };
+  e := 5;
+  e = 6;
+  assert(a + e == 6, "reassigned int");
+}
+
+bindingless_handlers_twice() `test {
+  a := fail(1)? {
+    0
+  };
+  b := fail(2)? {
+    0
+  };
+  assert(a + b == 0, "both recovered");
+}
+
+int_reassigned_after_vector_for_in() `test {
+  total := 0;
+  v := words();
+  for s in v {
+    total = total + s.len;
+  }
+  s := 1;
+  s = 2;
+  assert(total + s == 6, "reassigned int");
+}
+
+ints_reassigned_after_indexed_vector_for_in() `test {
+  total := 0;
+  v := words();
+  for i, s in v {
+    total = total + i + s.len;
+  }
+  i := 1;
+  i = 2;
+  s := 3;
+  s = 4;
+  assert(total + i + s == 11, "reassigned ints");
+}
+
+// A map for-in binds both the key and the value name, each with its own string drop.
+ints_reassigned_after_map_for_in() `test {
+  m := Map[string, string]();
+  m["a" + "b"] = "c" + "d";
+  total := 0;
+  for k, v in m {
+    total = total + k.len + v.len;
+  }
+  k := 1;
+  k = 2;
+  v := 3;
+  v = 4;
+  assert(total + k + v == 10, "reassigned ints");
+}
+
+int_reassigned_after_iterator_for_in() `test {
+  total := 0;
+  v := words();
+  for s in v.iter() {
+    total = total + s.len;
+  }
+  s := 1;
+  s = 2;
+  assert(total + s == 6, "reassigned int");
+}
+
+structural_local_after_classic_for() `test {
+  count := 0;
+  for d := gauge(n: 1); count < 2; count = count + 1 {
+    assert(d.level == 2, "loop variable");
+  }
+  d := gauge(n: 3);
+  assert(d.level == 6, "after the loop");
+}
+
+select_cases_same_local() `test {
+  a := channel[int](1);
+  b := channel[int](1);
+  b.send(4);
+  select {
+    v := <-a:
+      d := gauge(n: v!);
+      assert(d.level > 0, "first case");
+    w := <-b:
+      d := gauge(n: w!);
+      assert(d.level == 8, "second case");
+  }
+}
+
+select_default_then_local() `test {
+  a := channel[int](1);
+  select {
+    v := <-a:
+      d := gauge(n: v!);
+      assert(d.level > 0, "case");
+    default:
+      d := gauge(n: 2);
+      assert(d.level == 4, "default");
+  }
+  d := gauge(n: 3);
+  assert(d.level == 6, "after the select");
+}
+
+// Inside a goroutine a select without `default` generates each case body twice —
+// once for the ready path, once for the wake-after-parking path — so the second
+// copy of a body-local declaration must not inherit the first copy's drop state.
+select_case_local_in_goroutine() `test(exclude: wasm) {
+  ch := channel[int](1);
+  done := channel[int](1);
+  go {
+    select {
+      v := <-ch:
+        d := gauge(n: v!);
+        done.send(d.level);
+    }
+  };
+  ch.send(5);
+  int level = (<-done)!;
+  assert(level == 10, "goroutine select case");
+}

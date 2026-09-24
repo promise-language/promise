@@ -19,6 +19,8 @@ func (c *Compiler) genBlock(block *ast.Block) {
 		return
 	}
 	savedScopeLen := len(c.scopeBindings)
+	// T1982: names declared in this block leave its drop-state maps on exit.
+	savedDrop := c.saveDropNames(declaredNames(block.Stmts))
 
 	// T0088: Save heapTemps so statement-level cleanup inside this block
 	// doesn't free temps from the enclosing scope (e.g., iterator instances
@@ -42,6 +44,7 @@ func (c *Compiler) genBlock(block *ast.Block) {
 		c.emitCloseErrCheck(cap, savedScopeLen)
 	}
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
+	c.restoreDropNames(savedDrop)
 	c.heapTemps = savedHeapTemps
 	c.heapTempMap = savedHeapTempMap
 }
@@ -742,6 +745,8 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 		c.blockValueOwnedResult = false // T1107
 		return nil
 	}
+	// T1982: names declared in this block leave its drop-state maps on exit.
+	defer c.restoreDropNames(c.saveDropNames(declaredNames(block.Stmts)))
 	// T1029: a block value (if/match/handler arm body) is its own straight-line
 	// region nested inside the discarded expression — it is not the discarded
 	// top-level call. Clear discardedExpr so alias-arg pointers are not recorded in

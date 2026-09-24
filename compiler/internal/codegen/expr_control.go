@@ -400,6 +400,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		if e.ElseBody != nil {
 			// else clause: bind error and run else body (T0091: register for drop)
 			savedElseScope := len(c.scopeBindings)
+			elseDrop := c.saveDropNames([]string{e.ElseBinding, "_else_err_tmp"}) // T1982: else-scoped
 			prevElseLocal, hadPrevElseLocal := c.locals[e.ElseBinding]
 			if e.ElseBinding != "" && e.ElseBinding != "_" {
 				elseValStruct := c.reconstructErrorValue(errVal)
@@ -435,6 +436,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 				c.block.NewBr(mergeBlock)
 			}
 			c.scopeBindings = c.scopeBindings[:savedElseScope]
+			c.restoreDropNames(elseDrop)
 			// T1605: remove the else binding from c.locals so it doesn't leak
 			// into subsequent code (e.g., a go block that reuses the name).
 			if e.ElseBinding != "" && e.ElseBinding != "_" {
@@ -494,6 +496,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	}
 
 	prevHandlerLocal, hadPrevHandlerLocal := c.locals[e.Binding]
+	handlerDrop := c.saveDropNames([]string{e.Binding, "_err_tmp"}) // T1982: handler-scoped
 	if e.Binding != "" && e.Binding != "_" {
 		valStruct := c.reconstructErrorValue(errVal)
 		alloca := c.createEntryAlloca(userValueType())
@@ -524,6 +527,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		c.emitScopeCleanup(savedHandlerScope, false)
 	}
 	c.scopeBindings = c.scopeBindings[:savedHandlerScope]
+	c.restoreDropNames(handlerDrop)
 	// T1605: remove the handler binding from c.locals so it doesn't leak
 	// into subsequent code (e.g., a go block that reuses the name).
 	if e.Binding != "" && e.Binding != "_" {

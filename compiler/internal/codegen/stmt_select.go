@@ -391,6 +391,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 	for i, ci := range caseInfos {
 		c.block = caseExecBlks[i]
 		savedScopeLen := len(c.scopeBindings)
+		savedDrop := c.saveDropNames(declaredNames(s.Cases[i].Body)) // T1982: case-scoped
 
 		prefix := fmt.Sprintf("select.c%d", i)
 		if ci.isSend {
@@ -412,6 +413,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 			c.emitCloseErrCheck(cap, savedScopeLen)
 		}
 		c.scopeBindings = c.scopeBindings[:savedScopeLen]
+		c.restoreDropNames(savedDrop)
 		if c.block != nil && c.block.Term == nil {
 			c.block.NewBr(mergeBlk)
 		}
@@ -421,6 +423,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 	if defaultBlk != nil {
 		c.block = defaultBlk
 		savedScopeLen := len(c.scopeBindings)
+		savedDrop := c.saveDropNames(declaredNames(s.Default)) // T1982: default-scoped
 		unlockAll()
 		for _, stmt := range s.Default {
 			if c.block.Term != nil {
@@ -433,6 +436,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 			c.emitCloseErrCheck(cap, savedScopeLen)
 		}
 		c.scopeBindings = c.scopeBindings[:savedScopeLen]
+		c.restoreDropNames(savedDrop)
 		if c.block != nil && c.block.Term == nil {
 			c.block.NewBr(mergeBlk)
 		}
@@ -622,6 +626,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		for i, ci := range caseInfos {
 			c.block = wakeCaseBlks[i]
 			savedScopeLen := len(c.scopeBindings)
+			savedDrop := c.saveDropNames(declaredNames(s.Cases[i].Body)) // T1982: case-scoped
 
 			prefix := fmt.Sprintf("select.wk%d", i)
 			if ci.isSend {
@@ -660,6 +665,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 				c.emitCloseErrCheck(cap, savedScopeLen)
 			}
 			c.scopeBindings = c.scopeBindings[:savedScopeLen]
+			c.restoreDropNames(savedDrop)
 			if c.block != nil && c.block.Term == nil {
 				c.block.NewBr(mergeBlk)
 			}

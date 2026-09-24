@@ -239,6 +239,9 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 // --- Classic for loop ---
 
 func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
+	// T1982: the init variable is declared inline, outside any genBlock, so its
+	// drop flag/binding are retired here when the loop ends.
+	defer c.restoreDropNames(c.saveDropNames([]string{s.InitName}))
 	// Init: declare the loop variable.
 	// T1257: delegate to the normal var-decl codegen (same technique T1192 uses
 	// for the update clause) instead of hand-rolling the store. The hand-rolled

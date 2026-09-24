@@ -88,6 +88,11 @@ func (c *Compiler) genForInIterableWith(eval func() value.Value) value.Value {
 // the iterable was spelled. The raw generator branch is the sole exception to
 // the unwrap — it keeps its own (T0284); see sema's isRawGeneratorForIn.
 func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
+	// T1982: the loop binding's drop flag/binding are loop-scoped. Some variants
+	// register it below the loop scope (a string element's binding stays on
+	// c.scopeBindings until the enclosing block exits), so the name is retired
+	// here, where it goes out of view, not where its scope entry is popped.
+	defer c.restoreDropNames(c.saveDropNames([]string{s.Binding, s.Index}))
 	iterableType := c.forInIterableType(s)
 
 	if arr, ok := iterableType.(*types.Array); ok {

@@ -59,12 +59,79 @@ func TestSupportedTargetsIsDeterministic(t *testing.T) {
 // host, where that triple IS the native row and listing it twice would
 // advertise one target as both native and not.
 func wantSupportedTriples() []string {
-	host := codegen.HostTargetTriple()
+	return wantSupportedTriplesFor(codegen.HostTargetTriple())
+}
+
+// wantSupportedTriplesFor is wantSupportedTriples for a named host, so the
+// windows-amd64 shape can be asserted from a Linux or macOS run instead of
+// waiting for a Windows one — see TestSupportedTargetsForEachHost.
+func wantSupportedTriplesFor(host string) []string {
 	want := []string{host, "wasm32-wasi", "wasm32-web"}
 	if host != "x86_64-pc-windows-msvc" {
 		want = append(want, "x86_64-pc-windows-msvc")
 	}
 	return want
+}
+
+// TestSupportedTargetsForEachHost pins the advertised set for every host this
+// compiler runs on, not just the one running the test.
+//
+// The windows-amd64 row is the one that matters and the one no non-Windows run
+// could reach before: there the Windows triple is the NATIVE row, so the
+// "append the cross row" branch must not fire, and the set is the host plus the
+// two wasm targets. That shape is what makes the cross-execution refusal
+// unreachable through the CLI on Windows, and therefore what
+// TestWindowsCrossRunRefusesToExecute skips on (T2206).
+func TestSupportedTargetsForEachHost(t *testing.T) {
+	t.Parallel()
+	for _, host := range []string{
+		"x86_64-pc-windows-msvc",
+		"aarch64-pc-windows-msvc",
+		"x86_64-unknown-linux-musl",
+		"aarch64-unknown-linux-musl",
+		"arm64-apple-macosx26.0.0", // a version suffix the static table cannot enumerate
+	} {
+		t.Run(host, func(t *testing.T) {
+			t.Parallel()
+			specs := supportedTargetsFor(host)
+
+			got := make([]string, 0, len(specs))
+			seen := make(map[string]bool)
+			natives := 0
+			for _, ts := range specs {
+				if seen[ts.Triple] {
+					t.Errorf("host %q advertises %q twice", host, ts.Triple)
+				}
+				seen[ts.Triple] = true
+				got = append(got, ts.Triple)
+				if ts.Native {
+					natives++
+					if ts.Triple != host {
+						t.Errorf("host %q marks %q native", host, ts.Triple)
+					}
+				}
+				if ts.Display == "" {
+					t.Errorf("host %q advertises %q with no display name", host, ts.Triple)
+				}
+			}
+			if want := wantSupportedTriplesFor(host); !slices.Equal(got, want) {
+				t.Errorf("supportedTargetsFor(%q) = %v, want exactly %v", host, got, want)
+			}
+			if natives != 1 {
+				t.Errorf("supportedTargetsFor(%q) marked %d entries native, want exactly 1", host, natives)
+			}
+		})
+	}
+}
+
+// TestSupportedTargetsUseTheBuildHost keeps the parameterized form above from
+// passing while the real caller answers something else: supportedTargets() must
+// be supportedTargetsFor(HostTargetTriple()) and nothing more.
+func TestSupportedTargetsUseTheBuildHost(t *testing.T) {
+	t.Parallel()
+	if got, want := supportedTargets(), supportedTargetsFor(codegen.HostTargetTriple()); !slices.Equal(got, want) {
+		t.Errorf("supportedTargets() = %+v, want the %s set %+v", got, codegen.HostTargetTriple(), want)
+	}
 }
 
 // TestKnownTargetsSupersetOfSupported: anything this release can link, it must

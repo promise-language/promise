@@ -8,124 +8,159 @@ import (
 	"testing"
 )
 
-func TestIsHostTarget(t *testing.T) {
+// TestHostTargetMatrix pins isHostTargetFor for every host this compiler runs
+// on, not just the one running the test.
+//
+// The windows-amd64 row is the whole point. x86_64-pc-windows-msvc is a CROSS
+// target on Linux and macOS, and on windows-amd64 it is that host's OWN target,
+// so `promise run` executes what it built instead of refusing it — the fact
+// T2206's black-box test contradicted, having been written where the Windows
+// branch could not be seen. Naming the host makes that row assertable on every
+// machine; reading it from runtime.GOOS, as this test used to, checks one.
+func TestHostTargetMatrix(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		triple string
-		want   bool
+	for _, tc := range []struct {
+		goos, goarch, triple string
+		want                 bool
 	}{
-		// The host target must always be recognized as host.
-		{"", false}, // empty is not a valid triple
-	}
+		// windows-amd64: its own triple is native, its arm64 sibling is not.
+		{"windows", "amd64", "x86_64-pc-windows-msvc", true},
+		{"windows", "amd64", "aarch64-pc-windows-msvc", false},
+		{"windows", "amd64", "x86_64-unknown-linux-musl", false},
+		{"windows", "amd64", "x86_64-apple-macosx10.15.0", false},
+		// windows-arm64: the same triple, now foreign — the arch half of the
+		// check is what separates these two rows.
+		{"windows", "arm64", "aarch64-pc-windows-msvc", true},
+		{"windows", "arm64", "x86_64-pc-windows-msvc", false},
 
-	// Build expected host cases dynamically so the test works on any platform.
-	switch runtime.GOOS {
-	case "darwin":
-		switch runtime.GOARCH {
-		case "arm64":
-			cases = append(cases,
-				struct {
-					triple string
-					want   bool
-				}{"arm64-apple-macosx15.0.0", true},
-				struct {
-					triple string
-					want   bool
-				}{"arm64-apple-macosx14.0.0", true},
-				struct {
-					triple string
-					want   bool
-				}{"x86_64-apple-macosx10.15.0", false},
-				struct {
-					triple string
-					want   bool
-				}{"aarch64-unknown-linux-musl", false},
-				struct {
-					triple string
-					want   bool
-				}{"x86_64-pc-windows-msvc", false},
-			)
-		case "amd64":
-			cases = append(cases,
-				struct {
-					triple string
-					want   bool
-				}{"x86_64-apple-macosx10.15.0", true},
-				struct {
-					triple string
-					want   bool
-				}{"arm64-apple-macosx15.0.0", false},
-			)
-		}
-	case "linux":
-		switch runtime.GOARCH {
-		case "amd64":
-			cases = append(cases,
-				struct {
-					triple string
-					want   bool
-				}{"x86_64-unknown-linux-musl", true},
-				struct {
-					triple string
-					want   bool
-				}{"x86_64-unknown-linux-gnu", true},
-				struct {
-					triple string
-					want   bool
-				}{"aarch64-unknown-linux-musl", false},
-				struct {
-					triple string
-					want   bool
-				}{"arm64-apple-macosx15.0.0", false},
-			)
-		case "arm64":
-			cases = append(cases,
-				struct {
-					triple string
-					want   bool
-				}{"aarch64-unknown-linux-musl", true},
-				struct {
-					triple string
-					want   bool
-				}{"x86_64-unknown-linux-musl", false},
-			)
-		}
-	case "windows":
-		switch runtime.GOARCH {
-		case "amd64":
-			cases = append(cases,
-				struct {
-					triple string
-					want   bool
-				}{"x86_64-pc-windows-msvc", true},
-				struct {
-					triple string
-					want   bool
-				}{"aarch64-unknown-linux-musl", false},
-			)
+		{"linux", "amd64", "x86_64-unknown-linux-musl", true},
+		{"linux", "amd64", "x86_64-unknown-linux-gnu", true},
+		{"linux", "amd64", "x86_64-pc-windows-msvc", false},
+		{"linux", "amd64", "aarch64-unknown-linux-musl", false},
+		{"linux", "arm64", "aarch64-unknown-linux-musl", true},
+		{"linux", "arm64", "x86_64-unknown-linux-musl", false},
+
+		// macOS carries a version suffix the comparison must ignore, and
+		// spells arm64 both ways.
+		{"darwin", "arm64", "arm64-apple-macosx15.0.0", true},
+		{"darwin", "arm64", "arm64-apple-macosx14.0.0", true},
+		{"darwin", "arm64", "aarch64-apple-macosx14.0.0", true},
+		{"darwin", "arm64", "x86_64-apple-macosx10.15.0", false},
+		{"darwin", "arm64", "aarch64-unknown-linux-musl", false},
+		{"darwin", "arm64", "x86_64-pc-windows-msvc", false},
+		{"darwin", "amd64", "x86_64-apple-macosx10.15.0", true},
+		{"darwin", "amd64", "arm64-apple-macosx15.0.0", false},
+
+		// An unknown host OS or arch matches nothing rather than defaulting to
+		// "yes" — a host this compiler was never built for must not be handed
+		// a foreign binary to exec.
+		{"plan9", "amd64", "x86_64-unknown-linux-musl", false},
+		{"linux", "riscv64", "x86_64-unknown-linux-musl", false},
+		{"windows", "386", "x86_64-pc-windows-msvc", false},
+	} {
+		if got := isHostTargetFor(tc.goos, tc.goarch, tc.triple); got != tc.want {
+			t.Errorf("isHostTargetFor(%q, %q, %q) = %v, want %v",
+				tc.goos, tc.goarch, tc.triple, got, tc.want)
 		}
 	}
 
-	// Always-false cases regardless of platform.
-	cases = append(cases,
-		struct {
-			triple string
-			want   bool
-		}{"wasm32-wasi", false},
-		struct {
-			triple string
-			want   bool
-		}{"wasm32-web", false},
-		struct {
-			triple string
-			want   bool
-		}{"totally-bogus", false},
-	)
+	// Never host, whoever is asking: an empty triple is not a triple, wasm is
+	// dispatched to its own runtime before the host check, and a bogus string
+	// must not match by accident.
+	for _, goos := range []string{"windows", "linux", "darwin"} {
+		for _, goarch := range []string{"amd64", "arm64"} {
+			for _, triple := range []string{"", "wasm32-wasi", "wasm32-web", "totally-bogus"} {
+				if isHostTargetFor(goos, goarch, triple) {
+					t.Errorf("isHostTargetFor(%q, %q, %q) = true, want false", goos, goarch, triple)
+				}
+			}
+		}
+	}
+}
 
-	for _, c := range cases {
-		if got := isHostTarget(c.triple); got != c.want {
-			t.Errorf("isHostTarget(%q) = %v, want %v (GOOS=%s GOARCH=%s)",
-				c.triple, got, c.want, runtime.GOOS, runtime.GOARCH)
+// TestCanExecuteTargetMatrix is the same fact one level up, at the predicate
+// `run`/`test`/`exec` actually consult: the identical triple is executable on
+// one host and a hard error on another, and the message names the host that
+// refused it.
+func TestCanExecuteTargetMatrix(t *testing.T) {
+	t.Parallel()
+	if err := canExecuteTargetFor("windows", "amd64", "x86_64-pc-windows-msvc"); err != nil {
+		t.Errorf("windows-amd64 refuses its own target: %v", err)
+	}
+	err := canExecuteTargetFor("linux", "amd64", "x86_64-pc-windows-msvc")
+	if err == nil {
+		t.Fatal("linux-amd64 accepted a windows binary; a non-host target must be a hard error")
+	}
+	for _, want := range []string{"cross-target execution is not supported", "linux-amd64"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+	// wasm is executable from anywhere: its runtime is a shipped harness, not
+	// the host CPU.
+	for _, triple := range []string{"wasm32-wasi", "wasm32-web"} {
+		if err := canExecuteTargetFor("windows", "amd64", triple); err != nil {
+			t.Errorf("canExecuteTargetFor(windows, amd64, %q) = %v, want nil", triple, err)
+		}
+	}
+}
+
+// TestWindowsAmd64AdvertisesNothingItCannotRun is the premise of the skip in
+// tests/buildrun/windows_cross_link_test.go stated as an assertion, and the
+// reason option (2) of T2206 — "assert against a triple that is cross
+// everywhere" — does not exist.
+//
+// A CLI-level cross-execution refusal needs a target that links AND cannot run.
+// On windows-amd64 there is none: every advertised target is the host's own or
+// a wasm one, and anything else is turned away by the flag gate long before
+// execution. Linux is the control — there the windows triple is exactly such a
+// target, which is why the refusal test runs there. If a future release adds a
+// cross-linkable target to the Windows set (T0530/T0532), this fails and the
+// skip can be replaced by a real assertion.
+func TestWindowsAmd64AdvertisesNothingItCannotRun(t *testing.T) {
+	t.Parallel()
+	for _, ts := range supportedTargetsFor("x86_64-pc-windows-msvc") {
+		if err := canExecuteTargetFor("windows", "amd64", ts.Triple); err != nil {
+			t.Errorf("windows-amd64 advertises %q but cannot run it: %v\n"+
+				"  the CLI can now reach the cross-execution refusal on Windows — "+
+				"replace the skip in TestWindowsCrossRunRefusesToExecute with this target",
+				ts.Triple, err)
+		}
+	}
+
+	// The control: on linux-amd64 the same set does contain one, so the
+	// assertion above is about Windows and not about an empty loop.
+	unrunnable := 0
+	for _, ts := range supportedTargetsFor("x86_64-unknown-linux-musl") {
+		if canExecuteTargetFor("linux", "amd64", ts.Triple) != nil {
+			unrunnable++
+		}
+	}
+	if unrunnable != 1 {
+		t.Errorf("linux-amd64 advertises %d targets it cannot run, want exactly 1 (x86_64-pc-windows-msvc)", unrunnable)
+	}
+}
+
+// TestHostPredicatesUseTheRunningHost keeps the parameterized forms above from
+// passing while the real callers get a different answer: the wrappers must
+// forward runtime.GOOS/GOARCH and nothing else.
+func TestHostPredicatesUseTheRunningHost(t *testing.T) {
+	t.Parallel()
+	for _, triple := range []string{
+		"x86_64-pc-windows-msvc", "x86_64-unknown-linux-musl",
+		"aarch64-unknown-linux-musl", "arm64-apple-macosx15.0.0",
+		"wasm32-wasi", "totally-bogus",
+	} {
+		want := isHostTargetFor(runtime.GOOS, runtime.GOARCH, triple)
+		if got := isHostTarget(triple); got != want {
+			t.Errorf("isHostTarget(%q) = %v, want the %s-%s answer %v",
+				triple, got, runtime.GOOS, runtime.GOARCH, want)
+		}
+		wantErr := canExecuteTargetFor(runtime.GOOS, runtime.GOARCH, triple)
+		gotErr := canExecuteTarget(triple)
+		if (gotErr == nil) != (wantErr == nil) {
+			t.Errorf("canExecuteTarget(%q) = %v, want the %s-%s answer %v",
+				triple, gotErr, runtime.GOOS, runtime.GOARCH, wantErr)
 		}
 	}
 }

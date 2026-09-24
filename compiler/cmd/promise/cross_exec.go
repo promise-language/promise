@@ -45,11 +45,19 @@ func crossExecCommand(ctx context.Context, target, binaryPath string, args ...st
 // host, without constructing (and therefore without materializing the harness
 // for) a command. Callers use it to fail before doing expensive work.
 func canExecuteTarget(target string) error {
+	return canExecuteTargetFor(runtime.GOOS, runtime.GOARCH, target)
+}
+
+// canExecuteTargetFor is canExecuteTarget with the host named rather than read
+// from the process, so a caller's platform is a parameter of the answer instead
+// of a property of wherever the question happened to be asked. See
+// isHostTargetFor for why that matters here.
+func canExecuteTargetFor(goos, goarch, target string) error {
 	switch {
-	case isWasmWebTarget(target), isWasmTarget(target), isHostTarget(target):
+	case isWasmWebTarget(target), isWasmTarget(target), isHostTargetFor(goos, goarch, target):
 		return nil
 	default:
-		return fmt.Errorf("cannot execute a %s binary on a %s-%s host: cross-target execution is not supported", target, runtime.GOOS, runtime.GOARCH)
+		return fmt.Errorf("cannot execute a %s binary on a %s-%s host: cross-target execution is not supported", target, goos, goarch)
 	}
 }
 
@@ -57,10 +65,21 @@ func canExecuteTarget(target string) error {
 // The comparison checks OS and architecture components independently because
 // the host triple may include version info (e.g. "arm64-apple-macosx15.0.0").
 func isHostTarget(target string) bool {
-	hostOS := runtime.GOOS     // "darwin", "linux", "windows"
-	hostArch := runtime.GOARCH // "amd64", "arm64"
+	return isHostTargetFor(runtime.GOOS, runtime.GOARCH, target)
+}
 
-	switch hostOS {
+// isHostTargetFor is isHostTarget with the host named rather than read from the
+// process, so every host's branch is evaluated wherever the suite runs.
+//
+// The windows branch is the one that cannot otherwise be checked on the Linux
+// and macOS hosts that run almost every build: x86_64-pc-windows-msvc is a
+// cross target there and this host's OWN target on windows-amd64, where `run`
+// correctly executes what it just built. T2206 was a black-box test asserting
+// the refusal for that triple unconditionally — green on every non-Windows run,
+// and impossible to satisfy on a Windows one. Same shape, and the same reason,
+// as clitest's buildCommandsFor (T2152).
+func isHostTargetFor(goos, goarch, target string) bool {
+	switch goos { // "darwin", "linux", "windows"
 	case "darwin":
 		if !isDarwinTarget(target) {
 			return false
@@ -77,7 +96,7 @@ func isHostTarget(target string) bool {
 		return false
 	}
 
-	switch hostArch {
+	switch goarch { // "amd64", "arm64"
 	case "amd64":
 		return strings.HasPrefix(target, "x86_64")
 	case "arm64":

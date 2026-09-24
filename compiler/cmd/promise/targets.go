@@ -81,7 +81,15 @@ func knownTargets() []targetSpec {
 // any release yet; they are added here — statically — when T0530/T0532 land.
 // They remain valid for `emit-ir` in the meantime, via knownTargets().
 func supportedTargets() []targetSpec {
-	host := codegen.HostTargetTriple()
+	return supportedTargetsFor(codegen.HostTargetTriple())
+}
+
+// supportedTargetsFor is supportedTargets with the host named rather than read
+// from the build, so the windows-amd64 shape — the one host where the Windows
+// row IS the native row instead of an appended cross one — is assertable on
+// every machine rather than only on Windows. Same split, and the same reason,
+// as isHostTargetFor (T2206) and clitest's buildCommandsFor (T2152).
+func supportedTargetsFor(host string) []targetSpec {
 	specs := []targetSpec{
 		{
 			Triple:      host,

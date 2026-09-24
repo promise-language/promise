@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -28,6 +29,18 @@ import (
 // emit-ir only until its import libs exist (findWindowsLinkSurface rejects it
 // by name).
 const windowsCrossTriple = "x86_64-pc-windows-msvc"
+
+// windowsCrossTripleIsNative reports whether windowsCrossTriple is this host's
+// OWN target rather than a cross one. On windows-amd64 it is: supportedTargets()
+// lists it as the native row instead of appending the cross one, and
+// crossExecCommand takes its isHostTarget arm and runs the .exe.
+//
+// Everything this file asserts about LINKING holds either way — that is what
+// makes the triple listable everywhere. Only the two tests about EXECUTION have
+// a host in their premise, and this is what lets them say so (T2206).
+func windowsCrossTripleIsNative() bool {
+	return runtime.GOOS == "windows" && runtime.GOARCH == "amd64"
+}
 
 // windowsShippedDLLs is the whole runtime dependency a Promise .exe is allowed
 // to have: DLLs present in a stock Windows install, needing no redistributable.
@@ -188,6 +201,12 @@ func TestWindowsCrossBuiltExeRunsUnderWine(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping cross-build integration test in short mode")
 	}
+	if windowsCrossTripleIsNative() {
+		// Wine's premise is a foreign binary. Here the .exe is the host's own
+		// and runs directly — TestRunWithNativeTripleExecutes covers that. A
+		// `wine` on PATH must not turn this into a third, undefined path.
+		t.Skip("the .exe is native on this host; nothing for wine to emulate")
+	}
 	wine, err := exec.LookPath("wine") // path-ok: a runtime that executes a built artifact without contributing to it
 	if err != nil {
 		t.Skip("wine is not installed, so the cross-built .exe was not run")
@@ -287,6 +306,15 @@ func TestWindowsCrossBuildDefaultsToExeName(t *testing.T) {
 // so `run` failed before compiling anything; now the gate accepts it and the
 // refusal comes later, from crossExecCommand, after a successful build.
 //
+// The refusal is about a NON-HOST target (docs/windows-support.md: "a
+// non-Windows host links the .exe but cannot run it"), so this case belongs to
+// the hosts where that triple is foreign. On windows-amd64 the CLI cannot reach
+// the seam at all: supportedTargets() there is the host plus the two wasm
+// targets, every one of them executable, and any other triple is turned away by
+// the flag gate with the wording asserted against below. The skip is therefore
+// a property of the target set, not a gap someone forgot to fill — it lifts as
+// soon as a second cross-linkable target ships (T0530/T0532).
+//
 // Both halves are asserted. That it FAILS keeps a cross-built binary from ever
 // looking like it ran here. That it does NOT fail with the flag gate's wording
 // keeps the target from being quietly un-listed again — which would restore the
@@ -295,6 +323,11 @@ func TestWindowsCrossRunRefusesToExecute(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping cross-build integration test in short mode")
+	}
+	if windowsCrossTripleIsNative() {
+		t.Skip("x86_64-pc-windows-msvc is this host's native target, so run executes it: " +
+			"TestRunWithNativeTripleExecutes asserts that side, and TestHostTargetMatrix " +
+			"in package main covers the refusal predicate for every host")
 	}
 	bin := clitest.Bin(t)
 

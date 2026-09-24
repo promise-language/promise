@@ -56,13 +56,12 @@ func TestDoctorJSON(t *testing.T) {
 }
 
 func TestDoctorFixFlag(t *testing.T) {
-	// -fix reclaims cache space, and its LLVM/CRT view cleanup is an
-	// os.RemoveAll of cache/llvm-view. Against the developer's real
-	// PROMISE_HOME that deletes the staging dirs of any peer process
-	// materializing a view right then — the T1616 failure shape, which the
-	// per-area test packages made reachable by compiling concurrently with this
-	// one. Give the wipe its own home so it can only ever clear its own cache.
-	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
+	// Runs under the package's shared home. -fix only PRINTS the Fix hint of a
+	// failing check; the destructive cache work — the cleanViewsUnderLock that
+	// would delete a peer's view staging dir (T1616) — is under --repair, which
+	// the tests below drive through doctorCheckCAS directly and which do have
+	// homes of their own. A home here bought protection from nothing and cost a
+	// cold toolchain, because the toolchain check materializes one (T2150).
 
 	// Java is a dev-only check, reachable only via -dev.
 	output := captureStdout(t, func() {

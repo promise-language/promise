@@ -183,9 +183,12 @@ func (w casWindow) AddTo(values map[string]float64) {
 // legitimately non-zero the first time a clone builds. The other two go to the
 // tracker gates and to `promise test`, where no term is owed.
 //
-// Neither of these two is enforced YET: a real sweep reports 29 homes and ~70 MB
-// fetched, because the Go suite builds a private PROMISE_HOME per test (T2150).
-// Both are registered informational in every target block until that is fixed.
+// Neither of these two is enforced YET. T2150 removed the private PROMISE_HOME
+// the Go suite built per test and stopped a cold home fetching artifacts the
+// binary embeds, so the tree should now report 1 and 0 — measured on
+// windows-amd64. Promoting them commits every target at once, so T2153 holds
+// them informational until a -count=1 gate run has confirmed the figure on
+// linux and darwin too.
 func (w casWindow) Metrics() ([]Metric, string) {
 	vals, incomplete := w.Values()
 	if vals == nil {
@@ -234,15 +237,23 @@ func sortedSetKeys(m map[string]bool) []string {
 	return out
 }
 
-// SummaryLine is the window's one human line, or "" when the run cost the store
-// nothing — the same rule `promise test` follows, and for the same reason: a
-// counter that is zero on every warm run must not cost every warm run a line of
-// a tail-read.
+// Summary is what the window costs, as bin/verify prints it, or "" when the run
+// cost the store nothing — the same rule `promise test` follows, and for the
+// same reason: a counter that is zero on every warm run must not cost every warm
+// run a line of a tail-read.
 //
-// This is what bin/verify prints. The numbers it JUDGES come from the gates,
-// which measure with -count=1 and so report the same figure every time; see
-// RunVerify for why this run's figure must not reach a ratchet.
-func (w casWindow) SummaryLine() string {
+// One line normally. Past one home it adds a continuation line per home, because
+// the count alone says a change added a home but not WHICH one, and finding that
+// out again means re-running the whole sweep with the ledger open — which is
+// what T2150 had to do. The paths are the diagnosis: each extra one is a
+// t.TempDir() named after the test that built it. They are lines rather than a
+// list because the reading this exists to serve had 29 of them, and 29 paths on
+// one line is not a thing anybody reads.
+//
+// The numbers it JUDGES come from the gates, which measure with -count=1 and so
+// report the same figure every time; see RunVerify for why this run's figure
+// must not reach a ratchet.
+func (w casWindow) Summary() string {
 	if !w.open {
 		return ""
 	}
@@ -253,12 +264,19 @@ func (w casWindow) SummaryLine() string {
 	if l.NetworkBytes == 0 && l.MaterializedBytes == 0 && l.Materializations == 0 {
 		return ""
 	}
-	line := fmt.Sprintf("Store cost:   %d materialization(s) over %d home(s), %.1f MB written, %.1f MB fetched",
+	summary := fmt.Sprintf("Store cost:   %d materialization(s) over %d home(s), %.1f MB written, %.1f MB fetched",
 		l.Materializations, len(l.Homes), megabytes(l.MaterializedBytes), megabytes(l.NetworkBytes))
 	if len(l.Names) > 0 {
-		line += " (" + strings.Join(l.Names, ", ") + ")"
+		summary += " (" + strings.Join(l.Names, ", ") + ")"
 	}
-	return line
+	if len(l.Homes) > 1 {
+		// Indented to the column "Store cost:" puts its own value in, so the
+		// paths line up under the count they explain.
+		for _, home := range l.Homes {
+			summary += "\n                home: " + home
+		}
+	}
+	return summary
 }
 
 func megabytes(n int64) float64 { return float64(n) / (1024 * 1024) }

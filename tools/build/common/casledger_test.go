@@ -348,26 +348,26 @@ func TestCASWindowAddToContributesNothingWhenUnopened(t *testing.T) {
 	}
 }
 
-// TestCASWindowSummaryLineIsSilentWhenTheRunCostNothing: bin/verify's summary is
+// TestCASWindowSummaryIsSilentWhenTheRunCostNothing: bin/verify's summary is
 // read by tailing it, so a counter that is zero on every warm run must not cost
 // every warm run a line to say so.
-func TestCASWindowSummaryLineIsSilentWhenTheRunCostNothing(t *testing.T) {
+func TestCASWindowSummaryIsSilentWhenTheRunCostNothing(t *testing.T) {
 	root := t.TempDir()
 	if err := resetCASLedger(root); err != nil {
 		t.Fatal(err)
 	}
-	if line := (casWindow{root: root, open: true}).SummaryLine(); line != "" {
+	if line := (casWindow{root: root, open: true}).Summary(); line != "" {
 		t.Errorf("a zero-cost run printed %q, want nothing", line)
 	}
-	if line := (casWindow{root: root, why: "unopened"}).SummaryLine(); line != "" {
+	if line := (casWindow{root: root, why: "unopened"}).Summary(); line != "" {
 		t.Errorf("an unopened window printed %q, want nothing", line)
 	}
 }
 
-// TestCASWindowSummaryLineNamesItsCause: a non-zero reading says how many homes
+// TestCASWindowSummaryNamesItsCause: a non-zero reading says how many homes
 // paid, what it cost, and which trees — so the line points at the change that
 // caused it rather than only at the fact that something did.
-func TestCASWindowSummaryLineNamesItsCause(t *testing.T) {
+func TestCASWindowSummaryNamesItsCause(t *testing.T) {
 	root := t.TempDir()
 	writeLedger(t, root, `{"event":"network","bytes":74000000}
 {"event":"materialize","name":"llvm-view","bytes":9961472,"count":28}
@@ -375,14 +375,37 @@ func TestCASWindowSummaryLineNamesItsCause(t *testing.T) {
 {"event":"home","path":"/w/.promise-home"}
 {"event":"home","path":"/tmp/private-home"}
 `)
-	line := (casWindow{root: root, open: true}).SummaryLine()
+	line := (casWindow{root: root, open: true}).Summary()
 	for _, want := range []string{
 		"Store cost:", "56 materialization(s)", "over 2 home(s)",
 		"9.5 MB written", "70.6 MB fetched", "(crt-view, llvm-view)",
+		// Past one home the paths themselves are the diagnosis: each extra one
+		// is a t.TempDir() named after the test that built it. Without them the
+		// count says a change added a home but not which, and finding out means
+		// re-running the sweep with the ledger open (T2150).
+		"home: /w/.promise-home", "home: /tmp/private-home",
 	} {
 		if !strings.Contains(line, want) {
 			t.Errorf("line %q is missing %q", line, want)
 		}
+	}
+}
+
+// TestCASWindowSummaryDoesNotNameTheOneExpectedHome: the end state is one
+// home, so naming it on every run that materialized anything would put a path
+// nobody needs into every cold build's summary. The paths appear only once
+// there is more than one, which is the case worth reading.
+func TestCASWindowSummaryDoesNotNameTheOneExpectedHome(t *testing.T) {
+	root := t.TempDir()
+	writeLedger(t, root, `{"event":"materialize","name":"llvm-view","bytes":1048576,"count":1}
+{"event":"home","path":"/w/.promise-home"}
+`)
+	line := (casWindow{root: root, open: true}).Summary()
+	if !strings.Contains(line, "over 1 home(s)") {
+		t.Errorf("line %q does not report the one home", line)
+	}
+	if strings.Contains(line, "home: ") {
+		t.Errorf("line %q names the expected home; only extras are worth a path", line)
 	}
 }
 
@@ -440,4 +463,27 @@ func TestCASWindowReportsAnUnreadableLedger(t *testing.T) {
 // all — no process, no error.
 func TestEnsureToolchainWarmSkipsAnUnbuiltTree(t *testing.T) {
 	ensureToolchainWarm(t.TempDir()) // no bin/promise: returns without spawning
+}
+
+// TestCASWindowSummaryIsSilentOnAnUnreadableLedger: a ledger that cannot be READ
+// (as opposed to one that is absent, which folds to an honest zero) must produce
+// no summary line rather than a line of zeros. Values() answers the same case
+// with a reason, because a gate has to distinguish "clean" from "not measured";
+// the human summary has no such obligation and says nothing.
+//
+// A directory where the ledger file belongs is the portable way to make
+// os.ReadFile fail — no permission trick that root or Windows would shrug off.
+func TestCASWindowSummaryIsSilentOnAnUnreadableLedger(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(casLedgerPath(root), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if line := (casWindow{root: root, open: true}).Summary(); line != "" {
+		t.Errorf("an unreadable ledger produced %q, want nothing", line)
+	}
+	// And the machine-readable side still reports it as unmeasured, so the two
+	// disagree only in verbosity.
+	if vals, incomplete := (casWindow{root: root, open: true}).Values(); vals != nil || incomplete == "" {
+		t.Errorf("Values() = %v / %q, want no numbers and a reason", vals, incomplete)
+	}
 }

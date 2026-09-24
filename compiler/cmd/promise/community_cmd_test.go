@@ -59,30 +59,6 @@ func makeCommunityCatalogRepo(t *testing.T, modulesTOML string, indexFiles map[s
 	return dir
 }
 
-// makeTaggedModuleRepo creates a bare git "remote" carrying a verifiable module
-// (good=true → compiles + tests pass) tagged epoch-<epoch>. Returns (bareDir,
-// headCommit).
-func makeTaggedModuleRepo(t *testing.T, cli *cliEnv, name, epoch string, good bool) (string, string) {
-	t.Helper()
-	bareDir := filepath.ToSlash(shortRepoDir(t))
-	workDir := shortRepoDir(t)
-	run := func(dir string, args ...string) { cli.git(t, dir, args...) }
-	run(bareDir, "init", "--bare", ".")
-	run(workDir, "clone", bareDir, ".")
-	writeMod(t, workDir, name, good)
-	run(workDir, "add", ".")
-	run(workDir, "commit", "-m", "init")
-	run(workDir, "tag", "epoch-"+epoch)
-	run(workDir, "push", "origin", "HEAD", "--tags")
-	cmd := exec.Command("git", "rev-parse", "HEAD")
-	cmd.Dir = workDir
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("rev-parse: %v", err)
-	}
-	return bareDir, strings.TrimSpace(string(out))
-}
-
 // --- resolveCommunity (name-resolution, §9.9 step 4) ---
 
 func TestResolveCommunityVerified(t *testing.T) {
@@ -250,7 +226,10 @@ func TestVerifyLocalModuleCompat(t *testing.T) {
 		t.Skip("skipping verify integration test in short mode")
 	}
 	setupGitTestEnv(t)
-	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
+	// The package's shared home (TestMain). Unlike the resolveCommunity tests
+	// above, this one never touches cache/community-catalog — it verifies local
+	// module dirs — so it needs no home of its own, and one would only add a
+	// cold toolchain for each verify subprocess to stage (T2150).
 	bin := locatePromiseBin(t)
 	epoch := compilerEpochForTest(t)
 

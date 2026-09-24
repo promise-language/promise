@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -270,6 +271,78 @@ func TestResolveHomeNeverTheSharedPromiseHome(t *testing.T) {
 	}
 }
 
+// TestNewEnvRunsUnderTheSharedHome is the per-test half of the same invariant
+// (T2150). T2133 removed the home each PACKAGE built itself; the ones each TEST
+// built survived it, and there are twenty of them. Every one stages an LLVM
+// view nothing asked for — 375 MB of copies on macOS, ~900 MB on Windows — plus
+// a re-explosion of the embedded catalog and, on Linux, a fetch of a musl CRT
+// the binary already carries. So an Env must carry the ambient PROMISE_HOME
+// through untouched, and must not add one of its own.
+func TestNewEnvRunsUnderTheSharedHome(t *testing.T) {
+	ambient := filepath.Join(t.TempDir(), "shared-home")
+	t.Setenv("PROMISE_HOME", ambient)
+
+	var homes []string
+	for _, kv := range NewEnv(t).env {
+		key, value, ok := strings.Cut(kv, "=")
+		if ok && strings.EqualFold(key, "PROMISE_HOME") {
+			homes = append(homes, value)
+		}
+	}
+	if len(homes) != 1 || homes[0] != ambient {
+		t.Errorf("NewEnv passes PROMISE_HOME=%v, want exactly the ambient %q — a home of its own is a toolchain staged per test",
+			homes, ambient)
+	}
+}
+
+// TestSharedHomeKeepingAmbientHonoursAHomeTheCallerChose pins the one respect in
+// which cmd/promise's TestMain differs (T2150): a home already in the
+// environment is left alone, because that package's tests re-exec the test
+// binary and hand the child the home it must read. Overwriting it there is a
+// wrong answer to 22 tests.
+func TestSharedHomeKeepingAmbientHonoursAHomeTheCallerChose(t *testing.T) {
+	chosen := filepath.Join(t.TempDir(), "chosen")
+	t.Setenv("PROMISE_HOME", chosen)
+
+	suite := &suiteStub{code: 3}
+	if got := SharedHomeKeepingAmbient(suite); got != 3 {
+		t.Errorf("SharedHomeKeepingAmbient returned %d, want the suite's 3", got)
+	}
+	if suite.homeSeen != chosen {
+		t.Errorf("the suite ran under PROMISE_HOME=%q, want the chosen %q", suite.homeSeen, chosen)
+	}
+	// And it is not WARMED. A chosen home is a fixture — in cmd/promise it is a
+	// staged epoch tree handed to a re-exec'd child — so running a compiler
+	// under it stages a toolchain there, which is precisely the per-home cost
+	// T2150 removes. Warming it measured 21 extra homes across one sweep.
+	if _, err := os.Stat(chosen); !os.IsNotExist(err) {
+		t.Errorf("the chosen home %q was populated; keeping a fixture home must not warm it (stat err=%v)", chosen, err)
+	}
+}
+
+// TestSharedHomeKeepingAmbientStillRefusesAnUnsetHome: the case SharedHome
+// exists for is PROMISE_HOME *unset*, which resolves to the machine-global
+// ~/.promise (docs/build-tools.md §"Test Sandboxing"). Honouring a chosen home
+// must not have opened that door — unset is not "already set".
+func TestSharedHomeKeepingAmbientStillRefusesAnUnsetHome(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, ok := repoRootFrom(dir)
+	if !ok {
+		t.Skip("not running inside a checkout")
+	}
+	t.Setenv("PROMISE_HOME", "")
+
+	suite := &suiteStub{}
+	SharedHomeKeepingAmbient(suite)
+	if want := filepath.Join(root, ".promise-home"); suite.homeSeen != want {
+		t.Errorf("an unset home ran the suite under %q, want the worktree home %q",
+			suite.homeSeen, want)
+	}
+}
+
 // TestHomeForRootFallsBackOutsideACheckout: with no checkout to anchor to, the
 // package owns a temp home and removes it — the one branch that still behaves
 // the way every package used to.
@@ -364,5 +437,98 @@ func TestSharedHomeRunsTheSuiteUnderTheWorktreeHome(t *testing.T) {
 	// create it mid-flight.
 	if fi, err := os.Stat(suite.homeSeen); err != nil || !fi.IsDir() {
 		t.Errorf("the shared home %q was not there for the suite: %v", suite.homeSeen, err)
+	}
+}
+
+// TestUsableAmbientHomeRefusesTheMachineGlobalOne: SharedHomeKeepingAmbient
+// honours a home the caller chose, and the one home nobody may choose is
+// ~/.promise — docs/build-tools.md §"Test Sandboxing". It is the product's own
+// default, so a developer plausibly has it exported; keeping it would let a bare
+// `go test` write the real cache.
+func TestUsableAmbientHomeRefusesTheMachineGlobalOne(t *testing.T) {
+	t.Parallel()
+	if usableAmbientHome("") {
+		t.Error("an unset home is not usable — it resolves to ~/.promise")
+	}
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no user home dir on this host")
+	}
+	global := filepath.Join(userHome, ".promise")
+	for _, spelling := range []string{global, global + string(filepath.Separator), filepath.Join(global, ".")} {
+		if usableAmbientHome(spelling) {
+			t.Errorf("usableAmbientHome(%q) = true, want the machine-global home refused", spelling)
+		}
+	}
+	if !usableAmbientHome(filepath.Join(t.TempDir(), "chosen")) {
+		t.Error("a home of the caller's own must be kept")
+	}
+}
+
+// TestUsableAmbientHomeOnBothPlatforms exercises both arms of the decision on
+// every host, the way TestBuildCommandsSpellBothForms does for the rebuild
+// message — and for the same reason. T2152 was a Windows-only branch that only a
+// Windows run could reach, so no other run could notice it was wrong; a
+// comparison that folds case on one platform and not the other is that shape
+// again, and a Linux-only CI would never execute half of it.
+func TestUsableAmbientHomeOnBothPlatforms(t *testing.T) {
+	t.Parallel()
+	const userHome = "/home/dev"
+	global := filepath.Join(userHome, ".promise")
+
+	for _, goos := range []string{"windows", "linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			if usableAmbientHomeOn(goos, "", userHome) {
+				t.Error("an unset home is not usable on any platform")
+			}
+			if usableAmbientHomeOn(goos, global, userHome) {
+				t.Errorf("the machine-global home %q was kept", global)
+			}
+			// Spellings of the same directory that filepath.Clean settles.
+			for _, same := range []string{global + "/", filepath.Join(global, ".")} {
+				if usableAmbientHomeOn(goos, same, userHome) {
+					t.Errorf("%q is the machine-global home spelled differently, and was kept", same)
+				}
+			}
+			if !usableAmbientHomeOn(goos, filepath.Join(userHome, "chosen"), userHome) {
+				t.Error("a home of the caller's own must be kept")
+			}
+			// A host that cannot say where its user home is keeps the ambient:
+			// the re-exec'd child that needs its fixture home is certain, while
+			// a ~/.promise nobody can spell is one the compiler could not
+			// resolve either.
+			if !usableAmbientHomeOn(goos, global, "") {
+				t.Error("an undeterminable user home must not refuse the caller's home")
+			}
+		})
+	}
+
+	// The case fold is Windows-only: on a case-sensitive platform two spellings
+	// that differ in case are two directories, and only one of them is the one
+	// that must be refused.
+	shouty := strings.ToUpper(global)
+	if usableAmbientHomeOn("windows", shouty, userHome) {
+		t.Errorf("windows: %q is the machine-global home in another case, and was kept", shouty)
+	}
+	if !usableAmbientHomeOn("linux", shouty, userHome) {
+		t.Errorf("linux: %q is a different directory from %q and must be kept", shouty, global)
+	}
+}
+
+// TestCompilerEpochReadsTheCompilersOwnEpoch covers both forms of the epoch
+// probe, the Env-free one and the Env method. Both were at zero coverage, and
+// both were changed by T2150: they used to give the child a private PROMISE_HOME
+// just to ask the binary which epoch it is, which staged a whole toolchain to
+// read one line of `catalog list`.
+//
+// It asserts the shape rather than a value — the epoch moves every release — and
+// that both forms agree, since they are two spellings of one question.
+func TestCompilerEpochReadsTheCompilersOwnEpoch(t *testing.T) {
+	epoch := CompilerEpoch(t) // skips when there is no usable binary
+	if !regexp.MustCompile(`^[0-9]{4}\.[0-9]+$`).MatchString(epoch) {
+		t.Errorf("CompilerEpoch = %q, want an epoch like 2026.1", epoch)
+	}
+	if got := NewEnv(t).CompilerEpoch(t); got != epoch {
+		t.Errorf("Env.CompilerEpoch = %q, the Env-free form says %q — two spellings of one question", got, epoch)
 	}
 }

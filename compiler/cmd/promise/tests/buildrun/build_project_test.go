@@ -2,6 +2,7 @@ package buildrun
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -756,18 +757,19 @@ func TestUnusedImportWarnsButBuildsOK(t *testing.T) {
 
 	dir := clitest.TempDir(t)
 	src := filepath.Join(dir, "main.pr")
-	// `use path;` is never referenced — an unused import.
-	if err := os.WriteFile(src,
-		[]byte("use path;\n\nmain() {\n  print_line(\"hi\");\n}\n"), 0644); err != nil {
+	// `use path;` is never referenced — an unused import. The leading comment
+	// carries this run's temp dir, which Go makes unique per invocation, so the
+	// source is one no build cache can already hold — and that is what
+	// guarantees the miss the assertion needs, since sema (where the warning is
+	// emitted) is skipped on a hit. A private PROMISE_HOME would buy the same
+	// miss by staging a whole cold toolchain for it (T2150).
+	body := fmt.Sprintf("// %s\nuse path;\n\nmain() {\n  print_line(\"hi\");\n}\n", filepath.ToSlash(dir))
+	if err := os.WriteFile(src, []byte(body), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	cmd := exec.Command(bin, "run", src)
 	cmd.Dir = dir
-	// Isolate the build cache so this compile is a guaranteed miss — sema (where
-	// the warning is emitted) is skipped on a cache hit, so a shared cache would
-	// make the warning assertion flaky.
-	cmd.Env = append(os.Environ(), "PROMISE_HOME="+filepath.Join(dir, "home"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run failed despite only a warning: %v\n%s", err, out)

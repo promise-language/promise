@@ -17,6 +17,7 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 	"github.com/promise-language/promise/compiler/internal/blobstore"
+	"github.com/promise-language/promise/compiler/internal/casmetrics"
 )
 
 // TestBlobSetKeyOrderIndependentAndContentSensitive verifies the view-dir key is
@@ -983,5 +984,159 @@ func TestMakeLLDAliasesWithoutLLDIsANoOp(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("makeLLDAliases invented %d entries with no lld to alias", len(entries))
+	}
+}
+
+// TestEmbeddedTargetDepReadsWhatTheBinaryCarries covers the adapter that gives
+// resolveTargetDepView its third blob source (T2150), on every platform: a file
+// the embed FS carries comes back verbatim, one it does not reads as absent
+// rather than as an error, and a build that embeds nothing for a dependency
+// supplies no source at all.
+//
+// It reads the embedded std module, which every build carries, so the adapter
+// is covered where the musl/compiler-rt trees are empty stubs.
+func TestEmbeddedTargetDepReadsWhatTheBinaryCarries(t *testing.T) {
+	t.Parallel()
+
+	local := embeddedTargetDep(embeddedModules, "resources/modules/std", true)
+	if local == nil {
+		t.Fatal("embeddedTargetDep(present: true) supplied no source")
+	}
+	want, err := embeddedModules.ReadFile("resources/modules/std/string.pr")
+	if err != nil {
+		t.Skipf("this build embeds no std/string.pr to read: %v", err)
+	}
+	got, ok := local("string.pr")
+	if !ok {
+		t.Fatal("the adapter reported an embedded file as absent")
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("the adapter returned %d bytes, want the embedded %d", len(got), len(want))
+	}
+	if _, ok := local("no_such_file.a"); ok {
+		t.Error("a file the embed FS does not carry must read as absent, not as bytes")
+	}
+	if embeddedTargetDep(embeddedModules, "resources/modules/std", false) != nil {
+		t.Error("a build that embeds nothing for a dependency must supply no source")
+	}
+
+	// The arch lives in the prefix, so a dep+arch this binary was not built for
+	// reads as absent for EVERY file of it. That is the invariant the ladder
+	// rests on: the CAS view stays the only path that can serve an arch the
+	// binary does not embed (docs/runtime-architecture.md, step 4). If this ever
+	// answered bytes, a cross-compile would silently link one arch's CRT into
+	// another's binary — a wrong answer, where a fetch is merely a slow one.
+	crossArch := embeddedTargetDep(embeddedMuslCRT, "resources/crt/sparc64-linux-musl", true)
+	for _, f := range muslCRTFiles {
+		if _, ok := crossArch(f); ok {
+			t.Errorf("an arch this binary does not embed answered bytes for %q", f)
+		}
+	}
+}
+
+// TestLocalTargetDepFileIsNilSafe: a platform whose embed stub is empty passes a
+// nil source, and the population loop must read that as "this binary carries no
+// copy" rather than panicking on the way to the resolver.
+func TestLocalTargetDepFileIsNilSafe(t *testing.T) {
+	t.Parallel()
+	if data, ok := localTargetDepFile(nil, "crt1.o"); ok || data != nil {
+		t.Errorf("localTargetDepFile(nil) = (%v, %v), want (nil, false)", data, ok)
+	}
+}
+
+// TestResolveTargetDepViewDoesNotFetchWhatTheBinaryEmbeds is the item's own
+// assertion (T2150): against a home whose CAS is EMPTY, materializing a target
+// dependency this binary carries must cost zero bytes over the wire.
+//
+// Before the third blob source existed, this path had only store.Has and the
+// resolver, so every cold home downloaded the musl CRT and the compiler-rt
+// builtins the running binary already contained — 55 MB across one sweep of the
+// CLI test packages, none of which asked for it.
+//
+// Skips where it cannot mean anything: a binary that embeds no musl CRT (every
+// non-Linux host), or a manifest carrying no musl blobs for this arch, never
+// reaches the branch at all.
+func TestResolveTargetDepViewDoesNotFetchWhatTheBinaryEmbeds(t *testing.T) {
+	if !hasEmbeddedMuslCRT {
+		t.Skip("this binary embeds no musl CRT, so there is no local copy to prefer")
+	}
+	arch := muslArchDir(runtime.GOARCH + "-unknown-linux-musl")
+	if _, err := embeddedMuslCRT.ReadFile("resources/crt/" + arch + "/crt1.o"); err != nil {
+		t.Skipf("this binary embeds no CRT for %s: %v", arch, err)
+	}
+	t.Setenv("PROMISE_HOME", t.TempDir()) // an empty CAS: every blob is a miss
+
+	before := casmetrics.Read()
+	if !before.Available {
+		t.Skip("no ledger beside the test binary, so nothing can be measured")
+	}
+	viewDir, err := resolveMuslCRTView(arch)
+	if err != nil {
+		t.Fatalf("resolveMuslCRTView against a cold home: %v", err)
+	}
+	if viewDir == "" {
+		t.Skipf("this binary's manifest carries no musl blobs for %s, so rung 4 falls through", arch)
+	}
+	if !muslCRTComplete(viewDir) {
+		t.Fatalf("the published view %q is missing CRT objects", viewDir)
+	}
+	if fetched := casmetrics.Read().NetworkBytes - before.NetworkBytes; fetched != 0 {
+		t.Errorf("a cold home fetched %d bytes for a CRT this binary carries", fetched)
+	}
+	// The view holds the embedded bytes, which is what proves the local branch
+	// ran rather than a store hit that could not have happened here.
+	want, err := embeddedMuslCRT.ReadFile("resources/crt/" + arch + "/crt1.o")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(viewDir, "crt1.o"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("the view's crt1.o is %d bytes, want the embedded %d", len(got), len(want))
+	}
+}
+
+// TestChooseTargetDepSourceOrdersItsThreeSources pins the precedence T2150
+// introduced, on every platform — which is the point of it being a function at
+// all. The loop it serves is unreachable off Linux (no other target's manifest
+// carries musl or compiler-rt blobs), so without this the ordering would be
+// checked by one CI job and by nothing else.
+func TestChooseTargetDepSourceOrdersItsThreeSources(t *testing.T) {
+	t.Parallel()
+	embedded := func(string) ([]byte, bool) { return []byte("embedded bytes"), true }
+	absent := func(string) ([]byte, bool) { return nil, false }
+
+	for _, tc := range []struct {
+		name    string
+		inStore bool
+		local   func(string) ([]byte, bool)
+		want    targetDepSource
+		// wantData is what the caller writes; only the embedded source carries any.
+		wantData string
+	}{
+		// The store wins even when this binary also has the file: its bytes are
+		// the ones the manifest's hash was taken over.
+		{name: "store over embedded", inStore: true, local: embedded, want: sourceStore},
+		{name: "store over wire", inStore: true, local: absent, want: sourceStore},
+		{name: "store over no source at all", inStore: true, local: nil, want: sourceStore},
+		// A store miss takes the copy we already hold rather than the wire —
+		// the 55 MB this item is named for.
+		{name: "embedded over wire", inStore: false, local: embedded, want: sourceEmbedded, wantData: "embedded bytes"},
+		// And falls to the wire only when nothing local can answer, which is
+		// what keeps an arch this binary does not embed servable at all.
+		{name: "wire when the embed FS lacks the file", inStore: false, local: absent, want: sourceWire},
+		{name: "wire when this build embeds nothing", inStore: false, local: nil, want: sourceWire},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, data := chooseTargetDepSource(tc.inStore, tc.local, "libc.a")
+			if got != tc.want {
+				t.Errorf("chooseTargetDepSource(inStore=%v) = %v, want %v", tc.inStore, got, tc.want)
+			}
+			if string(data) != tc.wantData {
+				t.Errorf("data = %q, want %q — only the embedded source carries bytes", data, tc.wantData)
+			}
+		})
 	}
 }

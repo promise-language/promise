@@ -406,7 +406,7 @@ func (r *verifyRun) summary(failed string) verifySummary {
 		Parts:    r.parts,
 		Terms:    r.terms,
 		Failed:   failed,
-		Store:    r.store.SummaryLine(),
+		Store:    r.store.Summary(),
 		Elapsed:  time.Since(r.start),
 	}
 }

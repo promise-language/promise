@@ -820,7 +820,7 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 1. Sibling of binary: `{exe_dir}/crt/x86_64-linux-musl/`
 2. Installed: `~/.promise/lib/crt/x86_64-linux-musl/`
 3. Cache: `~/.promise/cache/crt/x86_64-linux-musl/` (validated by size against embedded)
-4. Content-addressed store (`resolveMuslCRTView`) — resolves the arch-qualified `musl-<arch>-*` entries out of the embedded manifest into `cache/crt-view/<arch>-<blobkey>/`, fetching blobs on first use. This is the only path that can serve an arch the binary does not embed.
+4. Content-addressed store (`resolveMuslCRTView`) — resolves the arch-qualified `musl-<arch>-*` entries out of the embedded manifest into `cache/crt-view/<arch>-<blobkey>/`. A blob the store already holds fills the view; one it does not is taken from this binary's own embedded copy of that arch when there is one, and fetched on first use only when there is not — the same rule `prebuiltToolPath` follows for the LLVM view, and what keeps `cas_network_bytes` ([gate-system.md](gate-system.md#store-metrics)) at zero for an artifact the binary already carries. This is still the only path that can serve an arch the binary does not embed.
 5. Extract embedded CRT to cache (first build only, ~2.5 MB)
 
 The CRT objects themselves are a pinned prebuilt (`[binaries.musl]` in `tools/build/prebuilts.toml`, sliced from the upstream Alpine `musl-dev` apk), fetched by `bin/build` and hosted content-addressed by `bin/release publish-blobs --dependency musl` — never taken from the build host's `/usr/lib` (T0530).

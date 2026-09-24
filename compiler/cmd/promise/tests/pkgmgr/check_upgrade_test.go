@@ -26,7 +26,6 @@ func TestCheckUpgradeWithDeps(t *testing.T) {
 	}
 	bin := clitest.Bin(t)
 	epoch := clitest.CompilerEpoch(t)
-	home := clitest.TempDir(t)
 
 	makeDep := func(good bool) (url, commit string) {
 		work := clitest.MakeWorkRepo(t)
@@ -43,7 +42,11 @@ func TestCheckUpgradeWithDeps(t *testing.T) {
 		os.WriteFile(filepath.Join(proj, "promise.toml"), []byte(toml), 0644)
 		cmd := exec.Command(bin, "package", "check-upgrade", epoch)
 		cmd.Dir = proj
-		cmd.Env = append(os.Environ(), "PROMISE_HOME="+home, "GIT_TERMINAL_PROMPT=0")
+		// The package's shared home (clitest.SharedHome, in TestMain): each dep
+		// lives at a fixture URL of its own, so the module cache entries are
+		// already private, and a home of its own would only add a cold
+		// toolchain to stage (T2150).
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}

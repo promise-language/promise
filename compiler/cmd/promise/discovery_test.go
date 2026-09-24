@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 	"github.com/promise-language/promise/compiler/internal/module"
 )
 
@@ -201,7 +200,9 @@ func TestAddCatalogResolvesToURL(t *testing.T) {
 	bin := locatePromiseBin(t)
 	testVerifyCompilerBin = bin
 	defer func() { testVerifyCompilerBin = "" }()
-	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
+	// The package's shared home (TestMain): the fixture repo has a URL of its
+	// own, so its module cache entries are already private, and a home of its
+	// own would only add a cold toolchain for the verify step to stage (T2150).
 	epoch := compilerEpochForTest(t)
 
 	// Create a local bare git repo to act as the "remote", carrying a verifiable

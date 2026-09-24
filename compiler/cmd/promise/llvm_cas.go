@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -750,7 +751,22 @@ func compilerRTManifestName(arch, file string) string {
 // version bump never serves stale files from a name-only match. The lock file
 // lives OUTSIDE the view tree so cleanViewsUnderLock's RemoveAll can't delete
 // it mid-hold.
-func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, waiting string) (string, error) {
+//
+// `local` supplies this binary's own embedded copy of a file, or nil when it
+// carries none for this arch. It is the third blob source, and it is what keeps
+// a cold home off the wire: without it a home whose CAS is empty downloads the
+// musl CRT and the compiler-rt builtins that the running binary already
+// contains — once per home, which is 55 MB across one sweep of the CLI test
+// packages (T2150). resolveLLVMView has had the same third source since it was
+// written (prebuiltToolPath); the target-dep path never grew one.
+//
+// The manifest sha is not a reason to prefer the download: the embedded copy is
+// sliced from the same pinned prebuilt the manifest names, and the view is
+// validated by presence, exactly as resolveLLVMView's prebuilt branch is. An
+// arch this binary embeds nothing for still fetches, which is what keeps step 4
+// the only path that can serve one (docs/runtime-architecture.md).
+func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, waiting string,
+	local func(file string) ([]byte, bool)) (string, error) {
 	m, err := loadEmbeddedManifest()
 	if err != nil || m == nil {
 		return "", nil
@@ -795,17 +811,27 @@ func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, 
 		for _, f := range files {
 			name := targetDepManifestName(dep, arch, f)
 			entry, _ := m.Lookup(name)
+			dst := filepath.Join(tmpDir, f)
 			var blobPath string
-			if store.Has(entry.SHA256) {
+			switch source, data := chooseTargetDepSource(store.Has(entry.SHA256), local, f); source {
+			case sourceStore:
 				blobPath = store.BlobPath(entry.SHA256)
-			} else {
+			case sourceEmbedded:
+				// Writing the bytes we already hold costs a few MB into the same
+				// all-or-nothing staging dir; fetching them costs the wire.
+				if werr := os.WriteFile(dst, data, 0o644); werr != nil {
+					return werr
+				}
+				exploded += int64(len(data))
+				continue
+			default:
 				p, rerr := resolver.Resolve(name)
 				if rerr != nil {
 					return rerr
 				}
 				blobPath = p
 			}
-			n, err := linkOrCopyBlob(blobPath, filepath.Join(tmpDir, f), 0o644)
+			n, err := linkOrCopyBlob(blobPath, dst, 0o644)
 			exploded += n
 			if err != nil {
 				return err
@@ -819,11 +845,76 @@ func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, 
 	return viewDir, nil
 }
 
+// targetDepSource is where one file of a target dependency comes from.
+type targetDepSource int
+
+const (
+	// sourceStore is a content-verified CAS blob: canonical, always preferred.
+	sourceStore targetDepSource = iota
+	// sourceEmbedded is this binary's own copy of the artifact, chosen over the
+	// wire for bytes already on hand (T2150).
+	sourceEmbedded
+	// sourceWire is a fetch from the manifest's hosts — the only path that can
+	// serve an arch this binary does not embed.
+	sourceWire
+)
+
+// chooseTargetDepSource is resolveTargetDepView's three-way decision, lifted out
+// of the populate loop so it can be checked on every platform.
+//
+// That matters more than it looks. The loop it came from cannot run at all off
+// Linux — no other target's manifest carries musl or compiler-rt blobs, so the
+// function returns at the manifest lookup and the branch below is dead code on
+// three of four platforms. A precedence this change turns on, verifiable only
+// where one CI job runs, is the shape T2152 and T2133 both had.
+//
+// The order is the whole semantic: the store first because its bytes are
+// content-verified, this binary's copy next because it costs no network, and the
+// wire last because it is the only one that can answer for an arch we do not
+// carry.
+func chooseTargetDepSource(inStore bool, local func(string) ([]byte, bool), file string) (targetDepSource, []byte) {
+	if inStore {
+		return sourceStore, nil
+	}
+	if data, ok := localTargetDepFile(local, file); ok {
+		return sourceEmbedded, data
+	}
+	return sourceWire, nil
+}
+
+// localTargetDepFile is local(file) with a nil `local` reading as "this binary
+// carries no copy of this dep+arch", so the caller does not have to spell both.
+func localTargetDepFile(local func(string) ([]byte, bool), file string) ([]byte, bool) {
+	if local == nil {
+		return nil, false
+	}
+	return local(file)
+}
+
+// embeddedTargetDep adapts one of the build-tagged embed.FS resource trees into
+// the `local` source resolveTargetDepView takes. present is the per-platform
+// hasEmbedded* constant, so a build that embeds nothing for this dependency
+// answers nil and the view falls through to the CAS/resolver as before.
+//
+// A file the embed FS does not carry (the OpenSSL placeholder sentinel, or an
+// arch this binary was not built for) reads as absent rather than as an error:
+// the point is only to skip a download for bytes already on hand.
+func embeddedTargetDep(fsys embed.FS, prefix string, present bool) func(string) ([]byte, bool) {
+	if !present {
+		return nil
+	}
+	return func(file string) ([]byte, bool) {
+		data, err := fsys.ReadFile(prefix + "/" + file)
+		return data, err == nil
+	}
+}
+
 // resolveMuslCRTView materializes the musl CRT objects from the CAS (T0530).
 func resolveMuslCRTView(arch string) (string, error) {
 	return resolveTargetDepView("musl", "crt-view", arch, muslCRTFiles,
 		"promise (materializing musl CRT)",
-		"Waiting for another process to finish staging the musl CRT...")
+		"Waiting for another process to finish staging the musl CRT...",
+		embeddedTargetDep(embeddedMuslCRT, "resources/crt/"+arch, hasEmbeddedMuslCRT))
 }
 
 // resolveOpenSSLView materializes the static OpenSSL archives from the CAS
@@ -831,7 +922,8 @@ func resolveMuslCRTView(arch string) (string, error) {
 func resolveOpenSSLView(arch string) (string, error) {
 	return resolveTargetDepView("openssl", "openssl-view", arch, opensslFiles,
 		"promise (materializing OpenSSL)",
-		"Waiting for another process to finish staging OpenSSL...")
+		"Waiting for another process to finish staging OpenSSL...",
+		embeddedTargetDep(embeddedOpenSSL, "resources/openssl/"+arch, hasEmbeddedOpenSSL))
 }
 
 // resolveCompilerRTView materializes the compiler-rt builtins archive from the
@@ -839,7 +931,8 @@ func resolveOpenSSLView(arch string) (string, error) {
 func resolveCompilerRTView(arch string) (string, error) {
 	return resolveTargetDepView("compiler-rt", "compiler-rt-view", arch, compilerRTFiles,
 		"promise (materializing compiler-rt builtins)",
-		"Waiting for another process to finish staging the compiler-rt builtins...")
+		"Waiting for another process to finish staging the compiler-rt builtins...",
+		embeddedTargetDep(embeddedCompilerRT, "resources/compiler-rt/"+arch, hasEmbeddedCompilerRT))
 }
 
 // unbrotliBytes decompresses a brotli byte slice.

@@ -81,8 +81,11 @@ main() {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			// One shared PROMISE_HOME so both programs hit the same build cache.
-			home := clitest.TempDir(t)
+			// Both programs run under the package's shared PROMISE_HOME
+			// (clitest.SharedHome, in TestMain), so they hit the same build
+			// cache — which is all this needs. A home of its own would isolate
+			// that cache from nothing and stage a cold toolchain to do it
+			// (T2150).
 			run := func(prog, label string) (string, error) {
 				dir := clitest.TempDir(t)
 				src := filepath.Join(dir, "prog.pr")
@@ -90,7 +93,7 @@ main() {
 					t.Fatalf("write %s: %v", label, err)
 				}
 				cmd := exec.Command(absBin, "run", src)
-				cmd.Env = append(os.Environ(), "PROMISE_HOME="+home)
+				cmd.Env = os.Environ()
 				out, err := cmd.CombinedOutput()
 				return string(out), err
 			}

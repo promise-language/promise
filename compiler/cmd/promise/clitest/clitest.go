@@ -113,7 +113,7 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// Env drives the built promise binary as a subprocess, with its own
+// Env drives the built promise binary as a subprocess, under the package's
 // PROMISE_HOME and an isolated git configuration carried in each command's
 // environment rather than the process's.
 //
@@ -128,28 +128,40 @@ func fileExists(path string) bool {
 // compiler. A subprocess of the real binary is a real compiler, so the
 // production code takes its normal path.
 type Env struct {
-	bin  string
-	home string
-	env  []string
+	bin string
+	env []string
 }
 
-// NewEnv builds an isolated environment around the compiler binary.
+// NewEnv builds an environment around the compiler binary: a git configuration
+// of its own, and the package's shared PROMISE_HOME.
+//
+// It does NOT build a home: it inherits the one SharedHome set for the package.
+// What a test out here needs isolated is its fixture project and the module
+// cache entries it creates — and those are already private, because each test's
+// fixture repo lives at a path of its own and the module cache mirrors a
+// module's URL. What a private home would ALSO isolate is the toolchain
+// surface, which is the entire cost of one: an empty home stages a whole LLVM
+// view (375 MB of copies on macOS, ~900 MB on Windows, symlinks on Linux),
+// re-explodes the embedded catalog, and on Linux fetches the musl CRT it
+// already has, per test. That is T2133 at per-test scope, and T2150 measured it
+// at 22 homes and 55 MB off the wire for one sweep of these packages.
+//
+// This also removes the reason T2189 had to give the home a retrying cleanup
+// here: a home no test creates holds no llc.exe for Windows to refuse to
+// unlink. TempDir stays for the homes that remain elsewhere; the gitconfig dir
+// below never holds an executable, so it is a plain t.TempDir.
+//
+// A test whose SUBJECT is a home's contents still wants one of its own, and
+// should say so by setting PROMISE_HOME itself — visibly, with the reason.
 func NewEnv(t *testing.T) *Env {
 	t.Helper()
 	bin := Bin(t)
-	// The home, not t.TempDir: every command run under this Env materializes the
-	// llvm-view into it, so the directory holds llc.exe / opt.exe by the time
-	// cleanup runs, and on Windows those cannot be unlinked for a moment after
-	// the child exits (T2157's TempDir; the sites that kept t.TempDir are T2189).
-	// The gitconfig dir below never holds an executable and stays t.TempDir.
-	home := TempDir(t)
 	gitconfig := filepath.Join(t.TempDir(), "gitconfig")
 	if err := os.WriteFile(gitconfig,
 		[]byte("[user]\n\temail = test@users.noreply.github.com\n\tname = Test\n[safe]\n\tdirectory = *\n"), 0644); err != nil {
 		t.Fatalf("write git config: %v", err)
 	}
-	return &Env{bin: bin, home: home, env: append(os.Environ(),
-		"PROMISE_HOME="+home,
+	return &Env{bin: bin, env: append(os.Environ(),
 		"GIT_CONFIG_GLOBAL="+gitconfig,
 		"GIT_CONFIG_SYSTEM="+os.DevNull,
 		"GIT_TERMINAL_PROMPT=0",
@@ -217,12 +229,13 @@ func (e *Env) CompilerEpoch(t *testing.T) string {
 }
 
 // CompilerEpoch is the Env-free form, for a test that drives the binary itself
-// rather than through an Env.
+// rather than through an Env. Like NewEnv it runs under the package's shared
+// home rather than building one (T2150).
 func CompilerEpoch(t *testing.T) string {
 	t.Helper()
 	cmd := exec.Command(Bin(t), "catalog", "list")
 	cmd.Dir = t.TempDir()
-	cmd.Env = append(os.Environ(), "PROMISE_HOME="+TempDir(t))
+	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Skipf("cannot determine compiler epoch: %v\n%s", err, out)
@@ -347,7 +360,34 @@ func GitRun(t *testing.T, dir string, args ...string) string {
 // unset, can never write the machine-global ~/.promise (docs/build-tools.md
 // §"Test Sandboxing"). Only the no-checkout fallback creates and removes a temp
 // home; the worktree home is never deleted.
-func SharedHome(m interface{ Run() int }) int {
+func SharedHome(m interface{ Run() int }) int { return sharedHome(m, false) }
+
+// SharedHomeKeepingAmbient is SharedHome for a package whose tests choose a home
+// themselves and pass it to a child — cmd/promise, where 22 tests re-exec the
+// test binary (`exec.Command(os.Args[0], "-test.run=…")`) and hand the child the
+// home it must read in its environment. TestMain runs in that child too, so
+// overwriting the variable there answers every one of them with the wrong home.
+//
+// It differs from SharedHome in one respect: a usable already-set PROMISE_HOME
+// is kept, and then deliberately not warmed — see sharedHome for why warming
+// somebody else's fixture home is the very cost this avoids.
+//
+// The case SharedHome exists to catch is PROMISE_HOME *unset*, which resolves to
+// the machine-global ~/.promise. That one is still caught here, because unset is
+// not usable — and neither is ~/.promise spelled out.
+func SharedHomeKeepingAmbient(m interface{ Run() int }) int { return sharedHome(m, true) }
+
+func sharedHome(m interface{ Run() int }, keepAmbient bool) int {
+	if keepAmbient && usableAmbientHome(os.Getenv("PROMISE_HOME")) {
+		// A home the caller chose is a FIXTURE, not this package's home, and it
+		// is deliberately not warmed. Warming it would run a compiler under it,
+		// which is how a re-exec'd child ends up staging a whole toolchain into
+		// its parent's temp directory — measured at 21 extra homes across one
+		// sweep of cmd/promise, which is the cost T2150 exists to remove. The
+		// package's own home is warmed by the branch below, and by the three
+		// per-area packages that share it.
+		return m.Run()
+	}
 	home, cleanup := resolveHome()
 	if err := os.Setenv("PROMISE_HOME", home); err != nil {
 		panic("clitest: cannot set PROMISE_HOME: " + err.Error())
@@ -356,6 +396,53 @@ func SharedHome(m interface{ Run() int }) int {
 	code := m.Run()
 	cleanup()
 	return code
+}
+
+// usableAmbientHome reports whether an inherited PROMISE_HOME may be kept.
+//
+// Unset is not usable: it resolves to the machine-global ~/.promise, which is
+// the case SharedHome exists for. Neither is ~/.promise spelled out, and that
+// one is worth checking rather than assuming — it is the product's own default,
+// so it is a plausible thing for a developer to have exported, and honouring it
+// would let a bare `go test` write the cache docs/build-tools.md §"Test
+// Sandboxing" says no test may touch.
+//
+// A host whose user home cannot be determined keeps the ambient anyway. That is
+// the lesser risk of the two: the re-exec'd child that needs its fixture home is
+// certain, while a ~/.promise that cannot even be spelled is one the compiler
+// under test could not resolve either.
+func usableAmbientHome(ambient string) bool {
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		userHome = ""
+	}
+	return usableAmbientHomeOn(runtime.GOOS, ambient, userHome)
+}
+
+// usableAmbientHomeOn is usableAmbientHome's decision with the host as a
+// parameter, so BOTH platform arms are exercised on every host — the same shape
+// as buildCommandsFor, and for the same reason. T2152 was a Windows-only branch
+// that only a Windows run could reach, so no other run could notice it was
+// wrong; a comparison that is case-insensitive on one platform and not on the
+// other is exactly that shape again.
+//
+// An empty userHome means the host could not say where it is, which no path
+// compares equal to, so the ambient is kept.
+func usableAmbientHomeOn(goos, ambient, userHome string) bool {
+	if ambient == "" {
+		return false
+	}
+	if userHome == "" {
+		return true
+	}
+	global := filepath.Join(userHome, ".promise")
+	// Case-insensitively on Windows, where one directory answers to several
+	// spellings; an exotic spelling this misses only degrades to keeping the
+	// home, which is where this started.
+	if goos == "windows" {
+		return !strings.EqualFold(filepath.Clean(ambient), filepath.Clean(global))
+	}
+	return filepath.Clean(ambient) != filepath.Clean(global)
 }
 
 // resolveHome returns the package's PROMISE_HOME and the cleanup that owns it.

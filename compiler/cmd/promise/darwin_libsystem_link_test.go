@@ -13,7 +13,6 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 
-	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
 	"github.com/promise-language/promise/compiler/internal/ast"
 	"github.com/promise-language/promise/compiler/internal/codegen"
 	"github.com/promise-language/promise/compiler/internal/sema"
@@ -67,9 +66,13 @@ func TestBundledLibSystemLinksRepresentativePrograms(t *testing.T) {
 
 	// Catalog modules spanning the surface the audit found gaps in: file I/O,
 	// networking, OS/process info, TLS, HTTP, timing, JSON and crypto.
+	//
+	// Every subtest below links, and links under the package's shared home
+	// (TestMain). A home apiece would isolate nothing these assertions read —
+	// they read the linker's output — and would stage ten cold LLVM views to do
+	// it, which on macOS is ten 375 MB copies (T2150).
 	for _, name := range []string{"io", "net", "os", "tls", "http", "time", "json", "crypto"} {
 		t.Run(name, func(t *testing.T) {
-			t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 			modDir := filepath.Join(modulesDir, name)
 			file, info := compileModuleTestFrontend(modDir, "")
 			binPath, err := linkTestBinaryLikeCLI(file, info, modDir)
@@ -85,7 +88,6 @@ func TestBundledLibSystemLinksRepresentativePrograms(t *testing.T) {
 	// promise_test_run/GenerateTestMain harness, not by any PAL declaration)
 	// first surfaced.
 	t.Run("plain_no_imports", func(t *testing.T) {
-		t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 		dir := t.TempDir()
 		src := filepath.Join(dir, "plain_test.pr")
 		body := "plain_math() `test {\n  assert(1 + 1 == 2, \"arithmetic works\");\n}\n"
@@ -113,7 +115,6 @@ func TestBundledLibSystemLinksRepresentativePrograms(t *testing.T) {
 	// file (not reduced to a minimal repro) so it tracks whatever future compiler
 	// changes shift that threshold, on either path.
 	t.Run("e2e_named_args", func(t *testing.T) {
-		t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 		src := filepath.Join(repoRoot, "tests", "e2e", "named_args.pr")
 		if _, err := os.Stat(src); err != nil {
 			t.Skipf("tests/e2e/named_args.pr not available at %s", src)

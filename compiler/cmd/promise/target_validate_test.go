@@ -19,6 +19,11 @@ func TestIsSupportedTarget(t *testing.T) {
 		{codegen.HostTargetTriple(), true},
 		{"wasm32-wasi", true},
 		{"wasm32-web", true},
+		// Cross-links from every host: the import libs are embedded in the
+		// compiler binary (T0772/T0531), so nothing has to be fetched.
+		{"x86_64-pc-windows-msvc", true},
+		// arm64 Windows is emit-ir only — no import libs generated for it yet.
+		{"aarch64-pc-windows-msvc", false},
 		// Display short names are NOT accepted as input — downstream tools
 		// expect canonical triples.
 		{"linux-x86_64", false},

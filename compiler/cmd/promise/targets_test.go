@@ -48,8 +48,8 @@ func TestTargetsJSON(t *testing.T) {
 	if got.Host != codegen.HostTargetTriple() {
 		t.Errorf("host = %q, want %q", got.Host, codegen.HostTargetTriple())
 	}
-	if len(got.Targets) != 3 {
-		t.Fatalf("got %d targets, want 3", len(got.Targets))
+	if want := len(wantSupportedTriples()); len(got.Targets) != want {
+		t.Fatalf("got %d targets, want %d", len(got.Targets), want)
 	}
 
 	natives := 0
@@ -76,8 +76,8 @@ func TestTargetsJSON(t *testing.T) {
 
 func TestSupportedTargetsRegistry(t *testing.T) {
 	specs := supportedTargets()
-	if len(specs) != 3 {
-		t.Fatalf("got %d specs, want 3", len(specs))
+	if want := len(wantSupportedTriples()); len(specs) != want {
+		t.Fatalf("got %d specs, want %d", len(specs), want)
 	}
 	if !specs[0].Native {
 		t.Error("first spec should be the native host target")
@@ -145,8 +145,8 @@ func TestRunTargetsJSON(t *testing.T) {
 	if got.Host != codegen.HostTargetTriple() {
 		t.Errorf("host = %q, want %q", got.Host, codegen.HostTargetTriple())
 	}
-	if len(got.Targets) != 3 {
-		t.Errorf("got %d targets, want 3", len(got.Targets))
+	if want := len(wantSupportedTriples()); len(got.Targets) != want {
+		t.Errorf("got %d targets, want %d", len(got.Targets), want)
 	}
 }
 

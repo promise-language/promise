@@ -25,14 +25,14 @@ func TestSupportedTargetsIsDeterministic(t *testing.T) {
 	// The exact set, not just "stable across two calls". Comparing two calls
 	// alone would still pass on a host where a restored disk probe finds
 	// nothing either time — it has to fail wherever the payloads do exist.
-	want := []string{codegen.HostTargetTriple(), "wasm32-wasi", "wasm32-web"}
+	want := wantSupportedTriples()
 	got := make([]string, 0, len(want))
 	for _, ts := range supportedTargets() {
 		got = append(got, ts.Triple)
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("supportedTargets() = %v, want exactly %v\n"+
-			"a cross-native target may only appear here once its link payload ships (T0530/T0531/T0532), "+
+			"a cross-native target may only appear here once its link payload ships (T0532), "+
 			"and then as a static entry — never because one was found on disk", got, want)
 	}
 
@@ -44,6 +44,27 @@ func TestSupportedTargetsIsDeterministic(t *testing.T) {
 	if !slices.Equal(first, second) {
 		t.Errorf("supportedTargets() changed with PROMISE_HOME: %+v then %+v", first, second)
 	}
+}
+
+// wantSupportedTriples is what supportedTargets() must advertise, in order.
+// Stated once here because several tests assert against it — a count copied
+// into each is a count that gets updated in all but one of them.
+//
+// Spelled as literals rather than read from the production constant: a test
+// that takes its expectation from the code under test agrees with that code by
+// construction, including when the code is wrong.
+//
+// x86_64-pc-windows-msvc cross-links from every host, its import libs being
+// embedded rather than fetched (T0772/T0531). The exception is a Windows x86_64
+// host, where that triple IS the native row and listing it twice would
+// advertise one target as both native and not.
+func wantSupportedTriples() []string {
+	host := codegen.HostTargetTriple()
+	want := []string{host, "wasm32-wasi", "wasm32-web"}
+	if host != "x86_64-pc-windows-msvc" {
+		want = append(want, "x86_64-pc-windows-msvc")
+	}
+	return want
 }
 
 // TestKnownTargetsSupersetOfSupported: anything this release can link, it must
@@ -99,9 +120,12 @@ func TestKnownTargetsMarksHostNative(t *testing.T) {
 // TestUnlinkableTargetErrorIsAccurate: a real triple whose payload does not
 // ship must not be reported as "invalid" — that sends the reader hunting for a
 // typo. It must say linking is unavailable and point at emit-ir.
+// aarch64-pc-windows-msvc is the example rather than the x86_64 spelling: the
+// latter links from every host now (T0531), while arm64 Windows stays emit-ir
+// only until its import libs are generated (T0772).
 func TestUnlinkableTargetErrorIsAccurate(t *testing.T) {
 	t.Parallel()
-	msg := invalidTargetMessage("x86_64-pc-windows-msvc")
+	msg := invalidTargetMessage("aarch64-pc-windows-msvc")
 	for _, want := range []string{"cannot be built by this release", "known target", "emit-ir"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("invalidTargetMessage for a known-but-unlinkable target missing %q:\n%s", want, msg)

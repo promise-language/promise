@@ -232,8 +232,10 @@ func llvmTargetEntry(root, target string) (*PrebuiltsManifest, *TargetEntry, err
 // entries only, so collecting musl would stage artifacts no manifest references.
 // The catalog flow needs no staging at all — `publish-install` projects musl via
 // BuildRuntimeManifestFromCatalog and `fetch-blobs` pulls every manifest entry,
-// musl included. macOS SDK stubs and Windows UCRT stubs remain out of both flows
-// (T0531/T0532, cross-compile track).
+// musl included. macOS SDK stubs remain out of both flows (T0532, cross-compile
+// track). The Windows link surface needs neither flow: its import libs are
+// generated from the committed .def symbol lists at build time and embedded in
+// the compiler binary itself (T0772), so there is no blob to stage or host.
 func runReleaseBlobs(root string, args []string) error {
 	fs := flag.NewFlagSet("blobs", flag.ContinueOnError)
 	host := fs.String("host", CurrentBuildTarget(), "target to collect blobs for")

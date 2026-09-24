@@ -124,6 +124,25 @@ jobs:
       - name: Install wasmtime (runtime for the wasm32-wasi tests)
         uses: bytecodealliance/actions/wasmtime/setup@v1
 
+      # Wine runs the cross-built Windows .exe (T0531). One runner, not four:
+      # the cross-LINK is asserted on every platform by the PE import check in
+      # tests/buildrun/windows_cross_link_test.go, and only the EXECUTION half
+      # needs an emulator. The test skips where Wine is absent, so this step is
+      # what makes it actually run somewhere on every PR.
+      - name: Install wine (runs the cross-built windows-amd64 .exe)
+        if: ${{ inputs.run_tests && matrix.name == 'linux-amd64' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wine
+          # The test skips when `wine` is not on PATH, so a package that
+          # installs an engine but no `wine` command would turn this step into
+          # a silent no-op. `wine64` is exactly that trap: it ships only
+          # /usr/lib/wine/wine64. The `wine` metapackage is what registers
+          # /usr/bin/wine through update-alternatives, and it is satisfied by
+          # `wine64 | wine32` — so no i386 architecture is needed. Assert the
+          # command exists, so a future package rename fails HERE and loudly.
+          wine --version
+
       # bin/ is gitignored — the forge dev tools (bin/build, bin/test, …) are compiled
       # by ./make and refuse to run stale, so bootstrap them before any bin/* use.
       - name: Bootstrap dev tools (Unix)

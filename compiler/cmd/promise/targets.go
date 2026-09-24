@@ -63,18 +63,26 @@ func knownTargets() []targetSpec {
 }
 
 // supportedTargets returns the targets this binary can build all the way to an
-// executable — the host plus the WebAssembly targets, whose payloads ship with
-// the compiler. It is deliberately a constant per platform, never a function of
-// on-disk cache state, so `promise targets` cannot change its answer depending
-// on what a previous build happened to leave behind.
+// executable — the host, the WebAssembly targets, and Windows x86_64, every one
+// of whose payloads ships inside the compiler. It is deliberately a constant
+// per platform, never a function of on-disk cache state, so `promise targets`
+// cannot change its answer depending on what a previous build happened to leave
+// behind.
 //
-// Cross-native targets are absent because their link payloads (musl CRT,
-// mingw-w64 CRT, macOS SDK stubs) are not part of any release yet; they are
-// added here — statically — when T0530/T0531/T0532 land. They remain valid for
-// `emit-ir` in the meantime, via knownTargets().
+// x86_64-pc-windows-msvc is listed on every host because its link payload
+// already ships inside this binary: the self-generated import libs (T0772) are
+// embedded unconditionally, not host-gated (winlink_embed.go), and the rest of
+// a Promise .exe's link surface — crt0, TLS directory, __chkstk, _fltused — is
+// codegen-emitted. Nothing is fetched and nothing is probed, so the entry is as
+// static as the wasm ones (T0531).
+//
+// The remaining cross-native targets are absent because their link payloads
+// (macOS SDK stubs, and the musl CRT for a non-host Linux arch) are not part of
+// any release yet; they are added here — statically — when T0530/T0532 land.
+// They remain valid for `emit-ir` in the meantime, via knownTargets().
 func supportedTargets() []targetSpec {
 	host := codegen.HostTargetTriple()
-	return []targetSpec{
+	specs := []targetSpec{
 		{
 			Triple:      host,
 			Display:     hostShortName(host),
@@ -92,7 +100,24 @@ func supportedTargets() []targetSpec {
 			Description: "WebAssembly for browsers / Node.js (emits bootstrap .js loader)",
 		},
 	}
+	// On a Windows x86_64 host the row above already covers this triple as the
+	// native one. Appending it again would advertise the same target twice and
+	// make "which row is native" ambiguous.
+	if host != windowsAmd64Triple {
+		specs = append(specs, targetSpec{
+			Triple:      windowsAmd64Triple,
+			Display:     hostShortName(windowsAmd64Triple),
+			Description: "Windows x86_64 (MSVC ABI) — cross-links from any host",
+		})
+	}
+	return specs
 }
+
+// windowsAmd64Triple is the one Windows triple this compiler can link. arm64
+// Windows is knownTargets()-only until the import libs are generated for it —
+// findWindowsLinkSurface rejects an arm64 triple by name rather than handing
+// lld-link the amd64 libs (T0772).
+const windowsAmd64Triple = "x86_64-pc-windows-msvc"
 
 // hostShortName produces a stable user-friendly label for a host triple.
 // Unknown triples are returned unchanged.

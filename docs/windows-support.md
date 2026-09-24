@@ -10,7 +10,9 @@
 
 Promise targets Windows natively via the MSVC ABI (`x86_64-pc-windows-msvc`). The compiler binary (`promise.exe`) is built on Windows using Go, and produces Windows executables by compiling LLVM IR through `opt` → `llc` → `lld-link`, linking against a self-generated link surface (own import libs + codegen-emitted crt0/TLS/builtins) that resolves only to DLLs shipped with Windows.
 
-**Non-goals:** MinGW/Cygwin, cross-compilation from Linux to Windows.
+That link surface is **host-agnostic** (§3.3): the import libs are embedded in every compiler binary, not just the Windows one, and everything else it needs is codegen-emitted — so `promise build -target x86_64-pc-windows-msvc` produces a `.exe` from a Linux or macOS host with nothing fetched and no Windows toolchain anywhere. Cross-compilation as a whole is tracked under T0524.
+
+**Non-goals:** MinGW/Cygwin.
 
 ---
 
@@ -21,6 +23,7 @@ Windows is a first-class, fully-supported target. Core language, standard librar
 ### Supported
 
 - **Build & toolchain:** compiler builds on Windows; release builds (`bin/build --release`) embed LLVM tools (T0056); **zero-dependency link surface** — no Visual Studio Build Tools, no Windows SDK, no Microsoft `.lib` redistribution (T0772)
+- **Cross-linking from any host:** `-target x86_64-pc-windows-msvc` is listed by `promise targets` on every platform and links a `.exe` there (T0531). arm64 Windows is `emit-ir` only until its import libs are generated.
 - **Core language:** variables, types, enums, generics, match, lambdas, closures
 - **Standard library:** int/float/bool/char/string, Vector, Map, Set, iterators, sorting
 - **M:N scheduler:** goroutines, channels, select, tasks (full GMP model)
@@ -39,6 +42,7 @@ Windows is a first-class, fully-supported target. Core language, standard librar
 ### Known limitations
 
 - **No LTO in the link pipeline** — Windows uses `opt → llc → lld-link` (no cross-module LTO, unlike Linux/macOS which use bitcode → linker with `--lto-O1`). Deferred — **T0049**.
+- **Cross-*building* is supported; cross-*testing* is not.** A non-Windows host links the `.exe` but cannot run it: `promise run`/`test`/`exec` refuse a non-host native target rather than reaching for an emulator, because what a build produces must not depend on which emulator a machine happens to carry. Running cross-built binaries is the cross-target matrix's job (T0537); CI's Wine job covers the smoke case only.
 - **POSIX-only signals are unsupported by design** — only SIGINT/SIGTERM map to Windows console control events; SIGHUP and other POSIX signals return an error.
 
 ---
@@ -90,6 +94,12 @@ are gitignored build artifacts. The `.lib` files are then embedded (`go:embed`)
 into the compiler binary (~21 KiB total), then extracted to
 `<PROMISE_HOME>/cache/winlink/<arch>/` at link time (mirroring the embedded musl
 CRT objects). Regenerate with `bin/release winlink`.
+
+The embed is **unconditional, not host-gated** — a Linux or macOS compiler
+carries the same import libs as the Windows one. That is what makes §1's
+cross-linking work with nothing to download: at 21 KiB the surface is cheaper to
+embed everywhere than to publish as a per-target blob, so `windows-amd64` needs
+no entry in the prebuilts manifest and no `sysroot` blob at all.
 
 **Entry point:** `@__promise_start` (codegen-emitted; named in `/entry:`). It runs
 the minimal UCRT app-init (`_configure_narrow_argv` + `_initialize_narrow_environment`,

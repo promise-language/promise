@@ -70,7 +70,7 @@ func TestMissedJoinSignalReportsNamedTimeout(t *testing.T) {
 	// clock that included the child's cold compile (T2133). That the deadline
 	// bounded the join is what the TIMEOUT assertions below read, and every one
 	// of them holds only if it fired.
-	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", "-timeout", "2s", src).RequireRan(t)
+	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", "-timeout", "2s", src)
 	combined := r.Combined()
 
 	if r.ExitCode == 0 {

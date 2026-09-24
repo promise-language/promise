@@ -480,9 +480,9 @@ func TestProgressRunReportsWhyTheChildFailed(t *testing.T) {
 
 	// And a killed child names its deadline rather than reporting a bare code.
 	killed := clitest.Result{Args: []string{"test", "x.pr"}, ExitCode: -1,
-		TimedOut: true, Budget: clitest.DefaultBudget}
+		TimedOut: true, Budget: clitest.MinBudget}
 	if d := killed.Detail(); !strings.Contains(d, "KILLED") ||
-		!strings.Contains(d, clitest.DefaultBudget.String()) {
+		!strings.Contains(d, clitest.MinBudget.String()) {
 		t.Errorf("a timed-out run must name its deadline:\n%s", d)
 	}
 }

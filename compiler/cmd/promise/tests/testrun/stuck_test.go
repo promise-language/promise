@@ -54,7 +54,7 @@ func TestStuckGoroutineReportsNamedTimeout(t *testing.T) {
 	// naming the drain when the drain was never involved (T2133). What the
 	// deadline really did is what the TIMEOUT assertions below read, and those
 	// hold only if it fired.
-	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", "-timeout", "2s", src).RequireRan(t)
+	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", "-timeout", "2s", src)
 	combined := r.Combined()
 
 	if r.ExitCode == 0 {
@@ -110,7 +110,7 @@ func TestStuckGoroutineWordingAndFailPrecedence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := clitest.Run(t, promiseBin, nil, "test", "-timeout", "2s", src).RequireRan(t)
+	r := clitest.Run(t, promiseBin, nil, "test", "-timeout", "2s", src)
 	combined := r.Combined()
 	if r.ExitCode == 0 {
 		t.Fatalf("expected non-zero exit:%s", r.Detail())
@@ -186,7 +186,7 @@ func TestTimedOutTestDoesNotStallLaterDrains(t *testing.T) {
 
 	// -progress full: the later tests' `pass` lines are asserted below, and
 	// pass lines are suppressed by default when stdout is a pipe (T1888).
-	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", src).RequireRan(t)
+	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", src)
 	combined := r.Combined()
 	if r.ExitCode == 0 {
 		t.Fatalf("expected non-zero exit for the timed-out test:%s", r.Detail())

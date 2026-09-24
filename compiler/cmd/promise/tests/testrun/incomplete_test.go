@@ -40,7 +40,7 @@ func TestIncompleteHarnessReportsFailure(t *testing.T) {
 
 	// -progress full: this test asserts the completed test's `pass` line is
 	// still reported, and pass lines are suppressed by default on a pipe (T1888).
-	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", src).RequireRan(t)
+	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", src)
 	combined := r.Combined()
 
 	if r.ExitCode == 0 {
@@ -78,7 +78,7 @@ func TestIncompleteMultiFileReportsFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", dir).RequireRan(t)
+	r := clitest.Run(t, promiseBin, nil, "test", "-progress", "full", dir)
 	combined := r.Combined()
 
 	if r.ExitCode == 0 {
@@ -124,7 +124,7 @@ func TestIncompleteNotReportedForExcludedTests(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := clitest.Run(t, promiseBin, nil, "test", src).RequireRan(t)
+	r := clitest.Run(t, promiseBin, nil, "test", src)
 	combined := r.Combined()
 	if r.ExitCode != 0 {
 		t.Fatalf("excluded tests must not trip the completeness check:%s", r.Detail())
@@ -152,7 +152,7 @@ func TestIncompleteFromCachedBinaryPreservesExitCode(t *testing.T) {
 	}
 
 	for _, run := range []string{"compiled", "cached"} {
-		r := clitest.Run(t, promiseBin, nil, "test", src).RequireRan(t)
+		r := clitest.Run(t, promiseBin, nil, "test", src)
 		combined := r.Combined()
 
 		if r.ExitCode == 0 {
@@ -184,7 +184,7 @@ func TestIncompleteCoverageModeReportsFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := clitest.Run(t, promiseBin, nil, "test", "-coverage", src).RequireRan(t)
+	r := clitest.Run(t, promiseBin, nil, "test", "-coverage", src)
 	combined := r.Combined()
 
 	if r.ExitCode == 0 {
@@ -214,7 +214,7 @@ func TestIncompleteStressAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := clitest.Run(t, promiseBin, nil, "test", "-stress", "2", src).RequireRan(t)
+	r := clitest.Run(t, promiseBin, nil, "test", "-stress", "2", src)
 	combined := r.Combined()
 
 	if r.ExitCode == 0 {

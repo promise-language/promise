@@ -224,7 +224,8 @@ func TestWindowsCrossBuiltExeRunsUnderWine(t *testing.T) {
 	// and a wedged wineserver would otherwise hang until Go's global timeout,
 	// which reports the panic against whatever test was running rather than
 	// against wine.
-	ctx, cancel := context.WithTimeout(context.Background(), clitest.DefaultBudget)
+	budget := clitest.Budget()
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
 	prefix := clitest.TempDir(t)
@@ -233,7 +234,7 @@ func TestWindowsCrossBuiltExeRunsUnderWine(t *testing.T) {
 		"WINEPREFIX="+prefix, "WINEDEBUG=-all", "WINEDLLOVERRIDES=mscoree=d")
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
-		t.Fatalf("wine did not finish within %s (killed):\n%s", clitest.DefaultBudget, out)
+		t.Fatalf("wine did not finish within %s (killed):\n%s", budget, out)
 	}
 	if err != nil {
 		t.Fatalf("running the cross-built .exe under wine failed: %v\n%s", err, out)

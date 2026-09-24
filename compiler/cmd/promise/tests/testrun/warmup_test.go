@@ -43,7 +43,7 @@ func TestTestBinaryWarmupContractHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := clitest.Run(t, promiseBin, nil, "test", file).RequireRan(t)
+	r := clitest.Run(t, promiseBin, nil, "test", file)
 	combined := r.Combined()
 	if r.ExitCode != 0 {
 		t.Fatalf("expected the test file to pass:%s", r.Detail())

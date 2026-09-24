@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -168,18 +167,30 @@ func NewEnv(t *testing.T) *Env {
 	)}
 }
 
+// exec runs one command in dir under the isolated environment, bounded by the
+// same backstop Run applies and failing the test the same way if it fires.
+//
+// These used to be plain CombinedOutput calls with no bound at all — the whole
+// of tests/pkgmgr and part of the other two — so a wedged child here produced
+// exactly the package-deadline goroutine dump naming no invocation that the
+// backstop exists to prevent, and Promise would have handed a killed corpse back
+// to a caller asserting on failure (T2207).
+func (e *Env) exec(t *testing.T, dir, name string, args ...string) Result {
+	t.Helper()
+	return runBounded(child{
+		bin: name, dir: dir, args: args, env: e.env, budget: Budget(),
+	}).RequireRan(t)
+}
+
 // Run executes any command in dir under the isolated environment, failing the
 // test if it does not succeed.
 func (e *Env) Run(t *testing.T, dir, name string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	cmd.Env = e.env
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s %v in %s: %v\n%s", name, args, dir, err, out)
+	r := e.exec(t, dir, name, args...)
+	if r.Err != nil {
+		t.Fatalf("%s %v in %s: %v\n%s", name, args, dir, r.Err, r.Combined())
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(r.Combined())
 }
 
 // Git runs a git command in dir, returning its trimmed output.
@@ -192,11 +203,8 @@ func (e *Env) Git(t *testing.T, dir string, args ...string) string {
 // the exit error, for tests that assert on failure as well as success.
 func (e *Env) Promise(t *testing.T, dir string, args ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command(e.bin, args...)
-	cmd.Dir = dir
-	cmd.Env = e.env
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	r := e.exec(t, dir, e.bin, args...)
+	return r.Combined(), r.Err
 }
 
 // PromiseOK runs the compiler in dir and fails the test if it does not succeed.
@@ -233,14 +241,14 @@ func (e *Env) CompilerEpoch(t *testing.T) string {
 // home rather than building one (T2150).
 func CompilerEpoch(t *testing.T) string {
 	t.Helper()
-	cmd := exec.Command(Bin(t), "catalog", "list")
-	cmd.Dir = t.TempDir()
-	cmd.Env = os.Environ()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Skipf("cannot determine compiler epoch: %v\n%s", err, out)
+	r := runBounded(child{
+		bin: Bin(t), dir: t.TempDir(), args: []string{"catalog", "list"},
+		env: os.Environ(), budget: Budget(),
+	}).RequireRan(t)
+	if r.Err != nil {
+		t.Skipf("cannot determine compiler epoch: %v\n%s", r.Err, r.Combined())
 	}
-	return parseCatalogEpoch(t, string(out))
+	return parseCatalogEpoch(t, r.Combined())
 }
 
 func parseCatalogEpoch(t *testing.T, out string) string {
@@ -321,14 +329,14 @@ func ShortRepoDir(t *testing.T) string {
 // Env exists.
 func GitRun(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %s\n%s", args, err, out)
+	r := runBounded(child{
+		bin: "git", dir: dir, args: args, budget: Budget(),
+		env: append(os.Environ(), "GIT_TERMINAL_PROMPT=0"),
+	}).RequireRan(t)
+	if r.Err != nil {
+		t.Fatalf("git %v: %s\n%s", args, r.Err, r.Combined())
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(r.Combined())
 }
 
 // SharedHome points the calling test package at the worktree's .promise-home for
@@ -517,9 +525,12 @@ func warmToolchain(bin string) {
 		return
 	}
 	defer os.RemoveAll(dir)
-	cmd := exec.Command(bin, "exec", `print_line("");`)
-	cmd.Dir = dir
-	_ = cmd.Run()
+	// Bounded like every other child, and for the sharpest version of the
+	// reason: this one runs before any test exists to blame, so a wedge here
+	// would hang the whole package with nothing at all to name. Budget reads no
+	// deadline out here — testing.Init has not run — so this is the ceiling.
+	_ = runBounded(child{bin: bin, dir: dir, budget: Budget(),
+		args: []string{"exec", `print_line("");`}})
 }
 
 // MakeSubdirRepo builds a bare git repo with NO promise.toml at its root and one

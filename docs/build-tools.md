@@ -92,6 +92,21 @@ Oversubscription here was never buying wall time — it was spending it. On a
 12-core host with a cold test cache, the compiler suite ran 247s at the defaults
 (156 concurrent processes, 9.4 GB) and 210s bounded (40 processes, 5.6 GB).
 
+**A subprocess backstop is a share of the run's own deadline, never a fixed wall
+clock.** Every `bin/promise` a test spawns is bounded, so a wedged child costs
+that one test instead of the package deadline — which surfaces as a goroutine
+dump naming no invocation. That purpose is defined entirely *by* the package
+deadline, so a number chosen independently of it cannot serve it: it is either
+below what a loaded host needs or above the deadline it exists to pre-empt. A
+fixed three minutes was the first, and killed children that were merely slow
+while reporting them as product failures (T2207). The bound is therefore half of
+what `go test -timeout` has left the package, floored at three minutes and capped
+at ten. It is read from a **flag** on the test binary's own command line and
+never from the environment — [No hidden effects](org/engineering-guide.md#no-hidden-effects):
+an environment variable is never an input — so `-timeout`
+is the visible lever that raises it. A child the backstop kills is reported as
+killed, naming the backstop and that lever, on every path that can observe one.
+
 ## Test Sandboxing
 
 **No test, and no command run from the worktree** (`bin/*` and the tests they

@@ -751,13 +751,14 @@ type scopeBinding struct {
 // Entry-block allocas are initialized to null/false so branch-produced temps
 // have defined values on all paths.
 type stmtTemp struct {
-	alloca      *ir.InstAlloca // entry-block i8* alloca, initialized to null
-	dropFlag    *ir.InstAlloca // entry-block i1, initialized to false
-	dropFunc    *ir.Func       // B0219: drop function to call (promise_string_drop, Vector.drop, Channel[T].drop)
-	elemType    types.Type     // T0109: vector element type for string-element drops (nil for non-vectors)
-	arrType     *types.Array   // T1181: fixed-array temp — alloca holds [N x T] storage; cleanup walks elements & drops each (dropFunc nil)
-	tupleType   *types.Tuple   // T1233: tuple temp — alloca holds the tuple aggregate; cleanup walks fields via emitVariantFieldDrop & drops each droppable one (dropFunc nil)
-	perPathFlag bool           // T1208: dropFlag holds a genuine PER-PATH i1 (a flagPhi from an elvis/merge result — owned on one path, borrowed on another), not a compile-time constant. When true, an enclosing merge phi must thread this temp's live flag rather than a whole-arm constant, else it would drop a borrowed value on the borrowed path (use-after-free)
+	alloca      *ir.InstAlloca  // entry-block i8* alloca, initialized to null
+	dropFlag    *ir.InstAlloca  // entry-block i1, initialized to false
+	dropFunc    *ir.Func        // B0219: drop function to call (promise_string_drop, Vector.drop, Channel[T].drop)
+	elemType    types.Type      // T0109: vector element type for string-element drops (nil for non-vectors)
+	arrType     *types.Array    // T1181: fixed-array temp — alloca holds [N x T] storage; cleanup walks elements & drops each (dropFunc nil)
+	tupleType   *types.Tuple    // T1233: tuple temp — alloca holds the tuple aggregate; cleanup walks fields via emitVariantFieldDrop & drops each droppable one (dropFunc nil)
+	optType     *types.Optional // T2049: optional temp — alloca holds the {i1, T} aggregate; cleanup branches on the has-value flag & drops the inner via emitOptionalValueDrop (dropFunc nil)
+	perPathFlag bool            // T1208: dropFlag holds a genuine PER-PATH i1 (a flagPhi from an elvis/merge result — owned on one path, borrowed on another), not a compile-time constant. When true, an enclosing merge phi must thread this temp's live flag rather than a whole-arm constant, else it would drop a borrowed value on the borrowed path (use-after-free)
 }
 
 // heapTemp tracks a heap-allocated droppable instance from a constructor call (T0088).

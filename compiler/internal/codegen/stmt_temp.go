@@ -244,20 +244,38 @@ func (c *Compiler) trackArrayTemp(val value.Value, arr *types.Array) {
 // Not registered in stmtTempMap: these temps are always borrowed-by-callee /
 // discarded, never transferred into a downstream binding, so no claim is needed.
 func (c *Compiler) registerTupleStmtTemp(val value.Value, tup *types.Tuple) {
-	if val == nil || c.block == nil || c.block.Term != nil {
+	alloca, dropFlag := c.newAggregateStmtTempSlots(val)
+	if alloca == nil {
 		return
+	}
+	c.stmtTemps = append(c.stmtTemps, stmtTemp{alloca: alloca, dropFlag: dropFlag, tupleType: tup})
+}
+
+// newAggregateStmtTempSlots materializes the entry-block storage every
+// AGGREGATE-valued statement temp needs — a tuple (T1233) or an optional
+// (T2049), neither of which is an i8* pointer the ordinary tracker can hold: an
+// alloca of the value's own LLVM type, zero-initialized at function entry so a
+// path that never produced the value drops nothing, plus an i1 live flag. The
+// value and a live flag of 1 are stored in the CURRENT block.
+//
+// Returns (nil, nil) when the caller must not register anything — no open block,
+// no entry block, or temp tracking disabled for this function. Callers append
+// their own stmtTemp so each names the field that selects its drop walk.
+func (c *Compiler) newAggregateStmtTempSlots(val value.Value) (alloca, dropFlag *ir.InstAlloca) {
+	if val == nil || c.block == nil || c.block.Term != nil {
+		return nil, nil
 	}
 	if c.entryBlock == nil || !c.tempTrackingEnabled {
-		return
+		return nil, nil
 	}
 	llvmType := val.Type()
-	alloca := c.createEntryAlloca(llvmType)
-	dropFlag := c.createEntryAlloca(irtypes.I1)
+	alloca = c.createEntryAlloca(llvmType)
+	dropFlag = c.createEntryAlloca(irtypes.I1)
 	c.entryBlock.NewStore(constant.NewZeroInitializer(llvmType), alloca)
 	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
 	c.block.NewStore(val, alloca)
 	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
-	c.stmtTemps = append(c.stmtTemps, stmtTemp{alloca: alloca, dropFlag: dropFlag, tupleType: tup})
+	return alloca, dropFlag
 }
 
 // emitTupleTempDrop emits a conditional field-wise drop for a tuple statement
@@ -283,6 +301,58 @@ func (c *Compiler) emitTupleTempDrop(temp stmtTemp) {
 	c.block = skipBlock
 }
 
+// registerOptionalStmtTemp registers a droppable Optional temporary — a
+// call/getter result of type `T?` whose inner T owns heap memory — for
+// present/absent cleanup at statement end (T2049). The third sibling of
+// trackArrayTemp (T1181) and registerTupleStmtTemp (T1233): the value is a
+// `{i1, T}` LLVM aggregate, not an i8* pointer, so no producer path registers it
+// (trackGetterResultByType handles only i8*, trackHeapUserTypeResult only
+// `{i8*, i8*}`) and its payload leaked in every borrow/discard position.
+//
+// Not registered in stmtTempMap, for the same reason registerTupleStmtTemp is
+// not: it is registered ONLY where the value is borrowed by a callee or
+// discarded, never where a downstream binding could take ownership, so no claim
+// is needed anywhere. Registering at the producer instead would oblige every
+// consuming site (var-decl, assignment, return, move-arg, constructor field, go
+// capture) to claim, and missing one is a double free rather than a leak.
+func (c *Compiler) registerOptionalStmtTemp(val value.Value, opt *types.Optional) {
+	if !c.variantFieldNeedsDrop(opt) {
+		return // nothing inside owns heap memory — registering would emit a dead drop
+	}
+	alloca, dropFlag := c.newAggregateStmtTempSlots(val)
+	if alloca == nil {
+		return
+	}
+	c.stmtTemps = append(c.stmtTemps, stmtTemp{alloca: alloca, dropFlag: dropFlag, optType: opt})
+}
+
+// emitOptionalTempDrop emits a conditional inner drop for an Optional statement
+// temp (T2049). Mirrors emitTupleTempDrop: loads the `{i1, T}` aggregate and
+// hands it to emitOptionalValueDrop — which does its own present/absent split and
+// already dispatches every inner kind (string, vector, channel, heap user, enum,
+// tuple, array, closure, nested optional) — then clears the flag so a temp reused
+// across loop iterations isn't dropped twice.
+func (c *Compiler) emitOptionalTempDrop(temp stmtTemp) {
+	opt := temp.optType
+	if c.typeSubst != nil {
+		if sub, ok := types.Substitute(opt, c.typeSubst).(*types.Optional); ok {
+			opt = sub
+		}
+	}
+	flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
+	dropBlock := c.newBlock("opttmp.drop")
+	skipBlock := c.newBlock("opttmp.skip")
+	c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	optVal := c.block.NewLoad(temp.alloca.ElemType, temp.alloca)
+	c.emitOptionalValueDrop(optVal, opt)
+	c.block.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
+}
+
 // tupleArgIsCallerOwnedTemp reports whether a tuple value produced by expr is a
 // TEMPORARY the caller must drop (a literal or call result with no owning caller
 // variable) rather than a borrow. An IdentExpr (an owned tuple variable drops via
@@ -301,7 +371,10 @@ func (c *Compiler) tupleArgIsCallerOwnedTemp(expr ast.Expr) bool {
 	case *ast.MemberExpr:
 		return c.isGetterCallExpr(e) // getter returns owned; plain field read borrows
 	case *ast.IdentExpr:
-		return false
+		// T2049: a bare identifier naming a module-level getter is a CALL, not a
+		// variable read — it hands back a fresh owned value nothing else owns.
+		// The MemberExpr case above already says this for the qualified spelling.
+		return c.isBareModuleGetterIdent(e)
 	}
 	return true
 }
@@ -522,6 +595,11 @@ func (c *Compiler) cleanupStmtTempsFrom(floor int) {
 			c.emitTupleTempDrop(temp)
 			continue
 		}
+		// T2049: optional temp — present/absent split + inner drop, no i8* dropFunc.
+		if temp.optType != nil {
+			c.emitOptionalTempDrop(temp)
+			continue
+		}
 		// B0219: Each temp has its own drop function (string/vector/channel).
 		if temp.dropFunc == nil {
 			continue
@@ -603,6 +681,11 @@ func (c *Compiler) emitStmtTempCleanupForErrorPath() {
 		// T1233: tuple temp — field-wise drop via emitVariantFieldDrop, no i8* dropFunc.
 		if temp.tupleType != nil {
 			c.emitTupleTempDrop(temp)
+			continue
+		}
+		// T2049: optional temp — present/absent split + inner drop, no i8* dropFunc.
+		if temp.optType != nil {
+			c.emitOptionalTempDrop(temp)
 			continue
 		}
 		// B0219: Each temp has its own drop function (string/vector/channel).

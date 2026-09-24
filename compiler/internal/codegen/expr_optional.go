@@ -1681,13 +1681,24 @@ func isIdentOptionalUnwrapSource(expr ast.Expr) bool {
 // value and frees it (variable binding / owner drop / container drop), so a
 // discarded-result drop path (T1234) must skip these to avoid a double-free.
 // A `move` out of a place is a MoveExpr — not matched here — so it still drops.
-func isBorrowingPlaceExpr(expr ast.Expr) bool {
+//
+// T2049: a GETTER read is not a place — it is a call handing back a fresh owned
+// value, so a discarded one must drop or its payload leaks. Both spellings are
+// exempted: the qualified `mod.prop` / instance `obj.prop` form (which parses as
+// a MemberExpr) via isGetterCallExpr — already the predicate
+// tupleArgIsCallerOwnedTemp uses to say "getter returns owned; plain field read
+// borrows" — and the unqualified module-getter form (an IdentExpr) via
+// isBareModuleGetterIdent.
+func (c *Compiler) isBorrowingPlaceExpr(expr ast.Expr) bool {
 	for {
 		p, ok := expr.(*ast.ParenExpr)
 		if !ok {
 			break
 		}
 		expr = p.Expr
+	}
+	if c.isBareModuleGetterIdent(expr) || c.isGetterCallExpr(expr) {
+		return false
 	}
 	switch expr.(type) {
 	case *ast.IdentExpr, *ast.MemberExpr, *ast.IndexExpr:

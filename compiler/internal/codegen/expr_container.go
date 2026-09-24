@@ -197,8 +197,14 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 						dupped = true
 					}
 					c.clearDropFlag(ident.Name)
-				} else {
+				} else if !c.isBareModuleGetterIdent(ident) {
 					// No drop flag (function parameter): always dup droppable types.
+					// T2049: EXCEPT a bare identifier naming a module-level getter —
+					// that is a CALL handing back a fresh owned value, the same class
+					// as the CallExpr and qualified `mod.prop` MemberExpr sources this
+					// dup decision already leaves alone below. Dupping it made the
+					// vector own a copy and orphaned the getter's original, which no
+					// producer path tracks → one leaked payload per push.
 					if dupVal := c.maybeDupPushElement(argVal, resolvedElem); dupVal != nil {
 						argVal = dupVal
 						dupped = true

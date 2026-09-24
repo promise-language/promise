@@ -1,0 +1,820 @@
+// T2049: a bare identifier naming a module-level getter is a CALL producing a
+// fresh owned value, not a place read. Codegen's ownership classifiers switched
+// on the AST shape and read `*ast.IdentExpr` as "a variable", so a getter result
+// was either duplicated (orphaning the original) or given no statement temp at
+// all. Separately, no producer path registered an `Optional`-typed call/getter
+// result as a statement temp — an `Optional[T]` is a `{i1, T}` aggregate, which
+// matches neither the i8* nor the `{i8*, i8*}` tracker — so its payload leaked
+// wherever it was borrowed or discarded.
+//
+// Every test loops 50 times so a per-iteration leak is unambiguous in the count.
+get probe_dir string? `doc("Optional heap string from a module-level getter.") {
+  return "probe" + "-dir-payload";
+}
+
+get probe_plain string `doc("Non-optional heap string — the tracked control.") {
+  return "probe" + "-plain-payload";
+}
+
+get probe_vec int[]? `doc("Optional heap vector from a module-level getter.") {
+  int[] v = [];
+  v.push(1);
+  v.push(2);
+  return v;
+}
+
+type Row `doc("Droppable heap user type, to exercise the Optional[user] inner.") {
+  string label;
+  drop(~this) {
+  }
+}
+
+get probe_row Row? `doc("Optional droppable heap user type from a getter.") {
+  return Row(label: "row" + "-payload");
+}
+
+probe_fn() string? `doc("Optional heap string from a plain call, not a getter.") {
+  return "probe" + "-fn-payload";
+}
+
+_borrow_opt(string? v) `doc("Borrows an optional string — does not consume it.") {
+}
+
+_borrow_vec(int[]? v) `doc("Borrows an optional vector.") {
+}
+
+_borrow_row(Row? v) `doc("Borrows an optional heap user type.") {
+}
+
+_borrow_plain(string v) `doc("Borrows a plain string.") {
+}
+
+_consume(string? move v) `doc("Consumes an optional string.") {
+}
+
+_take[T](T move v) `doc("Generic consuming parameter.") {
+}
+
+type Box `doc("Holds an optional string field.") {
+  string? v;
+}
+
+// --- the item's repro: push a moved optional getter result --------------------
+
+test_push_moved_optional_getter() `test {
+  string?[] xs = [];
+  int i = 0;
+  while i < 50 {
+    xs.push(move probe_dir);
+    i = i + 1;
+  }
+  assert(xs.len == 50, "every push should have stored an element");
+}
+
+// The same push WITHOUT the marker. Sema accepts both spellings for a bare
+// getter today; whichever one T2205 settles on, neither may leak.
+test_push_unmarked_optional_getter() `test {
+  string?[] xs = [];
+  int i = 0;
+  while i < 50 {
+    xs.push(probe_dir);
+    i = i + 1;
+  }
+  assert(xs.len == 50, "every push should have stored an element");
+}
+
+test_push_moved_optional_vector_getter() `test {
+  int[]?[] xs = [];
+  int i = 0;
+  while i < 50 {
+    xs.push(move probe_vec);
+    i = i + 1;
+  }
+  assert(xs.len == 50, "every push should have stored an element");
+}
+
+test_push_moved_optional_row_getter() `test {
+  Row?[] xs = [];
+  int i = 0;
+  while i < 50 {
+    xs.push(move probe_row);
+    i = i + 1;
+  }
+  assert(xs.len == 50, "every push should have stored an element");
+}
+
+// --- borrow position: the callee borrows, so the caller must free the temp ----
+
+test_borrow_arg_optional_getter() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_opt(probe_dir);
+    i = i + 1;
+  }
+  assert(true, "borrowed optional getter results must be freed at statement end");
+}
+
+test_borrow_arg_optional_call() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_opt(probe_fn());
+    i = i + 1;
+  }
+  assert(true, "borrowed optional call results must be freed at statement end");
+}
+
+test_borrow_arg_optional_vector_getter() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_vec(probe_vec);
+    i = i + 1;
+  }
+  assert(true, "borrowed optional vector results must be freed at statement end");
+}
+
+test_borrow_arg_optional_row_getter() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_row(probe_row);
+    i = i + 1;
+  }
+  assert(true, "borrowed optional heap-user results must be freed at statement end");
+}
+
+// --- discard position --------------------------------------------------------
+
+test_discard_optional_getter() `test {
+  int i = 0;
+  while i < 50 {
+    probe_dir;
+    i = i + 1;
+  }
+  assert(true, "a discarded optional getter result must be freed");
+}
+
+test_discard_optional_vector_getter() `test {
+  int i = 0;
+  while i < 50 {
+    probe_vec;
+    i = i + 1;
+  }
+  assert(true, "a discarded optional vector getter result must be freed");
+}
+
+test_discard_optional_call() `test {
+  int i = 0;
+  while i < 50 {
+    probe_fn();
+    i = i + 1;
+  }
+  assert(true, "a discarded optional call result must be freed");
+}
+
+// --- the present/absent split: a `none` getter must not drop a garbage inner --
+
+get probe_none string? `doc("Always absent — exercises the absent arm of the drop.") {
+  string? empty;
+  return empty;
+}
+
+test_absent_optional_getter_borrow() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_opt(probe_none);
+    i = i + 1;
+  }
+  assert(true, "an absent optional must skip the inner drop, not crash");
+}
+
+test_absent_optional_getter_push() `test {
+  string?[] xs = [];
+  int i = 0;
+  while i < 50 {
+    xs.push(move probe_none);
+    i = i + 1;
+  }
+  assert(xs.len == 50, "absent optionals still occupy a slot");
+}
+
+test_absent_optional_getter_discard() `test {
+  int i = 0;
+  while i < 50 {
+    probe_none;
+    i = i + 1;
+  }
+  assert(true, "a discarded absent optional must not drop anything");
+}
+
+// --- the values must survive the fix: no premature free ----------------------
+
+test_pushed_payloads_are_readable() `test {
+  string?[] xs = [];
+  int i = 0;
+  while i < 50 {
+    xs.push(move probe_dir);
+    i = i + 1;
+  }
+  int seen = 0;
+  int j = 0;
+  while j < xs.len {
+    assert(xs[j] is present, "slot {j} should be present");
+    assert(xs[j]!.len == 17, "payload should survive the push intact");
+    seen = seen + 1;
+    j = j + 1;
+  }
+  assert(seen == 50, "every stored optional should still hold its payload");
+}
+
+test_pushed_vector_payloads_are_readable() `test {
+  int[]?[] xs = [];
+  int i = 0;
+  while i < 50 {
+    xs.push(move probe_vec);
+    i = i + 1;
+  }
+  int total = 0;
+  int j = 0;
+  while j < xs.len {
+    assert(xs[j] is present, "slot {j} should be present");
+    total = total + xs[j]!.len;
+    j = j + 1;
+  }
+  assert(total == 100, "every stored vector should still hold 2 elements, got {total}");
+}
+
+// --- no-regression controls: the spellings the item recorded as already clean -
+
+test_control_named_binding() `test {
+  string?[] xs = [];
+  int i = 0;
+  while i < 50 {
+    string? d = probe_dir;
+    xs.push(move d);
+    i = i + 1;
+  }
+  assert(xs.len == 50, "the named-binding spelling must stay clean");
+}
+
+test_control_consuming_param() `test {
+  int i = 0;
+  while i < 50 {
+    _consume(move probe_dir);
+    i = i + 1;
+  }
+  assert(true, "a consuming parameter takes ownership");
+}
+
+test_control_generic_consuming_param() `test {
+  int i = 0;
+  while i < 50 {
+    _take[string?](move probe_dir);
+    i = i + 1;
+  }
+  assert(true, "a generic consuming parameter takes ownership");
+}
+
+test_control_constructor_field() `test {
+  Box[] boxes = [];
+  int i = 0;
+  while i < 50 {
+    boxes.push(Box(v: move probe_dir));
+    i = i + 1;
+  }
+  assert(boxes.len == 50, "a constructor field takes ownership");
+}
+
+test_control_plain_getter_push() `test {
+  string[] xs = [];
+  int i = 0;
+  while i < 50 {
+    xs.push(move probe_plain);
+    i = i + 1;
+  }
+  assert(xs.len == 50, "the non-optional getter push must stay clean");
+}
+
+test_control_plain_getter_borrow() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_plain(probe_plain);
+    i = i + 1;
+  }
+  assert(true, "the non-optional borrow must stay clean");
+}
+
+// A local shadowing a getter name is a variable, not a call — it must keep its
+// own drop binding and must not be reclassified as a fresh owned temp.
+test_control_local_shadows_getter_name() `test {
+  int i = 0;
+  while i < 50 {
+    string? probe_dir = "shadow" + "-payload";
+    _borrow_opt(probe_dir);
+    i = i + 1;
+  }
+  assert(true, "a local shadowing a getter name stays a variable");
+}
+
+// --- control-flow paths where the drop must fire exactly once ----------------
+
+_raise_on_opt!(string? v) bool `doc("Raises while the caller's optional temp is live.") {
+  raise error(message: "boom");
+}
+
+// The error unwind (emitStmtTempCleanupForErrorPath) must drop the temp too —
+// the statement is abandoned before its normal statement-end drain runs.
+test_error_unwind_drops_temp() `test {
+  int i = 0;
+  while i < 50 {
+    bool ok = _raise_on_opt(probe_dir)? {
+      false
+    };
+    i = i + 1;
+  }
+  assert(true, "the error unwind must free the borrowed optional temp");
+}
+
+// A `return` mid-loop leaves the statement-end drain behind; the temp created on
+// that iteration must still be freed by scope cleanup.
+_early_return(int n) int `doc("Returns early while optional temps are in flight.") {
+  int i = 0;
+  while i < n {
+    _borrow_opt(probe_dir);
+    if i == 5 {
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+test_early_return_drops_temp() `test {
+  assert(_early_return(50) == 5, "early return out of a loop holding a temp");
+}
+
+// `continue` skips the rest of the body — the temp must not survive the back edge.
+test_loop_continue_drops_temp() `test {
+  int i = 0;
+  while i < 50 {
+    i = i + 1;
+    if i % 2 == 0 {
+      _borrow_opt(probe_dir);
+      continue;
+    }
+    _borrow_opt(probe_dir);
+  }
+  assert(true, "both the continue and fallthrough paths must free their temp");
+}
+
+// Branch arms carry their own block-value temp floors (T1329).
+test_if_arms_drop_temp() `test {
+  int i = 0;
+  while i < 50 {
+    if i % 2 == 0 {
+      _borrow_opt(probe_dir);
+    } else {
+      _borrow_vec(probe_vec);
+    }
+    i = i + 1;
+  }
+  assert(true, "each arm must free the temp it created");
+}
+
+type Counter `doc("Receiver for the method-call borrow paths.") {
+  int n;
+  bump(~this, string? v) `doc("Mutating receiver with an optional borrow param.") {
+    this.n = this.n + 1;
+  }
+  peek(this, string? v) int `doc("Shared receiver with an optional borrow param.") {
+    return this.n;
+  }
+}
+
+// A method call routes through the same argument path as a free function.
+test_method_borrow_drops_temp() `test {
+  Counter c = Counter(n: 0);
+  int i = 0;
+  while i < 50 {
+    c.bump(probe_dir);
+    i = i + 1;
+  }
+  assert(c.n == 50, "mutating receiver with an optional getter arg");
+}
+
+test_shared_receiver_borrow_drops_temp() `test {
+  Counter c = Counter(n: 7);
+  int i = 0;
+  while i < 50 {
+    assert(c.peek(probe_dir) == 7, "shared receiver reads its own state");
+    i = i + 1;
+  }
+}
+
+_borrow_generic[T](T? v) `doc("Generic optional borrow parameter.") {
+}
+
+// A generic borrow param is substituted before the registration decision.
+test_generic_borrow_drops_temp() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_generic[string](probe_dir);
+    i = i + 1;
+  }
+  assert(true, "a substituted generic optional param must free its temp");
+}
+
+// Two optional temps live simultaneously in one statement — both must be freed.
+_borrow_two(string? a, string? b) `doc("Two optional borrow params.") {
+}
+
+test_two_live_temps() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_two(probe_dir, probe_dir);
+    i = i + 1;
+  }
+  assert(true, "both optional argument temps must be freed");
+}
+
+// --- the same classifier fix reaches the tuple (T1233) and array (T1466) paths -
+
+get probe_tuple(string, int) `doc("Droppable tuple from a module-level getter.") {
+  return ("tup" + "-payload", 1);
+}
+
+get probe_array string[2] `doc("Fixed array of heap strings from a getter.") {
+  return["one" + "-payload", "two" + "-payload"];
+}
+
+_borrow_tuple((string, int) t) `doc("Borrows a droppable tuple.") {
+}
+
+_borrow_array(string[2] a) `doc("Borrows a fixed array of heap strings.") {
+}
+
+// tupleArgIsCallerOwnedTemp gates the T1233 tuple and T1466 array borrow-param
+// registrations too, so correcting its IdentExpr case frees these as well — they
+// leaked one tuple (and two array elements) per call before.
+test_getter_tuple_borrow_drops_temp() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_tuple(probe_tuple);
+    i = i + 1;
+  }
+  assert(true, "a bare-getter tuple temp must be freed by the caller");
+}
+
+test_getter_array_borrow_drops_temp() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_array(probe_array);
+    i = i + 1;
+  }
+  assert(true, "a bare-getter fixed-array temp must be freed element-wise");
+}
+
+// Inside a goroutine body the temps belong to the coroutine frame, not the
+// spawning statement (T0594 gives a coroutine body its own temp registries).
+// Joining over the channel is the happens-before edge — never a sleep.
+test_goroutine_body_drops_temp() `test {
+  channel[int] done = channel[int](1);
+  int i = 0;
+  while i < 50 {
+    go {
+      _borrow_opt(probe_dir);
+      done.send(1);
+    };
+    i = i + 1;
+  }
+  int got = 0;
+  while got < 50 {
+    <-done;
+    got = got + 1;
+  }
+  assert(got == 50, "every goroutine ran and freed its own optional temp");
+}
+
+// --- the inner-kind matrix -------------------------------------------------
+//
+// emitOptionalTempDrop hands the `{i1, T}` aggregate to emitOptionalValueDrop,
+// which dispatches on the inner kind. The borrow-argument path must therefore
+// free EVERY droppable inner it can be handed, not just the string/vector/
+// heap-user shapes the original repro used. Each of these leaked before the fix.
+
+type Emitter `structural `doc("Structural interface for the boxed-view inner.") {
+  emit(this, int x) int `abstract;
+}
+
+type HeavyEmitter `doc("Heap implementer — its box must be freed via RTTI drop.") {
+  string tag;
+  emit(this, int x) int {
+    return x + this.tag.len;
+  }
+}
+
+enum Parcel `doc("Enum with a heap payload, to exercise the enum inner.") {
+  Text(string s),
+  Num(int n),
+}
+
+_answer() int `doc("Trivial goroutine body for the task inner.") {
+  return 3;
+}
+
+get inner_nested string?? `doc("Nested optional inner (T??).") {
+  string? inner = "n" + "ested-payload";
+  return inner;
+}
+get inner_tuple(string, int)? `doc("Droppable tuple inner.") {
+  return ("tup" + "le-payload", 1);
+}
+get inner_array string[2]? `doc("Fixed array of heap strings inner.") {
+  return["arr" + "-one", "arr" + "-two"];
+}
+get inner_closure(() -> int)? `doc("Closure inner — owns a heap env.") {
+  int captured = 7;
+  return || -> captured;
+}
+get inner_enum Parcel? `doc("Droppable enum inner.") {
+  return Parcel.Text(s: "par" + "cel-payload");
+}
+get inner_channel channel[int]? `doc("Channel inner.") {
+  return channel[int](1);
+}
+get inner_ref Ref[int]? `doc("Ref inner — refcounted.") {
+  return Ref[int](5);
+}
+get inner_weak Weak[int]? `doc("Weak inner — refcounted.") {
+  Ref[int] strong = Ref[int](5);
+  return strong.downgrade();
+}
+get inner_mutex Mutex[int]? `doc("Mutex inner — single-owner handle.") {
+  return Mutex[int](5);
+}
+get inner_task task[int]? `doc("Task inner — a G struct plus result buffer.") {
+  return go _answer();
+}
+get inner_view Emitter? `doc("Structural-view inner — a heap box.") {
+  return HeavyEmitter(tag: "vi" + "ew-payload");
+}
+
+_borrow_nested(string?? v) `doc("Borrows a nested optional.") {
+}
+_borrow_tuple_inner((string, int)? v) `doc("Borrows an optional tuple.") {
+}
+_borrow_array_inner(string[2]? v) `doc("Borrows an optional fixed array.") {
+}
+_borrow_closure((() -> int)? v) `doc("Borrows an optional closure.") {
+}
+_borrow_enum(Parcel? v) `doc("Borrows an optional enum.") {
+}
+_borrow_channel(channel[int]? v) `doc("Borrows an optional channel.") {
+}
+_borrow_ref(Ref[int]? v) `doc("Borrows an optional Ref.") {
+}
+_borrow_weak(Weak[int]? v) `doc("Borrows an optional Weak.") {
+}
+_borrow_mutex(Mutex[int]? v) `doc("Borrows an optional Mutex.") {
+}
+_borrow_task(task[int]? v) `doc("Borrows an optional task handle.") {
+}
+_borrow_view(Emitter? v) `doc("Borrows an optional structural view.") {
+}
+
+test_inner_nested_borrow() `test {
+  int i = 0;
+  while i < 20 {
+    _borrow_nested(inner_nested);
+    i = i + 1;
+  }
+  assert(true, "a nested optional inner must be freed through both layers");
+}
+
+test_inner_tuple_borrow() `test {
+  int i = 0;
+  while i < 20 {
+    _borrow_tuple_inner(inner_tuple);
+    i = i + 1;
+  }
+  assert(true, "a tuple inner must be freed field-wise");
+}
+
+test_inner_array_borrow() `test {
+  int i = 0;
+  while i < 20 {
+    _borrow_array_inner(inner_array);
+    i = i + 1;
+  }
+  assert(true, "a fixed-array inner must be freed element-wise");
+}
+
+test_inner_closure_borrow() `test {
+  int i = 0;
+  while i < 20 {
+    _borrow_closure(inner_closure);
+    i = i + 1;
+  }
+  assert(true, "a closure inner must have its heap env freed");
+}
+
+test_inner_enum_borrow() `test {
+  int i = 0;
+  while i < 20 {
+    _borrow_enum(inner_enum);
+    i = i + 1;
+  }
+  assert(true, "an enum inner must have its variant payload freed");
+}
+
+test_inner_channel_borrow() `test {
+  int i = 0;
+  while i < 20 {
+    _borrow_channel(inner_channel);
+    i = i + 1;
+  }
+  assert(true, "a channel inner must be freed");
+}
+
+test_inner_ref_borrow() `test {
+  int i = 0;
+  while i < 20 {
+    _borrow_ref(inner_ref);
+    i = i + 1;
+  }
+  assert(true, "a Ref inner must have its strong count released");
+}
+
+test_inner_weak_borrow() `test {
+  int i = 0;
+  while i < 20 {
+    _borrow_weak(inner_weak);
+    i = i + 1;
+  }
+  assert(true, "a Weak inner must have its weak count released");
+}
+
+test_inner_mutex_borrow() `test {
+  int i = 0;
+  while i < 20 {
+    _borrow_mutex(inner_mutex);
+    i = i + 1;
+  }
+  assert(true, "a Mutex inner must be freed");
+}
+
+test_inner_task_borrow() `test {
+  int i = 0;
+  while i < 20 {
+    _borrow_task(inner_task);
+    i = i + 1;
+  }
+  assert(true, "an un-awaited task inner must be joined and freed");
+}
+
+test_inner_view_borrow() `test {
+  int i = 0;
+  while i < 20 {
+    _borrow_view(inner_view);
+    i = i + 1;
+  }
+  assert(true, "a structural-view inner must have its box freed via RTTI drop");
+}
+
+// Discard position for the inner kinds dropDiscardedOptional already dispatches.
+// The six it has no arm for (nested, tuple, array, enum, task, structural) leak
+// identically for a plain CALL and are tracked separately as T2209 — they are
+// deliberately not parked here as known leaks.
+
+test_inner_closure_discard() `test {
+  int i = 0;
+  while i < 20 {
+    inner_closure;
+    i = i + 1;
+  }
+  assert(true, "a discarded optional closure must have its env freed");
+}
+
+test_inner_channel_discard() `test {
+  int i = 0;
+  while i < 20 {
+    inner_channel;
+    i = i + 1;
+  }
+  assert(true, "a discarded optional channel must be freed");
+}
+
+test_inner_ref_discard() `test {
+  int i = 0;
+  while i < 20 {
+    inner_ref;
+    i = i + 1;
+  }
+  assert(true, "a discarded optional Ref must be released");
+}
+
+test_inner_weak_discard() `test {
+  int i = 0;
+  while i < 20 {
+    inner_weak;
+    i = i + 1;
+  }
+  assert(true, "a discarded optional Weak must be released");
+}
+
+test_inner_mutex_discard() `test {
+  int i = 0;
+  while i < 20 {
+    inner_mutex;
+    i = i + 1;
+  }
+  assert(true, "a discarded optional Mutex must be freed");
+}
+
+// --- parenthesized spellings -------------------------------------------------
+//
+// Both classifiers peel ParenExpr before deciding, so `(g)` must be recognized
+// as the getter call it is. Each of these leaked before the fix.
+
+test_paren_discard_drops_temp() `test {
+  int i = 0;
+  while i < 50 {
+    (probe_dir);
+    i = i + 1;
+  }
+  assert(true, "a parenthesized discarded getter must still drop");
+}
+
+test_double_paren_discard_drops_temp() `test {
+  int i = 0;
+  while i < 50 {
+    ((probe_dir));
+    i = i + 1;
+  }
+  assert(true, "the paren peel must be a loop, not a single unwrap");
+}
+
+test_paren_borrow_arg_drops_temp() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_opt((probe_dir));
+    i = i + 1;
+  }
+  assert(true, "a parenthesized borrow argument must still drop");
+}
+
+// A getter reachable by bare name because `std` is auto-imported (`use std as _`)
+// must take the same path as a file-local one — neither leaking nor crashing.
+test_std_getter_bare_reference() `test {
+  int i = 0;
+  while i < 50 {
+    stdout;
+    i = i + 1;
+  }
+  assert(true, "a bare std getter reference is a getter call like any other");
+}
+
+// --- inside a monomorphized generic body -------------------------------------
+//
+// When the borrow happens INSIDE a generic body the temp is registered and
+// dropped under an active typeSubst, and once per instantiation. Both of these
+// leaked two temps per iteration before the fix.
+
+_sink_generic[T](T? v) `doc("Generic optional borrow sink.") {
+}
+
+_borrow_inside_generic[T](T? passthru) `doc("Borrows both its own param and a getter result.") {
+  _sink_generic[T](passthru);
+  _sink_generic[string](probe_dir);
+}
+
+test_borrow_inside_generic_body() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_inside_generic[string](probe_dir);
+    i = i + 1;
+  }
+  assert(true, "an optional temp created inside a monomorphized body must drop");
+}
+
+test_borrow_inside_generic_body_second_instantiation() `test {
+  int i = 0;
+  while i < 50 {
+    _borrow_inside_generic[int[]](probe_vec);
+    i = i + 1;
+  }
+  assert(true, "each instantiation drops its own temp under its own subst");
+}
+
+// The structural-view inner must still be USABLE before it is dropped — a
+// premature free of the box would surface here rather than as a leak.
+test_inner_view_is_live_before_drop() `test {
+  int i = 0;
+  int total = 0;
+  while i < 50 {
+    if v := inner_view {
+      total = total + v.emit(1);
+    }
+    i = i + 1;
+  }
+  // emit(1) == 1 + "view-payload".len == 13.
+  assert(total == 650, "each view must be live when called, got {total}");
+}

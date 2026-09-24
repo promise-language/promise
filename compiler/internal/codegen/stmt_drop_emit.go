@@ -549,7 +549,7 @@ func (c *Compiler) dropDiscardedOptional(expr ast.Expr, result value.Value) {
 	// out of a place is a MoveExpr, not a bare place, so it still drops here (and
 	// the move site clears the source's drop flag). Mirrors trackHeapUserTypeResult's
 	// ident/member-source skips and dropDiscardedHeapType's CallExpr-only guard.
-	if isBorrowingPlaceExpr(expr) {
+	if c.isBorrowingPlaceExpr(expr) {
 		return
 	}
 	elem := opt.Elem()

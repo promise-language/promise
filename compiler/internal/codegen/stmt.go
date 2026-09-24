@@ -421,6 +421,35 @@ func (c *Compiler) isGetterCallExpr(expr ast.Expr) bool {
 	return false
 }
 
+// isBareModuleGetterIdent reports whether expr is a bare identifier that names a
+// file/module-level GETTER rather than a variable (T2049). Such a read calls the
+// getter and hands back a FRESH owned value — it is the unqualified spelling of
+// `mod.prop`, which isGetterCallExpr already recognizes. Every ownership
+// classifier that switches on the AST shape otherwise reads `*ast.IdentExpr` as
+// "a variable", i.e. a borrow or an already-owned local, and so either dups the
+// value (orphaning the getter's original) or declines to give it a temp at all.
+// The three conditions mirror genIdentExpr's own dispatch exactly, in its order:
+// a local binding shadows the getter name (so locals are checked first), the
+// getter must have a declared LLVM function, and sema must have resolved the
+// name to a getter. Matching that dispatch is what makes this predicate safe to
+// use for ownership decisions — a shape genIdentExpr would NOT compile as a
+// getter call must never be classified as one here, or a genuinely borrowed
+// value would be treated as owned and double-freed.
+func (c *Compiler) isBareModuleGetterIdent(expr ast.Expr) bool {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return false
+	}
+	if _, isLocal := c.locals[ident.Name]; isLocal {
+		return false
+	}
+	if _, declared := c.funcs[ident.Name]; !declared {
+		return false
+	}
+	obj := c.lookupFunc(ident.Name)
+	return obj != nil && obj.IsGetter()
+}
+
 // isUserIndexExpr reports whether expr is an IndexExpr that dispatches to a
 // user-defined *non-native* `[]` operator. genIndexExpr compiles such reads via
 // genMethodIndex, which (T0647) returns an *owned* heap temp tracked by

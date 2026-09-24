@@ -1638,6 +1638,36 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param,
 				}
 			}
 		}
+		// T2049: A plain (borrow) Optional-by-value param receives a `{i1, T}`
+		// aggregate. When the arg is an optional TEMP (a call/getter result with no
+		// owning caller variable) nothing frees its inner heap payload — the value
+		// is neither an i8* stmtTemp nor a {vtable, instance} heap temp, so no
+		// producer path registers it. Register an optional stmt temp so the caller
+		// drops the inner after the call returns: the third sibling of the T1233
+		// tuple and T1466 array blocks above, gated by the same owned-temp predicate.
+		if i < len(params) && !isMutRefParam && !params[i].IsVariadic() {
+			paramType := params[i].Type()
+			if c.typeSubst != nil {
+				paramType = types.Substitute(paramType, c.typeSubst)
+			}
+			// Whether the inner actually owns heap memory is registerOptionalStmtTemp's
+			// own guard — asking it here too would be the same invariant in two places.
+			if opt, isOpt := paramType.(*types.Optional); isOpt &&
+				c.tupleArgIsCallerOwnedTemp(arg.Value) &&
+				!calleeIsGenerator && v.Type().Equal(c.resolveType(opt)) {
+				// Two guards, both load-bearing. A generator borrows its param but
+				// reads it lazily (the frame outlives this statement), so a
+				// statement-end drop would be a UAF — the T1233/T1467 rationale;
+				// such a shape keeps ordinary statement lifetime (T1500). And the
+				// layout guard is T1467's: coerceCallArgs has not necessarily
+				// wrapped the value into the `{i1, T}` layout yet — an
+				// Optional[user type] arg is still a bare {vtable, instance} value
+				// struct here, a widened structural arg a bare view — and emitting
+				// the optional drop against such a value reads the wrong fields and
+				// produces malformed IR.
+				c.registerOptionalStmtTemp(v, opt)
+			}
+		}
 		// B0203: Variadic passthrough — set static flag (bit 63) on the vector's
 		// len field so the callee's scope-exit drop skips element drops and buffer free.
 		// Passthrough is detected when the arg is NOT an ArrayLit (ArrayLit means

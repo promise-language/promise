@@ -259,12 +259,7 @@ test_src_dir_stored_optionals_are_dropped() `test {
   string?[] dirs = [];
   int i = 0;
   while i < 50 {
-    // Through a binding rather than `dirs.push(move src_dir)`: that spelling
-    // leaks the payload of every element (T2049), and it is the getter place
-    // expression that goes wrong, not the optional or the vector. Tighten this
-    // back to the direct form once T2049 is fixed.
-    string? dir = src_dir;
-    dirs.push(move dir);
+    dirs.push(move src_dir);
     i = i + 1;
   }
   assert(dirs.len == 50, "every read should have been stored");

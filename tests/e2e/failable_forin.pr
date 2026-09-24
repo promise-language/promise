@@ -1,6 +1,6 @@
 // T1896: a bare failable call as the subject of a `for-in` is an expression
-// position like any other — §7.2 of docs/language-design.md gives implicit
-// propagation in "all expression positions", and §11 makes an explicit `?^`
+// position like any other — language-design.md#calling-failable-functions of docs/language-design.md gives implicit
+// propagation in "all expression positions", and language-design.md#strings-and-interpolation makes an explicit `?^`
 // equivalent to the bare form. Before the fix the bare form panicked codegen
 // (the raw `{i1, i8*, i8*}` result struct reached genForInVector) for the
 // vector/string/map/range branches, and silently iterated zero times for the
@@ -389,7 +389,7 @@ forin_inside_go_block_propagates() `test {
 // `FailableExprs` is set on more node kinds than calls, and sema now settles
 // the iterable by consulting that map rather than by looking at the node kind.
 // A failable *getter* is a MemberExpr, `<-t` on a `failable_task[T]` is a
-// UnaryExpr (§17.2.1), and failability propagates outward through parentheses
+// UnaryExpr (language-design.md#failable-goroutines), and failability propagates outward through parentheses
 // (T1379) — so each of these is a bare failable iterable with no call node in
 // the position `isRawGeneratorForIn` inspects.
 
@@ -627,7 +627,7 @@ forin_inside_method() `test {
   assert(s.total()?! == 13, "bare failable iterable inside a method");
 }
 
-// §11 makes `?^` equivalent to the bare form; `?!` is the spelling that stays
+// language-design.md#strings-and-interpolation makes `?^` equivalent to the bare form; `?!` is the spelling that stays
 // legal in a *non*-failable function, so the new diagnostic must not have
 // swallowed it.
 _forin_bang() int {

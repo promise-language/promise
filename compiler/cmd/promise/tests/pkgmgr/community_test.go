@@ -90,7 +90,7 @@ func TestRunPackageBuildIndex(t *testing.T) {
 
 // TestRunPackageBuildIndexReport: a module that fails verification is absent from
 // the index and listed as unsupported; with -report the run does not exit-fail
-// (the §9.10 pre-release nudge).
+// (the module-system.md#when-a-module-has-no-compatible-version pre-release nudge).
 func TestRunPackageBuildIndexReport(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping verify integration test in short mode")

@@ -27,7 +27,7 @@ The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries i
 | `bin/stress` | Stress testing for flaky test detection. |
 | `bin/setup` | One-time dev setup (git hooks). |
 | `bin/prereqs` | Install build prerequisites (LLVM, Go, Java, wasmtime). |
-| `bin/run` | Run one contract gate and judge it against `tools/gates/thresholds.json`. `bin/run <gate>` measures and judges for a person; `bin/run <gate> --verdict` judges an envelope on stdin (what the SDK calls); `bin/run --list [--json]` prints the gates and every command `./make` builds — the workspace reads that list to refuse installing over a project tool and to decide which names it may remove, so it reports the whole build set rather than a subset. `bin/run <command> [args…]` dispatches `bin/<command>`, since the two kinds share one namespace. See [gate-system.md](gate-system.md#the-contract-gates-and-the-judge-binrun). |
+| `bin/run` | Run one contract gate and judge it against `tools/gates/thresholds.json`. `bin/run <gate>` measures and judges for a person; `bin/run <gate> --verdict` judges an envelope on stdin (what the SDK calls); `bin/run --list [--json]` prints the gates and every command `./make` builds — the workspace reads that list to refuse installing over a project tool and to decide which names it may remove, so it reports the whole build set rather than a subset. `bin/run <command> [args…]` dispatches `bin/<command>`, since the two kinds share one namespace. See [gate-system.md](gate-system.md#the-contract-gates-and-the-judge). |
 
 ## Architecture
 
@@ -163,18 +163,18 @@ Two cases carry no stamp and fall back to another build-time fact, never to cwd:
 source path (`runtime.Caller`); test binaries do the same via
 `common.RootForTests`, or set an explicit root with `common.SetRootForTest`.
 
-## Build Pipeline (`bin/build`)
+## Build Pipeline
 
 The build tool performs the following steps:
 
-### 1. Git hooks setup
+### Git hooks setup
 
 Configures git to use `.githooks/` for hooks:
 ```
 git config core.hooksPath .githooks
 ```
 
-### 2. ANTLR parser generation
+### ANTLR parser generation
 
 Downloads the ANTLR 4.13.1 JAR (if not cached) and generates the Go lexer/parser from the grammar files:
 - Input: `compiler/grammar/PromiseLexer.g4`, `compiler/grammar/PromiseParser.g4`
@@ -195,7 +195,7 @@ ordering across checkouts, so the previous mtime comparison spuriously regenerat
 the parser (and required a JRE + ANTLR download) on every fresh clone/worktree,
 Windows most of all (T1407). `bin/build --generate` forces regeneration regardless.
 
-### 3. Resource embedding
+### Resource embedding
 
 Copies project files into `compiler/cmd/promise/resources/` for Go's `embed` directive:
 
@@ -213,14 +213,14 @@ Also computes `resources/.sources.sha256` — a sorted list of SHA256 hashes for
 
 **Linux only:** Stages the compiler-rt builtins archive (`libclang_rt.builtins.a`) into `resources/compiler-rt/<musl-arch>/` the same way, from the pinned `[binaries.compiler-rt]` prebuilt (T1676). Like the CRT and unlike OpenSSL this step is **fatal** on failure: the archive is spliced onto every musl link line, so a build that skipped it would produce a compiler that cannot link.
 
-### 4. LLVM staging
+### LLVM staging
 
 The compiler requires LLVM 22+. The toolchain is **pinned, not detected**: `FindLLVM`
 resolves `opt`, `llc` and `lld` from exactly two sources, and the host is not one
 of them (T2108).
 
 1. **The pinned blobs** — staged into the host-stable prebuilts cache from
-   `tools/build/prebuilts.toml` + `blobs.json` (§6), fetched on demand.
+   `tools/build/prebuilts.toml` + `blobs.json` ([Release builds](#release-builds)), fetched on demand.
 2. **Per-tool overrides layered on top** — `PROMISE_OPT`, `PROMISE_LLC`, and the
    platform linker's `PROMISE_LLD` (Linux/Windows) or `PROMISE_LD64LLD` (macOS).
    Each names one binary, so an override of `opt` leaves `llc` and `lld` pinned;
@@ -255,7 +255,7 @@ measurement under one — a verdict has to describe the tree, not the machine (s
 `bin/build` prints nothing about the toolchain on the ordinary path: a "detected
 LLVM" line naming a toolchain the build does not use is a confident wrong answer.
 
-### 5. Go compilation
+### Go compilation
 
 Builds the compiler with version information:
 ```
@@ -270,7 +270,7 @@ The epoch is read from `catalog.toml`. After building, writes `bin/.promise.hash
 
 `bin/` holds one other sidecar, written by the compiler rather than by the build: `bin/.promise-cas.jsonl`, the ledger of what runs cost the content-addressed store — bytes fetched over the wire, and bytes written exploding store content into toolchain views and CRT trees. It sits beside the binary because every compiler process in a run is that binary, while the Promise home they write into is a choice each of them makes separately; a ledger inside a home cannot see a run that used three. `bin/gate` and `bin/verify` empty it once their build and toolchain warm-up are done and read it back when they are finished — the gate to report the `cas_*` metrics, verify to print the run's cost in its summary ([gate-system.md](gate-system.md#store-metrics)).
 
-### 6. Release builds (`bin/build --release`)
+### Release builds
 
 Release builds embed LLVM tools in the binary for self-contained distribution. The set of files bundled per target is declared in `tools/build/prebuilts.toml` (manifest schema 1).
 
@@ -292,7 +292,7 @@ The cache is independent of `PROMISE_HOME`, so `bin/verify` and other tools that
 
 Release builds compile with `-tags embed_llvm` to enable the embedded tool extraction code paths.
 
-## Verify Pipeline (`bin/verify`)
+## Verify Pipeline
 
 Verify is a list of named steps, run in order, stopping at the first failure —
 which it names, so `structure: docs: dangling link` sends the reader to the sweep
@@ -320,7 +320,7 @@ and then being judged by the fresh one would fail every change that touches the
 formatter, and on a fresh clone — no binary yet — verify would not repair at all
 before being judged on it.
 
-### The test phase is `integration`, in process
+### The test phase is integration in process
 
 Verify does not run suites of its own. The `integration` step calls
 `MeasureContractGateParts`, the same Go entry point `bin/run integration` and
@@ -349,10 +349,10 @@ The `check structure` step runs `common.RunStructuralChecks` — every check nam
 
 | Name | What it rejects |
 |------|-----------------|
-| `docs` | `common.CheckDocs` — dangling relative Markdown links, a tracked `docs/*.md` missing from [index.md](index.md), a `modules/` directory missing from `catalog.toml` or from the two inventory docs, and an annotation the compiler registers that [annotations.md](annotations.md) §6 has no row for |
+| `docs` | `common.CheckDocs` — dangling relative Markdown links, a tracked `docs/*.md` missing from [index.md](index.md), a `modules/` directory missing from `catalog.toml` or from the two inventory docs, and an annotation the compiler registers that [annotations.md](annotations.md), under [Index](annotations.md#index) has no row for |
 | `test-sleeps` | `sleep()` as synchronization in a test `.pr` without a `// sleep-ok:` reason ([code-style.md](code-style.md)) |
 | `test-temp-paths` | a scratch path built from `temp_dir` without `process_id` in a test `.pr` or an example, without a `// temp-dir-ok:` reason ([code-style.md](code-style.md)) |
-| `host-tool-lookups` | a tracked Go line resolving a toolchain binary through `PATH` without a `// path-ok:` reason (§4 above) |
+| `host-tool-lookups` | a tracked Go line resolving a toolchain binary through `PATH` without a `// path-ok:` reason ([LLVM staging](#llvm-staging) above) |
 
 No sweep reads a **staged set**. Each one reads the working tree, scoped by
 `git ls-files` where it needs to skip untracked and generated output (the two
@@ -513,7 +513,7 @@ unaffected: JSONL on stdout, human progress on stderr, exactly as before.
 
 Concurrent verify runs from different worktrees are serialized via a file lock (`~/.promise/verify.lock`), preventing resource contention.
 
-## Pre-Commit Hook (`bin/precommit-guard`)
+## Pre Commit Hook
 
 `.githooks/pre-commit` is a trampoline: it execs `bin/precommit-guard` and, if
 that tool is not installed, **refuses the commit**. The commit gate is delivered

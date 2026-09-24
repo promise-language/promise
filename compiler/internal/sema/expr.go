@@ -1139,11 +1139,11 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 	case ast.UnaryReceive:
 		// <-expr: operand should be Task[T], FailableTask[T], or Channel[T].
 		// Task[T] returns T; FailableTask[T] returns T but the receive is a
-		// failable operation (§17.2.1); Channel[T] returns T? (none when
+		// failable operation (language-design.md#failable-goroutines); Channel[T] returns T? (none when
 		// closed+empty).
 		if inst, ok := operand.(*types.Instance); ok {
 			origin := inst.Origin()
-			// §17.2.1: `<-tasks` where tasks : failable_task[T][] is a **drain** —
+			// language-design.md#failable-goroutines: `<-tasks` where tasks : failable_task[T][] is a **drain** —
 			// a failable operation that consumes the vector, awaits every task, and
 			// yields T[] (succeeding only if all succeed, else failing with the first
 			// error by index). Detect a Vector whose element is a failable_task.
@@ -1162,8 +1162,8 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 			}
 			if origin == types.TypFailableTask {
 				if len(inst.TypeArgs()) > 0 {
-					// §17.2.1: `<-t` on a failable_task[T] is a failable operation
-					// yielding T. Marking it failable makes it obey §7.2
+					// language-design.md#failable-goroutines: `<-t` on a failable_task[T] is a failable operation
+					// yielding T. Marking it failable makes it obey language-design.md#calling-failable-functions
 					// automatically (auto-propagate in a failable fn, require
 					// handling otherwise, accept `?!`/`?^`/`? e {}`).
 					c.info.FailableExprs[e] = true
@@ -1859,7 +1859,7 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 			}
 		} else if c.moduleImportedInOtherFile(ident.Name, ident.Pos().File) {
 			// A sibling file imports this module, but this file does not. Imports
-			// are per-file (T1686, §5.2), so this reference is unresolvable here.
+			// are per-file (T1686, module-system.md#import-scope), so this reference is unresolvable here.
 			c.errorf(ident.Pos(), "undefined module '%s'", ident.Name)
 			c.hintf(ident.Pos(), "add `use %s;` — imports are per-file, not per-module", ident.Name)
 			return nil
@@ -3612,7 +3612,7 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr, hint types.Type) types.Type {
 // "<subject> produce incompatible types …".
 const branchArmSubject = "if/match arms"
 
-// goBlockReturnSubject is joinBranchTypes' diagnostic subject for the §17.2
+// goBlockReturnSubject is joinBranchTypes' diagnostic subject for the language-design.md#explicit-concurrency
 // explicit-return unification of a `go {}` / `go! {}` body (T1385), where the
 // values being unified are `return` statements rather than if/match arms.
 const goBlockReturnSubject = "goroutine block `return` statements"
@@ -3834,7 +3834,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr, hint types.Type, report bool)
 	errsBefore := len(c.errors)
 	subjectType := c.checkExpr(e.Subject)
 	// T1900: a bare failable call as the match scrutinee is an expression
-	// position (§7.2), so it must auto-propagate in a failable function and be
+	// position (language-design.md#calling-failable-functions), so it must auto-propagate in a failable function and be
 	// rejected in a non-failable one — same check T1267 added for arm bodies.
 	c.checkFailableEscape(e.Subject)
 
@@ -3981,7 +3981,7 @@ func (c *Checker) blockValueType(block *ast.Block, report bool) types.Type {
 
 // trailingValueStmtPos returns the position of a block's last statement — the
 // one blockValueType reads the block's trailing value from. Used to anchor the
-// §17.2 "trailing expression is discarded" diagnostic (T1385).
+// language-design.md#explicit-concurrency "trailing expression is discarded" diagnostic (T1385).
 func trailingValueStmtPos(block *ast.Block) ast.Pos {
 	if block == nil || len(block.Stmts) == 0 {
 		return ast.Pos{}
@@ -4637,7 +4637,7 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		innerType = c.checkExpr(e.Expr)
 		_, isCall := e.Expr.(*ast.CallExpr)
 
-		// §17.2.1: an error operator attached to the spawn (`go! f()?!`,
+		// language-design.md#failable-goroutines: an error operator attached to the spawn (`go! f()?!`,
 		// `go! f()?^`, `go! f() ? e { }`) binds to the spawn, not the receive —
 		// the error appears at the receive. Reject with a fix-it. The parser binds
 		// the postfix operator around the whole `go!` operand, so these show up as
@@ -4683,16 +4683,16 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		savedFS := c.failableScope
 		savedEsc := c.failableEscapeCount
 		if e.Failable {
-			// §17.2.1: `go! {}` is a failable scope — bare failable calls
+			// language-design.md#failable-goroutines: `go! {}` is a failable scope — bare failable calls
 			// auto-propagate into the task and `?^`/`raise` are allowed.
 			c.nonFailableScope = false
 			c.failableScope = true
 		} else {
-			// §17.2.1: plain `go {}` is a non-failable scope (T1217).
+			// language-design.md#failable-goroutines: plain `go {}` is a non-failable scope (T1217).
 			c.nonFailableScope = true
 			c.failableScope = false
 		}
-		// T1385/T1392: `return` inside the body binds to the goroutine (§17.2
+		// T1385/T1392: `return` inside the body binds to the goroutine (language-design.md#explicit-concurrency
 		// explicit-return style), not to the enclosing function. Save/restore
 		// makes nested go blocks fall out for free.
 		savedGoBlock := c.goBlock
@@ -4708,12 +4708,12 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		c.nonFailableScope = savedNFS
 		c.failableScope = savedFS
 		c.closeScope()
-		// §17.2.1: a `go! {}` body that cannot fail is misleading — reject it,
+		// language-design.md#failable-goroutines: a `go! {}` body that cannot fail is misleading — reject it,
 		// symmetric to `go! f()` on a non-failable call.
 		if e.Failable && !escaped {
 			c.errorf(e.Block.Pos(), "this goroutine's body cannot fail; spawn it with plain `go`")
 		}
-		// Block form: infer T from the block's result value. §17.2 gives two
+		// Block form: infer T from the block's result value. language-design.md#explicit-concurrency gives two
 		// styles and the block is in exactly one of them:
 		//   - trailing-expression: the last statement is a bare expression (or a
 		//     value-producing if/else in statement position). Mirrors codegen's
@@ -4727,14 +4727,14 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		trailing := c.blockValueType(e.Block, !goCtx.hasValueRet)
 		if goCtx.hasValueRet {
 			innerType = goCtx.resultType
-			// §17.2: no mixing — once a block returns with `return`, a trailing
+			// language-design.md#explicit-concurrency: no mixing — once a block returns with `return`, a trailing
 			// expression is silently discarded, so reject it.
 			if trailing != nil && !types.Identical(trailing, types.TypVoid) {
 				pos := trailingValueStmtPos(e.Block)
 				c.errorf(pos, "this block returns with `return`; a trailing expression is discarded")
 				c.hintf(pos, "did you mean `return <expr>;`?")
 			} else if !c.blockReturns(e.Block) {
-				// §17.2: in explicit-return style every path must produce the value.
+				// language-design.md#explicit-concurrency: in explicit-return style every path must produce the value.
 				// Suppressed above: the trailing expression IS the fall-through path,
 				// and converting it to `return <expr>;` fixes both at once.
 				c.errorf(e.Block.End(), "goroutine block missing return statement")
@@ -4742,7 +4742,7 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 		} else {
 			innerType = trailing
 		}
-		// T1392/§17.2: a bare `return;` carries no value, so on a value-producing
+		// T1392/language-design.md#explicit-concurrency: a bare `return;` carries no value, so on a value-producing
 		// path it is the exact analog of `f() int { return; }` — an error in either
 		// style, rather than the type's zero ("every path of a value-producing body
 		// must produce one"). The verdict is deferred to here because T is only known

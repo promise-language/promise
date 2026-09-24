@@ -7,12 +7,12 @@ import (
 )
 
 // LiveSet computes the union of every installed epoch's blobs.refs — the GC root
-// set per docs/distribution.md §4.4. excludeEpoch, when non-empty, is skipped
+// set per docs/distribution.md#telemetry. excludeEpoch, when non-empty, is skipped
 // (used by `remove` to root against the REMAINING epochs after a directory is
 // dropped). The roots are derived from epochs/*/blobs.refs alone — no epoch
 // binary is executed.
 //
-// allRefsReadable is the §4.4 fail-safe signal: it is false when ANY installed
+// allRefsReadable is the T0769 §4.4 fail-safe signal: it is false when ANY installed
 // epoch's ref set is missing/unreadable, OR when no epoch contributed a readable
 // ref set at all (so liveness can't be established). Callers MUST keep
 // everything in that case — over-retention is recoverable; over-deletion wedges
@@ -66,9 +66,9 @@ type SweepResult struct {
 // Sweep deletes CAS blobs/archives referenced by no installed epoch's ref set.
 // The caller MUST hold Store.Lock() (so a half-installed epoch whose blobs.refs
 // isn't on disk yet can't be swept out from under it). When allRefsReadable is
-// false this is a no-op (§4.4 fail-safe). dryRun reports without deleting.
+// false this is a no-op (T0769 §4.4 fail-safe). dryRun reports without deleting.
 //
-// Archives are evicted more aggressively (§4.4): a cached archive is pure
+// Archives are evicted more aggressively (T0769 §4.4): a cached archive is pure
 // bandwidth optimization (the per-blob sha256 re-fetches), so it is also swept
 // when every blob the manifest maps to it is already materialized — even while
 // an epoch still references it. This has no over-deletion risk: an archive is

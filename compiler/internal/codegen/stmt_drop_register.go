@@ -1702,7 +1702,7 @@ func (c *Compiler) emitCloseCall(b scopeBinding, cap *closeErrCapture) {
 	// use-bound types have close() but may not have drop(). Without this, the
 	// heap instance leaks. If the type has a synthesized (field-only) drop, call
 	// that (it handles field drops + pal_free). If the type has a *user-defined*
-	// drop, T0967 / §16.4 suppresses it (use takes precedence) but still reclaims
+	// drop, T0967 / language-design.md#interaction-between-use-and-drop suppresses it (use takes precedence) but still reclaims
 	// fields + memory inline. Otherwise, just pal_free the instance directly.
 	if b.named != nil && !isContainerType(b.valType) && !b.named.IsValueType() {
 		instance := c.extractInstancePtr(val)
@@ -1739,7 +1739,7 @@ func (c *Compiler) emitCloseCall(b scopeBinding, cap *closeErrCapture) {
 			// user-defined drop() body. This is correct for two distinct cases:
 			//   (a) synthesized field-cleanup drop (no user logic) — identical to
 			//       defineSynthesizedDropBody, just inlined here; and
-			//   (b) T0967 / language-design §16.4: a `use`-bound value whose type
+			//   (b) T0967 / language-design language-design.md#interaction-between-use-and-drop: a `use`-bound value whose type
 			//       also defines drop() — `use` takes precedence, so the user
 			//       drop() body is suppressed (close() performs all cleanup) while
 			//       owned fields + memory are still reclaimed exactly once.

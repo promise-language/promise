@@ -72,5 +72,5 @@ go_call_move_into_goroutine() `test {
 
 // NOTE: the "await in scope" pattern (borrowing a function-level local and
 // awaiting the handle before scope exit) was previously accepted under the
-// escape-based model (T1152). Under §17.4 (T1397), ANY borrow across a go
+// escape-based model (T1152). Under language-design.md#ownership-across-goroutines (T1397), ANY borrow across a go
 // spawn boundary is rejected — the await-in-scope carve-out is removed.

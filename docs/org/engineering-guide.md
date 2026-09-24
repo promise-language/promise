@@ -105,7 +105,7 @@ The test: would this sentence need editing when work happens, even though nothin
 changed? If yes, it is a record, and it belongs where records live. A document points at where
 status lives rather than reporting it.
 
-## Finish it, or file what is left
+## Finish it or file what is left
 
 > **A change is done when it satisfies the normative document. Until then, the difference is an
 > issue — filed before the change lands, not after.**
@@ -153,7 +153,7 @@ platform never learns about: a gap is a platform request, not a local problem.
 - **The exception is deliberate vendoring**, as with this document — byte-identical, hash-checked,
   with its source named.
 
-## Plan first, then follow it
+## Plan first then follow it
 
 > **A plan names the files and functions it will change and what each change does — and it plans
 > the smallest change that resolves the item.** A plan that could have been written without
@@ -306,7 +306,7 @@ child process, and makes two identical command lines do different things. It is 
 of [one obvious way](#one-obvious-way). A capability reachable only by setting a variable is a
 missing flag, and the fix is the flag.
 
-## Ask, do not guess
+## Ask and do not guess
 
 > **A decision you cannot make from the item, the code, and the documents is asked for — never
 > guessed, and never worked around.**
@@ -315,7 +315,7 @@ The ask carries the decision needed, the evidence it rests on, and a recommendat
 cannot choose between options without seeing what they are choosing about. Ask only what you
 genuinely cannot decide — a question is for a missing decision, not for something unread.
 
-## Evidence, not assertion
+## Evidence and not assertion
 
 - **A claim of "already done", "cannot be done", or "not needed" carries proof** — the commit,
   the code, the reproduction. Without it, the claim is indistinguishable from giving up, and
@@ -327,7 +327,7 @@ genuinely cannot decide — a question is for a missing decision, not for someth
 - **Report what happened, not what was intended.** A summary describes the change that exists —
   which is not always the change that was planned.
 
-## Prompts point here; they do not restate this
+## Prompts point here and do not restate this
 
 A flow's step prompts are the natural place for these rules to be repeated, and repeating them
 there is the same defect as everything else in [Define once](#define-once): a prompt that restates

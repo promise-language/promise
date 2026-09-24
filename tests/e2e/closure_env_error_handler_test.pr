@@ -143,7 +143,7 @@ probe_optional_handler_ident() `test {
 //    holder's synthesized drop owns the optional closure field's env. The
 //    isOwnerGovernedMemberOptionalUnwrapSource guard prevents env-tracking the
 //    unwrap result so it is not double-freed with the holder's drop (mirrors the
-//    ident guard in §6, and the i8* string/vector member branches). Exercises the
+//    ident guard in language-design.md#ownership-and-memory-management, and the i8* string/vector member branches). Exercises the
 //    second guard clause of the T1235 isSig branch — with the guard removed this
 //    double-frees the field env at statement end vs. the holder's drop.
 type ClosureHolder {

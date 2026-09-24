@@ -4,14 +4,15 @@
 
 An annotation is a backtick-prefixed modifier on a declaration: `` `public ``, `` `copy ``,
 `` `test(timeout: "5s") ``. This document is the **normative reference for what each one means**,
-and the complete list — an annotation absent from §6 is not part of the language.
+and the complete list — an annotation absent from [Index](#index) is not part of the language.
 
-Syntax — placement, the parameter grammar, and why the backtick — is §8.1 of
-[language-design.md](language-design.md), and the models the annotations serve are §5 (types), §6
-(ownership) and §17 (concurrency). Those sections define the models; this document defines the
+Syntax — placement, the parameter grammar, and why the backtick — is [Annotation Syntax](language-design.md#annotation-syntax) of
+[language-design.md](language-design.md), and the models the annotations serve are [Type System](language-design.md#type-system) (types),
+[Ownership and Memory Management](language-design.md#ownership-and-memory-management) (ownership) and
+[Concurrency](language-design.md#concurrency) (concurrency). Those sections define the models; this document defines the
 annotations, and neither restates the other.
 
-## 1. The one-declaration rule
+## The one declaration rule
 
 **A property is declared in exactly one place: an annotation on the declaration it belongs to.**
 Every compiler decision about that property reads the declared flag.
@@ -34,7 +35,7 @@ Three corollaries:
 
    The compiler does legitimately know a handful of library types — it binds `{:}` to one,
    constructs another for `..`, and depends on a third's shape for `for`-`in`. Those are
-   **declared** with `` `builtin(role) `` (§10) rather than found by name, and they are bounded by
+   **declared** with `` `builtin(role) `` ([Type shape dispatch and construction](#type-shape-dispatch-and-construction)) rather than found by name, and they are bounded by
    what the knowledge may drive: **identity may bind syntax to a type, construct values of it, or
    check the compiler's own assumptions about it — never recover a property that the type's own
    structure determines.** The test is a user's own `MyMap`: writing one should cost exactly the
@@ -48,9 +49,9 @@ Three corollaries:
 (`compiler/internal/sema/expr.go`) resolves the receiver's underlying type and returns
 `tt.IsInterior()`, with no list of primitives anywhere.
 
-## 2. The set is closed
+## The set is closed
 
-**Both the annotations and their parameters are a closed set.** §6 is the complete list of
+**Both the annotations and their parameters are a closed set.** [Index](#index) is the complete list of
 annotation names; each entry's *Parameters* field is the complete list for that annotation. There
 are **no user-defined annotations**, and no annotation accepts a parameter it does not declare.
 Writing an unknown name is *"unknown meta annotation"*; an undeclared named parameter, a positional
@@ -70,7 +71,7 @@ capability that turns out to be worth having has to be specified here and implem
 prototyped in user code. That is the intended trade — the annotation namespace is part of the
 language, not an extension point.
 
-## 3. How to read an entry
+## How to read an entry
 
 Each entry states these six things, in this order, omitting a field it has nothing to say under —
 most annotations declare a property that is not derived, and have no *Derivation* to state.
@@ -80,14 +81,14 @@ is described — and an annotation that cannot be implemented does not belong in
 
 | Field | Meaning |
 |---|---|
-| **Targets** | Which declaration kinds accept it. Reconciled against `builtinMetas` in `compiler/internal/sema/meta.go`, and against the entry's own §6 row — an entry *repeats* its row, it never restates it differently. |
-| **Parameters** | Its positional and named parameters, reconciled against `metaParamSpecs` in `compiler/internal/sema/metaparams.go` and against the §6 row the same way. An undeclared parameter is a compile error, never silently discarded. |
+| **Targets** | Which declaration kinds accept it. Reconciled against `builtinMetas` in `compiler/internal/sema/meta.go`, and against the entry's own [Index](#index) row — an entry *repeats* its row, it never restates it differently. |
+| **Parameters** | Its positional and named parameters, reconciled against `metaParamSpecs` in `compiler/internal/sema/metaparams.go` and against the [Index](#index) row the same way. An undeclared parameter is a compile error, never silently discarded. |
 | **Effect** | The compiler decision it changes. |
 | **Derivation** | Whether the property is also derived structurally, and whether this annotation asserts, denies, or overrides that derivation. |
 | **Interactions** | Contradictions, implications, and mutual exclusions with other annotations. |
 | **Read by** | The predicate or pass that consumes it. A new consumer in a new place is a change to this document, not an implementation detail. |
 
-## 4. The axes
+## The axes
 
 Annotations that are routinely confused for one another govern genuinely different relations. The
 three below are independent, and a type may sit anywhere in their product.
@@ -107,11 +108,11 @@ N references to *one* `T` and never produces a second one, so a type may be both
 and `` `single_owner ``. Sharing a handle and copying a handle are different operations, and only
 the second is what `` `single_owner `` denies.
 
-**Layout is not an axis either.** Where a field lives is decided by the four-struct model (§5.2),
+**Layout is not an axis either.** Where a field lives is decided by the four-struct model ([The Four Struct Model](language-design.md#the-four-struct-model)),
 and the only annotation that moves one is `` `value ``. Padding, alignment and struct packing are
 not expressible.
 
-## 5. Assertions and denials
+## Assertions and denials
 
 An annotation either **asserts** a property the compiler cannot verify, or **denies** one it would
 otherwise derive. The two carry opposite risks, and that decides who may write them.
@@ -141,12 +142,12 @@ goroutine boundary. The denials are `` `not_sendable ``, `` `not_sharable `` and
 faith, it is checked — the boundary rules reject any crossing — so the plain reference count it
 licenses can never be reached by a value that violated it.
 
-## 6. Index
+## Index
 
-The complete set. Anything not listed here is not an annotation; see §16.
+The complete set. Anything not listed here is not an annotation; see [Not annotations](#not-annotations).
 
 **Targets** and **Parameters** are reconciled against `builtinMetas` and `metaParamSpecs`
-mechanically (§17), so both are written in a fixed vocabulary: the declaration kinds `types`,
+mechanically ([Adding an annotation](#adding-an-annotation)), so both are written in a fixed vocabulary: the declaration kinds `types`,
 `enums`, `fields`, `methods`, `functions`, `parameters` and `variants`, and parameters spelled
 `` `name` (kind, positional|named[, optional]) ``. A positional parameter is required unless it
 carries `optional`; a named one may always be omitted, so it never does. **Targets** records the
@@ -195,9 +196,9 @@ them, and the same check holds the two copies equal.
 | `` `required `` | fields | — | Must be present when decoding |
 | `` `flatten `` | fields | — | Inline the nested type's fields into the parent |
 
-## 7. Duplication
+## Duplication
 
-### `` `copy ``
+### copy
 
 - **Targets** types, enums · **Parameters** — none
 - **Effect** Assignment copies the value bitwise instead of moving it.
@@ -211,7 +212,7 @@ them, and the same check holds the two copies equal.
 - **Read by** `isCopyField` / `validateCopyType` (`sema/meta.go`); assignment and argument
   lowering in codegen.
 
-### `` `clone ``
+### clone
 
 - **Targets** types, enums · **Parameters** — none
 - **Effect** Synthesizes a `clone() Self` method that deep-copies every field. Assignment still
@@ -224,7 +225,7 @@ them, and the same check holds the two copies equal.
   type with a `clone() Self` satisfies it, annotated or not.
 - **Read by** `Named.IsClone()`; `validateCloneTypes` / `validateCloneInstance` (`sema/clone.go`).
 
-### `` `single_owner ``
+### single owner
 
 - **Targets** types, enums · **Parameters** — none
 - **Effect** Declares a **move-only handle**: it has no `clone()`, and no context may duplicate it.
@@ -241,11 +242,11 @@ them, and the same check holds the two copies equal.
 - **Read by** `isSingleOwnerType` / `firstNestedSingleOwnerHandle` and the container-element and
   generic-instantiation checks in `sema/clone.go`; the slice check in `sema/expr.go`.
 
-### `` `duplicates_elements ``
+### duplicates elements
 
 - **Targets** types · **Parameters** — none
 - **Effect** Declares that duplicating a value of this type duplicates the elements it holds — its
-  buffer is held **by value** ([memory-model.md](memory-model.md) §3), so a deep copy reaches every
+  buffer is held **by value** ([memory-model.md](memory-model.md), under [By value versus behind a handle](memory-model.md#by-value-versus-behind-a-handle)), so a deep copy reaches every
   element. Governs the container-element nesting rule, the `clone()`/`filled()` gate, and closure
   dup-safety.
 - **Derivation** Derived for every other type: one that reaches a `` `duplicates_elements `` type
@@ -253,9 +254,9 @@ them, and the same check holds the two copies equal.
   (`Map[T, bool] _map`) and a user's own container all get the property that way and must not be
   annotated. The annotation exists only for the primitive, which has no fields to derive from —
   `Vector[T]`, the sole variable-size primitive whose buffer is held by value
-  ([memory-model.md](memory-model.md) §2). A fixed-size array owns its elements the same way and
+  ([memory-model.md](memory-model.md), under [The variable size primitives are a closed set](memory-model.md#the-variable-size-primitives-are-a-closed-set)). A fixed-size array owns its elements the same way and
   needs no declaration at all.
-- **Interactions** `` `native ``-only, like `` `interior ``: it is an assertion (§5), unverifiable
+- **Interactions** `` `native ``-only, like `` `interior ``: it is an assertion ([Assertions and denials](#assertions-and-denials)), unverifiable
   for a type with no fields, and a Promise-written container derives it instead. Contradicts
   nothing; orthogonal to `` `single_owner ``, which the elements may still be — that is precisely
   what the nesting rule polices.
@@ -263,18 +264,18 @@ them, and the same check holds the two copies equal.
   — the single walk behind `ownsElementsByValue` and `duplicatingContainerElemTypes` — and the
   container-element, `clone()`/`filled()` and closure dup-safety checks they drive.
 
-## 8. Transfer and aliasing across goroutines
+## Transfer and aliasing across goroutines
 
 Two capabilities govern the goroutine boundary: **sendable** (values may be moved across one) and
 **sharable** (a reference may be aliased across one, the type carrying whatever synchronization
 that requires). What they mean, how they are derived from a type's fields, and what they require of
-`Channel`/`Ref`/`Weak` element types is §6.5 of [language-design.md](language-design.md).
+`Channel`/`Ref`/`Weak` element types is [Sendable and Sharable](language-design.md#sendable-and-sharable) of [language-design.md](language-design.md).
 
 Both are derived structurally, so ordinary code never writes these annotations. They exist to
 override the derivation for types whose safety the compiler cannot see — which is exactly the types
 with no Promise-level fields to derive from: the native concurrency primitives.
 
-### `` `sendable `` / `` `sharable ``
+### sendable and sharable
 
 - **Targets** types · **Parameters** — none
 - **Effect** Assert the capability for the declaration, skipping field derivation.
@@ -283,14 +284,14 @@ with no Promise-level fields to derive from: the native concurrency primitives.
   whose type argument is not sendable is rejected at the instantiation, not licensed by the tag.
   This is what keeps `Box[NonSendable]` an error while letting `Channel[T]` assert its own
   synchronization.
-- **Interactions** **Requires `` `native `` (§5).** These are assertions, so only a declaration
+- **Interactions** **Requires `` `native `` ([Assertions and denials](#assertions-and-denials)).** These are assertions, so only a declaration
   whose implementation the compiler emits may make one; on a type written in Promise the capability
   is derived from the fields, which already have the answer. Contradicts the matching `` `not_ ``
   form. Not accepted on an enum, which can never be `` `native ``.
 - **Read by** `isSendableType` / `isSharableType` and `validateSendableInstance`
   (`sema/sendable.go`).
 
-### `` `not_sendable `` / `` `not_sharable ``
+### not sendable and not sharable
 
 - **Targets** types, enums · **Parameters** — none
 - **Effect** Deny the capability even though the fields would derive it.
@@ -299,14 +300,14 @@ with no Promise-level fields to derive from: the native concurrency primitives.
 - **Interactions** Contradicts the matching positive form.
 - **Read by** `isSendableType` / `isSharableType` (`sema/sendable.go`).
 
-### `` `confined ``
+### confined
 
 - **Targets** types, enums · **Parameters** — none
 - **Effect** Declares the type **thread-confined**: no value of it may cross a `go`/channel/`Task`
   boundary, and a `Ref`/`Weak` of it therefore uses a plain, non-atomic reference count.
 - **Derivation** **Atomicity itself is not declared — the compiler decides it.** A `Ref` that never
   crosses a boundary gets a plain count; one that may be shared across goroutines gets an atomic
-  one. Semantics are identical either way, so this is a transparent implementation detail (§17.3).
+  one. Semantics are identical either way, so this is a transparent implementation detail ([Channels](language-design.md#channels)).
   `` `confined `` is the *explicit opt-in* for a type the analysis cannot see through, and it is
   sound in only one direction: an atomic count is safe everywhere, while a plain one requires proof
   that the value stays on one thread. That proof is what the annotation asserts and what the
@@ -318,10 +319,10 @@ with no Promise-level fields to derive from: the native concurrency primitives.
   (`sema/sendable.go`), which perform the boundary rejection; `refIsAtomic` (`codegen/sched.go`),
   which selects the counter.
 
-### `` `interior ``
+### interior
 
 - **Targets** types · **Parameters** — none
-- **Effect** Exempts the type from *"mutation through a shared borrow is rejected"* (§6.2): its
+- **Effect** Exempts the type from *"mutation through a shared borrow is rejected"* ([Borrowing and Moving](language-design.md#borrowing-and-moving)): its
   mutating methods and setters keep a shared `this` receiver and stay callable through a `&`
   borrow. This is what lets a captured channel be sent to, and a `Mutex` be locked, through a
   shared reference.
@@ -335,12 +336,12 @@ with no Promise-level fields to derive from: the native concurrency primitives.
 - **Read by** `recvIsInterior` (`sema/expr.go`); the setter-receiver decision in
   `resolveMethodSignature` (`sema/decl.go`).
 
-## 9. Field placement
+## Field placement
 
-A type's fields are distributed across the four-struct model (§5.2). Placement is per field, and
+A type's fields are distributed across the four-struct model ([The Four Struct Model](language-design.md#the-four-struct-model)). Placement is per field, and
 there are exactly two placements: the heap instance struct (the default) and the value struct.
 
-### `` `value ``
+### value
 
 - **Targets** fields · **Parameters** — none
 - **Effect** Places the field in the **value struct**, embedded directly and copied whenever the
@@ -358,13 +359,13 @@ there are exactly two placements: the heap instance struct (the default) and the
 
 **There are no per-type or per-monomorphization fields.** Such a field would be global mutable
 state — reachable from anywhere that can name the type, absent from every function signature, and
-unsynchronized across goroutines — which §9.2's *No Module-Level Variables* rules out for the
+unsynchronized across goroutines — which [Methods](language-design.md#methods)'s *No Module-Level Variables* rules out for the
 language as a whole, and a field placement must not reintroduce it through a side door.
 Per-monomorphization *data* is expressed as a `` `mono `` **method** returning the value
 (`sprite_path() string \`mono`), which needs no storage, cannot be mutated, and is visible at
 every call site.
 
-### `` `raw ``
+### raw
 
 - **Targets** fields · **Parameters** — none
 - **Effect** The field's type is an LLVM type identifier used directly, bypassing Promise's type
@@ -372,9 +373,9 @@ every call site.
 - **Interactions** Used with `` `native `` types and `` `extern `` boundaries.
 - **Read by** field type resolution in `sema/decl.go`; `codegen/layout.go`.
 
-## 10. Type shape, dispatch and construction
+## Type shape dispatch and construction
 
-### `` `abstract ``
+### abstract
 
 - **Targets** methods · **Parameters** — none
 - **Effect** The method has no body; a subtype must implement it. A type with any abstract method
@@ -387,7 +388,7 @@ every call site.
 - **Read by** method definition in `sema/decl.go`; `needsVtable` and vtable emission in
   `codegen/rtti.go`.
 
-### `` `structural ``
+### structural
 
 - **Targets** types, methods, enums · **Parameters** `protocol` (bool, named)
 - **Effect** On a type: the interface may be satisfied without an `is` declaration — any type with
@@ -400,7 +401,7 @@ every call site.
   satisfiable.
 - **Read by** `types.Implements`; structural-default synthesis in `codegen/mono.go`.
 
-### `` `open `` / `` `sealed ``
+### open and sealed
 
 - **Targets** types · **Parameters** — none
 - **Effect** Concrete types are **sealed by default**: no other type may declare `is` on them.
@@ -415,7 +416,7 @@ every call site.
   one spelling for a given transition.
 - **Read by** inheritance checking in `sema/decl.go`.
 
-### `` `native ``
+### native
 
 - **Targets** types, methods · **Parameters** — none
 - **Effect** Declares something **the compiler already knows how to implement**. There is no Promise
@@ -429,7 +430,7 @@ every call site.
   is also what bounds `` `interior ``, which requires `` `native ``.
 - **Interactions** A native type has no Promise-level fields, so it can derive no capability
   structurally — its `` `sendable ``/`` `sharable ``/`` `single_owner ``/`` `interior ``
-  annotations are what carry those properties, and per §1 they are read exactly like a source
+  annotations are what carry those properties, and per [The one declaration rule](#the-one-declaration-rule) they are read exactly like a source
   type's. Field validation of a `` `sendable `` assertion is skipped, there being no fields to
   check.
 - **Read by** `defineType` / `defineMethod` (`sema/decl.go`); intrinsic dispatch in
@@ -439,7 +440,7 @@ every call site.
 they partition it: `` `native `` says *the compiler implements this*, `` `builtin `` says *the
 compiler depends on this*. A type carries at most one of them.
 
-### `` `builtin ``
+### builtin
 
 - **Targets** types, enums · **Parameters** `role` (identifier, positional)
 - **Effect** Declares that this type fills a **role the compiler depends on**. Unlike `` `native ``
@@ -471,16 +472,16 @@ The roles, which are the complete set:
 A role is claimed for what the compiler must *do* with the type, never for what it must *know
 about* it — so a type appears here only because syntax denotes it, the compiler builds one, or its
 shape is depended upon. A container is not listed because the compiler wants to know how it
-duplicates its elements; that is a property, and §1 puts it out of reach.
+duplicates its elements; that is a property, and [The one declaration rule](#the-one-declaration-rule) puts it out of reach.
 
-### `` `final ``
+### final
 
 - **Targets** fields · **Parameters** — none
 - **Effect** The field is immutable after construction: it may be assigned only in a `new()` or
   `` `factory `` body. A value correct at construction stays correct perpetually.
 - **Read by** assignment checking in `sema/expr.go`.
 
-### `` `factory ``
+### factory
 
 - **Targets** methods · **Parameters** — none
 - **Effect** A receiver-less constructor. Implies `` `mono `` placement — all generics resolved,
@@ -492,14 +493,14 @@ duplicates its elements; that is a property, and §1 puts it out of reach.
   only code besides `new()` that may assign a `` `final `` field.
 - **Read by** `sema/decl.go`; call resolution in `sema/expr.go`.
 
-### `` `global `` / `` `mono ``
+### global and mono
 
 - **Targets** methods · **Parameters** — none
 - **Effect** The two receiver-less method placements. `` `global `` is a namespaced function: no
   `this`, no `Self`, one for the whole type. `` `mono `` is per-monomorphization: no `this`, but
   `Self` is available and bound to the declaring type.
 - **Interactions** Both are **method** placements only; there are no per-type or
-  per-monomorphization fields (§9). `` `global `` is rejected on generic types and *is* inherited,
+  per-monomorphization fields ([Field placement](#field-placement)). `` `global `` is rejected on generic types and *is* inherited,
   the type being purely a namespace; `` `mono `` is **not** inherited — it binds `Self` to its
   declaring type, so calling it through a subtype would bind the wrong one. Both are rejected on
   operator methods, which always take the left operand as receiver, and on enum methods. A
@@ -507,9 +508,9 @@ duplicates its elements; that is a property, and §1 puts it out of reach.
   pointer from, so it resolves at compile time to the type that declares it.
 - **Read by** `resolvePlacement` (`sema/decl.go`); static call resolution in `sema/expr.go`.
 
-## 11. Visibility and documentation
+## Visibility and documentation
 
-### `` `public ``
+### public
 
 - **Targets** types, enums, fields, methods, functions · **Parameters** — none
 - **Effect** Exports the declaration from its module. Everything is module-private by default.
@@ -521,7 +522,7 @@ duplicates its elements; that is a property, and §1 puts it out of reach.
   Restating a known contract at each implementation is noise, not documentation.
 - **Read by** `SetExported` (`sema/decl.go`); module import resolution.
 
-### `` `doc ``
+### doc
 
 - **Targets** types, enums, fields, methods, functions, parameters, variants · **Parameters**
   `text` (string, positional)
@@ -538,7 +539,7 @@ duplicates its elements; that is a property, and §1 puts it out of reach.
   interface requirement — see `` `public ``.
 - **Read by** `extractDoc` (`sema/meta.go`); `promise doc`; the bindgen and formatter passes.
 
-### `` `deprecated ``
+### deprecated
 
 - **Targets** types, enums, fields, methods, functions, parameters, variants · **Parameters**
   `message` (string, positional, optional)
@@ -549,9 +550,9 @@ duplicates its elements; that is a property, and §1 puts it out of reach.
   rule has to be specified before the parameter that carries it.
 - **Read by** `extractDeprecated` (`sema/meta.go`); use sites in `sema/expr.go`.
 
-## 12. Testing
+## Testing
 
-### `` `test ``
+### test
 
 - **Targets** functions · **Parameters** `expected` (string, named);
   `exclude` (exclude-condition, named); `timeout` (string, named);
@@ -573,9 +574,9 @@ duplicates its elements; that is a property, and §1 puts it out of reach.
 A test that leaks memory fails. There is no annotation to waive that: the repository holds zero
 leaks, and a leak is a regression to be fixed rather than declared acceptable.
 
-## 13. Foreign interfaces
+## Foreign interfaces
 
-### `` `extern ``
+### extern
 
 - **Targets** functions · **Parameters** `symbol` (string, positional)
 - **Effect** Declares a function whose body is not in Promise and whose linkage is by **symbol
@@ -597,7 +598,7 @@ exists to avoid — every `` `extern `` states the symbol it binds.
 declaration.** The compiler emits the platform layer itself, so it knows the complete set of
 symbols an `` `extern `` may name; that set is registered in one place, and naming anything outside
 it is a compile error reported at the annotation. This is the same discipline as the annotation set
-(§2) and the target-condition identifiers: a fixed vocabulary, checked where it is written.
+([The set is closed](#the-set-is-closed)) and the target-condition identifiers: a fixed vocabulary, checked where it is written.
 
 Validation belongs at the declaration rather than at link time for two reasons. A linker
 diagnostic cannot point at Promise source — it names an object file and an internal symbol, so the
@@ -605,7 +606,7 @@ reader is told where the *call* was emitted rather than where the mistake was wr
 never sees a declaration that is never called, so an `` `extern `` naming a symbol that does not
 exist can sit in a module indefinitely and fail only for whoever first calls it.
 
-### `` `wasm_import ``
+### wasm import
 
 - **Targets** functions · **Parameters** `module` (string, positional);
   `name` (string, positional)
@@ -613,9 +614,9 @@ exist can sit in a module indefinitely and fail only for whoever first calls it.
 - **Read by** validation in `sema/decl.go`; `WasmImportMod`/`WasmImportName` in
   `codegen/layout.go`; emitted by the bindgen passes.
 
-## 14. Compile-time
+## Compile time
 
-### `` `target ``
+### target
 
 - **Targets** types, enums, functions · **Parameters** `condition` (target-condition, positional)
 - **Effect** Filters the declaration out of compilation on non-matching targets. A filtered
@@ -623,35 +624,35 @@ exist can sit in a module indefinitely and fail only for whoever first calls it.
   that compile it — with the exception of `` `target `` itself, which is validated on the filtering
   path too.
 - **Interactions** The *target condition* — its closed set of platform identifiers and the
-  operators that combine them — is defined once in §8.1 of
+  operators that combine them — is defined once in [Annotation Syntax](language-design.md#annotation-syntax) of
   [language-design.md](language-design.md), and `` `test ``'s `exclude` takes the narrower form of
   the same grammar. The set is closed: an identifier outside it is a compile error, and the
   diagnostic's list is derived from the accepted set so the two cannot drift.
 - **Read by** `Info.FilteredDecls` (`sema/check.go`); the identifier check in
   `sema/metaparams.go` against `ValidExcludeIdents` (`sema/target.go`).
 
-### `` `embed ``
+### embed
 
 - **Targets** functions · **Parameters** `path` (string, positional); `compress` (bool, named)
 - **Effect** Embeds the file or glob tree at `path` into the binary at compile time, exposed
   through the getter as an `EmbeddedFile` or `EmbeddedFiles`.
 - **Interactions** A module-level getter is a parameterless function declaration, which is why
-  §6 records the target as `functions`; there is no narrower declaration kind to name.
-- **Read by** the embed pass in `sema`; `codegen`; §8.6 has the path and glob rules.
+  [Index](#index) records the target as `functions`; there is no narrower declaration kind to name.
+- **Read by** the embed pass in `sema`; `codegen`; [Resource Embedding](language-design.md#resource-embedding) has the path and glob rules.
 
-### `` `lifetime ``
+### lifetime
 
 - **Targets** parameters, functions, methods · **Parameters** `name` (identifier, positional)
 - **Effect** Names a lifetime explicitly, overriding elision. The compiler uses aggressive lifetime
-  elision (§6.3), so this is almost never needed.
+  elision ([Lifetimes](language-design.md#lifetimes)), so this is almost never needed.
 - **Read by** `Param.SetLifetime` / `Param.Lifetime` (`types/signature.go`).
 
-## 15. Serialization
+## Serialization
 
 `` `serializable `` synthesizes the `encode`/`decode` pair; the field annotations shape the result.
 [serialization.md](serialization.md) and [schema.md](schema.md) are the full specifications.
 
-### `` `serializable ``
+### serializable
 
 - **Targets** types, enums · **Parameters** `tag` (string, named)
 - **Effect** Synthesizes `encode(Encoder)` and `decode(Decoder)` from the declaration's fields. On
@@ -661,7 +662,7 @@ exist can sit in a module indefinitely and fail only for whoever first calls it.
 ### Field annotations
 
 These five share one entry rather than a heading each: one *Read by*, and effects that are only
-legible together. The columns are the same ones §6 declares, and are reconciled the same way.
+legible together. The columns are the same ones [Index](#index) declares, and are reconciled the same way.
 
 | Annotation | Targets | Parameters | Effect |
 |---|---|---|---|
@@ -677,7 +678,7 @@ legible together. The columns are the same ones §6 declares, and are reconciled
   `encode`/`decode`, so on a type that is not `` `serializable `` they are inert.
 - **Read by** `sema/serialize.go` and the synthesized `encode`/`decode` bodies.
 
-## 16. Not annotations
+## Not annotations
 
 These are **not** part of the language. Each was considered and rejected, and the reason generalizes
 — so the entries stay here to keep them from being reintroduced. A compiler that accepts one of
@@ -685,29 +686,29 @@ these names is wrong.
 
 | Name | Why not, and what to use |
 |---|---|
-| `` `variant `` | There is no per-monomorphization *field* placement (§9). Per-monomorphization behavior is a `` `mono `` **method**; per-monomorphization data is that method's return value. |
+| `` `variant `` | There is no per-monomorphization *field* placement ([Field placement](#field-placement)). Per-monomorphization behavior is a `` `mono `` **method**; per-monomorphization data is that method's return value. |
 | `` `packed `` | Field layout is determined by the four-struct model, not by a per-type padding directive. A foreign struct whose shape is dictated from outside uses `` `raw `` fields. |
 | `` `align(N) `` | Same: alignment is the layout model's to decide. A per-type override is an ABI-visible promise the language does not make. |
 | `` `inline `` | Inlining is the optimizer's decision. `opt` inlines across modules at `-O1`, and a hint the compiler is free to ignore is surface that teaches nothing. |
-| `` `instance `` | Instance placement is the default (§9). An annotation for it would be a second way to write nothing, and its method form named the receiver-ful default that §9.2 already says needs no annotation. Use `` `value `` to move a field to the value struct. |
+| `` `instance `` | Instance placement is the default ([Field placement](#field-placement)). An annotation for it would be a second way to write nothing, and its method form named the receiver-ful default that [Methods](language-design.md#methods) already says needs no annotation. Use `` `value `` to move a field to the value struct. |
 | `` `unsafe `` | Nothing checked it and nothing was unlocked by it. The `unsafe { }` block and the raw pointer type `T*` went with it: a raw pointer is only ever needed by an implementation the compiler emits, and `` `native `` already names those. FFI uses `` `extern `` for the call and `` `raw `` for foreign struct layout. |
 | `` `allow_leaks `` | A leaking test is a defect, not a configuration. |
 
-## 17. Adding an annotation
+## Adding an annotation
 
-1. **Specify it here first** — a §6 row and an entry in §3's schema. If *"Read by"* cannot be
+1. **Specify it here first** — a [Index](#index) row and an entry in [How to read an entry](#how-to-read-an-entry)'s schema. If *"Read by"* cannot be
    filled in, the design is not finished; if it can only be filled in with "nothing", the
    annotation does not belong in the language.
-2. Register it in `builtinMetas` (targets) and `metaParamSpecs` (parameters). The §6 row and
+2. Register it in `builtinMetas` (targets) and `metaParamSpecs` (parameters). The [Index](#index) row and
    those two tables are reconciled mechanically by `checkAnnotationCoverage`
    (`tools/build/common/annotationcheck.go`), which runs on every commit: a registered annotation
-   with no §6 row, a §6 row naming nothing the compiler registers, a row whose targets or
+   with no [Index](#index) row, a [Index](#index) row naming nothing the compiler registers, a row whose targets or
    parameters disagree with the tables, and an entry whose **Targets**/**Parameters** line
    disagrees with its own row are each a build failure.
 3. Store it as a flag on `types.Named`/`types.Enum`, or on the field or parameter, with a getter.
 4. Set the flag from the annotation in `sema/decl.go` — on **both** the native and the
    source-declared paths, which are separate branches with separate returns.
-5. Have every decision read the flag. Do not add a type-identity or type-name test; per §1 that is
+5. Have every decision read the flag. Do not add a type-identity or type-name test; per [The one declaration rule](#the-one-declaration-rule) that is
    the defect this rule exists to prevent.
 6. Cover it: a sema test that it is accepted on each declared target and rejected on the others, and
    a behavioral test that the flag changes what it claims to change.

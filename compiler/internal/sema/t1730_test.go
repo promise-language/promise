@@ -9,7 +9,7 @@ import (
 // restriction it lifts was a layout rule — an interface declares no fields, so
 // it cannot affect the value struct, and the `is` clause is a conformance claim
 // the compiler checks rather than inherited state
-// (docs/language-design.md §5.2). State-bearing parents are still rejected.
+// (docs/language-design.md#the-four-struct-model). State-bearing parents are still rejected.
 
 func TestT1730ValueTypeStructuralParentAccepted(t *testing.T) {
 	checkOK(t, `

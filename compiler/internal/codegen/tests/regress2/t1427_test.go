@@ -128,7 +128,7 @@ func TestT1427_GoBlockHeapVectorDivertDropsResult(t *testing.T) {
 	}
 }
 
-// Explicit-return exit (§17.2 / T1385): `go! { ...; use r := ...; return s + "!"; }`.
+// Explicit-return exit (language-design.md#explicit-concurrency / T1385): `go! { ...; use r := ...; return s + "!"; }`.
 func TestT1427_GoBlockExplicitReturnHeapDivertDropsResult(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		type CloseError is error { int code; }

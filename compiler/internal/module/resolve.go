@@ -89,7 +89,7 @@ func ListRepoTags(url string) (epochTags []EpochTag, stableCommit string, err er
 
 // Candidates filters epochTags down to those usable as a candidate for a project
 // on projectEpoch — every tag whose epoch is ≤ the project's — and returns them
-// sorted DESCENDING by epoch. The returned slice IS the §9.8 walk-back order:
+// sorted DESCENDING by epoch. The returned slice IS the module-system.md#cross-epoch-module-versioning walk-back order:
 // try the first (largest epoch-X ≤ E), and on verification failure step to the
 // next-older entry.
 func Candidates(epochTags []EpochTag, projectEpoch string) []EpochTag {
@@ -106,7 +106,7 @@ func Candidates(epochTags []EpochTag, projectEpoch string) []EpochTag {
 }
 
 // HighestEpoch returns the largest epoch among the given tags (numeric compare),
-// or "" when the list is empty. Used for the §9.10 "highest verified epoch"
+// or "" when the list is empty. Used for the module-system.md#when-a-module-has-no-compatible-version "highest verified epoch"
 // message — the newest epoch the module carries a tag for.
 func HighestEpoch(epochTags []EpochTag) (epoch, tag string) {
 	for _, t := range epochTags {
@@ -118,7 +118,7 @@ func HighestEpoch(epochTags []EpochTag) (epoch, tag string) {
 }
 
 // LowestEpoch returns the smallest epoch among the given tags (numeric compare),
-// or "" when the list is empty. Used for the §9.10 "module only targets newer
+// or "" when the list is empty. Used for the module-system.md#when-a-module-has-no-compatible-version "module only targets newer
 // epochs" message — the oldest epoch the module still supports.
 func LowestEpoch(epochTags []EpochTag) (epoch, tag string) {
 	for _, t := range epochTags {
@@ -129,7 +129,7 @@ func LowestEpoch(epochTags []EpochTag) (epoch, tag string) {
 	return epoch, tag
 }
 
-// NoCompatibleVersionError is the §9.10 gate: raised at resolve time, before any
+// NoCompatibleVersionError is the module-system.md#when-a-module-has-no-compatible-version gate: raised at resolve time, before any
 // unverified dependency source reaches the compiler, so a project never sees raw
 // compiler errors buried inside a dependency. Module is the URL or name as the
 // user referred to it; Epoch is the project's epoch; HighestVerifiedEpoch/
@@ -156,7 +156,7 @@ func (e *NoCompatibleVersionError) Error() string {
 		b.WriteString("  options:\n")
 		fmt.Fprintf(&b, "    - raise this project to epoch ≥ %s       (the module's oldest supported epoch)\n", e.LowestSupportedEpoch)
 		b.WriteString("    - use a fork:   promise package add github.com/you/fork\n")
-		b.WriteString("    - redirect locally while fixing:  [replace] " + e.Module + " = \"../...\"   (§9.7)\n")
+		b.WriteString("    - redirect locally while fixing:  [replace] " + e.Module + " = \"../...\"   (module-system.md#local-development-overrides)\n")
 		fmt.Fprintf(&b, "    - or wait for the module to publish an epoch-%s tag", e.Epoch)
 		return b.String()
 	}
@@ -173,7 +173,7 @@ func (e *NoCompatibleVersionError) Error() string {
 		fmt.Fprintf(&b, "    - pin this project to an epoch the module supports\n")
 	}
 	b.WriteString("    - use a fork:   promise package add github.com/you/fork\n")
-	b.WriteString("    - redirect locally while fixing:  [replace] " + e.Module + " = \"../...\"   (§9.7)\n")
+	b.WriteString("    - redirect locally while fixing:  [replace] " + e.Module + " = \"../...\"   (module-system.md#local-development-overrides)\n")
 	fmt.Fprintf(&b, "    - or wait for the module to publish an epoch-%s tag", e.Epoch)
 	return b.String()
 }

@@ -272,7 +272,7 @@ func (c *Compiler) emitArrayTempDrop(temp stmtTemp) {
 // emitInstanceFieldDropsAndFree drops all droppable fields of `named` for the
 // instance at `instance` (an i8*), then frees it — WITHOUT running any
 // user-defined drop() body. T0967: the use-binding close path uses this when a
-// use-bound type also defines drop(); §16.4 suppresses the user drop (use takes
+// use-bound type also defines drop(); language-design.md#interaction-between-use-and-drop suppresses the user drop (use takes
 // precedence), but the instance's fields and memory must still be reclaimed
 // (zero-leak policy). Mirrors defineSynthesizedDropBody's field-drop + free
 // sequence, but operates mid-block on an already-extracted instance pointer.

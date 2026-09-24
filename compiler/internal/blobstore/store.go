@@ -51,7 +51,7 @@ func (s *Store) ArchivePath(hash string) string {
 	return filepath.Join(s.archivesDir(), normalizeHash(hash))
 }
 
-// Has reports whether a blob is present in the CAS. Per §4.2 step 2 the cache
+// Has reports whether a blob is present in the CAS. Per distribution.md#fetch-flow step 2 the cache
 // trusts entries by presence (not re-hashed per build); integrity is repaired
 // by `promise doctor` (T0771).
 func (s *Store) Has(hash string) bool {
@@ -72,7 +72,7 @@ func (s *Store) HasArchive(hash string) bool {
 }
 
 // commitBlob atomically installs already-verified bytes at tmpPath into
-// blobs/sha256/<hash> via rename (§4.4): an interrupted fetch can never leave a
+// blobs/sha256/<hash> via rename (distribution.md#telemetry): an interrupted fetch can never leave a
 // half-written entry that looks valid by presence. Same temp+rename robustness
 // as T0722's install-binary write. Caller must have verified the sha256.
 func (s *Store) commitBlob(tmpPath, hash string) (string, error) {
@@ -187,7 +187,7 @@ func Lock(lockPath, identityHint, waitMsg string) (func(), error) {
 }
 
 // EpochRefs computes the blob+archive hash set referenced by a manifest, for
-// the per-epoch blobs.refs file (§4.4). Lines are "blob <hash>" / "archive
+// the per-epoch blobs.refs file (distribution.md#telemetry). Lines are "blob <hash>" / "archive
 // <hash>" (archive lines only for sources carrying archive_sha256, the asserted
 // content key). The set is derived from the manifest alone — no epoch binary is
 // executed. T0771's gc/remove reads the union of all epochs/*/blobs.refs.
@@ -214,7 +214,7 @@ func EpochRefs(m *Manifest) []string {
 }
 
 // WriteEpochRefs writes epochs/<epoch>/blobs.refs from the embedded manifest so
-// GC can compute roots without executing any epoch binary (§4.4). This is the
+// GC can compute roots without executing any epoch binary (distribution.md#telemetry). This is the
 // T0769 deliverable T0771 consumes.
 func WriteEpochRefs(epochDir string, m *Manifest) error {
 	if err := os.MkdirAll(epochDir, 0o755); err != nil {
@@ -365,7 +365,7 @@ func isHexHash(name string) bool {
 
 // ReadEpochRefs parses epochs/<epoch>/blobs.refs into its referenced blob +
 // archive hash sets. Returns ok=false (NOT an error) when the file is absent or
-// unreadable so callers can apply the §4.4 fail-safe (keep everything rather
+// unreadable so callers can apply the distribution.md#telemetry fail-safe (keep everything rather
 // than risk deleting a live blob). Lines are "blob <hash>" / "archive <hash>"
 // as written by WriteEpochRefs; malformed lines are ignored.
 func ReadEpochRefs(epochDir string) (blobs, archives map[string]bool, ok bool) {

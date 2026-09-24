@@ -16,7 +16,7 @@
 //	bin/release cut stable [--dry-run] [--reason <text>] [--commit <commit>] [--run-ci] [--no-ci-wait] [--confirm-year] [--notes-file <path>|-] [--notes <text>]
 //	bin/release ci [platform] [--no-tests] [--watch] [--commit <commit>] [--force] [--cancel-running]
 //
-// See docs/release-automation.md §2 (build-order), §6.3 (gated cut), and T0773,
+// See docs/release-automation.md#the-build-order-constraint (build-order), release-automation.md#cutting-with-enforced-gates (gated cut), and T0773,
 // T0797, T0943.
 package main
 

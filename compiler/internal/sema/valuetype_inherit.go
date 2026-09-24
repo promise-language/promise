@@ -219,7 +219,7 @@ func ownFieldPos(named *types.Named, d *ast.TypeDecl) ast.Pos {
 // `structural interface: a `structural type that declares no fields at all.
 // Such a parent is a conformance claim, not inherited state — it cannot affect
 // the value struct's layout, so a pure value type may always declare it
-// (T1730, docs/language-design.md §5.2).
+// (T1730, docs/language-design.md#the-four-struct-model).
 //
 // Fieldlessness, not the `structural flag alone, is the test. A `structural
 // *value* type carries `value fields and is state-bearing — satisfying it is

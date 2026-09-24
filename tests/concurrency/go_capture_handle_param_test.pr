@@ -1,6 +1,6 @@
 // T2162: a refcounted `sharable handle reaching a goroutine from a BORROWED
 // PARAMETER must be duplicated at the spawn boundary (docs/language-design.md
-// §17.4). Codegen only bumped the refcount when the captured name had a drop
+// language-design.md#ownership-across-goroutines). Codegen only bumped the refcount when the captured name had a drop
 // binding, which a parameter never has — the caller owns it. The caller's drop
 // (an NLL early drop at the call, which is its last use, or scope exit) then
 // freed the referent under the running goroutine: a null-mutex segfault on the
@@ -107,7 +107,7 @@ go_call_channel_param() `test {
 
 // --- go obj.method(ch) — the via-block call path ----------------------------
 
-// A pure value type: the receiver is Copy, so §17.4's receiver-borrow rule does
+// A pure value type: the receiver is Copy, so language-design.md#ownership-across-goroutines's receiver-borrow rule does
 // not apply and the spawn reaches genGoCallExprViaBlock with `ch` as a capture.
 type Relay {
   int bias `value;

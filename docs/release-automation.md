@@ -2,28 +2,28 @@
 
 > **Tag:** `release-automation` — remaining work to complete this document: `mcp__tracker__list --tag release-automation`
 
-> How Promise releases are built and published on GitHub. This is the pipeline behind the artifacts in [distribution.md](distribution.md) §3. It covers the new-model specifics the original distribution §7 did not: building the prebuilt dependency **blobs**, hashing them, embedding the manifest under a strict **build order**, producing **thin + full** binary variants, building the **Promise stub** per target, and publishing on an `epoch-*` tag.
+> How Promise releases are built and published on GitHub. This is the pipeline behind the artifacts in [distribution.md](distribution.md), under [Release Artifacts](distribution.md#release-artifacts). It covers the new-model specifics the original distribution document did not: building the prebuilt dependency **blobs**, hashing them, embedding the manifest under a strict **build order**, producing **thin + full** binary variants, building the **Promise stub** per target, and publishing on an `epoch-*` tag.
 
 ---
 
-## 1. Repository & tags
+## Repository and tags
 
 [`github.com/promise-language/promise`](https://github.com/promise-language/promise) — private, default branch `main`.
 
 | Branch | Purpose | Status |
 |--------|---------|--------|
 | `main` | Main development branch. All PRs target main. | exists |
-| `next` | Pre-release staging — validates the next epoch before it is cut. | optional; the `epoch-next` moving tag (§6) fills this role today |
+| `next` | Pre-release staging — validates the next epoch before it is cut. | optional; the `epoch-next` moving tag ([Cutting a release](#cutting-a-release)) fills this role today |
 
-Tags follow `epoch-YYYY.N` (e.g. `epoch-2026.0`). **A tag push is a release; nothing else triggers one.** `epoch-next` is a moving pre-release tag cut at the commit being validated (see [epoch-versioned-installs.md](archive/epoch-versioned-installs.md) §3 for channels); a dedicated `next` branch is optional and not currently used — the moving tag fills the staging role (§6). The first stable release **`epoch-2026.0`** has been cut and published; subsequent epochs follow the §6 procedure.
+Tags follow `epoch-YYYY.N` (e.g. `epoch-2026.0`). **A tag push is a release; nothing else triggers one.** `epoch-next` is a moving pre-release tag cut at the commit being validated (see [epoch-versioned-installs.md](archive/epoch-versioned-installs.md) [Prebuilt blobs](#prebuilt-blobs) for channels); a dedicated `next` branch is optional and not currently used — the moving tag fills the staging role ([Cutting a release](#cutting-a-release)). The first stable release **`epoch-2026.0`** has been cut and published; subsequent epochs follow the [Cutting a release](#cutting-a-release) procedure.
 
-> **Private repo caveat.** While the repository is private, GitHub Release assets are not publicly downloadable, so the `curl … | sh` install flow in [distribution.md](distribution.md) §2 cannot work for outside users yet. Either the repo (or a releases-only mirror) must be public before the public install story is live, or releases must be served from a separate public location. Track this as a release-readiness blocker.
+> **Private repo caveat.** While the repository is private, GitHub Release assets are not publicly downloadable, so the `curl … | sh` install flow in [distribution.md](distribution.md), under [Installation](distribution.md#installation) cannot work for outside users yet. Either the repo (or a releases-only mirror) must be public before the public install story is live, or releases must be served from a separate public location. Track this as a release-readiness blocker.
 
 ---
 
-## 2. The build-order constraint
+## The build order constraint
 
-The central constraint of the new model: a **thin** binary embeds a *manifest* — per dependency, the content identity (`name`, `sha256`, `size`) plus a ranked list of **acquisition sources** ([distribution.md](distribution.md) §4.1) — and the `sha256` is the trust anchor used to verify the blob when it is acquired at runtime. The `sha256` identifies *content*, not a URL, so packaging (one-file-per-hash vs archives) is free to vary. The blobs must still exist and be hashed **before** the compiler binary that references them is finalized:
+The central constraint of the new model: a **thin** binary embeds a *manifest* — per dependency, the content identity (`name`, `sha256`, `size`) plus a ranked list of **acquisition sources** ([distribution.md](distribution.md), under [Manifest entry content identity and acquisition](distribution.md#manifest-entry-content-identity-and-acquisition)) — and the `sha256` is the trust anchor used to verify the blob when it is acquired at runtime. The `sha256` identifies *content*, not a URL, so packaging (one-file-per-hash vs archives) is free to vary. The blobs must still exist and be hashed **before** the compiler binary that references them is finalized:
 
 ```
 1. Build prebuilt blobs         (host LLVM tools, wasm runner, CRTs, target sysroots)
@@ -47,9 +47,9 @@ Steps 1–2 are the expensive, cacheable part (LLVM builds rarely change between
 
 ---
 
-## 3. Prebuilt blobs (step 1–2)
+## Prebuilt blobs
 
-Each blob is a dependency artifact identified by the `sha256` of its extracted content, so it is immutable and shareable across epochs. **How it is published is an acquisition choice recorded in the manifest's `sources`** ([distribution.md](distribution.md) §4.1), not a fixed convention: a blob may be uploaded as its own release asset, or several blobs may ride in one compressed archive that the resolver downloads once and extracts by inner path, or a blob may be sourced from an upstream vendor archive without re-hosting. The pipeline picks the packaging; the compiler only ever asserts on the content `sha256`.
+Each blob is a dependency artifact identified by the `sha256` of its extracted content, so it is immutable and shareable across epochs. **How it is published is an acquisition choice recorded in the manifest's `sources`** ([distribution.md](distribution.md), under [Manifest entry content identity and acquisition](distribution.md#manifest-entry-content-identity-and-acquisition)), not a fixed convention: a blob may be uploaded as its own release asset, or several blobs may ride in one compressed archive that the resolver downloads once and extracts by inner path, or a blob may be sourced from an upstream vendor archive without re-hosting. The pipeline picks the packaging; the compiler only ever asserts on the content `sha256`.
 
 | Blob | Per | Notes |
 |------|-----|-------|
@@ -57,10 +57,10 @@ Each blob is a dependency artifact identified by the `sha256` of its extracted c
 | `wasmtime` / Node wasm harness | host platform | For `wasm32-wasi` / `wasm32-web` targets. |
 | musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`) | linux target | **Done** (T0530): static-link CRT, sliced from the pinned upstream Alpine `musl-dev` apk (musl.libc.org publishes source only, so a distro package is the only prebuilt). Manifest names are **arch-qualified** (`musl-<arch>-crt1.o`) because the CRT is a *target* dependency — one host manifest can carry several arches. Projected best-effort: an unpublished CRT is skipped, never fatal, since Linux binaries also embed the host arch's copy. |
 | compiler-rt builtins (`libclang_rt.builtins.a`) | linux target | **Done** (T1676): the compiler runtime the target ABI presumes — aarch64 soft-float binary128 helpers (musl's own `libc.a` calls them from its float `printf`/`scanf` path) and LSE outline-atomics helpers. Sliced from the pinned Alpine `compiler-rt` apk, same v3.23 baseline as musl. Arch-qualified manifest names (`compiler-rt-<arch>-libclang_rt.builtins.a`) — a *target* dependency, like the CRT. Spliced onto **every** musl link line, unconditionally. |
-| macOS SDK stubs (`libSystem.tbd` + headers) | macOS target | Zero-dep goal ([distribution.md](distribution.md) §5.1). |
-| Windows SDK / UCRT `.lib` import stubs | windows target | **Done** (T0772): self-generated license-clean import libs embedded in the compiler (~21 KiB), not a fetched blob. Zero-dep goal ([distribution.md](distribution.md) §5.2). |
+| macOS SDK stubs (`libSystem.tbd` + headers) | macOS target | Zero-dep goal ([distribution.md](distribution.md), under [macOS](distribution.md#macos)). |
+| Windows SDK / UCRT `.lib` import stubs | windows target | **Done** (T0772): self-generated license-clean import libs embedded in the compiler (~21 KiB), not a fetched blob. Zero-dep goal ([distribution.md](distribution.md), under [Windows](distribution.md#windows)). |
 
-**Cross-target blobs are fetched on demand by default** — a **full** host binary pre-stages only the host workflow, so targeting another platform fetches its blobs on first use. This is a packaging default, not a limit: the **all** variant ([distribution.md](distribution.md) §1.2) pre-stages every supported target's blobs as well, for fully offline cross-compilation. The runtime is identical either way — a missing blob is fetched the same way regardless of variant. *(the **all** variant is planned for later: cross-compilation is not working yet, so there are no cross-target blobs to bundle today. First releases ship thin + full only.)*
+**Cross-target blobs are fetched on demand by default** — a **full** host binary pre-stages only the host workflow, so targeting another platform fetches its blobs on first use. This is a packaging default, not a limit: the **all** variant ([distribution.md](distribution.md), under [Variants](distribution.md#variants)) pre-stages every supported target's blobs as well, for fully offline cross-compilation. The runtime is identical either way — a missing blob is fetched the same way regardless of variant. *(the **all** variant is planned for later: cross-compilation is not working yet, so there are no cross-target blobs to bundle today. First releases ship thin + full only.)*
 
 Blobs are produced **locally on a maintainer machine** (T0797), not on a per-epoch CI run. A single macOS maintainer can produce all platforms' blobs in one sitting — extracting upstream LLVM tarballs is platform-agnostic (`tar -xf`), so the linux + windows blobs come straight from the upstream tarball; only the `darwin-arm64` patch+sign step needs macOS, and the maintainer has it. The full local workflow:
 
@@ -108,13 +108,13 @@ Why brotli-11 and why per-blob:
 - **brotli-11** won a Go-library benchmark on the LLVM tool blobs (3 darwin-arm64 blobs, 377 MB → **77 MB, 4.87×**; decompress ~1.2 s). It beats LZMA/xz (92 MB, 6.4 s decompress), bzip2, and gzip on *both* ratio and decompress, and beats `zstd --best` (96 MB) on ratio. Its only cost is slow compression (~10 min single-threaded for the LLVM set), which is acceptable because **compression is rare** (only on a new dependency version) **and cacheable** (unchanged content-hash → reuse the compressed asset, never recompress), while **download size recurs for every user/install** and is the metric to minimize.
 - **Per-blob, not one combined archive:** bumping a single dependency (e.g. musl CRT) must not invalidate or force recompression of the others (e.g. all of LLVM). Each blob compresses/uploads/caches on its own content hash.
 
-This applies to everything Promise *fetches as a dependency*. It does **not** apply to the initial `promise` binary install download, which cannot use brotli (no decompressor exists on a fresh target system before the binary is installed) — see [distribution.md](distribution.md) §2.3.
+This applies to everything Promise *fetches as a dependency*. It does **not** apply to the initial `promise` binary install download, which cannot use brotli (no decompressor exists on a fresh target system before the binary is installed) — see [distribution.md](distribution.md), under [Direct download](distribution.md#direct-download).
 
 ---
 
-## 4. Build + test CI (manual dispatch)
+## Build and test CI
 
-CI is **manual `workflow_dispatch` only** — it does *not* run on push/PR. At the repo's commit volume on a private repo where Actions minutes are metered and macOS bills 10×, per-commit CI is not feasible; per-commit correctness comes from the mandatory local `bin/verify` gate, and this workflow validates the build+test toolchain on GitHub runners (which the release pipeline depends on). It builds and tests per platform — picking a single platform or `all` to control cost — and does **not** produce release artifacts (that is `release.yml`, §5). Trigger it with **`bin/release ci`** (below) or the Actions UI.
+CI is **manual `workflow_dispatch` only** — it does *not* run on push/PR. At the repo's commit volume on a private repo where Actions minutes are metered and macOS bills 10×, per-commit CI is not feasible; per-commit correctness comes from the mandatory local `bin/verify` gate, and this workflow validates the build+test toolchain on GitHub runners (which the release pipeline depends on). It builds and tests per platform — picking a single platform or `all` to control cost — and does **not** produce release artifacts (that is `release.yml`, [Release workflow](#release-workflow)). Trigger it with **`bin/release ci`** (below) or the Actions UI.
 
 Committed at [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (the authoritative copy). Essentials:
 
@@ -135,7 +135,7 @@ jobs:
           - { name: linux-arm64,   runner: ubuntu-24.04-arm }   # native arm64; metered on private repos
           - { name: darwin-arm64,  runner: macos-latest }
           - { name: windows-amd64, runner: windows-latest }
-          # - { name: darwin-amd64, runner: macos-13 }   # deferred — Intel macOS unverifiable (no working Xcode CLT); see §7
+          # - { name: darwin-amd64, runner: macos-13 }   # deferred — Intel macOS unverifiable (no working Xcode CLT); see [Open items](#open-items)
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -164,7 +164,7 @@ jobs:
         env: { PROMISE_USE_CLANG: "${{ runner.os == 'macOS' && '1' || '' }}" }
 ```
 
-**Triggering manually (`bin/release ci`).** The convenience trigger for the dispatch above (`tools/build/common/release_ci.go`). With no platform it dispatches **`linux-amd64` only** (the cheap default); `bin/release ci all` runs the whole matrix in one run; `bin/release ci darwin` — or `linux`/`windows`, or a canonical `<os>-<arch>` — names **one** target. `--no-tests` sets `run_tests=false` (build-only toolchain check); `--watch` polls the dispatched run to completion and **exits non-zero if CI is red** (usable as a script gate — it snapshots the latest run ID first, so it follows the run *this* dispatch creates, not a stale green one already at the same commit). `git`/`gh` sit behind the same interface seams as `cut`, so the tests are hermetic. (`cut` dispatches the same workflow as a release-gate side effect — §6.3; `bin/release ci` is the standalone "run CI on my commit" path.)
+**Triggering manually (`bin/release ci`).** The convenience trigger for the dispatch above (`tools/build/common/release_ci.go`). With no platform it dispatches **`linux-amd64` only** (the cheap default); `bin/release ci all` runs the whole matrix in one run; `bin/release ci darwin` — or `linux`/`windows`, or a canonical `<os>-<arch>` — names **one** target. `--no-tests` sets `run_tests=false` (build-only toolchain check); `--watch` polls the dispatched run to completion and **exits non-zero if CI is red** (usable as a script gate — it snapshots the latest run ID first, so it follows the run *this* dispatch creates, not a stale green one already at the same commit). `git`/`gh` sit behind the same interface seams as `cut`, so the tests are hermetic. (`cut` dispatches the same workflow as a release-gate side effect — [Cutting with enforced gates](#cutting-with-enforced-gates); `bin/release ci` is the standalone "run CI on my commit" path.)
 
 *What gets tested.* `workflow_dispatch` can only target a branch/tag ref — never an arbitrary commit — and `actions/checkout` re-fetches that ref **by name when the job starts**, seconds after the dispatch call returns. So:
 
@@ -182,9 +182,9 @@ jobs:
 
 ---
 
-## 5. Release workflow (tag-triggered)
+## Release workflow
 
-Triggered by an `epoch-*` tag. Implements the build order of §2 minus blob production: the per-epoch `blobs` job is gone (T0797), so `release.yml` now projects the manifest from the committed `blobs.json` catalog, pulls pre-hosted blobs on demand, and otherwise runs the same thin→stub→full→verify→publish chain.
+Triggered by an `epoch-*` tag. Implements the build order of [The build order constraint](#the-build-order-constraint) minus blob production: the per-epoch `blobs` job is gone (T0797), so `release.yml` now projects the manifest from the committed `blobs.json` catalog, pulls pre-hosted blobs on demand, and otherwise runs the same thin→stub→full→verify→publish chain.
 
 Committed at [`.github/workflows/release.yml`](../.github/workflows/release.yml) (the authoritative copy). The as-built workflow differs from the shape below in a few mechanical ways the sketch glosses over — they are intentional: the `compiler` job installs the host LLVM toolchain (phase B's stub `-release` compile needs a backend); artifacts land under `dist/bin/` + `dist/manifest-<host>.json`; and Windows binary names carry `.exe` supplied by the workflow (not by `bin/release`). The `manifest --from-catalog` step deliberately omits `--tag` — the deps release tag is catalog-derived (`deps-<dep>-<version>`); a workflow override would point the manifest's blob URLs at a release that does not host the blobs. Shape:
 
@@ -205,7 +205,7 @@ jobs:
                            {host: linux-arm64,   runner: ubuntu-24.04-arm},
                            {host: darwin-arm64,  runner: macos-latest},
                            {host: windows-amd64, runner: windows-latest} ] }
-                           # darwin-amd64 (macos-13) deferred — see §7
+                           # darwin-amd64 (macos-13) deferred — see [Open items](#open-items)
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -275,7 +275,7 @@ jobs:
       - name: Verify manifest resolves (fail the release on any mismatch)
         # For every manifest entry, confirm a packaged source yields bytes whose
         # sha256 matches. Catches bogus entries here so users never
-        # download-and-discard at runtime (distribution.md §4.3).
+        # download-and-discard at runtime (distribution.md [Content mismatch is loud and never silent](distribution.md#content-mismatch-is-loud-and-never-silent)).
         run: bin/release verify-manifest dist/manifest-*.json --against dist/deps
       - name: Compress binaries with gzip (T0796 — published assets are .gz only)
         # `-9` for max ratio; `-n` strips the embedded mtime so re-runs of the same
@@ -288,7 +288,7 @@ jobs:
         env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
         # The install scripts are committed (scripts/install.*, present via the checkout
         # prelude) and attached verbatim — nothing generates them. Users fetch them at
-        # releases/latest/download/install.sh (distribution.md §2.1). epoch-next cuts a
+        # releases/latest/download/install.sh (distribution.md [The Linux and macOS install script](distribution.md#the-linux-and-macos-install-script)). epoch-next cuts a
         # GitHub pre-release (the `next` channel). Only .gz assets + SHA256SUMS +
         # installers are published — dependency blobs live in deps-<dep>-<version>.
         run: |
@@ -307,17 +307,17 @@ jobs:
 Notes:
 - **Release notes are `--notes-from-tag`.** `bin/release cut` writes the notes body into the annotated tag, and `release.yml` publishes that tag body verbatim as the GitHub release notes alongside the artifacts. There is no committed changelog file to keep in sync. `resolveNotesBody` (`release_cut.go`) picks the body: **`--notes-file <path|->` or `--notes "<text>"`** (mutually exclusive) supplies a hand-authored or AI-synthesized themed body, and `installHeader` is auto-prepended either way. That is the **normal** path — the `/cut-release` skill drives it, and epoch-2026.8 was cut with it. With neither flag, `generateReleaseNotes` falls back to a mechanical bulleted list of non-merge commit subjects in `epoch-<last>..<sha>` (newest first) straight from `git log` — the fallback for an unattended cut, not the intended output.
 - `bin/release` (T0773) is the release driver implementing the build-order. Subcommands: `blobs --host <t> --out <dir>` (collect host dependency blobs), `manifest <blobsdir> --host <t> --pack <dir> --out <m> [--tag <tag>]` (hash+size, pack hash-named upload artifacts, emit the ranked-sources manifest), `build --variant {thin|full} --manifest <m> --out <bin> [--blobs <dir>] [--release-tag <epoch-Y.N>]` (the 3-phase compiler+stub build; `--release-tag` stamps the version from the tag rather than `catalog.toml`, T1195), and `verify-manifest <m>... --against <dir>` (the integrity gate). `bin/build --release` remains a shortcut that produces an embed-everything (full-equivalent) binary without the stub.
-- The **stub** is compiled *by the just-built compiler* inside `bin/release build` (an internal phase), then embedded back into the compiler so `promise install` can extract it ([distribution.md](distribution.md) §2.5). Cross-compiling the stub per target is gated on cross-compilation (T0524); first releases build the host stub only.
+- The **stub** is compiled *by the just-built compiler* inside `bin/release build` (an internal phase), then embedded back into the compiler so `promise install` can extract it ([distribution.md](distribution.md), under [The stub launcher](distribution.md#the-stub-launcher)). Cross-compiling the stub per target is gated on cross-compilation (T0524); first releases build the host stub only.
 - **Hosting:** each manifest entry's primary `source` is a **GitHub release asset** on `github.com/promise-language/promise`, named by the blob's content `sha256` (content-addressed → an unchanged dependency reuses the same asset across releases, no re-upload). The pinned upstream vendor archive (e.g. the LLVM tarball) is a ranked fallback source. A CDN/R2 mirror ([T0523](#)) is a deferred, optional future source — ranked sources + `PROMISE_BLOB_MIRROR` make adding it non-breaking (no content hashes change).
-- **Install binaries are gzip-compressed only** (T0796). Each `promise-*` binary is published as `promise-*[.exe].gz` — no raw asset. Gzip is the universal floor: `gunzip` ships on every POSIX system, and Windows decompresses via `System.IO.Compression.GzipStream`. Brotli/zstd/xz can't bootstrap the *first* install (the decompressor lives inside the promise binary that doesn't exist yet); the brotli-11 path in §3 is for dependency blobs the already-installed compiler fetches at runtime — a different problem.
+- **Install binaries are gzip-compressed only** (T0796). Each `promise-*` binary is published as `promise-*[.exe].gz` — no raw asset. Gzip is the universal floor: `gunzip` ships on every POSIX system, and Windows decompresses via `System.IO.Compression.GzipStream`. Brotli/zstd/xz can't bootstrap the *first* install (the decompressor lives inside the promise binary that doesn't exist yet); the brotli-11 path in [Prebuilt blobs](#prebuilt-blobs) is for dependency blobs the already-installed compiler fetches at runtime — a different problem.
 - **`SHA256SUMS` is computed over the `.gz` assets** — the bytes that are actually downloaded. All three consumers (`install.sh`, `install.ps1`, `promise update`/`sync`) verify the checksum before decompressing. This verifies HTTP/CDN integrity (catches a truncated/corrupted download immediately) and mirrors the normal `sha256sum *.gz` convention.
 - `SHA256SUMS` covers only the top-level binaries — dependency blobs are self-verifying via their content `sha256` in the embedded manifest, regardless of how they are packaged (direct files or archives).
 - `windows-amd64` is a **full matrix member** in `compiler` (CI already builds and passes the gates on it). Post-T0797 there is no per-epoch `blobs` job to be a member of — `windows-amd64` blobs are produced locally via `bin/release publish-blobs --host windows-amd64` like every other target. Its top-level artifacts carry `.exe` (`promise-windows-amd64.exe`, `…-full.exe`). The extension is supplied **by the workflow** (a `matrix.ext` field appended to `--out`), **not** by `bin/release` — the driver writes `--out` verbatim. The Windows compiler still builds via `opt` → `llc` → `lld-link` (no LTO yet — T0049).
-- The **all** variant ([distribution.md](distribution.md) §1.2) is the same "assemble" step with *every* supported target's blobs in the pre-stage set instead of just the host's — no new runtime code. It is deferred until cross-compilation works (no cross-target blobs exist yet), so first releases publish thin + full only.
+- The **all** variant ([distribution.md](distribution.md), under [Variants](distribution.md#variants)) is the same "assemble" step with *every* supported target's blobs in the pre-stage set instead of just the host's — no new runtime code. It is deferred until cross-compilation works (no cross-target blobs exist yet), so first releases publish thin + full only.
 
 ---
 
-## 5a. End-to-end install gate
+## End to end install gate
 
 The end-to-end install gate (`bin/gate install --variant {thin|full} [--channel {next|stable|<epoch>}]`, [gate-system.md](gate-system.md) §Class 3) validates the **real** user install path: it fetches the published install script from a GitHub release, runs it (download → verify checksum → decompress → `promise install`), sanity-checks the install, then runs the full test suite through the freshly **installed** distribution. The repo is public, so the gate installs straight from GitHub releases — `--channel` selects which: **next** (the moving `epoch-next` pre-release, default), **stable** (the latest published epoch), or an explicit **`Y.N`** epoch. This lets the same gate validate both the pre-release before a stable cut and the stable release after it. The gate never sets `PROMISE_BASE_URL` — GitHub is its only source (T0804 done; the `prebuilts.promise-lang.org` install bucket is gone). The installer **scripts** still honor `PROMISE_BASE_URL` as a manual **testing** override (point an install at a staged mirror), but it is unset for real users and unused by the gate.
 
@@ -346,13 +346,13 @@ Flags: `--out` (staging dir, default `<root>/dist`), `--r2-bucket` (default `pre
 
 ---
 
-## 6. Cutting a release
+## Cutting a release
 
-A release is **a tag push** (§5): `epoch-YYYY.N` cuts a stable release, `epoch-next` cuts/refreshes the pre-release channel. The release pipeline builds and publishes but **runs no tests** — so every correctness guarantee comes from the gates *before* the tag. Those gates are now **enforced by `bin/release cut`** (§6.3, **T0943**): run `bin/release cut next` / `bin/release cut stable` and the tag/push happens only when every gate is green. §6.2 documents the equivalent hand-run `git tag` fallback the commands replace.
+A release is **a tag push** ([Release workflow](#release-workflow)): `epoch-YYYY.N` cuts a stable release, `epoch-next` cuts/refreshes the pre-release channel. The release pipeline builds and publishes but **runs no tests** — so every correctness guarantee comes from the gates *before* the tag. Those gates are now **enforced by `bin/release cut`** ([Cutting with enforced gates](#cutting-with-enforced-gates), **T0943**): run `bin/release cut next` / `bin/release cut stable` and the tag/push happens only when every gate is green. [The procedure](#the-procedure) documents the equivalent hand-run `git tag` fallback the commands replace.
 
 `epoch-next` is a **moving** tag — re-cut on every push; `release.yml` deletes + recreates its GitHub **pre-release** (the `publish` job detects `epoch-next` and passes `--prerelease`) while keeping the tag. Stable `epoch-X.Y` tags are **immutable**: `gh release create` refuses to clobber them and the workflow never deletes them, so they must never be force-moved.
 
-### 6.1 Prerequisite — host the dependency blobs (once per dep version)
+### Prerequisite host the dependency blobs
 
 The per-epoch pipeline does not build LLVM; it pulls pre-hosted slim blobs (opt/llc/lld + the build-only llvm-dlltool) from the `deps-<dep>-<version>` GitHub release. On a dependency version bump — **or if that release is missing** (e.g. lost in a repo rebuild) — the maintainer stages the blobs locally, GitHub-only:
 
@@ -377,11 +377,11 @@ Trying an unauthenticated source is safe by construction: every path ends in `de
 
 > CI still sets `GH_TOKEN` (job-level) so source 1 is used on the runners — deterministic, and unaffected by GitHub's anonymous rate limits. It is now an optimization rather than a requirement; without it the runners would fall through to sources 2/3.
 
-### 6.2 The procedure
+### The procedure
 
-The steps below are **what `bin/release cut` enforces** (§6.3) — run as `bin/release cut next` then `bin/release cut stable`. The raw `git tag` snippets are the hand-run fallback the commands replace (and what a bypass with `--reason` reduces to); prefer the gated commands so no step is skipped.
+The steps below are **what `bin/release cut` enforces** ([Cutting with enforced gates](#cutting-with-enforced-gates)) — run as `bin/release cut next` then `bin/release cut stable`. The raw `git tag` snippets are the hand-run fallback the commands replace (and what a bypass with `--reason` reduces to); prefer the gated commands so no step is skipped.
 
-1. **Stage deps blobs** (§6.1) if the `deps-<dep>-<version>` release is missing or stale. Every `blobs.json` blob for the pinned versions × all hosts must be hosted, or the build fails mid-run. (Gate 4.)
+1. **Stage deps blobs** ([Prerequisite host the dependency blobs](#prerequisite-host-the-dependency-blobs)) if the `deps-<dep>-<version>` release is missing or stale. Every `blobs.json` blob for the pinned versions × all hosts must be hosted, or the build fails mid-run. (Gate 4.)
 2. **Verify locally:** `bin/verify`.
 3. **Catalog epoch.** Confirm `catalog.toml`'s `epoch` equals the epoch being cut (after each stable cut it is bumped to the next epoch — step 6 — so in steady state it already matches). Release notes need no manual step: `cut` generates them mechanically from the commit history in `epoch-<last>..<sha>` and embeds them in the tag (published by `release.yml` via `--notes-from-tag`). (Gate 3.)
 4. **Green CI at the release head.** CI must be green on **all platforms** at the exact commit — CI is manual `workflow_dispatch` and is the *only* test coverage a release gets. `cut` checks this (gate 7) and, when no run covers the commit, offers to dispatch `ci.yml` for the missing platforms and watch them to green.
@@ -398,11 +398,11 @@ The steps below are **what `bin/release cut` enforces** (§6.3) — run as `bin/
    ```
 6. **Bump for ongoing development.** `cut stable` finishes by advancing `catalog.toml`'s `epoch` to the next epoch (same-year increment) on `main` and pushing, so dev builds and the next `epoch-next` embed the upcoming epoch — not the shipped one (the side-by-side install layout dispatches on the embedded epoch).
 
-> **Bootstrap exception — `epoch-2026.0`.** The first stable release predates the gates and could not satisfy "promote the exact hash `epoch-next` validated" (nothing preceded it). It was cut by hand after all-platform CI went green and the pipeline was proven via `epoch-next`; it ships slightly stale `os`/`http` module descriptions (corrected on `main` for `2026.1`). From `2026.1` onward every cut goes through §6.3's gates.
+> **Bootstrap exception — `epoch-2026.0`.** The first stable release predates the gates and could not satisfy "promote the exact hash `epoch-next` validated" (nothing preceded it). It was cut by hand after all-platform CI went green and the pipeline was proven via `epoch-next`; it ships slightly stale `os`/`http` module descriptions (corrected on `main` for `2026.1`). From `2026.1` onward every cut goes through [Cutting with enforced gates](#cutting-with-enforced-gates)'s gates.
 
-### 6.3 `bin/release cut` with enforced gates (T0943) — implemented
+### Cutting with enforced gates
 
-§6.2 is encoded as two gated orchestrator subcommands so neither a maintainer nor an agent can skip a step (`tools/build/common/release_cut.go`):
+[The procedure](#the-procedure) is encoded as two gated orchestrator subcommands so neither a maintainer nor an agent can skip a step (`tools/build/common/release_cut.go`):
 
 ```sh
 bin/release cut next       # refresh the epoch-next pre-release
@@ -457,7 +457,7 @@ This keeps the happy path (CI already green) instant, turns the common "forgot t
 
 **Inputs.** Every gate input is reachable from `bin/release`: `git` (tree, reachability, tags, `rev-parse` for `--commit`, `log` for the release notes), `gh` (CI run + per-job conclusions by `headSha`; `deps-*` release assets via the existing `releaseUploader`; the `epoch-next` release run), and a `catalog.toml` parse. The implementation puts `git`/`gh` behind the `cutGit` / `cutGH` interfaces (the same stub pattern as `releaseUploader` / `blobFetcher`), so `release_cut_test.go` is fully hermetic — no `git`/`gh` process is spawned and the CI watch loop's sleep is stubbed.
 
-### 6.4 `bin/release changes` — release preview (T1141)
+### Release preview
 
 A read-only convenience command for previewing what would go into the next stable release's notes before cutting:
 
@@ -485,20 +485,20 @@ This command is **read-only**: no gates, no tagging, no side effects beyond `git
 
 ---
 
-## 7. Open items
+## Open items
 
 | Item | Notes |
 |------|-------|
-| ~~Gated release orchestrator~~ (done, **T0943**) | The §6.2 procedure is encoded as `bin/release cut next` / `cut stable` (`tools/build/common/release_cut.go`): the gates (catalog-epoch match, all-platform green CI at the head with absent-vs-failed handling, validate-via-next-then-promote-same-hash, deps blobs hosted, rule-valid auto-derived epoch + post-cut catalog bump) are enforced by the tool, not by discipline, and release notes are generated mechanically from the commit history into the tag (`--notes-from-tag`). `--dry-run` reports without changing anything; `--reason` audits any override. Design + shipped flags: §6.3. `epoch-2026.0` is grandfathered (predates the gates); the rules apply from `2026.1` onward. |
+| ~~Gated release orchestrator~~ (done, **T0943**) | The [The procedure](#the-procedure) procedure is encoded as `bin/release cut next` / `cut stable` (`tools/build/common/release_cut.go`): the gates (catalog-epoch match, all-platform green CI at the head with absent-vs-failed handling, validate-via-next-then-promote-same-hash, deps blobs hosted, rule-valid auto-derived epoch + post-cut catalog bump) are enforced by the tool, not by discipline, and release notes are generated mechanically from the commit history into the tag (`--notes-from-tag`). `--dry-run` reports without changing anything; `--reason` audits any override. Design + shipped flags: [Cutting with enforced gates](#cutting-with-enforced-gates). `epoch-2026.0` is grandfathered (predates the gates); the rules apply from `2026.1` onward. |
 | ~~`bin/release` driver~~ (done, T0773) | The blob/hash/manifest/thin/full/stub steps + `verify-manifest` gate are implemented as a Go build tool alongside `bin/build` (`tools/build/cmd/release`, `tools/build/common/release*.go`). |
-| Blob hosting & packaging | **Decided (T0773):** primary `source` is a one-file-per-hash **GitHub release asset** (named by content `sha256`); the upstream vendor archive is a ranked fallback. A dedicated CDN/bucket ([T0523](#)) is a deferred optional source. `PROMISE_BLOB_MIRROR` base-URL override ([epoch-versioned-installs.md](archive/epoch-versioned-installs.md) §3) and the *ranked* source list let the private→public transition add/promote a public source without changing content hashes (§1 private-repo caveat). |
-| Private→public release access (**T0786**) | While the repo is private, **nothing in the install path is anonymously fetchable**: the install scripts are themselves release assets (`releases/latest/download/install.sh`), and the binaries + dependency blobs they pull are too — all need auth or a public mirror. Resolve before advertising the public install (§1, [distribution.md](distribution.md) §2.1). Tracked as the standalone release-readiness blocker **T0786** (`needs-attention`); ties to T0523's public-origin requirement. |
-| ~~Manifest integrity gate~~ (done, T0773) | `bin/release verify-manifest <m>... --against <dir>` resolves every entry against the packaged artifacts (hashing a blob asset, or extracting `archive_path` from an archive) and **fails the release** on any `sha256` mismatch or missing artifact, so a bogus entry never reaches users ([distribution.md](distribution.md) §4.3). |
-| Mismatch telemetry (opt-in) | Decide whether to ship the opt-in integrity-mismatch signal ([distribution.md](distribution.md) §4.4): what it sends (dependency, source, expected/actual hash, epoch, platform), the disclosure/opt-in UX, and where it reports. Integrity-only, never general usage. |
+| Blob hosting & packaging | **Decided (T0773):** primary `source` is a one-file-per-hash **GitHub release asset** (named by content `sha256`); the upstream vendor archive is a ranked fallback. A dedicated CDN/bucket ([T0523](#)) is a deferred optional source. `PROMISE_BLOB_MIRROR` base-URL override ([epoch-versioned-installs.md](archive/epoch-versioned-installs.md) [Prebuilt blobs](#prebuilt-blobs)) and the *ranked* source list let the private→public transition add/promote a public source without changing content hashes ([Repository and tags](#repository-and-tags) private-repo caveat). |
+| Private→public release access (**T0786**) | While the repo is private, **nothing in the install path is anonymously fetchable**: the install scripts are themselves release assets (`releases/latest/download/install.sh`), and the binaries + dependency blobs they pull are too — all need auth or a public mirror. Resolve before advertising the public install ([Design](distribution.md#design), [distribution.md](distribution.md), under [The Linux and macOS install script](distribution.md#the-linux-and-macos-install-script)). Tracked as the standalone release-readiness blocker **T0786** (`needs-attention`); ties to T0523's public-origin requirement. |
+| ~~Manifest integrity gate~~ (done, T0773) | `bin/release verify-manifest <m>... --against <dir>` resolves every entry against the packaged artifacts (hashing a blob asset, or extracting `archive_path` from an archive) and **fails the release** on any `sha256` mismatch or missing artifact, so a bogus entry never reaches users ([distribution.md](distribution.md), under [Content mismatch is loud and never silent](distribution.md#content-mismatch-is-loud-and-never-silent)). |
+| Mismatch telemetry (opt-in) | Decide whether to ship the opt-in integrity-mismatch signal ([distribution.md](distribution.md), under [Telemetry](distribution.md#telemetry)): what it sends (dependency, source, expected/actual hash, epoch, platform), the disclosure/opt-in UX, and where it reports. Integrity-only, never general usage. |
 | ~~Blob caching across releases~~ (done, T0773) | Content-addressed packaging: `bin/release manifest` names each upload artifact by its `sha256`, so an unchanged dependency version (hence unchanged hash) is left untouched in the pack dir — no rebuild/re-upload. (Steps 1–2 also reuse the prebuilts cache's unchanged-hash skip.) |
 | ~~Per-epoch blob production~~ (done, T0797) | Blobs are produced **locally** by a maintainer (`bin/release publish-blobs`) on a dependency version bump, recorded in the committed `tools/build/blobs.json` catalog, and hosted in a dedicated `deps-<dep>-<version>` release. The per-epoch pipeline projects the catalog (`bin/release manifest --from-catalog`) and pulls pre-hosted blobs (`bin/release fetch-blobs`) — no 700 MB upstream LLVM download, no 10-min brotli-11 on every release. |
 | Windows release artifact | CI is done — `windows-amd64` is a full matrix member passing the gates. LLVM embed (T0056) and the self-generated SDK / UCRT import stubs for the zero-dep "no VS Build Tools required" goal (T0772, [windows-support.md](windows-support.md)) are both **done**. The only remaining release-side gap is LTO (T0049, deferred). |
 | `darwin-amd64` (Intel) — **deferred** | Dropped from the CI/release matrices: the maintainer can't run a working Xcode CLT on available Intel hardware, so the target can't be verified. The build code exists; revisit if a verifiable Intel runner/host is available (GitHub's `macos-13` Intel runner could validate it in CI even without local hardware — reconsider before deletion). |
 | ~~`linux-arm64`~~ (done) | Built **natively** on GitHub's `ubuntu-24.04-arm` runner, so the cross-compile half of this item never had to be solved. Both blob prerequisites are catalogued in `tools/build/blobs.json`: LLVM 22.1.0 `linux-arm64` (opt/llc/lld/llvm-dlltool) and the `linux-arm64` musl CRT (1.2.5-r23). It is a full member of the CI and release matrices and of `requiredPlatforms`, so `bin/release cut` refuses to tag until arm64 CI is green at the target SHA. `scripts/install.sh` already resolved `uname -m` `aarch64` → `promise-linux-arm64.gz`, so the asset drops into the existing install path. **Caveat:** `ubuntu-24.04-arm` is free for public repositories but metered on private plans — a run that never picks up a runner is a billing-plan symptom, not a workflow bug. The PAL carried aarch64 defects until they were fixed (packed `struct epoll_event`, `struct stat` field offsets), so arm64 correctness rests on that CI job actually running. |
 | Stub cross-build | Confirm the host compiler can emit the stub for every shipped target. |
-| `all` variant | Add once cross-compilation works: extend the "assemble" step to pre-stage every supported target's blobs ([distribution.md](distribution.md) §1.2). Release-packaging only — no runtime change. Gated on cross-compilation landing. |
+| `all` variant | Add once cross-compilation works: extend the "assemble" step to pre-stage every supported target's blobs ([distribution.md](distribution.md), under [Variants](distribution.md#variants)). Release-packaging only — no runtime change. Gated on cross-compilation landing. |

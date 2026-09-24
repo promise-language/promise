@@ -10,8 +10,8 @@ import (
 // telemetry. Unset (the default) means nothing is sent — no hidden effects.
 const integrityTelemetryEnv = "PROMISE_INTEGRITY_TELEMETRY"
 
-// reportIntegrityMismatch is a DESIGN CANDIDATE — see distribution.md §4.4 and
-// release-automation.md §7. The integrity-only signal (dependency, source,
+// reportIntegrityMismatch is a DESIGN CANDIDATE — see distribution.md#telemetry and
+// release-automation.md#open-items. The integrity-only signal (dependency, source,
 // expected/actual hash, epoch, platform) would let a broken release be detected
 // centrally within minutes. It is gated behind an explicit opt-in env var and,
 // when unset (default), does nothing. Disclosure/opt-in UX and the reporting

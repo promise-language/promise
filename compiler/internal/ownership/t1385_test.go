@@ -2,7 +2,7 @@ package ownership
 
 import "testing"
 
-// T1385 / §17.2 explicit-return style: `return <expr>` inside a `go {}` / `go! {}`
+// T1385 / language-design.md#explicit-concurrency explicit-return style: `return <expr>` inside a `go {}` / `go! {}`
 // block became reachable for the first time, so it now flows through the ownership
 // pass's return handling (checkExpr + tryMove + checkReturnRefSafety +
 // checkReturnBorrowsLocal). Those checks keyed off the ENCLOSING function's result

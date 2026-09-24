@@ -9,7 +9,7 @@ import (
 // T1952: a value crossing to a FIRST parent whose slot shapes it changed by a
 // relaxed match must get a view vtable with an adapter, not the concrete's own
 // vtable. `std.Closer` requires `close!(~this)`; a non-failable `close(~this)` is
-// a documented relaxed match (§5.3), so the concrete's own slot holds a
+// a documented relaxed match (language-design.md#variable-declarations), so the concrete's own slot holds a
 // `void (i8*)*` while the Closer call site bitcasts to `{ i1, i8* } (i8*)*` and
 // reads an error flag the callee never wrote.
 //

@@ -798,7 +798,7 @@ func TestT1386NestedGoBlockOuterEscapeStillCounts(t *testing.T) {
 
 func TestT1386NestedGoBlockReceiveIsAnEscapeForOuter(t *testing.T) {
 	// The complement of the rewind: consuming the inner task with `<-` IS an
-	// escape for the outer body (the receive is an ordinary failable call, §17.2.1),
+	// escape for the outer body (the receive is an ordinary failable call, language-design.md#failable-goroutines),
 	// so neither body is rejected. Guards against the rewind over-reaching and
 	// swallowing an escape recorded *after* the inner block closed.
 	errs := checkErrs(t, `
@@ -818,7 +818,7 @@ func TestT1386NestedGoBlockReceiveIsAnEscapeForOuter(t *testing.T) {
 func TestT1386GoBlockSpawningAFailableCallIsNotAnEscape(t *testing.T) {
 	// The call form `go! foo()` spawns asynchronously — its error is delivered to
 	// its own receiver, so the spawn is not the enclosing body's escape and the
-	// outer body still cannot fail (§17.2.1). The inner call form has no body of
+	// outer body still cannot fail (language-design.md#failable-goroutines). The inner call form has no body of
 	// its own to score, so exactly one rejection.
 	errs := checkErrs(t, `
 		foo!(int n) int { if n < 0 { raise error(message: "x"); } return n; }
@@ -832,7 +832,7 @@ func TestT1386GoBlockSpawningAFailableCallIsNotAnEscape(t *testing.T) {
 
 func TestT1386GoBlockBindingAFailableFunctionIsNotAnEscape(t *testing.T) {
 	// Failability is a property of *calling* a fallible producer, never of a
-	// value (§7.1) — binding a reference to a failable function does not escape.
+	// value (language-design.md#the-failable-convention) — binding a reference to a failable function does not escape.
 	errs := checkErrs(t, `
 		foo!(int n) int { if n < 0 { raise error(message: "x"); } return n; }
 		main!() {

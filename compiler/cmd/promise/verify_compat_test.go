@@ -36,7 +36,7 @@ func writeMod(t *testing.T, dir, name string, good bool) {
 		[]byte(name+"_value() int `public { return 1; }\n"), 0644)
 	body := "check() `test {\n  assert(" + name + "_value() == 1, \"ok\");\n}\n"
 	if !good {
-		// Genuine parse error → compile failure → incompatible (§9.9).
+		// Genuine parse error → compile failure → incompatible (module-system.md#compatibility-and-the-community-catalog).
 		body = "check() `test {\n  assert(" + name + "_value() == , \"x\");\n}\n"
 	}
 	os.WriteFile(filepath.Join(dir, name+"_test.pr"), []byte(body), 0644)
@@ -112,7 +112,7 @@ func TestVerifyModuleCompatCacheHit(t *testing.T) {
 }
 
 // TestVerifyModuleCompatNoTests: a module that compiles but carries no `*_test.pr`
-// is accepted as compatible (compile-only, §9.9 policy) — the §9.9 criterion is
+// is accepted as compatible (compile-only, module-system.md#compatibility-and-the-community-catalog policy) — the module-system.md#compatibility-and-the-community-catalog criterion is
 // vacuously satisfied when there are no test functions. The verdict is cached with
 // CompileOnly=true and the warn callback is called with an advisory message.
 func TestVerifyModuleCompatNoTests(t *testing.T) {
@@ -163,7 +163,7 @@ func TestVerifyModuleCompatNoTests(t *testing.T) {
 
 // TestVerifyModuleCompatNoTestsCompileError: a module with no `*_test.pr` but
 // broken source (syntax error) must be rejected — compile-only still enforces
-// that the source compiles under the epoch (§9.9 / §9.10).
+// that the source compiles under the epoch (module-system.md#compatibility-and-the-community-catalog / module-system.md#when-a-module-has-no-compatible-version).
 func TestVerifyModuleCompatNoTestsCompileError(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -198,7 +198,7 @@ func TestVerifyModuleCompatNoTestsCompileError(t *testing.T) {
 }
 
 // TestVerifyModuleCompatNoSourceFiles: a module with promise.toml but no .pr files
-// at all is accepted vacuously — there is nothing to compile or test (§9.9).
+// at all is accepted vacuously — there is nothing to compile or test (module-system.md#compatibility-and-the-community-catalog).
 func TestVerifyModuleCompatNoSourceFiles(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -253,7 +253,7 @@ func TestVerifyModuleCompatInvalidToml(t *testing.T) {
 }
 
 // TestVerifyModuleCompatTransitiveDepIncompatible: a module is incompatible when one
-// of its pinned [require] deps is incompatible (§9.10 applies transitively). The dep
+// of its pinned [require] deps is incompatible (module-system.md#when-a-module-has-no-compatible-version applies transitively). The dep
 // has no tests, so the compile-only path is triggered for it; with a bogus compiler
 // binary that path fails → dep is incompatible → parent is incompatible.
 func TestVerifyModuleCompatTransitiveDepIncompatible(t *testing.T) {
@@ -293,7 +293,7 @@ func TestVerifyModuleCompatTransitiveDepIncompatible(t *testing.T) {
 
 // TestVerifyModuleCompatTransitiveNamedDepIncompatible mirrors the [require] case
 // but via a [require.NAME] entry, covering the NamedRequire arm of verifyDeps —
-// the §9.10 transitive rule must hold for named dependencies too. The dep has no
+// the module-system.md#when-a-module-has-no-compatible-version transitive rule must hold for named dependencies too. The dep has no
 // tests, so the compile-only path is triggered; the bogus compiler makes it fail.
 func TestVerifyModuleCompatTransitiveNamedDepIncompatible(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
@@ -506,7 +506,7 @@ func TestResolveEpochAwareWalkBack(t *testing.T) {
 }
 
 // TestResolveEpochAwareNoCompatible builds a repo whose only tag (epoch-2026.1) is
-// broken, then asserts a project on 2026.1 hits the §9.10 gate.
+// broken, then asserts a project on 2026.1 hits the module-system.md#when-a-module-has-no-compatible-version gate.
 func TestResolveEpochAwareNoCompatible(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -542,7 +542,7 @@ func TestResolveEpochAwareNoCompatible(t *testing.T) {
 
 // TestResolveEpochAwareOnlyNewerEpochs builds a repo whose only tag (epoch-2026.3)
 // is a *good* module targeting a newer epoch, then asserts a project on 2026.1
-// hits the §9.10 OnlyNewerEpochs gate instead of being mislabeled "unversioned"
+// hits the module-system.md#when-a-module-has-no-compatible-version OnlyNewerEpochs gate instead of being mislabeled "unversioned"
 // (T1051).
 func TestResolveEpochAwareOnlyNewerEpochs(t *testing.T) {
 	if testing.Short() {
@@ -644,7 +644,7 @@ func TestCheckUpgradeUsageError(t *testing.T) {
 }
 
 // TestCheckUpgradeRejectsNext asserts `pkg check-upgrade next` is rejected before
-// any resolution — "next" is a toolchain channel, never a project epoch (§4.3).
+// any resolution — "next" is a toolchain channel, never a project epoch (module-system.md#epoch-channels).
 func TestCheckUpgradeRejectsNext(t *testing.T) {
 	if os.Getenv("TEST_CHECKUP_NEXT") == "1" {
 		runPackageCheckUpgrade([]string{"next"})
@@ -783,7 +783,7 @@ func TestVerifyLocalModuleCompatNoSourceFiles(t *testing.T) {
 // TestEpochCompilerBinPresent asserts epochCompilerBin returns the
 // <PromiseHome>/epochs/<E>/bin/promise path when the binary is already present —
 // the reproducibility guarantee that an old epoch's compiler stays installable at
-// a stable location (§9.10, §7.2).
+// a stable location (module-system.md#when-a-module-has-no-compatible-version, module-system.md#toolchain-directory).
 func TestEpochCompilerBinPresent(t *testing.T) {
 	// The other home-contents test: it stages an epoch compiler under the home
 	// and asserts the path resolved to it, so the home has to be its own.

@@ -5,13 +5,13 @@
 // and `exec`-replaces itself with that epoch's real compiler
 // (`~/.promise/epochs/<epoch>/bin/promise`), forwarding every argument
 // untouched. On Unix the exec keeps the same PID, so signals and exit status
-// flow straight to the compiler. See docs/distribution.md §2.5.
+// flow straight to the compiler. See docs/distribution.md#the-stub-launcher.
 //
 // The stub knows ONLY the epoch-resolution contract (the `active` file format
 // and the `promise.toml` `[module].epoch` key) plus its own `PROMISE_STUB_*`
 // env vars — a small, stable surface. That is what makes a newer stub safe to
 // run against an older compiler, and the install-time forward-only update rule
-// (§2.4 step 4) sound.
+// (distribution.md#what-install-does step 4) sound.
 use io;
 use os;
 
@@ -67,7 +67,7 @@ extract_quoted(string s) string? `doc("Returns the contents of the first double-
 }
 
 // parse_epoch_from_toml scans a promise.toml's text for `epoch = "..."`.
-// Only the key/format is the stable contract (§2.5), so a minimal hand-rolled
+// Only the key/format is the stable contract (distribution.md#the-stub-launcher), so a minimal hand-rolled
 // line scan is enough — the stub deliberately does not depend on a TOML parser.
 parse_epoch_from_toml(string content) string? `doc("Extracts the [module].epoch value from promise.toml text.") {
   string[] lines = content.split("\n");

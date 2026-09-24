@@ -77,7 +77,7 @@ func prefetchHostToolchain() string {
 //
 // On macOS the view holds patched + ad-hoc-signed working copies (the CAS keeps
 // the raw upstream bytes, so its content hash is deterministic and reproducible
-// at release time without codesign; §5.1 + §10 open contract). On Linux/Windows
+// at release time without codesign; distribution.md#macos + T0769 §10 open contract). On Linux/Windows
 // the view holds symlinks/copies of the raw blobs.
 //
 // allowFetch=false succeeds only when every LLVM blob is already a CAS hit (used
@@ -532,7 +532,7 @@ func viewComplete(viewDir string, entries []*blobstore.ManifestEntry) bool {
 // symlink, and Windows — where a symlink needs admin — gets a hardlink.
 //
 // Only macOS needs bytes of its own: PatchAndSignMachO rewrites the file in
-// place, and §5.1 requires the CAS blob to stay the raw upstream bytes it was
+// place, and distribution.md#macos requires the CAS blob to stay the raw upstream bytes it was
 // hashed as. A clone (copy-on-write, its own inode) satisfies both at metadata
 // cost; a streamed copy is the fallback where clonefile is unavailable. A
 // hardlink there would be a patch applied to the hashed content (T2133).
@@ -659,7 +659,7 @@ func makeLLDAliases(viewDir string) (int64, error) {
 }
 
 // stageEmbeddedLLVMBlobs decompresses each embedded LLVM blob (full-variant
-// builds) and stores it into the CAS by content hash (§2.4 step 3). The codec is
+// builds) and stores it into the CAS by content hash (distribution.md#what-install-does step 3). The codec is
 // self-describing via the embedded file's extension: the dist-CAS publish path
 // embeds the brotli <sha>.br directly (.br — T0807, byte-identical to the CAS
 // asset, the smaller shipped artifact), while the dev/slim and Homebrew bundle

@@ -17,7 +17,7 @@ mcp__tracker__list --tag <basename>     # --tag large-integers, for large-intege
 
 ## Language
 
-- [language-design.md](language-design.md) — Full language specification: types, ownership, errors, generics, modules, concurrency. §6 is the normative ownership & memory model.
+- [language-design.md](language-design.md) — Full language specification: types, ownership, errors, generics, modules, concurrency. [Ownership and Memory Management](language-design.md#ownership-and-memory-management) is the normative ownership & memory model.
 - [language-guide.md](language-guide.md) — Concise reference for writing correct Promise code.
 - [annotations.md](annotations.md) — Normative reference for every annotation: what each one means, its targets and parameters, and the one-declaration rule that keeps a property from being declared twice.
 - [memory-model.md](memory-model.md) — What may allocate: the closed set of variable-size heap primitives, by-value versus behind-a-handle ownership, and why every other container is composition.
@@ -64,9 +64,9 @@ mcp__tracker__list --tag <basename>     # --tag large-integers, for large-intege
 - [ai-platform.md](ai-platform.md) — Promise as an AI-centric platform: MCP servers, agent orchestration, sandboxed execution.
 - [cloud-persistence.md](cloud-persistence.md) — Durable, schema-driven, multi-process shared state.
 
-## Organization-wide corpus — binding
+## Organization wide corpus
 
-Vendored from [promise-language/org](https://github.com/promise-language/org) at the release named in [org/stamp.json](org/stamp.json). Never edited here: an issue about one of these documents is filed against `org` (org/normative.md §7); what this project files locally under their tags is its own compliance gaps.
+**Binding.** Vendored from [promise-language/org](https://github.com/promise-language/org) at the release named in [org/stamp.json](org/stamp.json). Never edited here: an issue about one of these documents is filed against `org` (org/normative.md [Reconciliation](org/normative.md#reconciliation)); what this project files locally under their tags is its own compliance gaps.
 
 - [org/normative.md](org/normative.md) — What makes a document binding, and the one docs structure every project holds. This project's own [normative.md](normative.md) states only its delta to it.
 - [org/engineering-guide.md](org/engineering-guide.md) — How code in this organization is written, in any language.
@@ -77,24 +77,26 @@ Vendored from [promise-language/org](https://github.com/promise-language/org) at
 
 ---
 
-## Proposals — not binding
+## Proposals
 
-An end state under discussion. Ratifying one moves it into the root above.
+**Not binding.** An end state under discussion. Ratifying one moves it into the root above.
 
 - [proposals/debugging.md](proposals/debugging.md) — Source-level debugging: threading `Pos` through codegen as DWARF metadata so `lldb`/`gdb` can break by line.
 - [proposals/ui.md](proposals/ui.md) — Draft / RFC: the `ui` module across native desktop, WASM, and terminal.
 
-## Research — not binding
+## Research
 
-Background analysis feeding a decision.
+**Not binding.** Background analysis feeding a decision.
 
 - [research/liquid-haskell-refinement-types.md](research/liquid-haskell-refinement-types.md) — Assessment of whether Liquid Haskell-style refinement types should map onto Promise's type system.
 
-## Archive — superseded or delivered
+## Archive
+
+**Not binding.** Superseded or delivered, kept for history.
 
 - [archive/stages.md](archive/stages.md) — Compiler implementation roadmap. All open items migrated to the tracker.
 - [archive/binding-architecture.md](archive/binding-architecture.md) — C binding via extern ABI coercion and generated headers. The `extern` ABI coercion it introduced is live and documented in [runtime-architecture.md](runtime-architecture.md); header generation was built, never wired to the CLI, and its motivating C runtime no longer exists.
-- [archive/epoch-versioned-installs.md](archive/epoch-versioned-installs.md) — Phased plan for side-by-side epoch installs. Delivered, and its layout and dispatch model superseded by [distribution.md](distribution.md) §1.3, §2.5, §4.
+- [archive/epoch-versioned-installs.md](archive/epoch-versioned-installs.md) — Phased plan for side-by-side epoch installs. Delivered, and its layout and dispatch model superseded by [distribution.md](distribution.md), under [Why content addressing](distribution.md#why-content-addressing), [The stub launcher](distribution.md#the-stub-launcher), [The dependency store](distribution.md#the-dependency-store).
 - [archive/generic-inheritance-method-generics.md](archive/generic-inheritance-method-generics.md) — Generic inheritance and method-level generics.
 - [archive/phase3-remote-modules.md](archive/phase3-remote-modules.md) — Remote module fetching via git.
 - [archive/subscript-slice-operators.md](archive/subscript-slice-operators.md) — Operator method dispatch expansion for subscript and slice.

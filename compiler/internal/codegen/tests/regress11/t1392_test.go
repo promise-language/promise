@@ -16,9 +16,9 @@ import (
 // now stores a DEFINED default on that exit: the result type's zero for a
 // non-failable body, and {ok, zero, null} for a failable one.
 //
-// T1385/§17.2: a bare `return;` on a VALUE-producing path is now a compile error,
+// T1385/language-design.md#explicit-concurrency: a bare `return;` on a VALUE-producing path is now a compile error,
 // so these bodies are `T = Void` — which is exactly the shape the defined-default
-// store still backs. The value-producing exits (§17.2's explicit-return style) are
+// store still backs. The value-producing exits (language-design.md#explicit-concurrency's explicit-return style) are
 // covered by t1385_test.go.
 
 // Non-failable void body: the bare-return exit must branch to the coroutine's
@@ -88,7 +88,7 @@ func TestT1392_FailableGoBlockBareReturnStoresOkAggregate(t *testing.T) {
 }
 
 // Fire-and-forget VOID block: sema rejects a bare return in a value-producing body
-// whether or not the handle is received (§17.2), so the fire-and-forget shape that
+// whether or not the handle is received (language-design.md#explicit-concurrency), so the fire-and-forget shape that
 // still reaches codegen is a void one. Codegen must take the void path here —
 // useGoBlockValuePath is `!goIsVoid && !goExprFireAndForget`, so no result buffer is
 // allocated. A store on this exit would write through a buffer that does not exist.

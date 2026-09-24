@@ -11,7 +11,7 @@ How every command-line tool in the organization behaves at its invocation surfac
 parameters, how it reports, and how it refuses. A rule stated as a blockquote is an invariant, and
 the prose under it is why.
 
-## 1. Scope
+## Scope
 
 This document governs the invocation surface of every command-line tool an organization project
 ships — the `bin/` tools and any binary a project's contributors or agents run by hand. It does not
@@ -21,7 +21,7 @@ own:
 - **The gate envelope and the `--envelope` protocol** — the gate contract owns that.
 - **How tools are built, provisioned, and kept fresh** — the tooling document owns that.
 
-## 2. Every input is an explicit argument
+## Every input is an explicit argument
 
 > **A tool reads no environment variable to decide what it does.** Every parameter arrives as an
 > explicit argument on the command line.
@@ -39,13 +39,13 @@ Two narrow uses are sanctioned, and both are outside the tool's outcome:
   action in the entire subprocess tree is containment, not argument transport: it is read by the
   guard, not by the tool, and it can only narrow what is possible, never select behaviour.
 
-## 3. Flag form
+## Flag form
 
 > **A flag is a full-English-word name, dash-separated when multiword, prefixed with `-` or `--`.**
 > The two prefixes are the same flag: tools normalize the prefix once, then match the name exactly.
 
 `--my-long-flag` and `-my-long-flag` are one flag. `--myLongFlag`, `--my_long_flag`, and
-abbreviations are not flags at all — they are unknown input (§8).
+abbreviations are not flags at all — they are unknown input ([Unknown input fails closed](#unknown-input-fails-closed)).
 
 > **A name — a flag's or a subcommand's — is lowercase ASCII letters `a`–`z` and digits `0`–`9`,
 > with `-` as the only separator.** Nothing else: no uppercase, no underscores, no dots, no
@@ -76,7 +76,7 @@ normalize to the same parameter.
 The pair makes the negative visible and greppable. `=false` hides a decision inside a value where
 a reader scanning for the flag's name will misread it.
 
-## 4. One order
+## One order
 
 > **The command path comes first, complete and uninterrupted; every flag follows it; every
 > positional argument follows the flags.**
@@ -93,11 +93,11 @@ are the standing failure this rule exists to delete — two positions is two spe
 invocation, and the second one is an alias.
 
 `-help` and `-version` obey the same rule: `tool -help` is the root command's help — the full
-surface, per §7 — and `tool sync -help` is `sync`'s.
+surface, per [Help and version](#help-and-version) — and `tool sync -help` is `sync`'s.
 
 > **A flag appearing after the first positional argument is an error, never a positional.** A
 > parser that stops at the first non-flag and hands the rest through untouched has silently
-> reinterpreted the invocation; refusing it is §8's fail-closed rule applied to position.
+> reinterpreted the invocation; refusing it is [Unknown input fails closed](#unknown-input-fails-closed)'s fail-closed rule applied to position.
 
 The operator who typed `tool sync origin -json` wanted JSON output; a tool that instead passes
 `-json` to the backend as a name has done something no one asked, without a word.
@@ -109,7 +109,7 @@ Without the marker, a value like a file named `-report` is indistinguishable fro
 guessing is worse than either answer. With it, the boundary between flags and arguments is
 explicit exactly where it would otherwise be ambiguous.
 
-## 5. General switches do not exist
+## General switches do not exist
 
 > **No flag answers questions the tool has not asked yet.** Blanket switches — `-yes`, `-force`,
 > "assume yes to everything" — are not permitted.
@@ -118,7 +118,7 @@ Every override is named for the one thing it overrides, so consenting to one ris
 to another. A tool that would need `-yes` is a tool that asks questions interactively; it should
 instead refuse with a typed, named condition and the specific flag that overrides it.
 
-## 6. Output: two modes, one rule
+## Output modes
 
 > **Output is human-readable when stdout is a terminal and JSON when it is not.** Every tool
 > supports `-json` and `-human` to force the mode regardless of piping. Passing both is a usage
@@ -132,7 +132,7 @@ That is what makes `tool > out.json` and `tool -json 2>/dev/null` both behave. J
 stable interface: fields are added, never renamed or repurposed, and absent means unknown rather
 than zero.
 
-## 7. `-help` and `-version`
+## Help and version
 
 > **Every tool supports `-help`**: it prints the subcommands and, per subcommand, every flag with
 > its type and a one-line description — or simply every flag, when the tool has no subcommands.
@@ -143,7 +143,7 @@ than zero.
 
 A binary that cannot say what it is cannot be the subject of a bug report.
 
-## 8. Unknown input fails closed
+## Unknown input fails closed
 
 > **An unknown flag is an error that names it** — the bad flag, the closest existing flag when one
 > is close, and how to get the supported list (`-help`). Nothing is silently ignored.
@@ -155,14 +155,14 @@ needs. The pointer to `-help` is the list, one step away.
 > written nothing, and contacted nothing.
 
 The same rule covers unknown subcommands, missing required parameters, values failing their type,
-misplaced flags (§4), and contradictory parameters. Validation is exhaustive: every problem with
+misplaced flags ([One order](#one-order)), and contradictory parameters. Validation is exhaustive: every problem with
 the invocation is reported, not just the first.
 
-## 9. `-json-input`: the whole invocation, from a file
+## The whole invocation from a file
 
 > **`-json-input /path/to/args.json` supplies parameters from a JSON file whose schema maps
 > exactly to the tool's flags**, plus `"args"`, an array carrying the non-flag arguments. An
-> unknown key in the file is an unknown flag (§8).
+> unknown key in the file is an unknown flag ([Unknown input fails closed](#unknown-input-fails-closed)).
 
 The file is a transport for the same closed parameter set, not a second configuration system: no
 key exists in the file that does not exist as a flag. The name is deliberately not `-file` or
@@ -170,9 +170,9 @@ key exists in the file that does not exist as a flag. The name is deliberately n
 the mechanism, so it collides with nothing a tool processes.
 
 > **A parameter set both in the file and on the command line is a usage error.** There is no
-> precedence between the two, because precedence is a fallback (§3).
+> precedence between the two, because precedence is a fallback ([Flag form](#flag-form)).
 
-## 10. Subcommands
+## Subcommands
 
 > **The command set is closed in both directions**: no command is added outside the tool's
 > definition, and no command answers to a name not in the set. Each command has exactly one name.
@@ -180,7 +180,7 @@ the mechanism, so it collides with nothing a tool processes.
 > **Addressing is exact.** An identifier the user types resolves to exactly what it names, never to
 > something that merely contains or resembles it.
 
-## 11. Exit codes
+## Exit codes
 
 > **`0` — did what was asked**, including when there was nothing to do. An empty result is not an
 > error. **`1` — could not complete**, or stopped on a condition a human must clear. **`2` — the

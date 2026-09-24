@@ -396,6 +396,6 @@ func TestBuildSubdirModulesAtDifferentCommits(t *testing.T) {
 }
 
 // `promise package update` on a subdir entry must re-resolve the *addressed
-// module* (the §9.9 gate compiles and tests proto/wire, not the repo root) and
+// module* (the module-system.md#compatibility-and-the-community-catalog gate compiles and tests proto/wire, not the repo root) and
 // rewrite only the commit — the subdir line has to survive, or the entry would
 // silently re-point at a root that has no manifest (T1524).

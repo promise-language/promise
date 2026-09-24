@@ -6,7 +6,7 @@ Promise needs a serialization system that lets AI agents produce correct seriali
 
 ---
 
-## 1. Problem Statement
+## Problem Statement
 
 JSON is the lingua franca of tool-use and API integration. An AI agent building a Promise tool-use program needs to:
 
@@ -20,9 +20,9 @@ The architecture must support multiple formats without duplicating the field-tra
 
 ---
 
-## 2. Survey: How Other Languages Do It
+## How Other Languages Do It
 
-### 2.1 Go — `encoding/json` + struct tags
+### Go struct tags
 
 ```go
 type User struct {
@@ -39,7 +39,7 @@ json.Unmarshal(data, &user)
 **Pros**: Zero codegen, works with any type, tags compose across formats.
 **Cons**: Slow (runtime reflection), no compile-time validation (wrong tag = silent bug), tag syntax is stringly-typed.
 
-### 2.2 Rust — `serde` + derive macros
+### Rust derive macros
 
 ```rust
 #[derive(Serialize, Deserialize)]
@@ -56,7 +56,7 @@ struct User {
 **Pros**: Zero runtime cost, compile-time validation, format-agnostic (one `derive` works for JSON, YAML, TOML, MessagePack, etc.), extremely flexible.
 **Cons**: Complex (the Serializer/Deserializer traits have 30+ methods), proc macros are opaque, compile times suffer, the error messages from macro expansion are hard to read.
 
-### 2.3 Kotlin — `kotlinx.serialization`
+### Kotlin serialization
 
 ```kotlin
 @Serializable
@@ -73,7 +73,7 @@ val user = Json.decodeFromString<User>(json)
 **Pros**: Compile-time, IDE-aware, format-agnostic, clean API. Default values and optionals handled naturally.
 **Cons**: Requires a compiler plugin (not a library-only solution), the serialization compiler plugin is complex.
 
-### 2.4 Swift — `Codable`
+### Swift Codable
 
 ```swift
 struct User: Codable {
@@ -94,7 +94,7 @@ let user = try JSONDecoder().decode(User.self, from: data)
 **Pros**: Clean, no macros, format-agnostic, compiler-synthesized.
 **Cons**: `CodingKeys` enum is verbose for simple renaming, limited customization without manual `encode`/`init(from:)`.
 
-### 2.5 What Promise Should Take From Each
+### What Promise Should Take From Each
 
 | From | Take | Adapt |
 |------|------|-------|
@@ -105,9 +105,9 @@ let user = try JSONDecoder().decode(User.self, from: data)
 
 ---
 
-## 3. Proposed Architecture
+## Proposed Architecture
 
-### 3.1 Core Idea
+### Core Idea
 
 `` `serializable `` on a type causes the compiler to **generate two methods** on that type:
 
@@ -141,7 +141,7 @@ These methods call into **format-agnostic `Encoder`/`Decoder` interfaces**. Form
 └──────────────────────────────────────────┘
 ```
 
-### 3.2 The `Encoder` and `Decoder` Structural Interfaces
+### The Encoder and Decoder Interfaces
 
 These live in the standard library (`modules/std/encode.pr`), making them available to all code without importing a format-specific module.
 
@@ -203,7 +203,7 @@ type Decoder `public
 - The interface is small: ~16 methods per side. Compare with serde's 30+ — we keep it simple because Promise types have fewer representations (signed integers → `encode_int`, unsigned integers → `encode_uint`, floats → `encode_f64` — no per-width methods). Sized types (i8, u16, etc.) route through int/uint with range checking on decode.
 - `encode_value` has a default implementation that dispatches to `value.encode(encoder)`, enabling recursive encoding of nested `Encodable` types.
 
-### 3.3 The `Encodable` and `Decodable` Structural Interfaces
+### The Encodable and Decodable Interfaces
 
 ```promise
 type Encodable `structural `public
@@ -222,7 +222,7 @@ type Decodable `structural `public
 - This mirrors the `Format`/`Parse` symmetry already in the standard library.
 - `` `serializable `` on a type auto-generates both methods, making the type satisfy both interfaces.
 
-### 3.4 What `` `serializable `` Generates
+### What serializable Generates
 
 Given:
 
@@ -291,12 +291,12 @@ decode!(Decoder ~d) Self `factory {
         name: name,
         age: age,
         email: email,
-        address: address!,   // panic if required field missing — see §3.7
+        address: address!,   // panic if required field missing — see [Required and Optional Field Handling](#required-and-optional-field-handling)
     );
 }
 ```
 
-### 3.5 Field Annotations
+### Field Annotations
 
 Field-level meta annotations control serialization behavior. The defaults are chosen so the common case requires zero annotations — you only annotate the rare case:
 
@@ -327,7 +327,7 @@ type ApiResponse `serializable {
 
 **Why field-level metas instead of Go-style string tags?** Promise's meta annotations are typed and validated at compile time. `` `key("user_name") `` is checked by the compiler — a typo like `` `ky("user_name") `` is a compile error. Go's struct tags are raw strings parsed at runtime — a typo like `` `josn:"name" `` is silent.
 
-### 3.6 Enum Serialization
+### Enum Serialization
 
 Enums with `` `serializable `` generate encode/decode that handles variants:
 
@@ -370,7 +370,7 @@ enum Status `serializable {
 // Encodes as: "active", "inactive"
 ```
 
-### 3.7 Required vs Optional Field Handling
+### Required and Optional Field Handling
 
 During deserialization, the default behavior minimizes boilerplate — fields that *can* be absent *are* absent gracefully:
 
@@ -391,7 +391,7 @@ During encoding:
 
 Unknown keys in the input are silently skipped (via `skip_value()`). This is the safe default for API compatibility — new fields added to a remote API don't break existing clients.
 
-### 3.8 Recursive and Generic Types
+### Recursive and Generic Types
 
 `` `serializable `` works with generic types:
 
@@ -411,7 +411,7 @@ type Wrapper[T] is marked `serializable but field 'value' of type T
 is not Encodable — add constraint T: Encodable or mark T's type as `serializable
 ```
 
-### 3.9 Custom encode/decode
+### Custom encode and decode
 
 A type can be `` `serializable `` and still define custom `encode`/`decode` methods. The user-written method takes precedence over the generated one:
 
@@ -434,7 +434,7 @@ type Timestamp `serializable {
 
 When the user provides `encode`, the compiler skips generation. When the user provides `decode`, the compiler skips generation. They are independent — you can customize one without the other.
 
-#### Format-specific field names
+#### Format specific field names
 
 `` `key `` applies to all formats — it's the wire name for every encoder/decoder. When different formats need different names for the same field (uncommon), don't reach for framework complexity. Write a format-specific helper function instead:
 
@@ -466,7 +466,7 @@ The generated `encode`/`decode` handles the primary format (JSON). The custom fu
 
 ---
 
-## 4. The `json` Catalog Module
+## The json Catalog Module
 
 The `json` module provides `JsonEncoder`, `JsonDecoder`, and convenience functions:
 
@@ -513,7 +513,7 @@ encode_string_pretty[T: Encodable](T value, int indent = 2) string!
 }
 ```
 
-### 4.1 Usage Example
+### Usage Example
 
 ```promise
 use json;
@@ -538,7 +538,7 @@ main!() {
 }
 ```
 
-### 4.2 Raw JSON (`JsonValue` enum)
+### Raw JSON and the JsonValue enum
 
 For untyped JSON manipulation, the module also provides a `JsonValue` enum:
 
@@ -563,21 +563,21 @@ This is the escape hatch for dynamic JSON — APIs that return varying shapes, o
 
 ---
 
-## 5. Required Compiler Features
+## Required Compiler Features
 
-### 5.1 New Built-in Meta Annotations
+### New Built in Meta Annotations
 
 The five field annotations this document's encoding rules read — `` `key ``, `` `skip ``,
 `` `include_none ``, `` `required `` and `` `flatten `` — are specified in
-[annotations.md](annotations.md) §15, which is where each one's targets, parameters and
+[annotations.md](annotations.md), under [Serialization](annotations.md#serialization), which is where each one's targets, parameters and
 interactions live. Registering them is `builtinMetas` and `metaParamSpecs` in `sema/meta.go` and
-`sema/metaparams.go`, per that document's §17, and they are validated during sema.
+`sema/metaparams.go`, per that document's [Adding an annotation](annotations.md#adding-an-annotation), and they are validated during sema.
 
-### 5.2 `` `serializable `` Flag Storage
+### Flag Storage
 
 Add `isSerializable bool` to both `Named` and `Enum` in the type system. Extract during sema's define pass (same pattern as `doc`, `deprecated`, `copy`).
 
-### 5.3 Method Generation in Sema
+### Method Generation in Sema
 
 When a type is marked `` `serializable ``, the sema pass must:
 
@@ -592,11 +592,11 @@ When a type is marked `` `serializable ``, the sema pass must:
 
 **Implementation approach:** The cleanest approach is to **synthesize AST nodes** for the generated methods during the sema define pass (similar to how auto-generated getters/setters work for vtable slots). This means the methods go through normal type-checking and codegen — no special codegen path needed.
 
-### 5.4 Implicit Constraints on Generic Type Parameters
+### Implicit Constraints on Generic Type Parameters
 
 When a generic type `T[A, B]` is `` `serializable ``, type parameters used in non-`` `skip `` fields need implicit `Encodable`/`Decodable` constraints. The sema pass adds these constraints automatically (or reports an error if the type parameter already has incompatible constraints).
 
-### 5.5 Primitive Encodable/Decodable Implementations
+### Primitive Implementations
 
 All primitive types need `encode`/`decode` implementations. Since primitives are `` `native `` types, these are added as regular methods:
 
@@ -677,7 +677,7 @@ type Vector[T] {
 }
 ```
 
-### 5.6 `DecodeError` Type
+### The DecodeError Type
 
 ```promise
 type DecodeError is error `public {
@@ -688,9 +688,9 @@ type DecodeError is error `public {
 
 ---
 
-## 6. Design Decisions & Rationale
+## Design Decisions and Rationale
 
-### 6.1 Why Compiler Codegen Instead of Runtime Reflection?
+### Why Compiler Codegen Instead of Runtime Reflection
 
 Promise has no runtime reflection system and shouldn't need one. The four-struct model stores RTTI for inheritance checks, but not for field enumeration. Adding runtime reflection would:
 
@@ -703,7 +703,7 @@ Compiler-generated methods are:
 - Validated at compile time (wrong field types caught early)
 - Inspectable (the generated code is just Promise methods)
 
-### 6.2 Why Streaming Encoder/Decoder Instead of Tree-Based?
+### Why Streaming Instead of Tree Based
 
 A tree-based approach (build a `JsonValue`, then serialize the tree) requires an intermediate allocation for every serialization. The streaming approach writes directly to the output:
 
@@ -723,7 +723,7 @@ The streaming model also naturally extends to binary formats (MessagePack, Proto
 
 Users who need tree manipulation can always use `JsonValue` directly — the streaming encoder/decoder and the tree-based `JsonValue` are complementary, not competing.
 
-### 6.3 Why Non-Structural for Encoder/Decoder, Structural for Encodable/Decodable?
+### Why Only Half the Interfaces Are Structural
 
 `Encoder` and `Decoder` have ~12 abstract methods each. They are **not** structural:
 
@@ -736,7 +736,7 @@ Users who need tree manipulation can always use `JsonValue` directly — the str
 - **Widely satisfied** — every serializable type, every primitive, every container. Requiring `is Encodable` on `int`, `string`, `Vector[T]`, etc. would be noisy.
 - **Accidental satisfaction is harmless** — if a type happens to have `encode!(Encoder ~e) `, it *should* be encodable.
 
-### 6.4 Why AST Synthesis Instead of IR Generation?
+### Why AST Synthesis Instead of IR Generation
 
 Generating the encode/decode methods as AST nodes (rather than generating LLVM IR directly) means:
 
@@ -747,7 +747,7 @@ Generating the encode/decode methods as AST nodes (rather than generating LLVM I
 
 The downside is that AST synthesis is a new pattern in the compiler (current codegen for structural default methods operates on existing AST nodes from the source code). But this is a bounded addition — the generated AST is formulaic and doesn't require new AST node types.
 
-### 6.5 Comparison with the Format/Parse Pair
+### Comparison with the Format and Parse Pair
 
 The serialization system parallels the existing Format/Parse design:
 
@@ -764,24 +764,24 @@ Format/Parse is for **human-readable text** (stdout, logs, debug display). Encod
 
 ---
 
-## 7. Open Questions
+## Open Questions
 
-### 7.1 Should `Encodable`/`Decodable` be two interfaces or one `Serializable`?
+### Two interfaces or one
 
 **Current proposal: two.** Rationale: some types are encode-only (you never deserialize them) or decode-only (you never serialize them). Separate interfaces give fine-grained control. The `` `serializable `` annotation generates both, but a user can implement just one.
 
-### 7.2 How should `map[K, V]` serialize when K is not string?
+### How a map serializes when its key is not a string
 
 **Resolved: convert via Format/Parse.** Non-string keys are converted to string via `to_string()` for encoding and parsed back via `scan[K]()` for decoding. This leverages the existing `Format`/`Parse` structural interfaces — any type that can format to string and parse from string can be a map key. String keys are used directly (no conversion overhead). The `Encoder` interface has `encode_key(string)`, so all keys must ultimately become strings at the wire level.
 
-### 7.3 Should unknown keys during decode be an error or silently skipped?
+### Whether unknown keys are an error
 
 **Current proposal: silently skipped.** This matches JSON API convention (forward-compatible). A future `` `serializable(strict: true) `` parameter could change this to error on unknown keys.
 
-### 7.4 AST synthesis vs a dedicated codegen path?
+### AST synthesis or a dedicated codegen path
 
 **Resolved: AST synthesis.** The Phase 3 implementation (`sema/serialize.go`) synthesizes `MethodDecl` AST nodes during sema pass 2. These flow through normal type-checking (pass 3), return analysis (pass 4), and codegen — no special codegen path needed. The approach works well for primitive and optional fields. The synthesized AST is formulaic (if-unwrap for optionals, call-member for encode/decode, for-loop for key matching) and uses existing AST node types.
 
-### 7.5 Naming: `encode`/`decode` vs `serialize`/`deserialize`?
+### Naming the generated methods
 
 `encode`/`decode` is shorter and follows Promise's full-word convention better than `ser`/`de`. It also avoids confusion with `Format`/`Parse` (which could be called "serialization" colloquially). The interfaces are `Encodable`/`Decodable`, not `Serializable`/`Deserializable`, because the meta annotation `` `serializable `` already uses "serializable" — using the same word for both the annotation and the interface would be confusing.

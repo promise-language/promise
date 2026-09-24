@@ -1,7 +1,7 @@
 // T1641: Go block droppable capture ownership transfer.
 // Positive tests — programs that should compile and run correctly after the fix.
 // Negative tests (use-after-move errors) are covered by the Go ownership unit tests.
-// T1397 (§17.4): a BARE capture of a droppable local is a borrow and is rejected
+// T1397 (language-design.md#ownership-across-goroutines): a BARE capture of a droppable local is a borrow and is rejected
 // at the spawn site, so every droppable capture below is bound inside the block —
 // the binding is what transfers ownership into the goroutine.
 // Copy types captured in a go block remain usable after the spawn.

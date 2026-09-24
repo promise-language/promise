@@ -2,7 +2,7 @@ package sema
 
 import "testing"
 
-// T1385 / §17.2 "Producing the result": a `go {}` / `go! {}` block yields its
+// T1385 / language-design.md#explicit-concurrency "Producing the result": a `go {}` / `go! {}` block yields its
 // result either with a trailing expression or with `return <expr>`, and `T` is
 // inferred either way. Before this, `return` inside a go block bound to the
 // ENCLOSING FUNCTION: the block typed `void` (so `v := <-t` failed), a `return`
@@ -85,7 +85,7 @@ func TestT1385BareFailableReturnValueInPlainGoRejected(t *testing.T) {
 	expectError(t, errs, "failable call must be handled")
 }
 
-// --- §17.2 no mixing ---
+// --- language-design.md#explicit-concurrency no mixing ---
 
 func TestT1385MixingTrailingExprWithReturnRejected(t *testing.T) {
 	// M1: previously compiled and yielded 0 — neither 7 nor 2.
@@ -131,7 +131,7 @@ func TestT1385MixingTrailingIfElseWithReturnRejected(t *testing.T) {
 	expectError(t, errs, "a trailing expression is discarded")
 }
 
-// --- §17.2 bare `return;` on a value-producing path ---
+// --- language-design.md#explicit-concurrency bare `return;` on a value-producing path ---
 
 func TestT1385BareReturnOnValuePathExplicitStyleRejected(t *testing.T) {
 	errs := checkErrs(t, `
@@ -167,7 +167,7 @@ func TestT1385BareReturnInVoidBlockAccepted(t *testing.T) {
 	`)
 }
 
-// --- §17.2 all paths must produce the value in explicit-return style ---
+// --- language-design.md#explicit-concurrency all paths must produce the value in explicit-return style ---
 
 func TestT1385ExplicitReturnFallThroughPathRejected(t *testing.T) {
 	errs := checkErrs(t, `
@@ -467,7 +467,7 @@ func TestT1385ReturnVoidExpressionIsNotATrailingValue(t *testing.T) {
 func TestT1385UntypeableReturnValueReportsOnlyItsOwnError(t *testing.T) {
 	// The return value fails to type, so the block's T stays unknown. That must
 	// surface as exactly the one real diagnostic — not as a follow-on "missing
-	// return statement" / "incompatible types" cascade from the §17.2 rules
+	// return statement" / "incompatible types" cascade from the language-design.md#explicit-concurrency rules
 	// running against a half-inferred T.
 	errs := checkErrs(t, `
 		main() {
@@ -629,7 +629,7 @@ func TestT1385ReturnAfterGoBlockInsideGeneratorBindsToTheGenerator(t *testing.T)
 	expectError(t, errs, "cannot return a value from a generator")
 }
 
-// A go block inside a generator is subject to the §17.2 rules like any other —
+// A go block inside a generator is subject to the language-design.md#explicit-concurrency rules like any other —
 // the generator context must not suppress them.
 func TestT1385GoBlockInsideGeneratorStillEnforcesTheMixingRule(t *testing.T) {
 	errs := checkErrs(t, `

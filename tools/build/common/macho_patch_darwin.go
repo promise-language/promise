@@ -10,7 +10,7 @@ import (
 
 // patchAndSignMachO patches a fetched LLVM Mach-O so it loads from its own
 // directory, then re-signs it ad-hoc. Mirrors the runtime resolver's
-// compiler/internal/blobstore/materialize_darwin.go::PatchAndSignMachO (§5.1):
+// compiler/internal/blobstore/materialize_darwin.go::PatchAndSignMachO (language-design.md#primitive-types-are-regular-types):
 // the CAS / hosted blob stores the raw upstream bytes (so the content hash is
 // deterministic and verifiable without running install_name_tool/codesign),
 // and the build-tool slim cache is the equivalent of the runtime view dir —

@@ -194,7 +194,7 @@ func TestCrossExecCommandWasm(t *testing.T) {
 
 // TestCrossExecCommandNoHostProbing pins the rule that makes this dispatcher
 // safe: a non-host native target is a hard error, never a fall back to an
-// emulator that may or may not be installed. docs/distribution.md §1.1/§4
+// emulator that may or may not be installed. docs/distribution.md#what-is-always-in-the-binary-and-what-is-fetched-on-demand/distribution.md#the-dependency-store
 // requires every dependency to be a manifest-named blob, so behaviour must not
 // change with what the machine happens to have on PATH. An earlier draft of
 // this code probed for wine64/wine and qemu-* — that is exactly what must not

@@ -1414,7 +1414,7 @@ file_rename_missing_parent_raises() `test(exclude: wasm) {
 // flock ownership is per open file description, not per process, so two fds on
 // one path contend inside a single process. Every lock test below is therefore
 // single-process and deterministic — no sleeps, no cross-process coordination.
-// Locking is advisory on every platform (docs/io.md §5.3): a held lock excludes
+// Locking is advisory on every platform (docs/io.md#advisory-everywhere-and-windows-locks-a-sentinel-byte): a held lock excludes
 // other lockers, never plain readers. On Windows that holds because the lock
 // covers a sentinel byte rather than the data (T1968) — with the old whole-file
 // LockFileEx range this read failed with "permission denied", which is exactly
@@ -1613,7 +1613,7 @@ replace_content_skips_live_slot() `test(exclude: wasm) {
   assert(!File.exists(p + ".promise-sync1"), "slot 1 was consumed by the rename");
 
   // Slot 0's contents are checked after the lock is released. Locking is
-  // advisory on every platform (docs/io.md §5.3 — Windows locks a sentinel
+  // advisory on every platform (docs/io.md#advisory-everywhere-and-windows-locks-a-sentinel-byte — Windows locks a sentinel
   // byte, not the data), so the read would succeed either way; releasing first
   // simply keeps the assertion about what replace_content did to a slot whose
   // writer is finished.
@@ -1800,7 +1800,7 @@ _hold_slot!(string path, int index) File {
   return h;
 }
 
-// docs/io.md §3.4 bounds the slot scan at 8 so a pathological directory cannot
+// docs/io.md#orphan-reclamation bounds the slot scan at 8 so a pathological directory cannot
 // make one write scan forever. With all eight held by live writers the write has
 // to give up and say so — not spin, and not overwrite somebody's slot.
 replace_content_slot_exhaustion_raises() `test(exclude: wasm) {
@@ -1837,7 +1837,7 @@ _replace_worker(string path, string content) bool {
   return true;
 }
 
-// Concurrent writers to one destination: docs/io.md §3 promises the last rename
+// Concurrent writers to one destination: docs/io.md#atomic-replace promises the last rename
 // wins and no writer ever sees a partial file. Each writer's payload is a
 // distinct byte repeated, so a destination that mixed two writers — or one that
 // had two writers sharing a temporary slot — would be neither payload.
@@ -1879,7 +1879,7 @@ _read_full_length(string path, int rounds) bool {
     string s = File.read_content(path[0:path.len])?!;
     // Every read must land on a whole file: the rename swaps a complete
     // destination in, so a short read would mean a reader saw a write in
-    // progress — exactly what docs/io.md §3 says cannot happen.
+    // progress — exactly what docs/io.md#atomic-replace says cannot happen.
     if s.len != 2048 {
       return false;
     }

@@ -156,7 +156,7 @@ func TestT1896BareFailableGeneratorForInFailablePropagates(t *testing.T) {
 // --- Iterables that are not CallExprs -------------------------------------
 //
 // FailableExprs is set on more node kinds than calls: a failable *getter* is a
-// MemberExpr, `<-t` on a failable_task[T] is a UnaryExpr (§17.2.1), and
+// MemberExpr, `<-t` on a failable_task[T] is a UnaryExpr (language-design.md#failable-goroutines), and
 // failability propagates through parentheses (T1379). checkFailableEscape keys
 // off FailableExprs, not off the node kind, so each of these is a for-in
 // subject the fix must settle — and each reaches a different corner of
@@ -223,7 +223,7 @@ func TestT1896BareFailableForInParenthesizedPropagates(t *testing.T) {
 	autoPropagated(t, info, 1)
 }
 
-// §17.2.1: `<-t` on a failable_task[T] is a failable operation in its own right,
+// language-design.md#failable-goroutines: `<-t` on a failable_task[T] is a failable operation in its own right,
 // so awaiting a task that produced a container and iterating the result in one
 // step is a bare failable iterable with no call node anywhere.
 func TestT1896BareFailableForInAwaitedTaskPropagates(t *testing.T) {
@@ -386,7 +386,7 @@ func TestT1896BareFailableForInIterMethodNonFailableErrors(t *testing.T) {
 
 // --- The explicit spellings still work ------------------------------------
 //
-// §11 makes `?^` equivalent to the bare form, so adding the bare route must not
+// language-design.md#strings-and-interpolation makes `?^` equivalent to the bare form, so adding the bare route must not
 // disturb the operator forms — including in a non-failable function, where `?!`
 // is the only legal spelling and must stay legal.
 

@@ -271,7 +271,7 @@ type Client is Closer `public `doc("A reusable HTTP/1.1 client with redirect fol
   // filled lazily.
   //
   // Declared BEFORE _pool on purpose. Fields drop in reverse declaration order
-  // (docs/language-design.md §16.3, drop rule 3), so this makes the pooled TLS
+  // (docs/language-design.md#the-drop-method, drop rule 3), so this makes the pooled TLS
   // sessions — which were created from this config's backend context and must
   // not outlive it — tear down first. The other direction frees the context
   // (an SSL_CTX, a Secure Transport identity, an SChannel credential) while

@@ -85,7 +85,7 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 		} else if c.goBlock != nil {
 			// T1428: a `go {}` body is compiled into its OWN coroutine, so a
 			// `yield` here would load the enclosing generator's yield slot from a
-			// function that has none (invalid IR). §12.4: `yield` must appear
+			// function that has none (invalid IR). language-design.md#generator-functions: `yield` must appear
 			// directly in the generator body. Checked before the lambda arm so the
 			// innermost enclosing construct is the one named.
 			c.errorf(s.Pos(), "yield inside a `go` block is not allowed")
@@ -382,7 +382,7 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 // `for`-in iterable, an interpolation. In a failable context the error
 // auto-propagates to the caller and the expression is recorded for codegen to
 // unwrap; in a non-failable one there is nowhere to propagate to, so it is a
-// compile error. §7.2 of docs/language-design.md gives auto-propagation in
+// compile error. language-design.md#calling-failable-functions of docs/language-design.md gives auto-propagation in
 // "all expression positions", which is why this is one predicate and not a
 // per-position family: every caller wants exactly this, and a position that
 // forgets to call it is the bug (T1873 for conditions, T1896 for `for`-in).
@@ -1190,7 +1190,7 @@ func (c *Checker) indexGetterCanError(target ast.Expr) bool {
 
 func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {
 	// T1385: inside a `go {}` / `go! {}` block body a `return` yields the
-	// GOROUTINE's result (§17.2 explicit-return style), not the enclosing
+	// GOROUTINE's result (language-design.md#explicit-concurrency explicit-return style), not the enclosing
 	// function's — including inside a generator, where the go block owns its own
 	// returns. checkLambdaExpr clears the context, so a `return` in a lambda
 	// nested in a go block still binds to the lambda.
@@ -1249,7 +1249,7 @@ func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {
 }
 
 // checkGoBlockReturn type-checks a `return` inside a `go {}` / `go! {}` block
-// body (§17.2 explicit-return style, T1385). The block's `T` is INFERRED from
+// body (language-design.md#explicit-concurrency explicit-return style, T1385). The block's `T` is INFERRED from
 // these returns, so there is no expected type to check against — successive
 // returns are unified with joinBranchTypes exactly like if/match arms. The
 // bare-`return;` verdict is deferred to checkGoExpr, which is the first point
@@ -1265,7 +1265,7 @@ func (c *Checker) checkGoBlockReturn(s *ast.ReturnStmt) {
 	// Hint with the running unified T so a numeric literal in a later return
 	// adapts to the first return's type (nil hint on the first return).
 	valType := c.checkExprWithHint(s.Value, ctx.resultType)
-	// T0976 in a plain `go {}` (the body is a non-failable scope); §17.2.1
+	// T0976 in a plain `go {}` (the body is a non-failable scope); language-design.md#failable-goroutines
 	// auto-propagation into the task in a `go! {}`.
 	c.checkFailableEscape(s.Value)
 	ctx.hasValueRet = true
@@ -1300,7 +1300,7 @@ func (c *Checker) checkRaiseStmt(s *ast.RaiseStmt) {
 // In failable functions, naked failable calls are auto-propagated.
 // In non-failable functions, naked failable calls are a compile error.
 func (c *Checker) checkExprStmtFailable(s *ast.ExprStmt) {
-	// §17.2.1: a discarded `go! f()` / `go! { }` is a fire-and-forget failable
+	// language-design.md#failable-goroutines: a discarded `go! f()` / `go! { }` is a fire-and-forget failable
 	// task — its error would be silently swallowed. Fire-and-forget must be
 	// non-failable (T1379).
 	if goExpr, ok := s.Expr.(*ast.GoExpr); ok && goExpr.Failable {
@@ -1316,7 +1316,7 @@ func (c *Checker) checkExprStmtFailable(s *ast.ExprStmt) {
 		}
 		return
 	}
-	// §17.2.1 (T1381): discarding any must-use value — one that transitively owns
+	// language-design.md#failable-goroutines (T1381): discarding any must-use value — one that transitively owns
 	// a `failable_task[T]` — silently swallows its error. Reject a bare
 	// expression-statement whose result type is must-use (e.g. a call returning a
 	// `failable_task[T]`, or a `failable_task[T][]`). It must be bound and then
@@ -1961,7 +1961,7 @@ func (c *Checker) recordFailableGeneratorForIn(s *ast.ForInStmt) {
 // checkFailableEscape must skip it. Single predicate, used both to gate that
 // call and to pick the branch in checkForInStmt.
 //
-// That panic is a divergence from §7.2 of docs/language-design.md, which makes a
+// That panic is a divergence from language-design.md#calling-failable-functions of docs/language-design.md, which makes a
 // bare failable call in a non-failable function a compile error in *every*
 // expression position. Settling it either way is T1942; until it is settled this
 // guard preserves the behavior tests/e2e/failable_generator_forin_test.pr
@@ -1983,7 +1983,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 
 	// T1896: the iterable is an expression position like any other, so a bare
 	// failable call there auto-propagates in a failable function and is a
-	// diagnostic in a non-failable one (§7.2: "all expression positions"). The
+	// diagnostic in a non-failable one (language-design.md#calling-failable-functions: "all expression positions"). The
 	// raw generator path is the one exception — see isRawGeneratorForIn.
 	rawGenerator := c.isRawGeneratorForIn(iterType, s.Iterable)
 	if !rawGenerator {

@@ -619,11 +619,11 @@ func SatisfiesAbstract(concrete, abstract *Signature, subst map[*TypeParam]Type,
 //
 // This is the one rule an explicitly declared `is` applies that implicit
 // structural satisfaction does not, and the asymmetry is a known GAP, not a
-// design: §5.3 of docs/language-design.md states the end-state rule for both
+// design: language-design.md#variable-declarations of docs/language-design.md states the end-state rule for both
 // paths (a concrete receiver may be less demanding than the requirement's, never
 // more), and the structural half — where a `~this` method satisfying a shared
 // requirement lets a shared borrow of the view mutate through it, contrary to
-// §6.2 — is tracked as T2185. An `is` clause is a *claim* about a specific
+// language-design.md#borrowing-and-moving — is tracked as T2185. An `is` clause is a *claim* about a specific
 // requirement, so a `close(this)` that cannot mutate anything, written against a
 // `close!(~this)` meant to release a resource, is exactly the drift the explicit
 // clause exists to catch (T1952).

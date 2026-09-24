@@ -1,6 +1,6 @@
 // Tests for failable function types: !(T) -> U
 //
-// T1634/D: the `!`-prefix notation from §9.6 did not parse at all — `apply(!(int)
+// T1634/D: the `!`-prefix notation from language-design.md#function-types did not parse at all — `apply(!(int)
 // -> int fn)` failed with `missing ')' at '!'`, and the trailing form
 // `(int) -> int!` failed too. A failable function type could not be written, so
 // no callback parameter could accept a failable function.

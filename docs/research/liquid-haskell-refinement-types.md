@@ -41,7 +41,7 @@ The wrong hypothesis (**H4**) and the nuanced ones (**H2**, **H6**) are reworked
 
 ---
 
-## 1. Soundness under Promise's real evaluation strategy
+## Soundness under the real evaluation strategy
 
 **LH's termination↔refinement coupling does not apply to Promise at the value level.** LH needs it only because Haskell is lazy: a binding `x :: {v:Int | v > 0}` may be a thunk that diverges when forced, and a divergent term inhabits *every* refinement — so you could "prove" `false`. LH therefore ties refinement soundness to a totality/termination analysis. Promise is strict (H1 confirmed): by the time a value of type `{v:Int | v > 0}` exists, it has been evaluated to a value. There is no thunk to diverge. **Value-level refinements in Promise need no termination analysis at all.** This is the single biggest structural advantage Promise has over Haskell for this feature.
 
@@ -58,7 +58,7 @@ Separate the two LH mechanisms:
 
 ---
 
-## 2. Which tier to adopt
+## Which tier to adopt
 
 LH's continuum runs lightweight (inferred, cheap: bounds / no-div-zero / no-`head []` / totality) → heavyweight (full functional correctness; hand proofs via reflection). Against Promise's documented goals:
 
@@ -76,14 +76,14 @@ LH's continuum runs lightweight (inferred, cheap: bounds / no-div-zero / no-`hea
 - **Structural measures** (`len`, `size`) lifted into the logic so bounds reasoning can discharge.
 
 **Expensive or anti-goal:**
-- **Refinement reflection + equational proofs** (`===`/`*** QED`). A second language layered on the first. Violates *"one obvious way"* and *"minimal context"*; re-introduces the termination obligation (§1). **Reject.**
+- **Refinement reflection + equational proofs** (`===`/`*** QED`). A second language layered on the first. Violates *"one obvious way"* and *"minimal context"*; re-introduces the termination obligation ([Soundness under the real evaluation strategy](#soundness-under-the-real-evaluation-strategy)). **Reject.**
 - **Full functional-correctness specs** ("insertion sort really sorts"): high authoring cost, low generation determinism. Anti-goal.
 
 The deciding quote is *"minimal context needed"*: anything forcing the agent to reason in an SMT proof context it can't see on the page works against the language's reason to exist.
 
 ---
 
-## 3. Refinements vs. / with `?` and sum types — the agent-legibility tradeoff
+## Refinements alongside failable calls and sum types
 
 This is where the agent-first mandate is decisive, and it cuts **against** refinements as the *primary* partiality mechanism.
 
@@ -104,7 +104,7 @@ The H2 nuance sharpens this: the `?` surface is *already* subtle enough to warra
 
 ---
 
-## 4. SMT / toolchain cost
+## SMT and toolchain cost
 
 The toolchain posture (H7) is explicit and lean:
 
@@ -115,15 +115,15 @@ The toolchain posture (H7) is explicit and lean:
 Evaluating the four options:
 
 - **(c) Full SMT (Z3) in the default build — reject.** Z3 is a large C++ dependency; embedding it in the always-on payload contradicts the "small, always needed" boundary and the single-Go-binary identity (`CLAUDE.md:1`). *(Ironic wrinkle: macOS LLVM already drags in `libz3` transitively — `runtime-architecture.md:139` — but that's LLVM's private copy, not a sanctioned, cross-platform, exposed solver.)*
-- **(d) Skip — viable, the honest default**, since the existing `?`/sum-type story already covers partiality (§3).
+- **(d) Skip — viable, the honest default**, since the existing `?`/sum-type story already covers partiality ([Refinements alongside failable calls and sum types](#refinements-alongside-failable-calls-and-sum-types)).
 - **(a) Opt-in pass / separate tool (LH's own plugin model) — strong.** Refinement checking lives in a separate `promise verify`-style tool or `--refine` pass that *may* pull Z3 from the on-demand cache, exactly as LLVM tools are fetched today. The default `build`/`run`/`test` path stays solver-free and binary-thin.
-- **(b) Syntactically decidable fragment in the core path (intervals/bounds by abstract interpretation, no general solver) — strong, complementary.** The lightweight tier (§2) is largely an interval/linear-arithmetic problem. A bespoke abstract-interpretation pass over intervals — *no Z3* — discharges the high-value 80% (array bounds, div-by-zero) in the default build with zero new heavy deps.
+- **(b) Syntactically decidable fragment in the core path (intervals/bounds by abstract interpretation, no general solver) — strong, complementary.** The lightweight tier ([Which tier to adopt](#which-tier-to-adopt)) is largely an interval/linear-arithmetic problem. A bespoke abstract-interpretation pass over intervals — *no Z3* — discharges the high-value 80% (array bounds, div-by-zero) in the default build with zero new heavy deps.
 
 **Recommendation: (b) in the core, (a) as the escape hatch.** Ship an interval/bounds checker in pure Go inside the compiler for the lightweight tier — it stays in the thin binary, runs in the default build, gives *local* evidence. Anything richer than quantifier-free linear arithmetic goes to an **opt-in `--refine` pass that fetches a solver on demand**, never in the default path. This is the only combination consistent with both the lean-toolchain quotes and the agent-first goal of a build that "just works" without a 50 MB solver.
 
 ---
 
-## 5. Inference interaction
+## Inference interaction
 
 H4 corrected: Promise is **annotation-driven with local/bidirectional inference**, not global HM. Two consequences for LH-style refinement *inference* (qualifier-set predicate abstraction):
 
@@ -132,7 +132,7 @@ H4 corrected: Promise is **annotation-driven with local/bidirectional inference*
 
 ---
 
-## 6. Concurrency: right tool or wrong tool?
+## Concurrency right tool or wrong tool
 
 For an agent-first *concurrent* language, the high-value correctness targets are **protocol/resource properties, not value predicates** — and LH is fundamentally sequential, silent on goroutines/channels. The in-tree evidence is striking: the partial operations that actually bite in Promise's concurrency and I/O surface are **state preconditions**, not arithmetic:
 
@@ -143,17 +143,17 @@ read_all!(~this) string { if this._fd < 0 { raise IoError(code: 9, "bad file des
 
 **Refinements are the wrong tool for the concurrency/resource axis.** `v > 0` is not where the bugs are; `fd >= 0` and "don't send on a closed channel" are. And Promise is unusually well-positioned for the *right* tool: it already has **affine ownership** (move-tracking, use-at-most-once — `language-design.md:1449-1487`) and **single-owner move-only handles** (`task[T]`, `Mutex` — `language-design.md:3635`). Typestate is essentially affine ownership where the *type changes on each consuming operation* (`File.open` → `OpenFile`; `read` consumes-and-returns `OpenFile`; `close` consumes to nothing) — Promise is one conceptual step away. H6's finding that there are **no documented typestate/session ambitions** is the most actionable gap in this report.
 
-**Refined ADTs + ghost/phantom state as a substitute: adequate-but-unergonomic, trending dead-end.** You *can* encode "open file" as a refined ADT with a phantom `IsOpen` field threaded through every method — but that re-encodes typestate in the wrong vocabulary, demands the heavyweight refinement tier you otherwise wouldn't ship (§2), and produces signatures an agent reconstructs *worse* than a plain `OpenFile`/`ClosedFile` pair. Against *"one obvious way"* it's a clear loss. **If Promise wants protocol safety, build typestate on the ownership system directly.**
+**Refined ADTs + ghost/phantom state as a substitute: adequate-but-unergonomic, trending dead-end.** You *can* encode "open file" as a refined ADT with a phantom `IsOpen` field threaded through every method — but that re-encodes typestate in the wrong vocabulary, demands the heavyweight refinement tier you otherwise wouldn't ship ([Which tier to adopt](#which-tier-to-adopt)), and produces signatures an agent reconstructs *worse* than a plain `OpenFile`/`ClosedFile` pair. Against *"one obvious way"* it's a clear loss. **If Promise wants protocol safety, build typestate on the ownership system directly.**
 
 ---
 
-## 7. Concrete recommendation
+## Concrete recommendation
 
 1. **Adopt the lightweight tier only**, surfaced as *interval/bounds checking* — array indices, non-zero divisors, non-empty preconditions — built as a **pure-Go abstract-interpretation pass in the default build** (option 4b). Removes real panics (`vector.pr:20`) at compile time with **zero new heavy dependency**, inside the "small, always needed" budget (`distribution.md:24`).
 2. **Anything richer → opt-in `--refine` pass** fetching a solver from the on-demand cache (option 4a), never in the default path.
-3. **Refinements strengthen success payloads; never replace the `?`/sum-type failure channel** (§3). The visible, in-band discipline owns partiality-as-failure; refinements only prove guards unnecessary.
-4. **Reject reflection and full functional-correctness proofs** — they violate *"one obvious way"* and *"minimal context"* (`CLAUDE.md:12-13`) and re-introduce the termination obligation (§1).
-5. **For the concurrency/resource axis, pursue typestate/session/linear types on the existing affine ownership system — not refinements** (§6). Higher-value, better-fitting, currently a documented blank.
+3. **Refinements strengthen success payloads; never replace the `?`/sum-type failure channel** ([Refinements alongside failable calls and sum types](#refinements-alongside-failable-calls-and-sum-types)). The visible, in-band discipline owns partiality-as-failure; refinements only prove guards unnecessary.
+4. **Reject reflection and full functional-correctness proofs** — they violate *"one obvious way"* and *"minimal context"* (`CLAUDE.md:12-13`) and re-introduce the termination obligation ([Soundness under the real evaluation strategy](#soundness-under-the-real-evaluation-strategy)).
+5. **For the concurrency/resource axis, pursue typestate/session/linear types on the existing affine ownership system — not refinements** ([Concurrency right tool or wrong tool](#concurrency-right-tool-or-wrong-tool)). Higher-value, better-fitting, currently a documented blank.
 6. **Surface errors with *local* evidence.** Not "refinement unsatisfiable," but `index i may reach len (v has length n at line X); call is in-bounds only when i < n`, anchored to the call site. The only way a refinement feature survives contact with *"self-contained readability"* (`CLAUDE.md:10`): the evidence must be on the page, not in the solver.
 
 **Adoption verdict: partial and narrow.** The lightweight bounds/non-zero tier is worth adopting — it removes panics the type system currently can't see. Everything above quantifier-free linear arithmetic (reflection, full correctness) should be declined as anti-goal for an agent-first language. And the feature the concurrency axis actually wants is not LH at all — it's typestate, which Promise is structurally primed for and currently lacks.
@@ -173,7 +173,7 @@ read_all!(~this) string `public `doc("Reads all remaining content into a string.
 ```
 The precondition `this._fd >= 0` (handle open) is currently enforced **at runtime** and signalled via the failable `!` channel.
 
-### (a) LH-style refined signature
+### A refined signature
 
 Precondition as a refinement on the receiver (phantom/ghost open-state), discharged by the solver:
 ```
@@ -187,7 +187,7 @@ f.close();                           // close's post: f.is_open becomes false
 content2 := f.read_all();            // COMPILE ERROR: refinement is_open unsatisfiable
 ```
 
-### (b) `?`-propagated `Result` — the existing idiom
+### The existing propagated idiom
 
 ```
 // actual Promise — partiality is in-band on the name + return channel
@@ -202,7 +202,7 @@ process!(string path) string {
 }
 ```
 
-### Which does an agent reconstruct more reliably from surface syntax alone?
+### Which an agent reconstructs more reliably
 
 **(b), decisively.** In (b) every fallible step carries a visible `?^` token and the callee's `!` announces fallibility on its name — an agent reading *only these lines* knows what can fail and where control leaves, with no external context. This is *"self-contained readability"* and *"explicit over implicit"* operating as designed (`CLAUDE.md:10-11`).
 
@@ -210,12 +210,12 @@ In (a), whether `f.read_all()` compiles depends on the solver having proved `f.i
 
 ### What each does at the failure site
 
-- **(a)** Failure is a **compile-time type error** at the bad call — *if and only if* the solver can prove it. Zero runtime cost, but the diagnosis is "refinement unsatisfiable" unless the implementation invests in local-evidence messages (§7.6).
+- **(a)** Failure is a **compile-time type error** at the bad call — *if and only if* the solver can prove it. Zero runtime cost, but the diagnosis is "refinement unsatisfiable" unless the implementation invests in local-evidence messages ([Concrete recommendation](#concrete-recommendation) item 6).
 - **(b)** Failure is a **runtime `IoError`** that is propagated (`?^`), handled (`? e {}`), or panicked (`?!`) — *visibly, in-band*, at a site the reader can see.
 
-### Which I'd ship
+### Which to ship
 
-**Ship (b).** It is the existing idiom, the more agent-legible reconstruction target, and the "handle is open" precondition is a **typestate** property — the class §6 argues refinements model *worst*. If Promise ever wants this checked statically, the right vehicle is a typestate `OpenFile`/`ClosedFile` split built on the affine ownership system (`language-design.md:1449`), not an SMT refinement. Reserve refinements for **value-level bounds/non-zero** cases (§2), where the predicate is short, local, and visible — and where no in-band sum-type alternative already does the job better.
+**Ship (b).** It is the existing idiom, the more agent-legible reconstruction target, and the "handle is open" precondition is a **typestate** property — the class [Concurrency right tool or wrong tool](#concurrency-right-tool-or-wrong-tool) argues refinements model *worst*. If Promise ever wants this checked statically, the right vehicle is a typestate `OpenFile`/`ClosedFile` split built on the affine ownership system (`language-design.md:1449`), not an SMT refinement. Reserve refinements for **value-level bounds/non-zero** cases ([Which tier to adopt](#which-tier-to-adopt)), where the predicate is short, local, and visible — and where no in-band sum-type alternative already does the job better.
 
 ---
 

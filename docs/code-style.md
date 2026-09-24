@@ -79,7 +79,7 @@ If the field itself is intended to be part of the public API and there's no deri
 
 ## Naming
 
-- Use full English words in public APIs. Approved abbreviations are listed in `docs/language-design.md` §9.3a — when an approved abbreviation exists (e.g. `dir`, `env`, `id`, `len`, `min`, `max`), prefer the abbreviation; otherwise use the full word (`print_line`, not `println`).
+- Use full English words in public APIs. Approved abbreviations are listed in `docs/language-design.md` [Naming Conventions](language-design.md#naming-conventions) — when an approved abbreviation exists (e.g. `dir`, `env`, `id`, `len`, `min`, `max`), prefer the abbreviation; otherwise use the full word (`print_line`, not `println`).
 - A getter (`get name T`) is for access that is **both** side-effect-free **and** cheap — O(1), field-like (e.g. `len`, `is_empty`, `is_literal`). Use a method (`name() T`) when the operation takes parameters, has side effects, **or has material call cost** (allocation or non-trivial computation). The parentheses are a *cost signal*: they tell the caller "this does work." So `len` is a getter, but `to_string()` (allocates), `clone()` (allocates + deep-copies), `bytes()` (allocates), and `format(w)` (takes a `Writer`) are methods even when parameterless and side-effect-free. When in doubt, ask "is this a field-cheap read?" — yes ⇒ getter, no ⇒ method.
 - **Interface conformance overrides the cost signal.** When a `` `structural `` interface declares an accessor as a getter (e.g. `Hashable` declares `get hash int`), every implementor matches that form — even where a particular type's implementation is O(n) (e.g. `string.hash` scans all bytes). A uniform shape across the hierarchy is worth more than the per-type cost signal, and such an accessor still reads as a property.
 
@@ -135,7 +135,7 @@ Same rule on a third axis: a target triple does not carry its own answer to "can
 
 ## Host tools in Go sources
 
-Same rule, one level up: a build that asks the host what it has installed runs a different build on every machine, and a *test* that does it runs a different test. The toolchain comes from the pinned prebuilts, an explicit `PROMISE_*` override, or a stub the test writes itself — never from `PATH` ([build-tools.md](build-tools.md) §4). T2108 applied that to the resolvers; the tests kept their `PATH` probes, so the same commit was green on a machine without LLVM and red on one with it (T2116).
+Same rule, one level up: a build that asks the host what it has installed runs a different build on every machine, and a *test* that does it runs a different test. The toolchain comes from the pinned prebuilts, an explicit `PROMISE_*` override, or a stub the test writes itself — never from `PATH` ([build-tools.md](build-tools.md), under [LLVM staging](build-tools.md#llvm-staging)). T2108 applied that to the resolvers; the tests kept their `PATH` probes, so the same commit was green on a machine without LLVM and red on one with it (T2116).
 
 - **`// path-ok: <reason>` annotates a legitimate lookup.** A structural guard (`CheckHostToolLookups` in `tools/build/common/hosttoolcheck.go`, run by `bin/verify` and over the real tree by the tools test suite) rejects any tracked `.go` line that calls `Which`/`exec.LookPath`, or names a toolchain binary bare to `exec.Command`, unless that line carries the marker with a non-empty reason. `git`, `sh`, `go` and `gofmt` need none — they are the environment the build runs inside, not tools it builds with. Per-line like its two siblings, and for the same reason.
 

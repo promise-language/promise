@@ -1,5 +1,5 @@
 // T1752 — `_validate!`: a type invariant every construction path must satisfy.
-// docs/language-design.md §5.7 → Validation.
+// docs/language-design.md#constructors → Validation.
 //
 // The chain runs at the construction expression, except for a `Self` built
 // inside its own `factory, which defers to that factory's `return` — after any
@@ -242,7 +242,7 @@ new_and_validate_share_one_failable_construction() `test {
   assert(fromValidate == "negative after doubling", "the invariant ran after new(), got: {fromValidate}");
 }
 
-// --- pure value types (§5.7: no value-type exemption) -----------------------
+// --- pure value types (language-design.md#constructors: no value-type exemption) -----------------------
 
 type Ratio {
   int num `value;
@@ -436,7 +436,7 @@ enum_clone_exempts_its_own_variants() `test {
   assert(isUnset, "a fieldless variant needs no handling");
 }
 
-// --- clone (§5.7: a clone copies an already-valid original) -----------------
+// --- clone (language-design.md#constructors: a clone copies an already-valid original) -----------------
 
 type Document `clone {
   string title `final;

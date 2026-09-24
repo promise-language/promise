@@ -7,7 +7,7 @@
 // spellings — dispatched only `string` and `Vector` for an i8* result, so a
 // handle matched neither name and fell out untracked: a discarded or
 // inline-consumed handle leaked its whole heap state (~5 allocations per
-// channel, 3 per mutex, 1 per Ref/Weak/Task). §7.2 of docs/language-design.md
+// channel, 3 per mutex, 1 per Ref/Weak/Task). language-design.md#calling-failable-functions of docs/language-design.md
 // gives the bare form in "all expression positions" and makes `?^` equivalent,
 // so all three spellings must account for ownership identically.
 //
@@ -623,7 +623,7 @@ generic_method_body_caret() `test {
   assert(gs.spin()?! == 3, "?^ inside a generic method body, T=string");
 }
 
-// A lambda body. Auto-propagation does not cross a lambda boundary (§7.2), so
+// A lambda body. Auto-propagation does not cross a lambda boundary (language-design.md#calling-failable-functions), so
 // `?!` is the only spelling available here — which is also why this is the one
 // context where the panic spelling is not merely the third alternative.
 lambda_body_panic() `test {

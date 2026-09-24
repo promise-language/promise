@@ -6,7 +6,7 @@ Promise installs as a single self-contained binary (compiler + standard library 
 catalog modules + runtime). The install script detects your platform, downloads
 the matching release binary, verifies its checksum, and sets up `~/.promise/`.
 
-## macOS (Apple Silicon) or Linux (x86_64 / arm64)
+## macOS and Linux
 
 ```sh
 curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh
@@ -14,7 +14,7 @@ curl -sSfL https://github.com/promise-language/promise/releases/latest/download/
 
 You may need to add Promise to your `PATH` — the installer prints the exact line for your shell.
 
-## Windows (PowerShell)
+## Windows
 
 ```powershell
 irm https://github.com/promise-language/promise/releases/latest/download/install.ps1 | iex
@@ -32,9 +32,9 @@ Verify with `promise version`, and keep it current with `promise update`.
   Intel Macs (x86_64) are not supported.
 - **macOS needs no prerequisites** — no Xcode, no Command Line Tools. Promise
   links against its own bundled `libSystem` stub (see
-  [distribution.md](distribution.md) §5.1); the host's Xcode/CLT installation,
+  [distribution.md](distribution.md), under [macOS](distribution.md#macos)); the host's Xcode/CLT installation,
   version, or license state never affects whether a Promise program links.
 - **Pin an epoch** instead of the latest stable:
   `curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh -s -- --epoch 2026.0`
 - **No-script install** (direct binary download + checksum verify) is
-  documented in [distribution.md](distribution.md) §2.3.
+  documented in [distribution.md](distribution.md), under [Direct download](distribution.md#direct-download).

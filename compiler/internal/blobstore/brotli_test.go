@@ -150,7 +150,7 @@ func TestResolveArchiveDeclinedSurfacesSentinel(t *testing.T) {
 
 // TestResolveBrotliDecompressionBombAbort feeds a small .br that expands well past
 // the manifest size; the bounded decompression (entry.Size+1) must reject it
-// rather than materialize an oversize blob (§4.3 overshoot defense over the
+// rather than materialize an oversize blob (distribution.md#content-mismatch-is-loud-and-never-silent overshoot defense over the
 // decompressed stream).
 func TestResolveBrotliDecompressionBombAbort(t *testing.T) {
 	big := bytes.Repeat([]byte("A"), 1<<16) // 64 KiB of highly compressible data

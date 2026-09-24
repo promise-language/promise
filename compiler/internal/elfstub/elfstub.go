@@ -9,7 +9,7 @@
 // install has none) the linker cannot even start, and every `promise build`
 // fails with "error while loading shared libraries" (T1774). Requiring the user
 // to install a system `.so` would break the zero-dependency bar that
-// docs/distribution.md §2.2/§5.3 sets, so the compiler supplies the library
+// docs/distribution.md#the-windows-install-script/distribution.md#linux sets, so the compiler supplies the library
 // itself: a ~2 KB stub, generated into the LLVM view dir that `runLLVMCmd`
 // already puts on LD_LIBRARY_PATH.
 //

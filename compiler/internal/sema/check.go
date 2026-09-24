@@ -57,10 +57,10 @@ type Checker struct {
 	pendingNarrowings   []NarrowedVar                    // post-divergence narrowings to apply before next statement
 	narrowedVariants    map[string]*IsNarrowing          // T0993: enum subjects narrowed to a variant in the current scope (var name → narrowing); save/restore around narrowed if-blocks
 	brokenFields        map[*types.Named]map[string]bool // T1168: fields whose declared type failed to resolve; member accesses to them are suppressed instead of cascading into "no field or method" errors
-	nonFailableScope    bool                             // T1217: true inside a plain `go {}` block body — a non-failable scope (§17.2.1); errors cannot propagate/raise regardless of the enclosing fn
-	failableScope       bool                             // T1379: true inside a `go! {}` block body — a failable scope (§17.2.1); errors auto-propagate/raise into the task regardless of the enclosing fn
+	nonFailableScope    bool                             // T1217: true inside a plain `go {}` block body — a non-failable scope (language-design.md#failable-goroutines); errors cannot propagate/raise regardless of the enclosing fn
+	failableScope       bool                             // T1379: true inside a `go! {}` block body — a failable scope (language-design.md#failable-goroutines); errors auto-propagate/raise into the task regardless of the enclosing fn
 	failableEscapeCount int                              // T1379: incremented at every point where a failable op escapes the current scope (see recordFailableEscape); snapshotted around a `go! {}` body to detect a body that cannot fail
-	goBlock             *goBlockCtx                      // T1385: non-nil inside a `go {}`/`go! {}` block body — `return` binds to the GOROUTINE, not curFunc (§17.2 explicit-return style)
+	goBlock             *goBlockCtx                      // T1385: non-nil inside a `go {}`/`go! {}` block body — `return` binds to the GOROUTINE, not curFunc (language-design.md#explicit-concurrency explicit-return style)
 	paramDefaults       []paramDefault                   // T1395: every parameter default declared in this file, in declaration order — type-checked once by checkParamDefaults
 	deferredValueTypes  []deferredValueType              // T1527: types whose value-type classification could not be decided during Define (see deferValueType), in declaration order
 
@@ -83,7 +83,7 @@ type Checker struct {
 	// sibling expression; every other position therefore rejects by default.
 	deferredSelfAllowed bool
 	// T1752: the type or enum whose clone() body is being checked, else nil.
-	// §5.7 exempts clone from validation — a clone is an identical copy of an
+	// language-design.md#constructors exempts clone from validation — a clone is an identical copy of an
 	// instance that was already valid — so a Self built there is not a validate
 	// site. Covers the compiler-synthesized `clone as well as a hand-written
 	// one, which is what keeps a validated type satisfiable as `Cloneable`
@@ -166,7 +166,7 @@ func (c *Checker) checkParamDefaults() {
 }
 
 // goBlockCtx accumulates the `return` statements seen inside one `go {}` /
-// `go! {}` block body. §17.2 gives a block two result styles — a trailing
+// `go! {}` block body. language-design.md#explicit-concurrency gives a block two result styles — a trailing
 // expression, or explicit `return <expr>` — and the block's `T` is inferred
 // either way. A `return` inside a go block therefore binds to the goroutine,
 // not to the enclosing function, so its value type is unified here rather than
@@ -191,7 +191,7 @@ type goBlockCtx struct {
 // for-in over a failable generator, and a use binding with a failable `close()`.
 //
 // EVERY such site must go through this one helper: the count it maintains is
-// what `go! { }` body-can-fail detection reads (§17.2.1, T1379), so a site that
+// what `go! { }` body-can-fail detection reads (language-design.md#failable-goroutines, T1379), so a site that
 // tests canPropagateError() directly silently drops its escape and makes a
 // genuinely failable body look like it cannot fail (T1386).
 func (c *Checker) recordFailableEscape() bool {

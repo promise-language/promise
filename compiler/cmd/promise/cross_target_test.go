@@ -17,7 +17,7 @@ import (
 // property of the compiler, not of the machine's cache state. An earlier draft
 // probed the disk for musl CRT / compiler-rt payloads, which made
 // `promise targets` answer differently on a warm and a cold cache — the same
-// class of host-dependent behaviour that docs/distribution.md §1.1/§4 forbids
+// class of host-dependent behaviour that docs/distribution.md#what-is-always-in-the-binary-and-what-is-fetched-on-demand/distribution.md#the-dependency-store forbids
 // (a cold cache means "not fetched yet", never "unsupported").
 func TestSupportedTargetsIsDeterministic(t *testing.T) {
 	// No t.Parallel: this test uses t.Setenv.

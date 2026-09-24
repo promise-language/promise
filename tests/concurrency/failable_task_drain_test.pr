@@ -1,4 +1,4 @@
-// T1381: `<-tasks` drain over `failable_task[T][]` (§17.2.1). A drain consumes
+// T1381: `<-tasks` drain over `failable_task[T][]` (language-design.md#failable-goroutines). A drain consumes
 // the vector, awaits every task in index order, and yields `T[]` — succeeding
 // only if every task succeeded, else failing with the FIRST error by index.
 // Remaining errors are discharged by the drain (not silently swallowed), and on
@@ -40,7 +40,7 @@ drain_all_ok_str() `test {
 
 // Fan-out then drain: build a failable_task[int][] dynamically (one spawn per
 // input) and await all with a single drain. (The `ids.map(id => go! produce(id))`
-// spelling from §17.2.1 is blocked on a parser gap, T1398 — a loop-built vector
+// spelling from language-design.md#failable-goroutines is blocked on a parser gap, T1398 — a loop-built vector
 // exercises the same drain over a dynamically-sized handle vector.)
 build_handles!(int n) failable_task[int][] {
   hs := failable_task[int][]();

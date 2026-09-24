@@ -85,7 +85,7 @@ func TestVoidFunctionTypeRendersInDiagnostic(t *testing.T) {
 	expectError(t, errs, "(int) -> void")
 }
 
-// T1634 / D: `!(…) -> T` — the failable function-type notation from §9.6.
+// T1634 / D: `!(…) -> T` — the failable function-type notation from language-design.md#function-types.
 // Before this, no failable function type could be written at all (`missing ')'
 // at '!'`), so no callback parameter could accept a failable function.
 

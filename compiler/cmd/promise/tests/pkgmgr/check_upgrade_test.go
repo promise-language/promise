@@ -15,7 +15,7 @@ import (
 // TestCheckUpgradeWithDeps drives `promise package check-upgrade <E>` end-to-end through
 // the real compiler binary (so epochCompilerBin resolves to a true compiler): a
 // project whose only dep has a verified E-compatible version reports all-clear; a
-// project whose dep is broken hits the §9.10 gate and exits non-zero.
+// project whose dep is broken hits the module-system.md#when-a-module-has-no-compatible-version gate and exits non-zero.
 func TestCheckUpgradeWithDeps(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -74,12 +74,12 @@ func TestCheckUpgradeWithDeps(t *testing.T) {
 			t.Fatalf("check-upgrade should exit non-zero for a broken dep:\n%s", out)
 		}
 		if !strings.Contains(out, "no compatible version") {
-			t.Errorf("expected a §9.10 gate report, got:\n%s", out)
+			t.Errorf("expected a module-system.md#when-a-module-has-no-compatible-version gate report, got:\n%s", out)
 		}
 	})
 
 	// T1051: a dep whose only tag targets a NEWER epoch than the project is
-	// versioned-but-incompatible — check-upgrade must hit the §9.10 gate and print
+	// versioned-but-incompatible — check-upgrade must hit the module-system.md#when-a-module-has-no-compatible-version gate and print
 	// the "module only targets newer epochs" line, not the unversioned fallback.
 	t.Run("only-newer-epochs", func(t *testing.T) {
 		year, minor, ok := module.ParseEpoch(epoch)

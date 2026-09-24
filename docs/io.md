@@ -14,7 +14,7 @@ guarantees; they are inventoried in [standard-library.md](standard-library.md) a
 
 ---
 
-## 1. Why these three need a contract
+## Why these three need a contract
 
 Writing a file correctly is not `open` → `write` → `close`. A process that dies partway through that
 sequence leaves a *truncated* file where the previous version used to be — the old contents are gone
@@ -35,7 +35,7 @@ default, and never has to know which of those traps applies to their platform.**
 
 ---
 
-## 2. The public surface
+## The public surface
 
 ```promise
 // The composite — the durable write, done correctly.
@@ -51,23 +51,23 @@ Dir.sync!(string path)                              `global `public
 File.lock!(~this)                                  // blocking, exclusive
 File.lock_shared!(~this)                           // blocking, shared
 File.try_lock!(~this) bool                         // never blocks; false = held elsewhere
-File.try_lock_for!(~this, Duration timeout) bool   // bounded wait; false = timed out (§5.7)
+File.try_lock_for!(~this, Duration timeout) bool   // bounded wait; false = timed out ([Bounded waiting and why it polls](#bounded-waiting-and-why-it-polls))
 File.unlock!(~this)
 ```
 
 `replace_content` is the one obvious way. The primitives exist because a caller streaming a large
 file cannot buffer it into a `string` first, and must be able to assemble the same sequence by hand.
 `Dir.sync!` is public **because** `File.rename!` is: a caller using the primitives without it would
-believe they had built a durable write and be wrong (§3.2).
+believe they had built a durable write and be wrong ([Why the final sync is not optional](#why-the-final-sync-is-not-optional)).
 
 ---
 
-## 3. Atomic replace
+## Atomic replace
 
-### 3.1 What `replace_content` does
+### What replace content does
 
-1. Create a temporary file **in the destination's own directory** (§3.3).
-2. Take an exclusive lock on it (§5), truncate it, and write the content.
+1. Create a temporary file **in the destination's own directory** ([The temporary file must be a sibling](#the-temporary-file-must-be-a-sibling)).
+2. Take an exclusive lock on it ([Advisory locking](#advisory-locking)), truncate it, and write the content.
 3. `sync` the temporary file — the *contents* are now durable.
 4. `rename` the temporary over the destination — the swap is atomic.
 5. `sync` the destination's directory — the *swap* is now durable.
@@ -77,7 +77,7 @@ A reader concurrently opening the destination sees either the complete old file 
 one. There is no window in which it sees a partial write, and no crash point that leaves a truncated
 destination.
 
-### 3.2 Why step 5 is not optional
+### Why the final sync is not optional
 
 `rename` modifies a directory entry. Syncing the *file* in step 3 says nothing about whether that
 directory entry reached stable storage. Without step 5, a power loss immediately after a successful
@@ -86,17 +86,17 @@ neither. The file's contents are durable and the swap is not.
 
 On POSIX this is `open(dir, O_RDONLY)` followed by `fsync`. On Windows a directory handle cannot be
 flushed; the equivalent guarantee comes from `MOVEFILE_WRITE_THROUGH` on `MoveFileEx`, or — when the
-rename falls back to the POSIX-semantics path of §6.2 — from flushing the renamed file, whose
+rename falls back to the POSIX-semantics path of [Borrowing and Moving](language-design.md#borrowing-and-moving) — from flushing the renamed file, whose
 metadata carries its directory entry. Either way `Dir.sync!` is a no-op there and the durability is
 carried by the rename itself.
 
-### 3.3 The temporary file must be a sibling
+### The temporary file must be a sibling
 
 `rename` fails with `EXDEV` across filesystem boundaries, and `/tmp` is very often a different
 filesystem. The temporary is therefore always created in the destination's directory, never in a
 system temporary directory.
 
-### 3.4 Orphan reclamation — no cleanup daemon, no random names
+### Orphan reclamation
 
 A temporary file survives only a hard kill: every ordinary error path in `replace_content` unlinks it
 before raising. `SIGKILL`, OOM, and power loss can still leave one behind, and a durable-write
@@ -109,7 +109,7 @@ destination — and liveness is decided by the lock:
 2. Locked: confirm the name still refers to the locked file — same file identity (POSIX
    `st_dev`+`st_ino`; Windows volume serial + file index), not same path string. **The lock, on a
    file its name still refers to, decides ownership.** Confirmed means the slot is ours and whatever
-   it holds is stale, because the kernel releases locks on process death (§5.4), so truncate it to
+   it holds is stale, because the kernel releases locks on process death ([Release on death is guaranteed](#release-on-death-is-guaranteed)), so truncate it to
    zero. On mismatch, drop the descriptor and retry the same slot: the name was consumed while we
    waited, and every such retry means another writer completed an entire replace, so the system
    always makes progress.
@@ -120,13 +120,13 @@ destination — and liveness is decided by the lock:
 Creation is deliberately *not* the ownership test. `open(O_CREAT|O_EXCL)` and the lock are two
 syscalls, and between them the temporary exists and is unlocked — indistinguishable from a crash
 orphan. A second writer arriving in that window would classify a live writer's slot as stale,
-truncate it, and rename it into place mid-write, violating §3.1 and §3.5.
+truncate it, and rename it into place mid-write, violating [What replace content does](#what-replace-content-does) and [Replace does not lock the destination](#replace-does-not-lock-the-destination).
 
 The lock *alone* is not the ownership test either, and for the mirror-image reason: the open and the
 lock are also two syscalls, and between them the slot's owner can finish — rename the temporary onto
 the destination and close, releasing the lock. The late arrival's `try_lock` then succeeds on a
 descriptor whose name is gone, and the file it holds **is the destination**: truncating it would
-empty a completed write, violating §3.1 and §3.5 from the other side. The identity check in step 2
+empty a completed write, violating [What replace content does](#what-replace-content-does) and [Replace does not lock the destination](#replace-does-not-lock-the-destination) from the other side. The identity check in step 2
 is what closes that window, and it is safe against re-opening it: once the name is confirmed, only
 the lock holder can rename it away, so ownership cannot be lost after the check.
 
@@ -134,7 +134,7 @@ This needs no random source, no process identifier, no clock, and no liveness pr
 identifier reuse cannot fool it, concurrent writers to one destination never collide, and every
 temporary left by a crash is reclaimed by the next writer to that path.
 
-### 3.5 `replace_content` does not lock the destination
+### Replace does not lock the destination
 
 Two processes replacing the same path both succeed; the last rename wins and neither observes a
 partial file. That is the guarantee, and it is sufficient for a store whose records are written whole.
@@ -145,7 +145,7 @@ who already holds one would deadlock against it.
 
 ---
 
-## 4. Forcing data to stable storage
+## Forcing data to stable storage
 
 `File.sync!` returns only once the file's contents are on stable storage.
 
@@ -164,25 +164,25 @@ Correctness is chosen over speed here without a knob to trade it back.
 
 ---
 
-## 5. Advisory locking
+## Advisory locking
 
-### 5.1 The model: one lock per open file, whole-file, advisory
+### One lock per open file whole file and advisory
 
 A lock is owned by the **open file description**, not by the process and not by the path. Locks are
 whole-file; there are no byte ranges. `lock!` is exclusive and `lock_shared!` is shared; `unlock!`
 releases early — otherwise the lock is released when the file closes.
 
 One lock model, three ways to acquire it: **wait indefinitely** (`lock!`, `lock_shared!`), **never
-wait** (`try_lock!`), or **wait up to a deadline** (`try_lock_for!`, §5.7). The mode is chosen by
+wait** (`try_lock!`), or **wait up to a deadline** (`try_lock_for!`, [Bounded waiting and why it polls](#bounded-waiting-and-why-it-polls)). The mode is chosen by
 which method is called rather than by a flag, so the call site says which one it is.
 
 | Platform | Implementation |
 |---|---|
 | Linux, macOS | `flock(2)` — `LOCK_EX`, `LOCK_SH`, `LOCK_NB`, `LOCK_UN` |
-| Windows | `LockFileEx` / `UnlockFileEx` over a sentinel byte at offset 2⁶⁴−2 (§5.3) |
+| Windows | `LockFileEx` / `UnlockFileEx` over a sentinel byte at offset 2⁶⁴−2 ([Advisory everywhere and Windows locks a sentinel byte](#advisory-everywhere-and-windows-locks-a-sentinel-byte)) |
 | WASM | unsupported — raises |
 
-### 5.2 Why `flock`, and what it costs
+### Why flock and what it costs
 
 POSIX offers three mechanisms and they are not interchangeable:
 
@@ -199,16 +199,16 @@ lock, so a correct caller would have to audit every descriptor in the program.
 `flock` is chosen because its per-open-file-description ownership is also what Windows `LockFileEx`
 provides per `HANDLE` — giving **one** model to document rather than two.
 
-The cost is NFS, and it is accepted rather than worked around (§5.5).
+The cost is NFS, and it is accepted rather than worked around ([NFS is out of scope](#nfs-is-out-of-scope)).
 
-### 5.3 Advisory everywhere — Windows locks a sentinel byte
+### Advisory everywhere and Windows locks a sentinel byte
 
 `flock` is advisory: a process that never takes the lock can read and write the file freely. Windows
 `LockFileEx` is mandatory — conflicting reads and writes from other handles actually fail — so
 locking a file's data range would give the two platforms observably different semantics, and worse:
-§3.4 requires the temporary slot's lock to outlive the rename, so a data-range lock would make the
+[Orphan reclamation](#orphan-reclamation) requires the temporary slot's lock to outlive the rename, so a data-range lock would make the
 freshly renamed-in *destination* unreadable to concurrent readers until the writer closes, breaking
-§3.1's reader guarantee on Windows (T1968).
+[What replace content does](#what-replace-content-does)'s reader guarantee on Windows (T1968).
 
 The Windows implementation therefore locks a **single sentinel byte at offset 2⁶⁴−2** — beyond any
 reachable file size, which Win32 explicitly permits. Every Promise lock operation uses the same
@@ -222,29 +222,29 @@ non-Promise program that locks a file's data range with `LockFileEx` does not co
 Promise lock on the same file — exactly as a program using `fcntl` ranges does not conflict with
 `flock` on POSIX.
 
-### 5.4 Release on death is guaranteed
+### Release on death is guaranteed
 
 The kernel releases the lock when the process exits, including under `SIGKILL` and OOM kill — POSIX
 tears down the descriptor table, Windows closes the handles. There is no stale-lock recovery to
 write, and no lease timeout to tune.
 
-This guarantee is what §3.4's orphan reclamation is built on. It does not extend to NFS.
+This guarantee is what [Orphan reclamation](#orphan-reclamation)'s orphan reclamation is built on. It does not extend to NFS.
 
-### 5.5 NFS is out of scope
+### NFS is out of scope
 
 Locking over NFS is **not supported** and must not be relied on. Linux emulates `flock` over NFS with
 `fcntl`, silently changing the ownership model out from under the caller; macOS returns `ENOTSUP`.
 Rather than expose a mechanism that is subtly wrong on one platform and absent on another, network
 filesystems are excluded from this contract.
 
-### 5.6 No lock upgrade or downgrade
+### No lock upgrade or downgrade
 
 Converting a shared lock to exclusive (or back) is **not supported**. `flock` permits re-calling with
 a different mode, but the conversion is not atomic — the lock is momentarily dropped, so another
 waiter can acquire it in between, and a caller that assumed continuity would be wrong. Release and
 re-acquire explicitly, and re-validate whatever was read under the shared lock.
 
-### 5.7 Bounded waiting, and why it polls
+### Bounded waiting and why it polls
 
 `try_lock_for!(timeout)` waits up to `timeout` for the lock and returns `false` if it did not get it.
 
@@ -266,11 +266,11 @@ waiting is legitimate but must stay bounded, `lock!` only when the holder is kno
 
 ---
 
-## 6. Platform differences a caller can observe
+## Platform differences a caller can observe
 
 Everything above is uniform across platforms except these, which are stated rather than hidden:
 
-1. **Lock interop with non-Promise programs** (§5.3): locking is advisory on every platform, but a
+1. **Lock interop with non-Promise programs** ([Advisory everywhere and Windows locks a sentinel byte](#advisory-everywhere-and-windows-locks-a-sentinel-byte)): locking is advisory on every platform, but a
    foreign program locking a file's data range coordinates with Promise locks on no platform.
 2. **Delete-pending on Windows.** An open file can be renamed over there, but not by
    `MoveFileEx`: `FILE_SHARE_DELETE` on every handle is necessary and not sufficient, because
@@ -280,19 +280,19 @@ Everything above is uniform across platforms except these, which are stated rath
    open file on Windows leaves the *name* visible until the last handle closes, and a new open of
    that name fails with `ERROR_ACCESS_DENIED`. POSIX `unlink` removes the name immediately and a
    fresh create succeeds.
-3. **`Dir.sync!` is a no-op on Windows** (§3.2).
+3. **`Dir.sync!` is a no-op on Windows** ([Why the final sync is not optional](#why-the-final-sync-is-not-optional)).
 4. **WASM supports none of this.** `sync`, the lock operations, and `replace_content` raise. WASI has
    no advisory locking, and the target has no durability story to offer.
 
 ---
 
-## 7. Errors
+## Errors
 
 All operations raise `IoError`, carrying the platform error code as `code`. Beyond the codes
 `modules/io` already maps, this contract adds:
 
 | Code | Meaning here |
 |---|---|
-| `EXDEV` (18) | `rename` across filesystems — the temporary was not a sibling of the destination (§3.3) |
-| `EAGAIN` / `EWOULDBLOCK` (11 Linux, 35 macOS) | contention. `try_lock!` reports it as `false` and never raises it; `replace_content` raises it when every temporary slot beside the destination is held by a live writer (§3.4) |
+| `EXDEV` (18) | `rename` across filesystems — the temporary was not a sibling of the destination ([The temporary file must be a sibling](#the-temporary-file-must-be-a-sibling)) |
+| `EAGAIN` / `EWOULDBLOCK` (11 Linux, 35 macOS) | contention. `try_lock!` reports it as `false` and never raises it; `replace_content` raises it when every temporary slot beside the destination is held by a live writer ([Orphan reclamation](#orphan-reclamation)) |
 | `ENOSYS` | the operation is unsupported on this target (WASM) |

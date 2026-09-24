@@ -82,7 +82,7 @@ failable_task_string_result() `test {
   assert(s == "value=4", "string result");
 }
 
-// A failable gate that forces an auto-propagation early-exit. §17.2.1 (T1381)
+// A failable gate that forces an auto-propagation early-exit. language-design.md#failable-goroutines (T1381)
 // makes a failable_task must-use, so the only legal way to reach the drop path is
 // to still OWN a task (or holder/vector) when control leaves the scope on an
 // error-propagation edge: spawn, then a bare `gate!(true)` auto-propagates before
@@ -125,7 +125,7 @@ failable_task_dropped_success_leak_free() `test {
   assert(s == "", "dropped-success path did not leak");
 }
 
-// §17.2.1: a failable_task[T] crosses field/collection boundaries like any type
+// language-design.md#failable-goroutines: a failable_task[T] crosses field/collection boundaries like any type
 // (single-owner handle). These exercise the field/collection drop paths.
 
 type FTHolder {
@@ -171,7 +171,7 @@ failable_task_vector_dropped_leak_free() `test {
   assert(r == -1, "vector drop path did not leak");
 }
 
-// §17.2.1 (T1381): an ENUM whose variant payload owns a failable_task is
+// language-design.md#failable-goroutines (T1381): an ENUM whose variant payload owns a failable_task is
 // transitively must-use, and its drop must discharge the buffered aggregate
 // leak-free — the enum-payload sibling of the holder/vector drop tests above.
 // One variant carries a buffered ERROR (produce raises), the other a buffered
@@ -238,7 +238,7 @@ failable_task_enum_dropped_success_leak_free() `test {
   assert(s == "", "enum buffered-success drop path did not leak");
 }
 
-// §17.2.1: `go! obj.method()` — a failable *method* spawn goes through the
+// language-design.md#failable-goroutines: `go! obj.method()` — a failable *method* spawn goes through the
 // ViaBlock codegen path (full context inside the coroutine body), distinct from
 // the free-function fast path above. Covers success, inline recovery, and the
 // leak-free drop of an un-received method-spawned failable task.
@@ -294,7 +294,7 @@ failable_task_method_spawn_dropped_leak_free() `test(exclude: wasm) {
   assert(r == -1, "method-spawn drop path did not leak");
 }
 
-// §17.2.1: `go! generic_fn(...)` — a failable *generic* free function spawn with
+// language-design.md#failable-goroutines: `go! generic_fn(...)` — a failable *generic* free function spawn with
 // inferred type args also routes through the ViaBlock failable path.
 pick![T](T a, T b, bool fail) T {
   if fail {
@@ -320,7 +320,7 @@ failable_task_generic_spawn_err() `test(exclude: wasm) {
   assert(v == 0, "generic spawn recovery value");
 }
 
-// §17.2.1 (T1381): must-use discharge across BRANCHES. A failable_task must be
+// language-design.md#failable-goroutines (T1381): must-use discharge across BRANCHES. A failable_task must be
 // received (or moved onward) on EVERY control-flow path that reaches scope end —
 // enforced by the AND-merge in the ownership pass (a task discharged on only some
 // arms is a compile error, see the ownership T1381 tests). These runtime tests

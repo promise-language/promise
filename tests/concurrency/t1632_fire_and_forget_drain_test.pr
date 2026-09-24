@@ -92,7 +92,7 @@ t1632_drain_covers_a_discarded_free_function_result() `test(exclude: wasm, timeo
 }
 
 // --- discarded heap result from a moved-receiver method call ---
-// go_method_call.pr's fire-and-forget shape: §17.4 forbids borrowing the receiver
+// go_method_call.pr's fire-and-forget shape: language-design.md#ownership-across-goroutines forbids borrowing the receiver
 // across the spawn, so ownership moves into the block and the trailing call's
 // result is discarded inside the goroutine.
 type T1632Builder {

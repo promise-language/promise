@@ -105,7 +105,7 @@ _parent_dir(string path) string {
 // A temporary file that has been opened, locked, and emptied — the exclusive
 // right to write <path>.promise-sync<N> and rename it over the destination.
 // Private: it is the mechanism behind File.replace_bytes, not a surface a caller
-// assembles by hand (docs/io.md §2 offers the primitives for that).
+// assembles by hand (docs/io.md#the-public-surface offers the primitives for that).
 type _Slot {
   File file;
   string name;
@@ -145,7 +145,7 @@ type _Slot {
   // rename that name no longer exists and unlinking it would delete the
   // destination — hence the committed flag. Best-effort by design: a drop runs on
   // a path that already has a failure to report, and a temporary left behind is
-  // not a correctness bug, only debris the next writer reclaims (docs/io.md §3.4).
+  // not a correctness bug, only debris the next writer reclaims (docs/io.md#orphan-reclamation).
   //
   // The File field's own drop closes the descriptor, which releases the lock.
   drop(~this) {
@@ -158,7 +158,7 @@ type _Slot {
 // Acquires the first free temporary slot beside path, starting at index.
 //
 // The lock, on a file its name still refers to, decides ownership (docs/io.md
-// §3.4): the slot is opened without O_TRUNC and without O_EXCL, a successful
+// io.md#orphan-reclamation): the slot is opened without O_TRUNC and without O_EXCL, a successful
 // try_lock proves nothing live holds it — the kernel releases locks on process
 // death, so a lock nobody holds means whatever wrote it is gone — and the
 // identity check proves the lock landed on the file the name still names,
@@ -169,7 +169,7 @@ type _Slot {
 _acquire_slot!(string path, int index) _Slot {
   // Bounded at 8 so a pathological directory cannot make one write scan forever;
   // eight concurrent live writers to a single path is already far past the
-  // design point (docs/io.md §3.4).
+  // design point (docs/io.md#orphan-reclamation).
   if index >= 8 {
     raise IoError(code: 11, message: "every temporary slot beside '{path}' is held by a live writer");
   }
@@ -180,7 +180,7 @@ _acquire_slot!(string path, int index) _Slot {
     // still refers to it. The slot's previous owner may have renamed it onto
     // the destination and closed (releasing the lock) after our open; the file
     // this descriptor points at is then the *destination*, and truncating it
-    // would empty a completed write mid-flight (T1967, docs/io.md §3.4).
+    // would empty a completed write mid-flight (T1967, docs/io.md#orphan-reclamation).
     // Identity closes that window: once the name is confirmed, only the lock
     // holder — us — can rename it away, so ownership is stable from here on.
     if !f._same_as_path(name[0:name.len]) {
@@ -410,7 +410,7 @@ type File is Closer `public `doc("A file handle. Use factory constructors to ope
     return Metadata(size: s, mode: m, uid: u, gid: g, modified: mt, accessed: at, created: ct, _file_type: ft);
   }
 
-  // --- Durability primitives (T1520 — docs/io.md §3, §4) ---
+  // --- Durability primitives (T1520 — docs/io.md#atomic-replace, io.md#forcing-data-to-stable-storage) ---
 
   sync!(~this) `public `doc("Returns only once this file's contents are on stable storage. On macOS this is F_FULLFSYNC, not fsync, and is significantly slower — see docs/io.md section 4. Unsupported on WASM.") {
     if this._fd < 0 {
@@ -429,7 +429,7 @@ type File is Closer `public `doc("A file handle. Use factory constructors to ope
     }
   }
 
-  // --- Advisory locking (T1520 — docs/io.md §5) ---
+  // --- Advisory locking (T1520 — docs/io.md#advisory-locking) ---
 
   lock!(~this) `public `doc("Takes an exclusive whole-file lock, waiting indefinitely. The lock is owned by this open file, is released by unlock() or by closing, and is released by the kernel if the process dies. There is no upgrade or downgrade: converting between shared and exclusive is not supported, because the conversion is not atomic — see docs/io.md section 5.6. Advisory on POSIX, mandatory on Windows; not supported over NFS. Unsupported on WASM.") {
     this._lock(1);
@@ -497,7 +497,7 @@ type File is Closer `public `doc("A file handle. Use factory constructors to ope
     }
   }
 
-  // --- Atomic replace (T1520 — docs/io.md §3) ---
+  // --- Atomic replace (T1520 — docs/io.md#atomic-replace) ---
 
   replace_bytes!(string path, u8[] content) `global `public `doc("Durably replaces a file's contents with content. Writes a sibling temporary, forces it to stable storage, atomically renames it over path, then syncs the directory — so a concurrent reader sees either the complete old file or the complete new one, and no crash point leaves a truncated destination. Does not lock the destination: the last writer wins and a read-modify-write cycle must hold its own lock across the whole cycle. See docs/io.md section 3. Unsupported on WASM.") {
     _Slot slot = _acquire_slot(path[0:path.len], 0);
@@ -533,7 +533,7 @@ type File is Closer `public `doc("A file handle. Use factory constructors to ope
 
   // Opens or creates for reading and writing, truncating nothing (mode 7).
   // Deliberately not public: it exists only for the temporary-slot protocol in
-  // docs/io.md §3.4, which must open a slot before the lock has decided whether
+  // docs/io.md#orphan-reclamation, which must open a slot before the lock has decided whether
   // its contents are stale.
   _open_or_create!(string path) Self `factory {
     int fd = _io_file_open(path, 7);
@@ -556,7 +556,7 @@ type File is Closer `public `doc("A file handle. Use factory constructors to ope
   // T1967: reports whether this open descriptor is still the file that path
   // names — false also when the name no longer exists. The temporary-slot
   // protocol must confirm this after locking, because a rename can consume the
-  // name between the open and the lock (docs/io.md §3.4).
+  // name between the open and the lock (docs/io.md#orphan-reclamation).
   _same_as_path!(~this, string path) bool {
     if this._fd < 0 {
       raise IoError(code: 9, message: "bad file descriptor");

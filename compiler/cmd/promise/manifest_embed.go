@@ -7,7 +7,7 @@ import (
 	"github.com/promise-language/promise/compiler/internal/blobstore"
 )
 
-// embeddedManifest is the runtime dependency manifest (docs/distribution.md §4.1),
+// embeddedManifest is the runtime dependency manifest (docs/distribution.md#manifest-entry-content-identity-and-acquisition),
 // ALWAYS embedded — thin and full alike. Thin builds carry an empty-entries
 // placeholder (host LLVM resolved from PATH/Homebrew, or fetched on first use
 // once the release manifest is present); full/release builds carry real entries

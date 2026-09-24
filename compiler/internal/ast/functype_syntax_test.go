@@ -67,7 +67,7 @@ func TestFunctionTypeSyntaxAccepted(t *testing.T) {
 }
 
 // TestEmptyParenReturnTypeRejected pins the T1634/C decision: `void` is the only
-// spelling for an empty return, and `()` is not a type. §9.6 previously showed
+// spelling for an empty return, and `()` is not a type. language-design.md#function-types previously showed
 // `() -> ()`, which never parsed; the docs now spell it `() -> void`. If `()`
 // is ever made a type, this test is the place that says the decision changed.
 func TestEmptyParenReturnTypeRejected(t *testing.T) {

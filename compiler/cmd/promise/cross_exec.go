@@ -13,7 +13,7 @@ import (
 // and `stress` previously each open-coded.
 //
 // The compiler never probes the host for emulators, toolchains, or any other
-// installed software. Per docs/distribution.md §1.1/§4 every heavy dependency
+// installed software. Per docs/distribution.md#what-is-always-in-the-binary-and-what-is-fetched-on-demand/distribution.md#the-dependency-store every heavy dependency
 // is a content-addressed blob named by the embedded manifest and verified by
 // sha256 — behaviour must not vary with what happens to be installed on the
 // machine, and a missing dependency must never be treated as absent-but-

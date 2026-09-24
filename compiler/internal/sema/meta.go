@@ -751,13 +751,13 @@ func (c *Checker) validateNewMethod(named *types.Named, m *types.Method, d *ast.
 	}
 	// T1752 lifted the old "value type cannot have a failable new()" rule:
 	// genValueTypeConstructor now merges new()'s error path into a failable
-	// result, the same shape the heap path has always produced. §5.7 grants no
+	// result, the same shape the heap path has always produced. language-design.md#constructors grants no
 	// value-type exemption from validation, and a validated value type must be
 	// able to declare `new!`.
 }
 
 // validateValidateMethod checks a _validate! invariant method's shape
-// (docs/language-design.md §5.7 → Validation, T1752). The method is the type's
+// (docs/language-design.md#constructors → Validation, T1752). The method is the type's
 // invariant: it must read every field and mutate none, so the receiver is a
 // shared `this`; it takes no parameters and returns nothing; and it must be
 // failable, since raising is how it rejects an instance.

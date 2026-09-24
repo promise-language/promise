@@ -58,7 +58,7 @@ func TestT1734DriftedCloseIsRejectedAtTheDeclaration(t *testing.T) {
 
 func TestT1952ReceiverBorrowKindMustMatchUnderExplicitIs(t *testing.T) {
 	// T1952: std.Closer requires close!(~this). A shared `this receiver is not
-	// among §5.3's relaxations, so an explicit `is` rejects it — and the message
+	// among language-design.md#variable-declarations's relaxations, so an explicit `is` rejects it — and the message
 	// names the receiver, because Signature.String() does not print it and the
 	// generic "expected X, found Y" arm would print two identical signatures.
 	errs := checkErrs(t, `
@@ -92,7 +92,7 @@ func TestT1952StructuralSatisfactionDoesNotYetCompareReceivers(t *testing.T) {
 	// Pins a known GAP, not a blessing: implicit structural satisfaction compares
 	// params, failability and result but never the receiver, so a `~this method
 	// satisfies a shared-receiver requirement and `s.emit(1)` below mutates
-	// through what §6.2 calls a read-only borrow. That is T2185; §5.3 states the
+	// through what language-design.md#borrowing-and-moving calls a read-only borrow. That is T2185; language-design.md#variable-declarations states the
 	// end-state rule (a concrete receiver may be less demanding than the
 	// requirement's, never more). This test exists so closing T2185 is a
 	// deliberate, visible change here rather than a silent one — the idiomatic

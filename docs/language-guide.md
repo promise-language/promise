@@ -47,7 +47,7 @@ stdout.write_line("data — same as print_line, but as a Writer handle");
 
 Bare numeric literals infer as `int` or `f64`. Use suffixes for specific types.
 
-### Wide integers (`i128`/`u128`, `i256`/`u256`, `i512`/`u512`)
+### Wide integers
 
 Fixed-width integers wider than 64 bits — for cryptography, hashing, UUIDs,
 network/IPv6 identifiers, and fixed-point currency. They are native primitives
@@ -456,7 +456,7 @@ string label = match shape {
 };
 ```
 
-## Ownership & Borrowing
+## Ownership and Borrowing
 
 ```promise
 // Three parameter modes (the shared borrow is the unmarked default):
@@ -506,7 +506,7 @@ add_one(int[]~ v) { v.push(1); }   // OK: mutable borrow
 ## Resource Management
 
 ```promise
-// use binding: auto-calls close() at scope exit (drop() is suppressed — §16.4)
+// use binding: auto-calls close() at scope exit (drop() is suppressed — [Interaction Between use and drop](language-design.md#interaction-between-use-and-drop))
 type Connection {
   int fd;
   close!(~this) { /* cleanup */ }
@@ -587,7 +587,7 @@ Set[Money] seen = Set[Money]();
 seen.add(Money(cents: 10));     // works because Money is Hashable + Equal
 ```
 
-## Collections (auto-imported from std)
+## Collections
 
 ```promise
 // Vector (T[])
@@ -701,7 +701,7 @@ t := go { expensive_work(); };
 <-t;                              // blocks until done, frees G
 
 // Task with return value (go + function call)
-t := go fetch_data(url.clone());  // the goroutine must own what it touches (§17.4)
+t := go fetch_data(url.clone());  // the goroutine must own what it touches ([Ownership Across Goroutines](language-design.md#ownership-across-goroutines))
 string result = <-t;           // blocks until done
 
 // Failable goroutine: spawn a fallible producer with `go!` → failable_task[T].
@@ -896,7 +896,7 @@ combined() stream[int] {
 }
 ```
 
-## Fixed-Size Arrays
+## Fixed Size Arrays
 
 ```promise
 // Declaration: Type[size]

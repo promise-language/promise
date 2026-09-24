@@ -6,11 +6,11 @@
 // because a rejected program does not compile.
 //
 // What IS testable here is the other half of the contract — the replacement
-// idiom the diagnostic's hint and §12.4 of docs/language-design.md point at, and
+// idiom the diagnostic's hint and language-design.md#generator-functions of docs/language-design.md point at, and
 // the shapes the guard must NOT reject. If the guard ever over-triggers (say, on
 // a `go` block that merely sits in a generator body), these stop compiling.
 // --- The documented workaround: the goroutine produces, the generator yields ---
-// This is verbatim the "OK" example in §12.4. A goroutine fills a channel; the
+// This is verbatim the "OK" example in language-design.md#generator-functions. A goroutine fills a channel; the
 // generator's own body owns every `yield`.
 t1428_channel_handoff() stream[int] {
   ch := channel[int](capacity: 4);

@@ -113,7 +113,7 @@ func TestUseVarDeclFailableInitAutoPropagate(t *testing.T) {
 }
 
 func TestUseBoundBothCloseAndDropSuppressesUserDrop(t *testing.T) {
-	// T0967 / language-design §16.4: for a `use`-bound value whose type defines
+	// T0967 / language-design language-design.md#interaction-between-use-and-drop: for a `use`-bound value whose type defines
 	// BOTH close() and a user drop(), only close() runs at scope exit — the user
 	// drop() body is suppressed (use takes precedence) to avoid double-cleanup.
 	// The instance is still freed (the heap memory is not user logic).

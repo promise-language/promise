@@ -12,7 +12,7 @@ auto-imported via an injected `use std as _;`.
 
 ---
 
-## 1. The Core Principle
+## The Core Principle
 
 **`modules/std/` = auto-imported into every file, no `use` needed.**
 **`modules/<name>/` = explicitly imported, available only when the program says so.**
@@ -20,7 +20,7 @@ auto-imported via an injected `use std as _;`.
 The difference is **purely ergonomic** — not architectural. Both live under `modules/` and are
 compiled the same way. This is the key insight that determines what belongs where.
 
-### The architecture: `std` as a regular catalog module
+### The std module is a regular catalog module
 
 `std` is a regular catalog module, identical in treatment to `modules/path` or `modules/io`.
 The only special behavior is that every source file automatically receives an injected
@@ -57,7 +57,7 @@ question is "does this auto-import or require `use`?" — not "does this affect 
 compile time?" This makes the design conversation simpler and reduces incentive to game the
 std/modules line for performance reasons.
 
-### Binary size: the full picture
+### Binary size the full picture
 
 With `std` as a proper module compiled to LLVM bitcode (`.bc`), and the linker running LTO
 (`--lto-O1` on Linux/macOS/WASM), dead code elimination works at IR level across all modules.
@@ -75,7 +75,7 @@ Until LTO was in place, binary size WAS affected by what goes in `std/`. But the
 effect is bounded — today std is ~28 files of pure Promise code plus some PAL bindings, which
 compiles to perhaps 50–100KB of object code. Not megabytes.
 
-### The `std/` membership test
+### The std membership test
 
 Given the above, the test is not "does this affect binary size?" but rather:
 
@@ -105,7 +105,7 @@ documentation.
 
 ---
 
-## 2. `\`target(cond)` — Compile-Time Platform Filtering
+## Compile Time Platform Filtering
 
 Implemented in Stage 8q. See `docs/archive/stages.md` for implementation details.
 
@@ -178,7 +178,7 @@ Entirely in sema (`sema/target.go`):
 No grammar changes were needed. `` `target `` is used in production code in `modules/std/platform.pr`
 (Platform constants) and in e2e tests (`tests/e2e/test_target_filter.pr`).
 
-### Where `\`target` applies vs where it does not
+### Where target applies and where it does not
 
 There are 36 `isWasm`/`isWindows` branches in Go codegen. Most are deep IR-level:
 scheduler coroutines (WASM is cooperative, no threads), setjmp/longjmp for panic recovery,
@@ -207,7 +207,7 @@ That's ~18 `\`target` annotation uses across std+modules. This replaces an equal
 Go codegen special cases with Promise source that is visible, readable, and owned by the module
 author rather than the compiler internals.
 
-### The boundary: `\`target` vs PAL
+### The boundary between target and PAL
 
 **PAL** = runtime OS syscall differences. `pal_file_open` on POSIX calls `open(2)`;
 on Windows calls `CreateFile`. Both exist at runtime, just with different implementations.
@@ -219,7 +219,7 @@ syscall on WASM" — there is no filesystem. `\`target(!wasm)` on `File` means W
 that import `modules/io` and try to use `File` get a sema error at compile time, not a runtime
 failure. That is strictly better.
 
-### Example: `modules/std/time.pr` sleep
+### Example the sleep function
 
 Currently `defineNanotimeSleepFunc` in `io.go` has:
 
@@ -263,7 +263,7 @@ annotation as the default (no annotation = always compiled).
 
 ---
 
-## 3. Platform Constants: `Platform` Type
+## The Platform Type
 
 Platform constants live in `modules/std/platform.pr` as global getters and methods on a `Platform`
 namespace type. All `` `target `` annotations are confined to `std/` — external modules like
@@ -297,7 +297,7 @@ Use `write_line` when writing to files or pipes where the platform convention ma
 
 ---
 
-## 4. `modules/std/time.pr` — Stays in `std`
+## Time stays in std
 
 `Duration` and `Instant` are already implemented in `modules/std/time.pr` and the question is whether
 they should move to `modules/time`.
@@ -312,7 +312,7 @@ they should move to `modules/time`.
    `Instant.now()` calling it costs nothing additional.
 
 `sleep(Duration)` stays in `modules/std/time.pr` with a `\`target` pair — the WASM no-op variant is
-explicit in source (see §2 example). The `promise_sleep_nanos` Go codegen branch is removed.
+explicit in source (see [Compile Time Platform Filtering](#compile-time-platform-filtering) example). The `promise_sleep_nanos` Go codegen branch is removed.
 
 **`modules/time`** then becomes the home for *higher-level* time operations that build on top of
 `modules/std/time.pr`: calendar date/time representation, time zone handling, formatted parsing and
@@ -321,7 +321,7 @@ heavier.
 
 ---
 
-## 5. `modules/path` — Path Manipulation
+## Path Manipulation
 
 Pure string operations, platform-aware via `Platform.is_path_separator`.
 
@@ -348,11 +348,11 @@ belong in `modules/io`. The module comment "no filesystem access" is correct and
 
 ---
 
-## 6. API Design Principles
+## API Design Principles
 
 Two principles that apply to all module APIs:
 
-### Principle 1: Minimize top-level namespace pollution — group under types
+### Principle 1 group under types
 
 Free functions with a noun prefix (`read_file`, `write_file`, `remove_file`) pollute the module
 namespace and repeat the noun in every call. Operations that conceptually belong to a type should
@@ -369,7 +369,7 @@ An agent looking for "what's in modules/io" sees three types and two free functi
 The rule: if an operation is logically about a type, it lives on that type. Only operations with
 no clear type owner live as module-level free functions.
 
-### Principle 2: Getters over zero-parameter functions
+### Principle 2 getters over zero parameter functions
 
 Zero-parameter functions that read a property (not perform an action) should be getters — no `()`.
 This reduces visual noise and signals the right semantics to readers.
@@ -402,11 +402,11 @@ Failable getters like `working_dir` use `!` unwrap at the call site (`os.working
 
 ---
 
-## 7. `modules/io` — File I/O and Standard Input
+## File IO and Standard Input
 
 `modules/io/io.pr` holds `File`, `BufferedReader`, `BufferedWriter`, `Dir`, `IoError`, and the `read_line()` / `read_stdin()` free functions.
 
-### I/O Architecture: Reactor + Async/Sync Backends
+### IO Architecture reactor and backends
 
 All file and network I/O goes through a **global reactor** (one per process, like Go's netpoller).
 The reactor uses the best available async mechanism per platform:
@@ -445,12 +445,12 @@ type IoError is error `public `doc("An operating system I/O error.") {
 }
 ```
 
-### `File` — factory constructors and handle methods
+### File factory constructors and handle methods
 
 Factory constructors are the **complete** set of ways to open a file. No string modes — the
 intent is in the constructor name, validated at compile time.
 
-Applying §6 principles: one-shot convenience operations use longer names (prefixed with
+Applying [API Design Principles](#api-design-principles) principles: one-shot convenience operations use longer names (prefixed with
 `read_content`/`write_content`). The module-level namespace has `File`, `Dir`, `IoError`,
 `read_line`, `read_stdin`.
 
@@ -544,7 +544,7 @@ auto-close after explicit close is safe.
 type would have its own factory (`assets.open!("path") `) but return handles satisfying the same
 interfaces. User code taking `Reader &r` works identically with real and embedded files.
 
-### `Dir` — directory operations
+### Dir directory operations
 
 Directory operations live on a separate `Dir` namespace type, not on `File`. Directories are
 not files — conflating them adds noise to `File` and misleads readers about what `File` does.
@@ -582,13 +582,13 @@ if Dir.exists("output/") {
 }
 ```
 
-### `BufReader`
+### BufReader
 
 Deferred until real usage drives the design. The structural interface (`Reader`) means a
 `BufReader` wrapper can be added later without changing `File` or any code that reads through
 `Reader`.
 
-### `read_line()` and `read_stdin()`
+### Reading a line and reading standard input
 
 These stay as free functions — they have no type to belong to (stdin has no `File` handle in
 normal use) and they are the primary interaction pattern for CLI programs.
@@ -612,7 +612,7 @@ while line := read_line!() {
 }
 ```
 
-### WASM file I/O
+### WASM file IO
 
 **Open question.** WASI Preview 1 provides `fd_read`, `fd_write`, `path_open` — basic file I/O
 is possible on WASI-capable runtimes (Wasmtime, WasmEdge). Whether to support this depends on:
@@ -622,7 +622,7 @@ is possible on WASI-capable runtimes (Wasmtime, WasmEdge). Whether to support th
 For now: `\`target(!wasm)` on `File` and `Dir`. WASM programs that try to use `io.File` get a
 compile-time error. This can be relaxed later when WASI support is designed properly.
 
-### PAL additions (implemented)
+### PAL additions
 
 ```
 pal_file_open(i8* path, i32 mode) i32                 // fd or -errno; mode: 0=rw, 1=ro, 2=create-trunc,
@@ -654,7 +654,7 @@ pal_file_truncate(i32 fd, i64 length) i32             // 0 or -errno; ftruncate 
 - POSIX `pal_dir_exists` uses opendir/closedir instead of `stat()` for the same reason.
 - Windows opens files with `CreateFileA` + `FILE_SHARE_DELETE` and wraps the HANDLE in a CRT descriptor via `_open_osfhandle`, so `_read`/`_write`/`_lseeki64`/`_close` keep working while an open file stays renamable (T1742). `_get_osfhandle` recovers the HANDLE where a Win32 call needs one. `pal_dir_exists` uses `GetFileAttributesA` since UCRT has no `opendir`.
 - The durability primitives (T1520, `docs/io.md`) are the one place a platform difference is *stated* rather than hidden: macOS `pal_file_sync` uses `fcntl(F_FULLFSYNC)` because `fsync(2)` there does not cross the drive's volatile write cache, and `pal_dir_sync` is a no-op on Windows because a directory handle cannot be flushed — `MOVEFILE_WRITE_THROUGH` on the rename carries that guarantee instead. `pal_file_lock` normalizes `ERROR_LOCK_VIOLATION` to `EWOULDBLOCK` locally so contention reads the same on all three platforms.
-- WASM stubs return -1 (error) or 0 (not found) for the original file ops, and `-ENOSYS` for the durability primitives — the code `docs/io.md` §7 names for "unsupported on this target" — since no filesystem access exists yet.
+- WASM stubs return -1 (error) or 0 (not found) for the original file ops, and `-ENOSYS` for the durability primitives — the code `docs/io.md` [Errors](io.md#errors) names for "unsupported on this target" — since no filesystem access exists yet.
 - `pal_errno` uses `__errno_location()` (Linux), `__error()` (macOS), `_errno()` (Windows).
 
 **Dir listing PAL (implemented):**
@@ -674,7 +674,7 @@ pal_dir_close(i8* handle) void                        // closedir / FindClose+fr
 - `promise_io_dir_next_name` — cast int→ptr, `pal_dir_next_name`, `strlen`+`promise_string_new`.
 - `promise_io_dir_close_handle` — cast int→ptr, `pal_dir_close`.
 
-### Syscall Handoff PAL (Phase 6a)
+### Syscall Handoff PAL
 
 File IO on POSIX cannot be async via epoll/kqueue (regular files always report "ready").
 Instead, goroutines release their P before blocking syscalls so other Gs can run:
@@ -689,7 +689,7 @@ blocking PAL call in `file_io.go`. On WASM, both are no-ops (single-threaded).
 
 Requires `@__promise_current_m` TLS global so `exit_syscall` can find its M and reattach P.
 
-### Reactor PAL (Phase 6b)
+### Reactor PAL
 
 ```
 // Reactor struct: known LLVM type (not opaque i8*) to prevent codegen drift.
@@ -710,9 +710,9 @@ to the browser event loop, and JS callbacks re-enqueue goroutines when IO comple
 
 ---
 
-## 8. `modules/os` — Operating System Interface
+## Operating System Interface
 
-Applying §6 principles: `args`, `executable_path`, `src_dir`, and `working_dir` are
+Applying [API Design Principles](#api-design-principles) principles: `args`, `executable_path`, `src_dir`, and `working_dir` are
 module-level getters (accessed as `os.args`, `os.executable_path`, `os.src_dir`,
 `os.working_dir!`). `exit_process` and `execute` stay as functions (they perform actions).
 `get_env_var` stays as a function because it takes a parameter.
@@ -876,7 +876,7 @@ pal_wait_pid(i32 pid) i32              // waitpid with EINTR retry; returns exit
 
 ---
 
-## 9. `modules/time` — Higher-Level Time Operations
+## Higher Level Time Operations
 
 `modules/std/time.pr` owns the monotonic primitives — `Duration`, `Instant`, and `sleep`. The `modules/time` catalog module builds wall-clock utilities on top of those: `DateTime.now()`, `Date`, `Time`, `from_unix_secs`, UTC offsets, and ISO-8601 (RFC 3339) format/parse.
 
@@ -912,7 +912,7 @@ The PAL function for wall clock time (`pal_wall_clock` / `CLOCK_REALTIME`) belon
 
 ---
 
-## 10. Future Platform Modules
+## Future Platform Modules
 
 One platform-facing module from the original list is still unbuilt, and unlike the planned
 entries in `catalog.toml` (`toml`, `yaml`, `mcp`, …) it has no catalog name reserved yet:
@@ -922,7 +922,7 @@ entries in `catalog.toml` (`toml`, `yaml`, `mcp`, …) it has no catalog name re
 | `modules/fs` | Advanced filesystem: symlinks, watch, temp files | PAL extensions |
 
 `modules/net`, `modules/http`, `modules/json`, and `modules/crypto` were on this list and have
-since shipped — see `docs/standard-library.md` §1 for their surfaces. `modules/process` was never
+since shipped — see `docs/standard-library.md` [Module Inventory](standard-library.md#module-inventory) for their surfaces. `modules/process` was never
 created: streaming child-process I/O landed inside `modules/os` as `Process`/`ProcessInput`/
 `ProcessOutput`, next to the one-shot `execute`, because it shares the same PAL fork/exec bridge.
 
@@ -931,7 +931,7 @@ less universal, which is exactly why they are imported explicitly rather than au
 
 ---
 
-## 11. Complete Layout
+## Complete Layout
 
 ```
 modules/
@@ -969,7 +969,7 @@ API surface and the semantic signal of `use`, not about compilation mechanics.
 
 ---
 
-## 12. Open Design Questions
+## Open Design Questions
 
 These need resolution before implementation:
 
@@ -1003,7 +1003,7 @@ This is the universal expectation and handles files created on Windows read on P
 
 ---
 
-## 13. `modules/tls` — Transport Security Backends
+## Transport Security Backends
 
 `modules/tls` layers TLS over an owned `net.TcpStream`. The design point that makes
 it portable is that **no backend ever sees a socket, an fd, or the scheduler**: the
@@ -1096,7 +1096,7 @@ backend gating on that type would reject every real-world certificate bundle Lin
 accepts. The import walks the returned `CFArray` by `CFTypeID` instead, taking the
 first certificate as the leaf and the remainder as issuers.
 
-### macOS: why Secure Transport, and the TLS 1.3 gap
+### Why Secure Transport on macOS and the TLS 1 3 gap
 
 Network.framework was rejected deliberately. It owns the socket *and* its own
 libdispatch event loop, so completions arrive on threads the M:N scheduler does not
@@ -1116,7 +1116,7 @@ Secure Transport is deprecated by Apple. If it is ever removed, the recorded
 successor is **vendoring a static BoringSSL/OpenSSL for macOS** the way T1596 did for
 Linux — that preserves the in-memory-buffer architecture instead of dismantling it.
 
-### Zero-dependency linking
+### Zero dependency linking
 
 A TLS program must build on a macOS host with **no Xcode Command Line Tools**, so TLS
 is not the one feature that requires an SDK. `ensureBundledSDK` therefore writes

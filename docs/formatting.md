@@ -6,7 +6,7 @@
 
 ---
 
-## 1. Design Principles
+## Design Principles
 
 **One canonical form.** No `.fmtrc`, no style options, no per-project overrides. Every valid Promise program has exactly one formatted representation.
 
@@ -20,16 +20,16 @@
 
 ---
 
-## 2. Complete Rule Set
+## Complete Rule Set
 
-### 2.1 Indentation
+### Indentation
 
 - **2 spaces** per indent level. No tabs.
 - No trailing whitespace on any line.
 - File ends with exactly one newline.
 - No more than one consecutive blank line anywhere.
 
-### 2.2 Blocks & Braces
+### Blocks and Braces
 
 - Opening `{` on same line as its construct, one space before: `if x {`.
 - Closing `}` on own line at the construct's indent level.
@@ -39,7 +39,7 @@
 - Blank lines between top-level declarations are preserved from source (up to 1 blank line).
 - No blank lines immediately after `{` or before `}`.
 
-### 2.3 Spacing
+### Spacing
 
 - One space around binary operators: `a + b`, `x == y`, `a && b`, `x := 5`, `a = b`, `a & b`, `a | b`.
 - No space around unary operators: `-x`, `!flag`, `~obj`, `<-ch`, `&ref`.
@@ -58,28 +58,28 @@
 - `++` and `--` (postfix): no space before.
 - `^` and `!` after value-producing tokens (postfix): no space — `x^`, `result!`.
 
-### 2.4 Semicolons & Newlines
+### Semicolons and Newlines
 
 - Semicolons produce a newline after them (except in classic `for` headers: `for i := 0; i < n; i++ {`).
 - Commas produce a newline only if the source had a newline after them (preserves inline vs multi-line style).
 - Colons produce a newline only if the source had a newline after them (select cases vs named args).
 
-### 2.5 Strings & Literals
+### Strings and Literals
 
 - String literals (regular, raw `r"..."`, triple-quoted `"""..."""`) pass through verbatim — content is never modified.
 - Char literals pass through verbatim.
 - Numeric literals (including suffixes like `i32`, `u8`, `f64` and prefixes like `0x`, `0b`) pass through verbatim.
 
-### 2.6 Lambdas
+### Lambdas
 
 - Pipe `|` is detected as lambda start when the preceding token is NOT value-producing. Otherwise it's bitwise OR.
 - `move` keyword before pipes: `move |x| -> x`.
 
 ---
 
-## 3. Implementation
+## Implementation
 
-### 3.1 Approach: Token-Based Reformatter
+### Approach Token Based Reformatter
 
 Uses a custom lexer that tokenizes Promise source into a flat token stream (including comments and newlines as explicit tokens). The reformatter walks the token stream and re-emits with canonical spacing and indentation. This avoids coupling to the ANTLR4 grammar (which uses `-> skip` for comments) and keeps the formatter simple and fast.
 
@@ -92,14 +92,14 @@ Key design decisions:
 - **Source newline preservation** — commas, colons, and semicolons only produce newlines if the source had them, avoiding the need to track block context (match vs function call, etc.).
 - **2-token lookback** — `prev` and `prevPrev` tokens enable unary/binary disambiguation and lambda pipe detection without a full parser.
 
-### 3.2 Key Files
+### Key Files
 
 - `compiler/internal/formatter/formatter.go` — custom lexer, reformatter, spacing rules (~1045 lines)
 - `compiler/internal/formatter/formatter_test.go` — table-driven tests (~130 cases)
 - `compiler/cmd/promise/fmt.go` — CLI wiring (stdin/file/dir modes, `-w`/`--check`/`--diff`)
 - `compiler/cmd/promise/main.go` — `case "format"` command dispatch
 
-### 3.3 CLI
+### CLI
 
 ```
 promise format [options] [files/dirs...]
@@ -113,7 +113,7 @@ No args = stdin → stdout. Directory args recurse for *.pr files.
 
 ---
 
-## 4. Test Strategy
+## Test Strategy
 
 - **Unit tests:** ~130 table-driven cases in `formatter_test.go` covering every token type, operator, keyword, and language construct.
 - **Idempotency:** `fmt(fmt(x)) == fmt(x)` for every `.pr` file in the repo (all std/ + tests/ + modules/).

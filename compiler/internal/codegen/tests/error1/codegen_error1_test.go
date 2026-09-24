@@ -1024,7 +1024,7 @@ func TestFailableDestructure(t *testing.T) {
 // to discard it ("block arms don't contribute typed results to match phis"), so
 // the merge fell through to genErrorHandlerExpr's zeroValue fallback and phi'd in
 // a `0` — silently wrong for an int, a null dereference for anything heap. The
-// bare spelling must emit exactly what the explicit `?^` spelling emits (§7.2:
+// bare spelling must emit exactly what the explicit `?^` spelling emits (language-design.md#calling-failable-functions:
 // auto-propagation applies in all expression positions).
 func TestT1420_BlockArmBareFailableCallPhisItsValue(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `

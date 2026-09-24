@@ -73,7 +73,7 @@ func TestT1752ValidateChainInheritedWithoutOwn(t *testing.T) {
 	}
 }
 
-// §5.7: the parent's runs first, and a child's _validate! ADDS to it rather
+// language-design.md#constructors: the parent's runs first, and a child's _validate! ADDS to it rather
 // than overriding — so both appear, root first.
 func TestT1752ValidateChainIsRootFirst(t *testing.T) {
 	base := makeNamed("Base")
@@ -90,7 +90,7 @@ func TestT1752ValidateChainIsRootFirst(t *testing.T) {
 
 // An ancestor reachable by two paths is emitted ONCE. Emitting it twice would
 // run the same invariant twice per construction — "runs exactly once" is the
-// guarantee §5.7 makes.
+// guarantee language-design.md#constructors makes.
 func TestT1752ValidateChainDeduplicatesADiamond(t *testing.T) {
 	top := makeNamed("Top")
 	addValidate(top)

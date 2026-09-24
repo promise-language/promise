@@ -496,7 +496,7 @@ func (c *Compiler) setOperatorValueParams(name string, sig *types.Signature) {
 //
 // T2162: the map carries the type rather than a bare bool because the `go` spawn
 // sites need it — a refcounted sharable handle arriving through a borrowed param
-// must be duplicated at the boundary (§17.4), and the param has no drop binding
+// must be duplicated at the boundary (language-design.md#ownership-across-goroutines), and the param has no drop binding
 // to read the type off. Membership is still the only question most callers ask;
 // they go through isBorrowedValueParam.
 func (c *Compiler) setBorrowedValueParams(sig *types.Signature) {

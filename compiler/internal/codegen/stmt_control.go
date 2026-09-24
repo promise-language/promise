@@ -49,7 +49,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// B0353: Goroutine return: bare return means "exit this goroutine".
 	// Branch to the coroutine's final suspend block instead of emitting
 	// ret void (the coroutine function returns ptr, not void).
-	// T1385: only the BARE form takes this shortcut. A `return <expr>` is §17.2
+	// T1385: only the BARE form takes this shortcut. A `return <expr>` is language-design.md#explicit-concurrency
 	// explicit-return style — it produces the goroutine's result, so it falls
 	// through to the shared value-return path below (evaluate-before-cleanup,
 	// dups, drop-flag clearing, temp claims, scope cleanup) and stores the value
@@ -76,7 +76,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		// error and dereference a garbage error pointer (SIGABRT). storeGoResultDefault
 		// writes the well-defined default so the receive sees success; it is a no-op
 		// for a body with no result buffer (plain void, fire-and-forget, generator).
-		// T1385/§17.2: a bare `return;` on a VALUE-producing path is now a sema error,
+		// T1385/language-design.md#explicit-concurrency: a bare `return;` on a VALUE-producing path is now a sema error,
 		// so a body reaching here is `T = Void` — the default IS the whole result.
 		c.storeGoResultDefault()
 		if c.block != nil && c.block.Term == nil {
@@ -94,7 +94,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// are moved out; the move-out clear below must not sweep the sibling prefix.
 	enumCtorSnap := len(c.enumCtorTemps)
 
-	// T1385: §17.2 explicit-return style inside a `go {}` / `go! {}` body. goRet
+	// T1385: language-design.md#explicit-concurrency explicit-return style inside a `go {}` / `go! {}` body. goRet
 	// means the value terminates the goroutine (branch to the final suspend
 	// instead of `ret`); goSink additionally means the caller allocated a result
 	// buffer to store it into. Without a sink the returned value is DISCARDED, so
@@ -452,7 +452,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	c.emitCloseErrCheck(closeCap, 0)
 	c.goResultDivertVal, c.goResultDivertType = nil, nil
 
-	// T1385: §17.2 explicit-return style — store the returned value into the
+	// T1385: language-design.md#explicit-concurrency explicit-return style — store the returned value into the
 	// goroutine's result buffer and branch to the coroutine's final suspend. The
 	// coroutine ramp returns a handle, so a `ret` here would be invalid IR.
 	if goRet {

@@ -71,7 +71,7 @@ func TestT1315RejectEnumVariantField(t *testing.T) {
 }
 
 func TestT1315RejectUninitializedStreamVar(t *testing.T) {
-	// `stream[int] s;` (no initializer) — the §6 annotation check, not T1313's
+	// `stream[int] s;` (no initializer) — the language-design.md#ownership-and-memory-management annotation check, not T1313's
 	// value-flow check, must reject this.
 	errs := checkErrs(t, t1315Gen+`
 		main() { stream[int] s; }

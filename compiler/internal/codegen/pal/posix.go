@@ -394,7 +394,7 @@ func (p *PosixPAL) emitNegErrnoReturnI64(errBlk *ir.Block, errnoLocFn *ir.Func) 
 //	6 = O_WRONLY|O_CREAT|O_APPEND (append)
 //	7 = O_RDWR|O_CREAT            (open-or-create, no truncate, no append)
 //
-// Mode 7 exists for the temporary-slot protocol in docs/io.md §3.4: the slot must
+// Mode 7 exists for the temporary-slot protocol in docs/io.md#orphan-reclamation: the slot must
 // be opened before the lock has decided whether it is stale, so it must not be
 // truncated at open time, and O_APPEND would defeat the write offsets that follow
 // the explicit truncate.
@@ -864,7 +864,7 @@ func (p *PosixPAL) EmitFileRemove(module *ir.Module) *ir.Func {
 
 // EmitFileRename declares libc @rename and defines @pal_file_rename.
 // rename(2) is atomic within one filesystem and fails with EXDEV across two —
-// which is why the temporary in docs/io.md §3.3 is always a sibling.
+// which is why the temporary in docs/io.md#the-temporary-file-must-be-a-sibling is always a sibling.
 func (p *PosixPAL) EmitFileRename(module *ir.Module) *ir.Func {
 	renameFn := getOrDeclareFunc(module, "rename", irtypes.I32,
 		ir.NewParam("old", irtypes.I8Ptr),
@@ -890,7 +890,7 @@ func (p *PosixPAL) EmitFileRename(module *ir.Module) *ir.Func {
 // EmitFileSync defines @pal_file_sync — fsync(2) on Linux, fcntl(fd, F_FULLFSYNC)
 // on macOS.
 //
-// The macOS divergence is the whole point (docs/io.md §4): fsync there returns
+// The macOS divergence is the whole point (docs/io.md#forcing-data-to-stable-storage): fsync there returns
 // once the data has been handed to the drive, which may keep it in a volatile
 // write cache, so only F_FULLFSYNC actually makes it durable. It is significantly
 // slower and there is deliberately no knob to trade it back — a durability
@@ -931,8 +931,8 @@ func (p *PosixPAL) EmitFileSync(module *ir.Module) *ir.Func {
 
 // EmitDirSync defines @pal_dir_sync — open(path, O_RDONLY) → fsync → close.
 //
-// Plain fsync on both platforms, not F_FULLFSYNC: docs/io.md §3.2 specifies
-// fsync for the directory entry, and §4's F_FULLFSYNC rule is about file
+// Plain fsync on both platforms, not F_FULLFSYNC: docs/io.md#why-the-final-sync-is-not-optional specifies
+// fsync for the directory entry, and io.md#forcing-data-to-stable-storage's F_FULLFSYNC rule is about file
 // contents. Syncing a directory this way is how a completed rename is made
 // durable; without it the contents survive a power loss and the swap does not.
 func (p *PosixPAL) EmitDirSync(module *ir.Module) *ir.Func {
@@ -981,7 +981,7 @@ func (p *PosixPAL) EmitDirSync(module *ir.Module) *ir.Func {
 // EmitFileLock defines @pal_file_lock using flock(2).
 //
 // flock is chosen over fcntl record locks and F_OFD_SETLK for the reasons set out
-// in docs/io.md §5.2: its lock is owned by the open file description, matching
+// in docs/io.md#why-flock-and-what-it-costs: its lock is owned by the open file description, matching
 // what Windows LockFileEx gives per HANDLE, so there is one ownership model to
 // document rather than two. fcntl record locks are silently dropped by an
 // unrelated close() anywhere in the process; F_OFD_SETLK does not exist on macOS.
@@ -1012,7 +1012,7 @@ func (p *PosixPAL) EmitFileLock(module *ir.Module) *ir.Func {
 	entry.NewCondBr(isErr, errBlk, okBlk)
 
 	// EWOULDBLOCK reaches the caller as -errno like any other failure; the
-	// Promise layer turns it into try_lock's false (docs/io.md §7).
+	// Promise layer turns it into try_lock's false (docs/io.md#errors).
 	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
 	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
 	return fn
@@ -1041,7 +1041,7 @@ func (p *PosixPAL) EmitFileUnlock(module *ir.Module) *ir.Func {
 }
 
 // EmitFileTruncate defines @pal_file_truncate using ftruncate(2).
-// Needed by the orphan-reclamation protocol (docs/io.md §3.4): a reclaimed
+// Needed by the orphan-reclamation protocol (docs/io.md#orphan-reclamation): a reclaimed
 // temporary slot is opened without O_TRUNC, so it must be emptied once the lock
 // has proved it stale.
 func (p *PosixPAL) EmitFileTruncate(module *ir.Module) *ir.Func {

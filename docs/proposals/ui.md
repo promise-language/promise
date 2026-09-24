@@ -6,9 +6,9 @@
 
 ---
 
-## 1. Overview
+## Overview
 
-[#1-overview](#1-overview)
+[#overview](#overview)
 
 The `ui` module provides retained-mode UI rendering for Promise programs, targeting a
 desktop window, the browser DOM, and a terminal from a single source of truth.
@@ -23,7 +23,7 @@ Three properties drive the entire design:
 
 2. **A closed layout catalog with an open composition surface.** Applications may
    define new components freely; they may not define new *layout behaviour*. These are
-   separable, and the design separates them (§1.3). The seal is compiler-enforced, not
+   separable, and the design separates them ([Non goals](#non-goals)). The seal is compiler-enforced, not
    conventional, and it is the single most important constraint in this document: it
    bounds what an AI agent writing UI code is able to express.
 
@@ -38,9 +38,9 @@ with a single-pass, O(n) layout and no constraint solver. The state model is Elm
 `Model -> View`, `update(Model, Message) -> Model` — with event handlers represented as
 inert `Message` **values** rather than closures.
 
-### 1.1 Three Kinds of Extensibility
+### Three Kinds of Extensibility
 
-[#11-three-kinds-of-extensibility](#11-three-kinds-of-extensibility)
+[#three-kinds-of-extensibility](#three-kinds-of-extensibility)
 
 "Closed catalog" sounds like one property. It is three, with very different risk
 profiles, and conflating them makes the design far more restrictive than it needs to
@@ -49,7 +49,7 @@ be:
 | # | Extension | Example | v1 status |
 | --- | --- | --- | --- |
 | 1 | **New composition** | `Card`, `Toolbar`, `Avatar` | **Open.** A `Component` subclass with a `build()` that returns catalog primitives. |
-| 2 | **New painting** | sparkline, gauge, chart | **Open question (§16.1).** A self-measuring leaf that emits display commands but participates in no layout protocol. |
+| 2 | **New painting** | sparkline, gauge, chart | **Open question ([Open Questions](#open-questions) item 1).** A self-measuring leaf that emits display commands but participates in no layout protocol. |
 | 3 | **New layout algorithm** | a novel multi-child sizing rule | **Closed.** Requires a reviewed diff to `view.pr`. |
 
 Category 1 is what "custom component" means in practice — the overwhelming majority of
@@ -64,9 +64,9 @@ route everything through the most general mechanism available.
 Category 2 sits in between and is genuinely low-risk — it is `Image` with a callback —
 but it is deferred to an open question rather than assumed.
 
-### 1.2 Goals
+### Goals
 
-[#12-goals](#12-goals)
+[#goals](#goals)
 
 - Identical layout output across every backend, verified by test.
 - A primitive catalog small enough for an agent to hold entirely in context, fully
@@ -76,9 +76,9 @@ but it is deferred to an open question rather than assumed.
   and consume `Message` values; everything else is module-private.
 - Zero steady-state heap allocation during layout.
 
-### 1.3 Non-goals
+### Non goals
 
-[#13-non-goals](#13-non-goals)
+[#non-goals](#non-goals)
 
 - **No general-purpose custom layout.** There is no `CustomLayout` primitive and no
   user-supplied `performLayout` hook. A missing layout is a signal to add a primitive
@@ -95,9 +95,9 @@ but it is deferred to an open question rather than assumed.
 
 ---
 
-## 2. Module Structure
+## Module Structure
 
-[#2-module-structure](#2-module-structure)
+[#module-structure](#module-structure)
 
 `ui` ships as a **catalog module whose source lives in its own repository**. The
 catalog already supports this: an entry carrying `url` + `commit` is fetched from git,
@@ -155,9 +155,9 @@ ui/
 └── *_test.pr
 ```
 
-### 2.1 The Export Surface
+### The Export Surface
 
-[#21-the-export-surface](#21-the-export-surface)
+[#the-export-surface](#the-export-surface)
 
 Top-level declarations in Promise are private by default, so the seal is mostly a
 matter of *not* writing `` `public ``:
@@ -165,29 +165,29 @@ matter of *not* writing `` `public ``:
 | Declaration | Exported? | Reason |
 | --- | --- | --- |
 | `View` | yes | applications name it in signatures and return it |
-| `Component`, `Composite`, `component()` | yes | **the** application extension point (§3.1) |
+| `Component`, `Composite`, `component()` | yes | **the** application extension point ([The View Hierarchy](#the-view-hierarchy)) |
 | Catalog primitives (`Text`, `Row`, …) | yes | the catalog |
 | `Style`, `EdgeInsets`, `Color`, `Alignment`, `Axis` | yes | configuration values |
-| `Size[T]`, `Rect[T]`, `Point[T]` | — | not `ui`'s; re-exported from `std.geometry` (§4.1) |
-| `NodeKind` | yes | no longer needs hiding — `` `sealed `` is the seal (§3.1.1) |
+| `Size[T]`, `Rect[T]`, `Point[T]` | — | not `ui`'s; re-exported from `std.geometry` ([Reusing the geometry types](#reusing-the-geometry-types)) |
+| `NodeKind` | yes | no longer needs hiding — `` `sealed `` is the seal ([How sealed and open Apply Here](#how-sealed-and-open-apply-here)) |
 | `Constraints` | no | layout-internal; exposing it invites layout code outside `ui` |
 | `Node`, `Arena` | no | the render tree is not application data |
-| `DisplayCommand`, `Backend` | yes | applications select and pass a backend (§10) |
+| `DisplayCommand`, `Backend` | yes | applications select and pass a backend ([Backends](#backends)) |
 | `WebBackend`, `DesktopBackend`, `TerminalBackend`, `RecordingBackend` | yes | one is chosen at the call site |
 | `run`, `Event`, `App`, `Handlers` | yes | the application entry point |
 
 `` `sealed `` on `View` is what makes the catalog closed, and it is enforced by the
-compiler rather than by convention. See §3.1.1.
+compiler rather than by convention. See [How sealed and open Apply Here](#how-sealed-and-open-apply-here).
 
 ---
 
-## 3. The Component Catalog
+## The Component Catalog
 
-[#3-the-component-catalog](#3-the-component-catalog)
+[#the-component-catalog](#the-component-catalog)
 
-### 3.1 The `View` Hierarchy
+### The View Hierarchy
 
-[#31-the-view-hierarchy](#31-the-view-hierarchy)
+[#the-view-hierarchy](#the-view-hierarchy)
 
 `View` is an abstract base type with exactly one abstract method, returning a
 **module-private** enum:
@@ -203,7 +203,7 @@ type View `sealed `public `doc("A UI element. Closed catalog — see the ui cons
 }
 ```
 
-`` `sealed `` (§5.4 of the language design) is the whole enforcement: `View` is
+`` `sealed `` ([Build](#build) of the language design) is the whole enforcement: `View` is
 extensible inside `ui` and closed outside it. `NodeKind` is therefore free to be
 `` `public `` — backends, tests, and diagnostics can all name it without opening the
 catalog.
@@ -278,7 +278,7 @@ without container indirection — use View[], map[K, View], or Set[View] to brea
 That rejection hits `Box`, `Padding`, `Align`, and `Scroll` — every single-child
 primitive. Working around it means typing each child slot as `View[]`, which costs a
 heap `Vector` allocation per `Padding`, in direct conflict with the zero-allocation
-goal in §1.2. The `` `sealed `` class hierarchy has none of that problem (`View child`
+goal in [Goals](#goals). The `` `sealed `` class hierarchy has none of that problem (`View child`
 and `View? child` are ordinary heap references), seals just as tightly, and is strictly
 more expressive: the enum offered no extension point at all, forcing category-1
 extensions through the same review gate as category-3.
@@ -287,11 +287,11 @@ The catalog is twelve primitives plus `Composite`. Adding a thirteenth is a chan
 `view.pr` — a reviewable diff in one file, and the natural future home for an
 `` `anchor `` once that feature lands.
 
-### 3.1.1 How `` `sealed `` and `` `open `` Apply Here
+### How sealed and open Apply Here
 
-[#311-how-sealed-and-open-apply-here](#311-how-sealed-and-open-apply-here)
+[#how-sealed-and-open-apply-here](#how-sealed-and-open-apply-here)
 
-The inheritance rules in §5.4 of the language design map onto this module cleanly, and
+The inheritance rules in [Build](#build) of the language design map onto this module cleanly, and
 between them they account for every extensibility decision it makes:
 
 | Type | Marking | Effect |
@@ -299,7 +299,7 @@ between them they account for every extensibility decision it makes:
 | `View` | `` `sealed `` | Abstract; extensible only inside `ui`. The catalog seal. |
 | `Text`, `Row`, `Padding`, `Composite`, … | none | Concrete → globally sealed by default. Nobody can subclass `Text` to override its behaviour, and the transitivity rule forbids marking one `` `open ``. |
 | `Component` | none | Abstract (`build()`) → implicitly open. The application extension point. Outside the `View` hierarchy, so no seal to violate. |
-| `Backend` | `` `structural `` | Implicitly open — backends are meant to be written by anyone (§10). |
+| `Backend` | `` `structural `` | Implicitly open — backends are meant to be written by anyone ([Backends](#backends)). |
 
 Two consequences worth stating explicitly:
 
@@ -316,9 +316,9 @@ what `Composite` + `Component` exists to provide, and routing it through a wrapp
 than a hole in the hierarchy is what keeps `match v.kind()` exhaustive over a genuinely
 closed set.
 
-### 3.2 Making Illegal Nesting Unrepresentable
+### Making Illegal Nesting Unrepresentable
 
-[#32-making-illegal-nesting-unrepresentable](#32-making-illegal-nesting-unrepresentable)
+[#making-illegal-nesting-unrepresentable](#making-illegal-nesting-unrepresentable)
 
 Flutter's single worst ergonomic failure is the runtime error
 `BoxConstraints forces an infinite height`, produced by nesting an unbounded child
@@ -344,7 +344,7 @@ scroll_grid(ListItem[] move items, int columns, Size cell) ScrollContent `public
 
 `ScrollContent` remains an enum, and legally so: it reaches `View` only through a heap
 class reference, which breaks the cycle the recursion check looks for. (Verified —
-§17.)
+[Verified Against the Compiler](#verified-against-the-compiler).)
 
 A `Column` is a `View`, not a `ScrollContent`. "Column inside a ListView" is not a
 runtime error with a good message — it is a type error, because there is no
@@ -374,9 +374,9 @@ source-located diagnostic. This is the one residual case the type system does no
 catch; it is rare, cheap to detect during `build`, and not worth further type
 machinery.
 
-### 3.3 Composition by Application Code
+### Composition by Application Code
 
-[#33-composition-by-application-code](#33-composition-by-application-code)
+[#composition-by-application-code](#composition-by-application-code)
 
 There are two ways to compose, and both are unrestricted.
 
@@ -432,9 +432,9 @@ the shape Flutter's `StatelessWidget` proved ergonomic.
 Prefer the function form for one-off arrangements and the `Component` form when the
 component has fields, is reused across call sites, or needs to be named in a signature.
 
-### 3.4 Handlers Are Values, Not Closures
+### Handlers Are Values and Not Closures
 
-[#34-handlers-are-values-not-closures](#34-handlers-are-values-not-closures)
+[#handlers-are-values-and-not-closures](#handlers-are-values-and-not-closures)
 
 Promise closures capture non-`Copy` values by `move`, transferring ownership and
 invalidating the outer binding. A callback-style API (`on_click: || -> ...`) would
@@ -469,13 +469,13 @@ function. And event routing becomes an integer lookup.
 
 ---
 
-## 4. Geometry and Style
+## Geometry and Style
 
-[#4-geometry-and-style](#4-geometry-and-style)
+[#geometry-and-style](#geometry-and-style)
 
-### 4.1 Reuse `std.geometry`
+### Reusing the geometry types
 
-[#41-reuse-stdgeometry](#41-reuse-stdgeometry)
+[#reusing-the-geometry-types](#reusing-the-geometry-types)
 
 `ui` defines **no** point, size, or rectangle types. `modules/std/geometry.pr` already
 provides them as generic pure value types, and the module uses those directly:
@@ -498,15 +498,15 @@ names for one thing — against the "one obvious way" principle. Offsets are `Po
 and the field is named `offset` where the distinction matters.
 
 Note the field names are `width` and `height`, not `w`/`h`, per the full-English-words
-rule (§9.3a of the language design). This document follows them.
+rule ([Naming Conventions](../language-design.md#naming-conventions) of the language design). This document follows them.
 
 **Additions `ui` needs that belong in `std.geometry`, not here:** `Rect.contains(Point[T])`,
 `Rect.intersect(Rect[T])`, and `==` on all three. These are generally useful and should be
 added alongside the existing types rather than duplicated in `ui`.
 
-### 4.2 `ui`-Local Value Types
+### Local Value Types
 
-[#42-ui-local-value-types](#42-ui-local-value-types)
+[#local-value-types](#local-value-types)
 
 The remaining geometry types have no std equivalent and are defined here. All are pure
 value types — every field carries `` `value ``, so they are stack-allocated, automatically
@@ -531,7 +531,7 @@ type Color `public {
 }
 ```
 
-> **Open question (§16.10):** `Color` is also needed by the planned `term` module, which
+> **Open question ([Open Questions](#open-questions) item 10):** `Color` is also needed by the planned `term` module, which
 > sketches its own. One shared `Color` in `std` would serve both; deciding this before
 > either module is written avoids a needless incompatibility.
 
@@ -571,7 +571,7 @@ Three language constraints to respect here:
 - **Pure value types cannot have `is` parents.** They are leaf types. No
   `type Constraints is Something`, no shared abstract geometry base.
 - **Hybrid types are not implemented.** A type's fields must be either *all* `` `value ``
-  or *none*. This is why `Node` (§5) carries no `` `value `` annotations at all, even
+  or *none*. This is why `Node` ([The Arena Render Tree](#the-arena-render-tree)) carries no `` `value `` annotations at all, even
   though several of its fields are themselves value types.
 - **Receivers are bare `this` (shared) or `~this` (mutable).** `&this` is no longer
   valid syntax and is rejected outright by sema.
@@ -602,7 +602,7 @@ value field Style.align must be a copy type, got Alignment
 
 — but marking the enum `` `copy `` makes it a legal `` `value `` field. So `Style` holds
 `Alignment` and `Axis` directly; no `u32` packing and no conversion at use sites.
-Verified in §17.
+Verified in [Verified Against the Compiler](#verified-against-the-compiler).
 
 Note `font_id` and `flags`: a pure value type cannot hold a `string` or any other move
 type, so anything nameable is interned to an integer. Font registration happens once at
@@ -614,13 +614,13 @@ enum an explicit `==`.
 
 ---
 
-## 5. The Arena Render Tree
+## The Arena Render Tree
 
-[#5-the-arena-render-tree](#5-the-arena-render-tree)
+[#the-arena-render-tree](#the-arena-render-tree)
 
-### 5.1 Why a Flat Arena
+### Why a Flat Arena
 
-[#51-why-a-flat-arena](#51-why-a-flat-arena)
+[#why-a-flat-arena](#why-a-flat-arena)
 
 Three properties of Promise make a conventional render-object graph a poor fit:
 
@@ -638,15 +638,15 @@ A flat array of a single concrete `Node` type sidesteps all three: indices inste
 pointers, no borrows held across calls, one monomorphic type with devirtualisable
 access.
 
-Note that this is *not* in tension with `View` being a class hierarchy (§3.1). The two
+Note that this is *not* in tension with `View` being a class hierarchy ([The View Hierarchy](#the-view-hierarchy)). The two
 are separate representations: `View` is the description an application writes and is
 walked exactly once per frame, in `build`; `Node` is the engine's working set and is
 walked in every hot path. Virtual dispatch is fine in the former and unacceptable in
 the latter.
 
-### 5.2 Structure
+### Structure
 
-[#52-structure](#52-structure)
+[#structure](#structure)
 
 ```promise
 type Node {
@@ -671,7 +671,7 @@ type Node {
 type Arena {
   Node[] nodes;
   string[] strings;
-  ShapeCache shapes;   // survives arena rebuilds — see §7
+  ShapeCache shapes;   // survives arena rebuilds — see [Text](#text)
 }
 ```
 
@@ -680,9 +680,9 @@ tighter encoding, but vector indexing requires `int`
 (`index type mismatch: expected int, got u32`), so every arena access would need an
 `as!` cast. `int` with `-1` is simpler and matches the language.
 
-### 5.3 The Two Invariants
+### The Two Invariants
 
-[#53-the-two-invariants](#53-the-two-invariants)
+[#the-two-invariants](#the-two-invariants)
 
 Everything downstream depends on these, and `build` is the only code that must maintain
 them:
@@ -695,14 +695,14 @@ Consequences:
 
 - A forward linear scan of `nodes` is a valid pre-order traversal.
 - A backward linear scan is reverse pre-order — painter's-algorithm top-most-first,
-  which is exactly what hit testing wants (§9).
-- Position resolution needs no recursion and no explicit stack (§6.3).
+  which is exactly what hit testing wants ([Hit Testing and Events](#hit-testing-and-events)).
+- Position resolution needs no recursion and no explicit stack ([Position Resolution](#position-resolution)).
 - Sibling iteration in the flex algorithm is a linear index range, not a linked-list
   walk.
 
-### 5.4 Build
+### Build
 
-[#54-build](#54-build)
+[#build](#build)
 
 `build` is the one place the `View` hierarchy is consumed. It dispatches on `kind()`,
 expands `Composite` nodes by calling `build()`, and lowers everything else to a `Node`.
@@ -753,13 +753,13 @@ is easy to state in review: *no `push` in `layout.pr`.*
 
 ---
 
-## 6. The Layout Pass
+## The Layout Pass
 
-[#6-the-layout-pass](#6-the-layout-pass)
+[#the-layout-pass](#the-layout-pass)
 
-### 6.1 Protocol
+### Protocol
 
-[#61-protocol](#61-protocol)
+[#protocol](#protocol)
 
 Constraints go down; sizes come up; the parent writes the child's offset. One pass, each
 node visited once, O(n). No constraint solver, no reflow iteration.
@@ -806,9 +806,9 @@ layout(Arena~ a, int i, Constraints c) Size[f64] {
 
 `NodeKind.Composite` never appears here — `build` expanded it away.
 
-### 6.2 Per-Kind Rules
+### Per Kind Rules
 
-[#62-per-kind-rules](#62-per-kind-rules)
+[#per-kind-rules](#per-kind-rules)
 
 **Padding** — child receives `c.deflate(insets)`. Own size is the child's size plus the
 insets, re-constrained. Child offset is `(left, top)`.
@@ -869,7 +869,7 @@ layout_flex(Arena~ a, int first, int n, Style style, Constraints c, Axis axis) S
 Contiguous sibling ranges are what make this three linear scans rather than three
 pointer walks.
 
-> **Open question (§16.3):** pass 1 gives every inflexible child the *full* remaining
+> **Open question ([Open Questions](#open-questions) item 3):** pass 1 gives every inflexible child the *full* remaining
 > main axis as its loose maximum. A `Text` child in a `Row` therefore wraps at the whole
 > row width and can starve the flex children of space. Flutter has the same sharp edge.
 > The alternatives — a pre-measure pass, or an explicit `Shrink` wrapper — need to be
@@ -877,23 +877,23 @@ pointer walks.
 
 **Stack** — every child receives `c` loosened; own size is the max over children,
 constrained. Children are positioned by their own alignment. Painted in index order, so
-later children are on top — consistent with the hit-test order in §9.
+later children are on top — consistent with the hit-test order in [Hit Testing and Events](#hit-testing-and-events).
 
 **Scroll** — the scroll axis is given `INFINITY` as its max; the cross axis is given
 tight `c.max_cross`. The `Scroll` node's own size is `c.max` (it fills its slot). The
 child's offset carries `-scroll_position` on the scroll axis. The overflow extent is
 retained for scrollbar geometry and clamping.
 
-**Text** — leaf. Shapes against `c.max_width` and returns the shaped block extent. See §7.
+**Text** — leaf. Shapes against `c.max_width` and returns the shaped block extent. See [Text](#text).
 
 **Image** — leaf. Uses the declared `Size` constrained by `c`; the intrinsic pixel size
 is not consulted, so image decode never blocks layout.
 
 **Spacer** — leaf. `extent` on the main axis, zero on the cross axis.
 
-### 6.3 Position Resolution
+### Position Resolution
 
-[#63-position-resolution](#63-position-resolution)
+[#position-resolution](#position-resolution)
 
 Layout produces only sizes and parent-relative offsets. Absolute rects come from a
 single forward sweep — correct **only** because of I1:
@@ -914,9 +914,9 @@ resolve(Arena a, Rect[f64][]~ out) {
 No recursion, no stack, no branching. The display list is emitted in the same sweep,
 maintaining a clip stack keyed by depth.
 
-### 6.4 The Display List
+### The Display List
 
-[#64-the-display-list](#64-the-display-list)
+[#the-display-list](#the-display-list)
 
 A flat command buffer — the sole interface between the engine and any backend:
 
@@ -937,9 +937,9 @@ catalog can express, which is what keeps backend cost bounded.
 
 ---
 
-## 7. Text
+## Text
 
-[#7-text](#7-text)
+[#text](#text)
 
 **This is the highest-risk component in the proposal and should be prototyped first.**
 If text measurement is not identical across backends, layouts diverge and the core
@@ -961,12 +961,12 @@ get inter_regular u8[] `embed("fonts/Inter-Regular.ttf", compress: true)
 
 `ShapeCache` is keyed by `(text_slot, font_id, font_size, flags, max_width)` and stores the
 shaped glyph run plus its measured extent. It **survives arena rebuilds** — this is what
-makes the rebuild-on-structural-change strategy (§8.2) affordable, since shaping
+makes the rebuild-on-structural-change strategy ([Value Change and Structural Change](#value-change-and-structural-change)) affordable, since shaping
 dominates and is unaffected by tree shape.
 
-### 7.1 The Unresolved Part
+### The Unresolved Part
 
-[#71-the-unresolved-part](#71-the-unresolved-part)
+[#the-unresolved-part](#the-unresolved-part)
 
 The appealing answer is to compile HarfBuzz plus a UAX #14 line breaker to a WASM blob,
 embed it, and run **the same blob** everywhere. That is not implementable: **Promise has
@@ -997,13 +997,13 @@ This must be settled before anything else is built.
 
 ---
 
-## 8. Invalidation
+## Invalidation
 
-[#8-invalidation](#8-invalidation)
+[#invalidation](#invalidation)
 
-### 8.1 Dirty Propagation and Relayout Boundaries
+### Dirty Propagation and Relayout Boundaries
 
-[#81-dirty-propagation-and-relayout-boundaries](#81-dirty-propagation-and-relayout-boundaries)
+[#dirty-propagation-and-relayout-boundaries](#dirty-propagation-and-relayout-boundaries)
 
 Marking a node dirty walks `parent` indices upward and stops at the first node whose
 `boundary` is true — a node that last received *tight* constraints, and whose size
@@ -1024,9 +1024,9 @@ mark_dirty(Arena~ a, int i) {
 Layout then re-runs from the root, but the memo check at the top of `layout` returns
 immediately for every clean subtree. Cost is proportional to the dirty region.
 
-### 8.2 Value Change vs. Structural Change
+### Value Change and Structural Change
 
-[#82-value-change-vs-structural-change](#82-value-change-vs-structural-change)
+[#value-change-and-structural-change](#value-change-and-structural-change)
 
 **Value change** — a label's text, a colour, a flex factor, with tree shape unchanged.
 Diff the new `View` against the arena in a single forward walk, patch the differing
@@ -1053,9 +1053,9 @@ in-place one regardless.
 
 ---
 
-## 9. Hit Testing and Events
+## Hit Testing and Events
 
-[#9-hit-testing-and-events](#9-hit-testing-and-events)
+[#hit-testing-and-events](#hit-testing-and-events)
 
 Hit testing is a backward linear scan. By I1, a later index was painted later and is
 therefore on top, so the first match wins:
@@ -1082,9 +1082,9 @@ already resolved.
 The router maps the hit node's `handler_slot` through `Handlers[M].slots` to a `Message` and
 sends it on the event channel.
 
-### 9.1 The Application Loop
+### The Application Loop
 
-[#91-the-application-loop](#91-the-application-loop)
+[#the-application-loop](#the-application-loop)
 
 ```promise
 type App[M, Model] `public {
@@ -1118,7 +1118,7 @@ run[M, Model](App[M, Model] move app, Backend~ backend) `public {
 }
 ```
 
-The backend is a parameter (§10), so which one runs is one visible line at the call
+The backend is a parameter ([Backends](#backends)), so which one runs is one visible line at the call
 site rather than an invisible target-selection rule.
 
 `Channel` is one of the `` `interior `` types, so a backend holding a shared borrow of
@@ -1127,9 +1127,9 @@ backend → engine event path and avoids any need for interior mutability elsewh
 
 ---
 
-## 10. Backends
+## Backends
 
-[#10-backends](#10-backends)
+[#backends](#backends)
 
 A backend is any type satisfying the `Backend` structural interface. Backends are
 **independent types, not target-filtered variants of one type**:
@@ -1159,16 +1159,16 @@ Three consequences beyond avoiding that bug:
 - **`TerminalBackend` needs no `` `target `` at all** — it is stdout, and compiles on
   every target including wasm.
 - **Several backends coexist in one binary**, so cross-backend equality is an in-process
-  assertion rather than a cross-target CI diff (§12.2).
+  assertion rather than a cross-target CI diff ([Cross Backend Identity](#cross-backend-identity)).
 - **Selection is explicit.** `run(app, DesktopBackend())` states which backend is in use
-  at one reviewable line, which is more in keeping with §1.3's "no hidden effects" than
+  at one reviewable line, which is more in keeping with [Non goals](#non-goals)'s "no hidden effects" than
   selection by invisible target magic.
 
 Every backend implements the same seven display commands plus `start`/`present`.
 
-### 10.1 Web Backend
+### Web Backend
 
-[#101-web-backend](#101-web-backend)
+[#web-backend](#web-backend)
 
 Emits absolutely-positioned DOM elements at Promise-computed rects. The browser's layout
 engine is never consulted — every element is `position: absolute` with explicit
@@ -1189,18 +1189,18 @@ Bindings come from `promise bind webidl` rather than hand-written FFI.
 DOM nodes are pooled and reused across frames keyed by arena index, so a rebuild does not
 churn the document.
 
-### 10.2 Native Backend
+### Native Backend
 
-[#102-native-backend](#102-native-backend)
+[#native-backend](#native-backend)
 
 Consumes the same display list into a rasteriser. Window creation, the event loop, and
 the swap chain are platform-specific and filtered by `` `target ``. Glyph atlases are
 keyed by `(font_id, size, glyph_id)` and populated from the same shaped runs the web
 backend uses.
 
-### 10.3 Terminal Backend
+### Terminal Backend
 
-[#103-terminal-backend](#103-terminal-backend)
+[#terminal-backend](#terminal-backend)
 
 Quantises rects to a character grid and renders into a cell buffer. `FillRect` becomes a
 background-colour span, `DrawTextRun` becomes clipped cell text, `DrawImage` becomes a
@@ -1214,19 +1214,19 @@ the two should be designed together.
 Geometry is still computed in `f64` and quantised only at emission, so the layout arena
 remains identical to the other backends and golden tests still compare unrounded values.
 
-### 10.4 Recording Backend
+### Recording Backend
 
-[#104-recording-backend](#104-recording-backend)
+[#recording-backend](#recording-backend)
 
-Appends every `DisplayCommand` to a vector and renders nothing. This is what makes §12 test
+Appends every `DisplayCommand` to a vector and renders nothing. This is what makes [Testing](#testing) test
 the *display list* — the thing backends actually consume — rather than only the layout
 arena, with no window, GPU, or wasmtime involved.
 
 ---
 
-## 11. Ownership Discipline
+## Ownership Discipline
 
-[#11-ownership-discipline](#11-ownership-discipline)
+[#ownership-discipline](#ownership-discipline)
 
 Two rules make the whole engine compile without arguing with the borrow checker. They
 belong in the module's contributing notes, because they are non-obvious and violations
@@ -1237,7 +1237,7 @@ produce confusing errors far from the cause:
 >
 > Borrows in Promise are scope-scoped rather than last-use: a stored `Node~` binding
 > keeps the arena borrowed until the end of its enclosing block, not until its final
-> read. The "copy out, work, write back" shape in §6.1 is not defensive style — it is
+> read. The "copy out, work, write back" shape in [Protocol](#protocol) is not defensive style — it is
 > the only shape that compiles.
 
 > **R2. Pass `Arena~` as a parameter, never as a `~this` receiver, in recursive code.**
@@ -1254,16 +1254,16 @@ Two supporting notes:
 
 ---
 
-## 12. Testing
+## Testing
 
-[#12-testing](#12-testing)
+[#testing](#testing)
 
 Because `View` is inert description and layout produces a serialisable arena, the entire
 engine is testable without a window, a GPU, or a headless browser.
 
-### 12.1 Golden Layout Trees
+### Golden Layout Trees
 
-[#121-golden-layout-trees](#121-golden-layout-trees)
+[#golden-layout-trees](#golden-layout-trees)
 
 The arena serialises to one line per node: `index parent kind x,y wxh`.
 
@@ -1280,11 +1280,11 @@ main() `test(expected: "0 - Column 0,0 400x600\n1 0 Text 8,8 384x20\n2 0 Row 8,3
 
 Deterministic pass/fail, readable diffs, no pixel comparison.
 
-### 12.2 Cross-Backend Identity
+### Cross Backend Identity
 
-[#122-cross-backend-identity](#122-cross-backend-identity)
+[#cross-backend-identity](#cross-backend-identity)
 
-Because backends are ordinary types (§10), this is an in-process assertion rather than a
+Because backends are ordinary types ([Backends](#backends)), this is an in-process assertion rather than a
 cross-target CI string diff: build one display list, feed it to two backends, compare
 what each recorded.
 
@@ -1304,17 +1304,17 @@ The same golden should additionally be compiled for `wasm` and for the host and 
 the same string — that is what guards the central claim, and it fails loudly the moment
 text metrics drift. It should run in CI on every commit for both targets.
 
-### 12.3 Stress
+### Stress
 
-[#123-stress](#123-stress)
+[#stress](#stress)
 
 `promise test -stress` catches nondeterminism in shaping and in cache eviction — exactly
 the failure mode that would otherwise show up as an intermittent golden-test diff much
 later.
 
-### 12.4 Invariant Assertions
+### Invariant Assertions
 
-[#124-invariant-assertions](#124-invariant-assertions)
+[#invariant-assertions](#invariant-assertions)
 
 Debug builds assert I1 and I2 after every `build`, assert that `layout` did not change
 `nodes.len`, and assert that no `Node` in the arena has `kind == NodeKind.Composite`.
@@ -1323,9 +1323,9 @@ three phases downstream.
 
 ---
 
-## 13. Documentation as the Agent Contract
+## Documentation as the Agent Contract
 
-[#13-documentation-as-the-agent-contract](#13-documentation-as-the-agent-contract)
+[#documentation-as-the-agent-contract](#documentation-as-the-agent-contract)
 
 Every exported declaration carries `` `doc ``, including per-parameter docs:
 
@@ -1351,24 +1351,24 @@ new layout primitives require a change to the `ui` module."*
 
 ---
 
-## 14. Milestones
+## Milestones
 
-[#14-milestones](#14-milestones)
+[#milestones](#milestones)
 
 **Deferred.** Sequencing is not worth fixing until the architecture is agreed. Two things
 are already clear and will survive whatever order is chosen:
 
-- **Text (§7) gates everything.** It is the only open question whose resolution
-  invalidates the architecture rather than merely delaying it, and §7.1 must be settled
+- **Text ([Text](#text)) gates everything.** It is the only open question whose resolution
+  invalidates the architecture rather than merely delaying it, and [The Unresolved Part](#the-unresolved-part) must be settled
   before any other work begins.
 - **The terminal backend is the cheapest first backend**, and proves the display list is
   a sufficient interface at a fraction of the cost of DOM or a rasteriser.
 
 ---
 
-## 15. Rejected Alternatives
+## Rejected Alternatives
 
-[#15-rejected-alternatives](#15-rejected-alternatives)
+[#rejected-alternatives](#rejected-alternatives)
 
 **Browser layout on web, Promise layout on desktop.** Cheapest to build, and it destroys
 the central guarantee. CSS flexbox and this constraint model disagree in dozens of edge
@@ -1382,7 +1382,7 @@ more.
 
 **`enum View` as the catalog.** The obvious encoding of a closed set, and it does not
 compile — Promise rejects directly-recursive enums, which hits every single-child
-primitive (§3.1). The
+primitive ([The View Hierarchy](#the-view-hierarchy)). The
 workaround (`View[]` for every child slot) allocates a `Vector` per `Padding`. The sealed
 class hierarchy is legal, allocation-free for single children, and seals more tightly
 because `NodeKind` privacy is compiler-enforced while still leaving a composition door
@@ -1391,46 +1391,46 @@ open.
 **A `RenderObject` inheritance hierarchy for the arena.** Idiomatic in most languages, but
 in the *engine* each field read would be a vtable dispatch and each parent link would need
 a `Ref[T]`. The `NodeKind` tag with a `match` in one function is faster, simpler to
-serialise, and easier to review. Note this is not in tension with §3.1: virtual dispatch
+serialise, and easier to review. Note this is not in tension with [The View Hierarchy](#the-view-hierarchy): virtual dispatch
 is fine in `View`, which is walked once per frame, and unacceptable in `Node`, which is
 walked in every hot path.
 
 **Flutter's Element tree.** Solves an identity-preservation problem we do not have,
-because our persistent state is content-keyed rather than tree-keyed. See §8.2.
+because our persistent state is content-keyed rather than tree-keyed. See [Value Change and Structural Change](#value-change-and-structural-change).
 
 **Refinement types for constraint boundedness.** Attractive, and unavailable — Promise has
 no refinement types and no macros to synthesise them. Distinct types at the composition
-points (§3.2) achieve the same guarantee with the type system that exists.
+points ([Making Illegal Nesting Unrepresentable](#making-illegal-nesting-unrepresentable)) achieve the same guarantee with the type system that exists.
 
 **Closure-based event handlers.** Fights Promise's `move`-capture semantics at every
 component boundary, forces `M` through the render tree, and reopens the door to effects in
 view code. Message values cost one integer indirection and close all three.
 
-**One `Backend` type selected by `` `target ``.** Fails in codegen today (§10), prevents
+**One `Backend` type selected by `` `target ``.** Fails in codegen today ([Backends](#backends)), prevents
 backends from coexisting, forces the terminal backend to carry a target filter it does not
 need, and turns cross-backend testing into a cross-target CI diff. Independent types
 satisfying a structural interface are better on every axis.
 
 **Shipping as an external module.** Rests on a misreading — remote catalog entries are
-pinned per module by commit, not by the catalog epoch (§2). An external module also
+pinned per module by commit, not by the catalog epoch ([Module Structure](#module-structure)). An external module also
 forfeits `promise doc` discoverability, which is the module's whole purpose.
 
 ---
 
-## 16. Open Questions
+## Open Questions
 
-[#16-open-questions](#16-open-questions)
+[#open-questions](#open-questions)
 
-1. **Custom painting (extensibility category 2, §1.1).** Should the catalog include a
+1. **Custom painting (extensibility category 2, [Three Kinds of Extensibility](#three-kinds-of-extensibility)).** Should the catalog include a
    `Canvas(Size size, int painter_id)` primitive backed by a registry of painters
    returning `DisplayCommand[]`? It is a self-measuring leaf that participates in no layout
    protocol — `Image` with a callback — and it is what most "the catalog doesn't have
    this" cases (sparkline, gauge, badge, chart) actually need. The friction of registering
    a painter and threading an integer id is the "discouraged" part. **Open: in or out for
    v1?**
-2. **Text strategy (§7.1).** Two HarfBuzz builds, a bundled WASM interpreter, or shaping
+2. **Text strategy ([The Unresolved Part](#the-unresolved-part)).** Two HarfBuzz builds, a bundled WASM interpreter, or shaping
    implemented in Promise. Blocking everything.
-3. **Flex pass-1 main-axis constraint (§6.2).** Whether inflexible children get the full
+3. **Flex pass-1 main-axis constraint ([Per Kind Rules](#per-kind-rules)).** Whether inflexible children get the full
    remaining main axis (Flutter's behaviour, with Flutter's sharp edge) or something
    tighter.
 4. **Sub-pixel positioning.** Fractional rects give better typography and worse DOM
@@ -1438,7 +1438,7 @@ forfeits `promise doc` discoverability, which is the module's whole purpose.
    emission, so golden tests compare unrounded geometry. The terminal backend quantises
    far more aggressively and confirms this split is the right one.
 5. **Font fallback.** Embedding one font is tractable; a fallback chain across scripts must
-   resolve identically on every backend or §12.2 fails. Possibly restrict v1 to an
+   resolve identically on every backend or [Cross Backend Identity](#cross-backend-identity) fails. Possibly restrict v1 to an
    explicit, ordered, embedded fallback list.
 6. **Arena capacity policy.** `clear()` retaining capacity means a single very large frame
    pins memory permanently. Some shrink heuristic is likely needed.
@@ -1447,7 +1447,7 @@ forfeits `promise doc` discoverability, which is the module's whole purpose.
 8. **Hybrid types.** If `` `value `` and instance fields become mixable, `Node` could place
    `size`, `offset`, and `last_in` in the value struct. Worth revisiting for cache
    behaviour, but the design must not depend on it.
-9. **A shared `Color` (§4.2).** The planned `term` module sketches its own `Color`. One
+9. **A shared `Color` ([Local Value Types](#local-value-types)).** The planned `term` module sketches its own `Color`. One
    in `std` would serve both. Worth settling before either module is written.
 10. **`` `anchor `` integration.** Once anchoring lands, `view.pr` is the natural anchor
     target — the catalog becomes a human-approved interface. `` `sealed `` is already the
@@ -1455,62 +1455,62 @@ forfeits `promise doc` discoverability, which is the module's whole purpose.
 
 ---
 
-## 17. Verified Against the Compiler
+## Verified Against the Compiler
 
-[#17-verified-against-the-compiler](#17-verified-against-the-compiler)
+[#verified-against-the-compiler](#verified-against-the-compiler)
 
 Everything in this section was executed against `bin/promise` rather than inferred from
 documentation.
 
-### 17.1 Confirmed Working
+### Confirmed Working
 
-[#171-confirmed-working](#171-confirmed-working)
+[#confirmed-working](#confirmed-working)
 
 | Claim | Section |
 | --- | --- |
-| `Component` outside the `View` hierarchy: app subclasses it across a module boundary, wraps via `component()`, and lowers correctly through `kind()` + in-module downcast | §3.1, §5.4 |
-| `ScrollContent` enum reaching `View` through a class reference — legal, cycle broken by the heap reference | §3.2 |
-| Value types with `Self` returns, `==` operators, and bare `this` receivers | §4 |
-| Payload-free enum as a `` `value `` field, **when the enum is marked `` `copy ``** | §4 |
-| `Arena~` mutable-borrow parameters; `a.nodes[i].size = ...` in-place field assignment through a vector index | §5, §6 |
-| `match` on a `NodeKind` with block-bodied arms containing declarations, loops, and downcasts | §6.1 |
-| `Handlers[M]` generic side table with `add(~this, M move msg)` | §3.4 |
-| Function-typed fields — `(Model, M) -> Model update;` on a generic type | §9.1 |
-| `` `structural `` `Backend` with `` `abstract `` methods; independent types satisfying it; `Backend~` parameter accepting any of them | §10 |
-| `` `embed("...", compress: true) `` on a module-level getter | §7 |
-| `promise doc <module> -signatures` and `promise bind webidl` both exist | §13, §10.1 |
-| Remote catalog entries (`url` + `commit`) — two modules already use the form | §2 |
+| `Component` outside the `View` hierarchy: app subclasses it across a module boundary, wraps via `component()`, and lowers correctly through `kind()` + in-module downcast | [The View Hierarchy](#the-view-hierarchy), [Build](#build) |
+| `ScrollContent` enum reaching `View` through a class reference — legal, cycle broken by the heap reference | [Making Illegal Nesting Unrepresentable](#making-illegal-nesting-unrepresentable) |
+| Value types with `Self` returns, `==` operators, and bare `this` receivers | [Geometry and Style](#geometry-and-style) |
+| Payload-free enum as a `` `value `` field, **when the enum is marked `` `copy ``** | [Geometry and Style](#geometry-and-style) |
+| `Arena~` mutable-borrow parameters; `a.nodes[i].size = ...` in-place field assignment through a vector index | [The Arena Render Tree](#the-arena-render-tree), [The Layout Pass](#the-layout-pass) |
+| `match` on a `NodeKind` with block-bodied arms containing declarations, loops, and downcasts | [Protocol](#protocol) |
+| `Handlers[M]` generic side table with `add(~this, M move msg)` | [Handlers Are Values and Not Closures](#handlers-are-values-and-not-closures) |
+| Function-typed fields — `(Model, M) -> Model update;` on a generic type | [The Application Loop](#the-application-loop) |
+| `` `structural `` `Backend` with `` `abstract `` methods; independent types satisfying it; `Backend~` parameter accepting any of them | [Backends](#backends) |
+| `` `embed("...", compress: true) `` on a module-level getter | [Text](#text) |
+| `promise doc <module> -signatures` and `promise bind webidl` both exist | [Documentation as the Agent Contract](#documentation-as-the-agent-contract), [Web Backend](#web-backend) |
+| Remote catalog entries (`url` + `commit`) — two modules already use the form | [Module Structure](#module-structure) |
 
-### 17.2 Confirmed Broken or Constrained
+### Confirmed Broken or Constrained
 
-[#172-confirmed-broken-or-constrained](#172-confirmed-broken-or-constrained)
+[#confirmed-broken-or-constrained](#confirmed-broken-or-constrained)
 
 | Finding | Consequence |
 | --- | --- |
-| **Directly-recursive enums are rejected** (T0628) | `enum View` is not viable; §3.1 is a class hierarchy |
-| **`` `target `` on two same-named types fails in codegen** — `redefinition of global '@promise_vtable_..._Backend'`; sema filters the declaration but codegen still emits its vtable and typeinfo. Never exercised in-tree — `` `target `` is used only on functions | Real compiler bug. §10's design avoids it by using distinct type names, so it is not blocking |
-| **Vector indices must be `int`, not `u32`** | Arena uses `int` indices and `NONE = -1` (§5.2) |
+| **Directly-recursive enums are rejected** (T0628) | `enum View` is not viable; [The View Hierarchy](#the-view-hierarchy) is a class hierarchy |
+| **`` `target `` on two same-named types fails in codegen** — `redefinition of global '@promise_vtable_..._Backend'`; sema filters the declaration but codegen still emits its vtable and typeinfo. Never exercised in-tree — `` `target `` is used only on functions | Real compiler bug. [Backends](#backends)'s design avoids it by using distinct type names, so it is not blocking |
+| **Vector indices must be `int`, not `u32`** | Arena uses `int` indices and `NONE = -1` ([Structure](#structure)) |
 | **`for-in` takes no type annotation** — `for i in 0..n`, not `for int i in 0..n` | All loops in this document corrected |
-| **`&this` is rejected** — bare `this` is the shared-borrow receiver | Noted in §4; `promise help` still teaches the old form |
-| **Payload-free enums are not `` `copy `` by default** | Mark `Alignment`/`Axis` `` `copy `` (§4) |
+| **`&this` is rejected** — bare `this` is the shared-borrow receiver | Noted in [Geometry and Style](#geometry-and-style); `promise help` still teaches the old form |
+| **Payload-free enums are not `` `copy `` by default** | Mark `Alignment`/`Axis` `` `copy `` ([Geometry and Style](#geometry-and-style)) |
 | **Payload-free enums have no `==` by default** | Compare with `match`, or define `==` explicitly |
-| **No WASM interpreter for native targets** | §7's "same blob on both targets" is not implementable as written; see §7.1 |
-| **`` `sealed `` is transitive** — no subtype of a sealed type may be `` `open ``, at any depth | `Component` cannot be `is View`; it is an independent abstract type reached through the `Composite` primitive (§3.1) |
+| **No WASM interpreter for native targets** | [Text](#text)'s "same blob on both targets" is not implementable as written; see [The Unresolved Part](#the-unresolved-part) |
+| **`` `sealed `` is transitive** — no subtype of a sealed type may be `` `open ``, at any depth | `Component` cannot be `is View`; it is an independent abstract type reached through the `Composite` primitive ([The View Hierarchy](#the-view-hierarchy)) |
 | **`` `abstract `` is a method meta only** — `type T `abstract {}` fails with ``meta `abstract cannot be applied to type`` | Abstractness comes from declaring an abstract method; the language design's type-level form is not implemented |
 | **Cross-module downcast panics codegen** — `b as! mod.Leaf` and `b as mod.Leaf` both crash with ``panic: codegen: unsupported cast target type *ast.QualifiedTypeRef`` (`expr_cast.go:701`) | Real compiler bug. Not blocking: all downcasting happens inside `ui`, where type names are unqualified. It does block application-side downcasting of a `View` |
-| **`` `sealed `` / sealed-by-default are design-approved but unimplemented** (T1537) | The seal is specified, not yet enforced; §3.1's structure is verified, the seal itself is not |
-| **`cmd` is not in the approved abbreviation dictionary** (§9.3a) | `DisplayCommand`, not `DisplayCmd` |
-| **`std.geometry` already defines `Point[T]`/`Size[T]`/`Rect[T]`** with `width`/`height`, not `w`/`h` | `ui` defines no geometry types of its own and no `Offset` (§4.1) |
+| **`` `sealed `` / sealed-by-default are design-approved but unimplemented** (T1537) | The seal is specified, not yet enforced; [The View Hierarchy](#the-view-hierarchy)'s structure is verified, the seal itself is not |
+| **`cmd` is not in the approved abbreviation dictionary** ([Naming Conventions](../language-design.md#naming-conventions)) | `DisplayCommand`, not `DisplayCmd` |
+| **`std.geometry` already defines `Point[T]`/`Size[T]`/`Rect[T]`** with `width`/`height`, not `w`/`h` | `ui` defines no geometry types of its own and no `Offset` ([Reusing the geometry types](#reusing-the-geometry-types)) |
 
-### 17.3 Not Yet Verified
+### Not Yet Verified
 
-[#173-not-yet-verified](#173-not-yet-verified)
+[#not-yet-verified](#not-yet-verified)
 
-- The layout pass itself — no part of §6 has been run.
-- `ShapeCache` behaviour and any text measurement at all (§7).
-- Whether `promise bind webidl` covers the DOM subset the web backend needs (§16.7).
+- The layout pass itself — no part of [The Layout Pass](#the-layout-pass) has been run.
+- `ShapeCache` behaviour and any text measurement at all ([Text](#text)).
+- Whether `promise bind webidl` covers the DOM subset the web backend needs ([Open Questions](#open-questions) item 7).
 - Arena rebuild allocation behaviour — that `nodes.clear()` retains capacity in practice
-  (§8.2).
+  ([Value Change and Structural Change](#value-change-and-structural-change)).
 - Borrow-checker behaviour of the recursive `layout(Arena~ a, ...)` shape under real
-  recursion depth (§11, R1/R2). This is the assumption most likely to require rework, and
+  recursion depth ([Ownership Discipline](#ownership-discipline), R1/R2). This is the assumption most likely to require rework, and
   a small spike would settle it cheaply.

@@ -69,7 +69,7 @@ vector_of_jobs_with_unrelated_buffer() `test {
   assert(total == 14, "both tasks awaited");
 }
 
-// A handle-held field is not held by value (memory-model.md §3): Ref's dup is a
+// A handle-held field is not held by value (memory-model.md#by-value-versus-behind-a-handle): Ref's dup is a
 // refcount bump, so a Vector of Ref-wrapped handles is allowed and drops cleanly.
 vector_of_ref_held_handles() `test {
   Vector[HandleHolderT1926[Mutex[int]]] hs = [];
@@ -179,7 +179,7 @@ tuple_held_buffer_of_ints_still_copies() `test {
   assert(xs.len == 2, "buffer copied intact");
 }
 
-// A fixed-size array is the other by-value buffer (memory-model.md §2). This one
+// A fixed-size array is the other by-value buffer (memory-model.md#the-variable-size-primitives-are-a-closed-set). This one
 // holds ints, not the type argument, so `SlotJobT1926[Task[int]]` is the `Job`
 // case with an array instead of a vector — a legal container element whose task
 // is awaited exactly once.

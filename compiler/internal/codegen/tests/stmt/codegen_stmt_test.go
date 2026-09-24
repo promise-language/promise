@@ -675,7 +675,7 @@ func TestForInBareFailableVectorAutoPropagates(t *testing.T) {
 	codegentest.AssertContains(t, body, "call void @Vector.drop")
 }
 
-// T1896: the bare form must emit what the explicit `?^` emits — §7.2 makes them
+// T1896: the bare form must emit what the explicit `?^` emits — language-design.md#calling-failable-functions makes them
 // the same expression. Comparing the two bodies for the same markers is the
 // contract; asserting one spelling alone would not notice the two drifting.
 func TestForInFailableVectorSpellingsAgree(t *testing.T) {
@@ -887,7 +887,7 @@ func TestForInBareFailableIterMethodAutoPropagates(t *testing.T) {
 
 // The iterable does not have to be a call. FailableExprs is also set on a
 // failable getter (a MemberExpr) and on `<-t` for a failable_task[T] (a
-// UnaryExpr, §17.2.1) — genForInStmt keys off AutoPropagateExprs, not off the
+// UnaryExpr, language-design.md#failable-goroutines) — genForInStmt keys off AutoPropagateExprs, not off the
 // node kind, and isRawGeneratorForIn's "is this a CallExpr" test must not send
 // these anywhere unusual.
 func TestForInBareFailableNonCallIterablesAutoPropagate(t *testing.T) {

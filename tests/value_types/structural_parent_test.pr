@@ -1,7 +1,7 @@
 // T1730: a pure value type may declare a `structural interface parent. An
 // interface declares no fields, so the parent cannot affect the value struct —
 // the `is` clause is a conformance claim the compiler checks, not inherited
-// state (docs/language-design.md §5.2). These tests pin the runtime behaviour on
+// state (docs/language-design.md#the-four-struct-model). These tests pin the runtime behaviour on
 // both paths: the direct call, which stays a static call on the flat value
 // struct, and the boxed call through an interface-typed variable, which was
 // already how such a type reached a view before it could say `is`.

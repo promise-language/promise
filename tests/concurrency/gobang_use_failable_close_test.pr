@@ -184,7 +184,7 @@ gobang_use_close_ok_returns_value() `test {
 }
 
 // --- Explicit-return exit + failing close: the close error surfaces (T1385/T1391) ---
-// §17.2 explicit-return style routes through the same emitScopeCleanup +
+// language-design.md#explicit-concurrency explicit-return style routes through the same emitScopeCleanup +
 // emitCloseErrCheck sequence as the bare-return and trailing-value exits, so a
 // failing close on that exit must divert the already-computed return value and
 // surface the close error instead — without leaking either.
@@ -221,7 +221,7 @@ gobang_use_close_explicit_return_ok_value() `test {
 // (emitCloseErrCheck → emitFailableGoBlockError) and stores the {err} aggregate
 // instead — so the divert path must drop the orphaned result or it leaks (T0067).
 // Three shapes: trailing binary expr (fresh temp), trailing bare ident (moved-local,
-// no temp record), and explicit `return` (§17.2 / T1385).
+// no temp record), and explicit `return` (language-design.md#explicit-concurrency / T1385).
 gobang_use_close_trailing_heap_diverted_leak_free() `test {
   t := go! {
     s := make_str(3)?^; // heap (string) result computed
@@ -365,7 +365,7 @@ gobang_use_close_ok_heap_value() `test {
 // use-binding whose failable close() raises on that exit must route the close
 // error into the task's {ok,err} aggregate (surfacing at <-t) and must not leak
 // the captured error instance.
-// T1385/§17.2: a bare `return;` is only legal on a non-value path, so these
+// T1385/language-design.md#explicit-concurrency: a bare `return;` is only legal on a non-value path, so these
 // bodies are `failable_task[Void]`. The bare-return close-error routing is
 // unchanged — it is the exit, not the result type, that this covers.
 gobang_use_close_bare_return_surfaces() `test {

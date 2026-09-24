@@ -60,7 +60,7 @@ import (
 //     variable, so walking it can never reach a capture. Codegen's arm is
 //     harmless; sema has nothing to record.
 //   - YieldStmt / YieldDelegateStmt: since T1428 a `yield` / `yield*` inside a
-//     `go {}` block is a sema error (§12.4 — the block body is compiled into its
+//     `go {}` block is a sema error (language-design.md#generator-functions — the block body is compiled into its
 //     own coroutine, which has no yield slot), so neither statement can reach
 //     either walk from user source. Codegen's arms are unreachable leftovers;
 //     sema has nothing to record. If the restriction is ever lifted, sema's arms

@@ -877,7 +877,7 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 		}
 	}
 
-	// T1752: §5.7 grants no value-type exemption — a validated value type's
+	// T1752: language-design.md#constructors grants no value-type exemption — a validated value type's
 	// construction is failable for exactly the same reason a heap type's is.
 	if chain := c.constructionValidateChain(e, typ); len(chain) > 0 {
 		return c.wrapWithValidateChain(val, c.valueStructRecvPtr(val), chain)

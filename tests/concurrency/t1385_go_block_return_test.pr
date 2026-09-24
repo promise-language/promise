@@ -1,4 +1,4 @@
-// T1385 / §17.2 "Producing the result": a `go {}` / `go! {}` block yields its
+// T1385 / language-design.md#explicit-concurrency "Producing the result": a `go {}` / `go! {}` block yields its
 // result in one of two styles — a trailing expression, or explicit
 // `return <expr>` — and `T` is inferred either way.
 //

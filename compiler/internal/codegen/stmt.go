@@ -856,7 +856,7 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 						}
 					} else {
 						// T1420: a trailing bare failable call IS the block's value —
-						// §7.2 gives auto-propagation in "all expression positions", so
+						// language-design.md#calling-failable-functions gives auto-propagation in "all expression positions", so
 						// `{ g() }` must yield exactly what `{ g()?^ }` yields, tracked
 						// identically (genAutoPropagateTracked, T1883). Discarding it
 						// left every block-value arm (an `if`/`match` arm, a `? e {}`
@@ -1302,7 +1302,7 @@ func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
 // variable. `expr` is the node whose c.info.Types entry holds the success
 // type; `result` is the already-unwrapped value. Used by the explicit `?^`
 // (ErrorPropagateExpr) and `?!` (ErrorPanicExpr) paths in genExpr, and by every
-// bare auto-propagate site through genAutoPropagateTracked (T0966, T1883). §7.2
+// bare auto-propagate site through genAutoPropagateTracked (T0966, T1883). language-design.md#calling-failable-functions
 // of docs/language-design.md gives the bare form in "all expression positions",
 // so all three spellings must register the same temp. Borrow returns (`T&`/`T~`)
 // are never owned temps and are skipped.

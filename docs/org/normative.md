@@ -12,7 +12,7 @@ keep two of them from ever disagreeing. Every managed project holds the same doc
 structure, so a reader who has learned one tree has learned them all. This document's subject is
 the documents themselves; it is one of them, and every rule below applies to it.
 
-## 1. Location is the whole rule
+## Location is the whole rule
 
 There is no configuration file and no per-document marker. The directory a file sits in
 determines what it is:
@@ -31,9 +31,9 @@ Those five rows are the whole vocabulary. A project may lack `research/` or have
 **`docs/index.md` is the map and the one file in the root that is not a specification.** Every
 tracked file under `docs/` is listed in it, wherever it lives — the section an entry sits under
 is where its binding status is written down. The index also names the project's status query
-(§3), which is the one per-project fact this shared document cannot carry.
+([A specification states the end state](#a-specification-states-the-end-state)), which is the one per-project fact this shared document cannot carry.
 
-## 2. The header
+## The header
 
 A specification opens with its title, and on the line beneath it, its tag:
 
@@ -49,7 +49,7 @@ on a GitHub-tracked project — and its exact spelling is stated once, in `docs/
 under `proposals/`, `archive/`, and `research/` carry no tag: none of them is something the
 project owes work against.
 
-## 3. A specification states the end state
+## A specification states the end state
 
 **A specification describes what the project should be, never how far along it is.** No status
 sections, no progress notes, no phasing, no "currently", "not yet", or "implemented", and no
@@ -73,7 +73,7 @@ specification:
 **A rule stated as a blockquote is an invariant**, and the prose under it is why. If the rule
 and the reasoning ever disagree, the rule is what the implementation must satisfy.
 
-## 4. One fact, one home — supersession is forbidden
+## One fact one home and supersession is forbidden
 
 **A fact is specified in exactly one document.** Two specifications must never define the same
 thing, and no specification may claim authority over another. *Supersedes*, *takes precedence
@@ -90,19 +90,19 @@ other, and each links to the other once.
 say. And a fact whose home is the org corpus stays there: a project document cites `docs/org/`,
 it does not restate it.
 
-## 5. Cross-reference, do not copy
+## Cross reference and do not copy
 
 Link to the document that owns a fact. If a passage must be edited whenever its target changes,
 it is a copy however it is worded — a paraphrase and a quotation drift identically. The one
 sanctioned copy is the vendored `docs/org/` itself: byte-identical, machine-checked, named as a
 copy by its own first lines.
 
-## 6. Lifecycle
+## Lifecycle
 
 Three transitions, each one reviewed change:
 
 - **Ratification.** A design begins in `docs/proposals/`, unbound, untagged, freely rewritten.
-  Ratifying it is one act: create the label, `git mv` into the root, add the §2 header, move its
+  Ratifying it is one act: create the label, `git mv` into the root, add the [The header](#the-header) header, move its
   index entry — the move *is* the decision.
 - **Amendment.** An ordinary reviewed diff, landing **before or with** the change that
   implements it, never after: a specification trailing its implementation has stopped describing
@@ -114,15 +114,15 @@ Three transitions, each one reviewed change:
   **Completion never retires a specification.** A document whose implementation is finished has
   an empty tag query — its healthiest state, not its end. It stays in the root, where it keeps
   the next change from quietly undoing the work and gives every future reconciliation pass its
-  measure; retiring it on delivery would turn "implemented" back into "unspecified", the §7 gap
+  measure; retiring it on delivery would turn "implemented" back into "unspecified", the [Reconciliation](#reconciliation) gap
   it took the work to close. A specification retires only when it stops describing the intended
   end state: a ratified replacement supersedes it, its subject is removed from the project, or
   the direction is abandoned — each a decision about the design, never a report that work
   finished. The one document that *is* delivered is one that was inherently one-shot — a staged
   migration, a bounded sequence — and it archives when it completes; that is the "delivered" in
-  §1's archive row, and it is the exception, not the pattern.
+  [Location is the whole rule](#location-is-the-whole-rule)'s archive row, and it is the exception, not the pattern.
 
-## 7. Reconciliation
+## Reconciliation
 
 > **Every gap between a specification and the implementation is covered by an open item carrying
 > that document's tag.**
@@ -150,7 +150,7 @@ where they stand. Such an issue is transferred to the home repository, not worke
 landed — and the document's opening home line is what tells both the reader and the transferrer
 where that is.
 
-## 8. What is enforced mechanically
+## What is enforced mechanically
 
 - Every relative link in every tracked Markdown file resolves to a tracked file.
 - Every tracked file under `docs/` is listed in `docs/index.md` — and **a missing index is a
@@ -159,5 +159,5 @@ where that is.
   integration gate.
 
 Everything else here is upheld by review, and the gaps against this document are items carrying
-its tag — the rules most worth mechanizing next are §3's ban on status prose and §4's ban on
+its tag — the rules most worth mechanizing next are [A specification states the end state](#a-specification-states-the-end-state)'s ban on status prose and [One fact one home and supersession is forbidden](#one-fact-one-home-and-supersession-is-forbidden)'s ban on
 precedence language.

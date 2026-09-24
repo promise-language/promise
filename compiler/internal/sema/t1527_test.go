@@ -188,7 +188,7 @@ func TestT1527ValueNewtypeMultipleParents(t *testing.T) {
 // The one-parent limit is about the value struct: a newtype shares exactly one,
 // and a `structural interface contributes none. So listing one alongside the
 // value parent is not the multiple-parent case — it is a conformance claim the
-// compiler checks, permitted since T1730 (docs/language-design.md §5.2). The
+// compiler checks, permitted since T1730 (docs/language-design.md#the-four-struct-model). The
 // interface's requirement here is satisfied by the inherited getter.
 func TestT1527ValueNewtypeWithStructuralParentAllowed(t *testing.T) {
 	checkOK(t, `

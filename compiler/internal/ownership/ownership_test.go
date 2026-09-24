@@ -14275,7 +14275,7 @@ func TestT1147GoCallCopyBindingOK(t *testing.T) {
 }
 
 // Reject (T1397): a heap-user-type for-in aliasing binding borrowed into `go`
-// is a spawn-boundary borrow — §17.4 rejects at spawn site.
+// is a spawn-boundary borrow — language-design.md#ownership-across-goroutines rejects at spawn site.
 func TestT1147GoCallAliasingBindingRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string s; }
@@ -14289,7 +14289,7 @@ func TestT1147GoCallAliasingBindingRejected(t *testing.T) {
 }
 
 // Reject (T1397): a function-level local borrowed into `go keep(s)` is a
-// spawn-boundary borrow — §17.4 rejects regardless of the handle being awaited.
+// spawn-boundary borrow — language-design.md#ownership-across-goroutines rejects regardless of the handle being awaited.
 func TestT1147GoCallFunctionLocalBorrowRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		keep(string p) string { return p.clone(); }
@@ -14341,7 +14341,7 @@ func TestT1147GoCallConstructorLoopBindingOK(t *testing.T) {
 }
 
 // Reject (T1397): `go sink.push(move x)` borrows the receiver `sink` across the
-// spawn boundary — §17.4 rejects at spawn site.
+// spawn boundary — language-design.md#ownership-across-goroutines rejects at spawn site.
 func TestT1147GoCallStoreNativeLoopBindingRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		test() {
@@ -14545,7 +14545,7 @@ func TestT1151GoCallLoopBodyLocalCloneTempOK(t *testing.T) {
 }
 
 // Reject (T1397): a pre-loop local borrowed into `go keep(y)` inside the loop is
-// a spawn-boundary borrow — §17.4 rejects at spawn site.
+// a spawn-boundary borrow — language-design.md#ownership-across-goroutines rejects at spawn site.
 func TestT1151GoCallLocalBeforeLoopRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		keep(string p) string { return p.clone(); }
@@ -14563,7 +14563,7 @@ func TestT1151GoCallLocalBeforeLoopRejected(t *testing.T) {
 
 // Reject (T1397): an owned local inside a `go { }` block borrowed into a nested
 // `go` is a spawn-boundary borrow — the depth-reset guard prevents the loop-
-// binding false positive, but §17.4 rejects the borrow at the inner spawn site.
+// binding false positive, but language-design.md#ownership-across-goroutines rejects the borrow at the inner spawn site.
 func TestT1151GoBlockLocalInLoopRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		keep(string p) string { return p.clone(); }
@@ -14583,7 +14583,7 @@ func TestT1151GoBlockLocalInLoopRejected(t *testing.T) {
 }
 
 // Reject (T1397): an owned local inside a lambda borrowed into `go` is a
-// spawn-boundary borrow — §17.4 rejects it at the spawn site.
+// spawn-boundary borrow — language-design.md#ownership-across-goroutines rejects it at the spawn site.
 func TestT1151LambdaLocalInLoopRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		keep(string p) string { return p.clone(); }
@@ -14821,9 +14821,9 @@ func TestT1153WhileLetBorrowedParamStillRejected(t *testing.T) {
 }
 
 // Reject (T1397): post-loop local borrowed into `go keep(y)` is now rejected
-// at spawn site — §17.4 categorical rule. The restore-guard property (while-
+// at spawn site — language-design.md#ownership-across-goroutines categorical rule. The restore-guard property (while-
 // unwrap binding's flag must not leak to a same-named post-loop local) is
-// still tested: the error is the §17.4 "cannot borrow", NOT the loop-binding
+// still tested: the error is the language-design.md#ownership-across-goroutines "cannot borrow", NOT the loop-binding
 // "into a goroutine" message.
 func TestT1153FlagRestoredAfterWhileUnwrapLoop(t *testing.T) {
 	errs := ownerErrs(t, `
@@ -14964,7 +14964,7 @@ func TestT1152_ReassignOuterFromGoHandleRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot borrow")
 }
 
-// Reject (T1397): `t := go keep(s); _ = <-t;` — §17.4 categorical rule: a borrow
+// Reject (T1397): `t := go keep(s); _ = <-t;` — language-design.md#ownership-across-goroutines categorical rule: a borrow
 // may never cross a go spawn boundary, even when the handle is awaited in scope.
 func TestT1152_AwaitInScopeRejected(t *testing.T) {
 	errs := ownerErrs(t, `
@@ -14980,7 +14980,7 @@ func TestT1152_AwaitInScopeRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot borrow")
 }
 
-// Reject (T1397): `t := go worker(s);` — §17.4 categorical rule: a borrow may
+// Reject (T1397): `t := go worker(s);` — language-design.md#ownership-across-goroutines categorical rule: a borrow may
 // never cross a go spawn boundary, even when the handle drops in scope.
 func TestT1152_DropInScopeRejected(t *testing.T) {
 	errs := ownerErrs(t, `
@@ -15081,7 +15081,7 @@ func TestT1152_ForInBindingDeferredToLoopCheck(t *testing.T) {
 
 // Integration guard: a loop-body local borrowed into `go f(y)` whose handle is
 // pushed to a vector outliving the iteration is rejected by the sibling call-site
-// check (T1151), NOT by the §17.4 spawn-site check.
+// check (T1151), NOT by the language-design.md#ownership-across-goroutines spawn-site check.
 func TestT1152_LoopBodyLocalDeferredToLoopCheck(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { string s; }
@@ -15116,7 +15116,7 @@ func TestT1152_InferredHandleBindingEscapeRejected(t *testing.T) {
 }
 
 // Accept: a PARAMETER (caller-owned, not a function-level local) borrowed into
-// `go f(p)` is NOT flagged by §17.4. Parameters are owned by the caller's frame
+// `go f(p)` is NOT flagged by language-design.md#ownership-across-goroutines. Parameters are owned by the caller's frame
 // — goCallBorrowsOwnedLocal skips params. Pins the `c.params` continue branch.
 func TestT1152_ParamBorrowEscapeNotFlagged(t *testing.T) {
 	errs := ownerErrs(t, `
@@ -15130,7 +15130,7 @@ func TestT1152_ParamBorrowEscapeNotFlagged(t *testing.T) {
 	expectNoOwnerError(t, errs, "cannot borrow")
 }
 
-// Accept: the `go { block }` form with no captures is outside the §17.4
+// Accept: the `go { block }` form with no captures is outside the language-design.md#ownership-across-goroutines
 // borrow-arg check — no captures to reject. Pins the no-captures path.
 func TestT1152_GoBlockHandleNotFlagged(t *testing.T) {
 	errs := ownerErrs(t, `
@@ -15142,7 +15142,7 @@ func TestT1152_GoBlockHandleNotFlagged(t *testing.T) {
 	expectNoOwnerError(t, errs, "cannot borrow")
 }
 
-// --- T1397: §17.4 spawn-site rejection — new shapes ---
+// --- T1397: language-design.md#ownership-across-goroutines spawn-site rejection — new shapes ---
 
 // Shape 2: receiver borrow rejected — `go obj.method()` where obj is a heap type.
 func TestT1397_ReceiverBorrowRejected(t *testing.T) {
@@ -16091,7 +16091,7 @@ func TestT1970_TwoLevelInheritedHandleFieldReadRejected(t *testing.T) {
 // The false-positive guard: the read gate never recurses TypeArgs, because a
 // refcounted handle's dup is a refcount bump rather than an alias. That must stay
 // true once the inherited field resolves to Ref[Mutex[int]] — otherwise resolving
-// inherited fields would reject sound code (memory-model.md §3).
+// inherited fields would reject sound code (memory-model.md#by-value-versus-behind-a-handle).
 func TestT1970_InheritedRefHandleFieldReadAccepted(t *testing.T) {
 	// ownerOK, not expectNoOwnerError: asserting the absence of one substring
 	// would also pass if the snippet failed to type-check at all, which is how a
@@ -16107,7 +16107,7 @@ func TestT1970_InheritedRefHandleFieldReadAccepted(t *testing.T) {
 	`)
 }
 
-// The must-use rule for `failable_task[T]` (language-design.md §17.2.1) shares the
+// The must-use rule for `failable_task[T]` (language-design.md#failable-goroutines) shares the
 // same field walk, in types.ContainsFailableTask. An inherited failable_task read
 // as still-generic let the goroutine's error be discarded silently.
 func TestT1970_InheritedFailableTaskMustBeReceived(t *testing.T) {

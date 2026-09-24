@@ -2,7 +2,7 @@
 
 > **Tag:** `language-design` — remaining work to complete this document: `mcp__tracker__list --tag language-design`
 
-## 1. Overview
+## Overview
 
 **Promise** is a systems-aware, statically-typed programming language with Dart-inspired syntax, Rust-inspired ownership semantics, and a rich type system featuring inheritance, generics, and algebraic error handling. The toolchain (compiler + package manager) is a single Go binary called `promise`, uses ANTLR4 for parsing, and targets LLVM IR for code generation.
 
@@ -10,7 +10,7 @@
 
 ---
 
-## 2. Toolchain Architecture
+## Toolchain Architecture
 
 ```
 Source (.pr)
@@ -99,7 +99,7 @@ promise version                   # Print compiler version
 
 `promise.toml` is the lockfile — remote dependencies are pinned by commit hash directly in it, so there is no separate lockfile command.
 
-**First-party catalog modules are built into the compiler and require no `add` step** — they are available directly with `use <name>;` (adding one to `[require]` is a compile error), because the epoch itself pins their version. `promise package add`/`remove`/`pin` operate on dependencies recorded in `promise.toml`: **community** modules (name-addressable via the `promise-community/catalog` index) and **ad-hoc** git URLs. `promise package add <name>` resolves the epoch-appropriate, test-verified revision and pins its commit; a bare `use foo;` whose name is neither first-party nor in `[require]` is a compile error that points you to `promise package add foo`. `promise package search` is discovery across the first-party and community catalogs. See `docs/module-system.md` §9.8–§9.10 for the full cross-epoch versioning and compatibility model.
+**First-party catalog modules are built into the compiler and require no `add` step** — they are available directly with `use <name>;` (adding one to `[require]` is a compile error), because the epoch itself pins their version. `promise package add`/`remove`/`pin` operate on dependencies recorded in `promise.toml`: **community** modules (name-addressable via the `promise-community/catalog` index) and **ad-hoc** git URLs. `promise package add <name>` resolves the epoch-appropriate, test-verified revision and pins its commit; a bare `use foo;` whose name is neither first-party nor in `[require]` is a compile error that points you to `promise package add foo`. `promise package search` is discovery across the first-party and community catalogs. See `docs/module-system.md` [Cross Epoch Module Versioning](module-system.md#cross-epoch-module-versioning)–[When a Module Has No Compatible Version](module-system.md#when-a-module-has-no-compatible-version) for the full cross-epoch versioning and compatibility model.
 
 `promise install` pre-stages the host LLVM toolchain into the cache as part of setup, so the first build works offline — there is no separate "fetch"/"warm" command. Re-running `promise install` (or `promise install <epoch>` for an already-installed epoch) re-asserts that the toolchain is staged; `--no-fetch-toolchain` skips the pre-stage for thin installs that fetch lazily on first compile.
 
@@ -109,7 +109,7 @@ The `ast` and `emit-ir` commands are also available for compiler debugging.
 
 ---
 
-## 3. File Extensions & Project Layout
+## File Extensions and Project Layout
 
 ```
 myproject/
@@ -128,7 +128,7 @@ myproject/
 
 Source files (`.pr`) and directories live directly inside the module root — there is no required `src/` directory. This keeps the layout flat and avoids an extra level of nesting that adds no information. The module root is wherever `promise.toml` is.
 
-### 3.1 Module Boundaries
+### Module Boundaries
 
 There is no concept of "sub-modules." Every `promise.toml` file defines a standalone module. When the compiler scans a module's directory tree, any subdirectory that contains its own `promise.toml` is **excluded** — it is a separate module, not part of the parent. Directories without a `promise.toml` are just organizational folders whose `.pr` files belong to the enclosing module.
 
@@ -141,7 +141,7 @@ This means a `promise.toml` file serves exactly one purpose: **it marks the root
 3. **Visibility boundaries.** Visibility rules apply at module boundaries. Without a `promise.toml`, a directory has no boundary — its files are part of the parent module and share its namespace.
 4. **Tooling clarity.** Tools, IDEs, and AI agents identify module structure by scanning for `promise.toml` files. No heuristics, no configuration — the file system is the source of truth.
 
-### 3.2 Testing Convention
+### Testing Convention
 
 Tests live alongside the code they test. Any function annotated with `` `test `` is a test function. There are two approaches:
 
@@ -206,9 +206,9 @@ Stress mode compiles all target files once, then repeatedly runs the binaries. I
 
 ---
 
-## 4. Module System
+## Module System
 
-### 4.1 Module File (`promise.toml`)
+### The module file
 
 Every module has a `promise.toml` at its root (TOML format). A minimal module file:
 
@@ -236,7 +236,7 @@ epoch = "2026.0"
 
 The `[require]` key is the git repository URL; the value is a commit hash or tag that pins an exact revision. Local overrides in `[replace]` map the same URL key to a local directory path.
 
-### 4.2 `use` Declarations
+### Use Declarations
 
 At the top of any `.pr` file, `use` imports a module. There are two forms:
 
@@ -261,7 +261,7 @@ The alias is the only way to reference that module's exports in the file. Both f
 
 **Catalog vs. external:** Catalog modules are built into the compiler and always available — `use json;` with no `[require]` entry. External modules must be declared in `[require]` before they can be imported with a sourced `use`. Attempting to add a catalog module to `[require]` is a compile error.
 
-### 4.3 Module Identity and Pinning
+### Module Identity and Pinning
 
 Remote modules are pinned by commit hash directly in `promise.toml` — the `[require]` value is the exact commit (or tag) to check out. `promise package pin <url> [ref]` resolves one remote dependency's ref (tag, branch, commit, or `HEAD`) to a full commit SHA and writes it back to `promise.toml`. To bump every declared dependency to the latest commit at once, run `promise package update`. The file is checked in and guarantees reproducible builds — `promise.toml` itself is the lockfile.
 
@@ -272,11 +272,11 @@ promise clean                     # clear local build cache
 promise clean --global            # clear global module + build cache
 ```
 
-### 4.4 Visibility
+### Visibility
 
 Promise uses a two-level visibility model: **module-level** and **member-level**.
 
-#### Module-Level Visibility
+#### Module Level Visibility
 
 Top-level declarations (types, enums, functions) are **private by default**. To export a declaration from a module, annotate it with `` `public ``:
 
@@ -301,7 +301,7 @@ helper() int {               // private — not exported
 
 The `ExportedScope` of a module contains only `` `public ``-annotated declarations. Consumers using `use mymod;` can only access `mymod.User`, `mymod.greet`, etc. — not `Cache` or `helper`.
 
-#### Member-Level Visibility
+#### Member Level Visibility
 
 Members (fields, methods) of a `` `public `` type are **public by default**. The underscore prefix (`_`) convention marks a member as private:
 
@@ -326,9 +326,9 @@ This model balances explicitness at module boundaries (types/functions need `` `
 
 ---
 
-## 5. Type System
+## Type System
 
-### 5.1 Primitive Types — Defined as Regular Types
+### Primitive Types Are Regular Types
 
 Promise does **not** have a separate namespace for primitive types. Instead, primitives are defined as regular `type` declarations annotated with `` `native ``, where the compiler backend provides the underlying representation and operator implementations. This means `int`, `f64`, `bool`, etc. are all types in the standard library, not compiler magic.
 
@@ -431,7 +431,7 @@ Operator precedence is fixed by the language and cannot be overridden by user-de
 
 Assignment (`=`, `+=`, `-=`, …) is a **statement**, not an expression, so it does not appear in this table.
 
-### 5.2 The Four-Struct Model
+### The Four Struct Model
 
 Every type declaration `T` produces four LLVM structs at compile time. These structs form a chain: **Value → Instance → Variant → Type**.
 
@@ -442,7 +442,7 @@ Every type declaration `T` produces four LLVM structs at compile time. These str
 - **Variant struct** — generated at compile time. One per unique monomorphization. Never dynamically allocated.
 - **Type struct** — generated at compile time. One per `type` declaration. Never dynamically allocated.
 
-#### 1. **Value Struct** (`T#v`)
+#### The Value Struct
 - The **unit of passing** — all function parameters, return values, and variable bindings are value structs.
 - Contains a **vtable pointer** that determines how fields and methods are dispatched (see Section 5.2.1).
 - Contains a **pointer to the Instance struct** that owns it.
@@ -451,20 +451,20 @@ Every type declaration `T` produces four LLVM structs at compile time. These str
 - **Always copied** on assignment (value semantics).
 - For types with ownership fields, a copy performs a deep clone (or is disallowed if the type is not `` `clone ``).
 
-#### 2. **Instance Struct** (`T#i`)
+#### The Instance Struct
 - Contains the instance fields (unannotated / default) and a single **pointer to its Variant**.
 - Always heap-allocated. This is the default representation when you use a type — the standard "object".
 - Does **not** contain a pointer to its Value — values reference the instance, not the other way around.
 - Subject to ownership rules.
 
-#### 3. **Variant Struct** (`T#m`)
+#### The Variant Struct
 - Represents **one concrete monomorphization** of a generic type (all generic parameters resolved).
 - Contains resolved generic type info and a **pointer to the Type struct**.
 - Shared across all instances of `T[ConcreteG1, ConcreteG2]`.
 - Generated once per unique set of type arguments at compile time.
 - Holds the RTTI chain only. User fields are never placed here.
 
-#### 4. **Type Struct** (`T#t`)
+#### The Type Struct
 - Matches the source-code type **declaration** 1:1.
 - Contains the unresolved/generic metadata: name, generic parameter descriptors, inheritance chain, field layout info, meta annotations.
 - Used for reflection and compile-time meta-programming.
@@ -529,7 +529,7 @@ A **view** is the perspective through which a value is accessed via a particular
 └──────────────────────────────────────────────────────────────┘
 ```
 
-#### 5.2.1 Vtable Dispatch Model
+#### Vtable Dispatch Model
 
 The vtable pointer in the value struct is the **sole mechanism** for field access and method dispatch. Every field produces a getter and setter slot in the vtable. Every **instance** method — one that takes a receiver — produces a method slot. The call site accesses fields and calls instance methods exclusively through the vtable — it never directly reads memory from the instance or value struct.
 
@@ -768,7 +768,7 @@ main() {
 **Rules**:
 - Automatically `` `copy `` — no explicit annotation needed
 - All fields must themselves be copy types (primitives, other value types, bool, char)
-- The only permitted **state-bearing** `is` parent is another pure value type (see *Value-type inheritance* below). A `` `structural `` interface parent is always permitted and never counts against this rule: an interface declares no fields, so it cannot affect the value struct's layout. `type Duration is Format, Parse` is a conformance claim the compiler checks, not an inheritance of state (see §5.4, *Protocol Interfaces*)
+- The only permitted **state-bearing** `is` parent is another pure value type (see *Value-type inheritance* below). A `` `structural `` interface parent is always permitted and never counts against this rule: an interface declares no fields, so it cannot affect the value struct's layout. `type Duration is Format, Parse` is a conformance claim the compiler checks, not an inheritance of state (see [Inheritance](#inheritance), *Protocol Interfaces*)
 - Cannot have `drop()` methods (nothing to clean up)
 - Cannot have failable `new()` methods
 - Cannot have `` `abstract `` methods, and must implement every abstract requirement
@@ -781,7 +781,7 @@ main() {
 - It **cannot be satisfied structurally.** Structural satisfaction requires the target to declare at least one `` `abstract `` method, and a value type may not declare one — so no unrelated type can ever "duck-type" into it.
 - The only types assignable to it are its own **layout-sharing value newtypes** (a fieldless child that inherits the parent's value struct verbatim — see *Value-Type Inheritance* below), for which the crossing is a plain register copy — never a heap box.
 
-This restricts what such a type can be a *target* of; it does not restrict what it can *satisfy*. A `` `structural `` value type is an ordinary concrete value type in the other direction — it can satisfy a real (abstract-method-bearing) interface and, assigned to one, is heap-boxed behind that interface's view exactly like any other value type. It may also **declare** that conformance with `is`, which changes nothing about its representation and only asks the compiler to verify the claim (see §5.4, *Protocol Interfaces*). `` `structural `` on a type is therefore never on its own a reason to treat it as an interface.
+This restricts what such a type can be a *target* of; it does not restrict what it can *satisfy*. A `` `structural `` value type is an ordinary concrete value type in the other direction — it can satisfy a real (abstract-method-bearing) interface and, assigned to one, is heap-boxed behind that interface's view exactly like any other value type. It may also **declare** that conformance with `is`, which changes nothing about its representation and only asks the compiler to verify the claim (see [Inheritance](#inheritance), *Protocol Interfaces*). `` `structural `` on a type is therefore never on its own a reason to treat it as an interface.
 
 ```promise
 type Metric `structural {
@@ -804,7 +804,7 @@ type Shape `structural {
 
 **Use cases**: coordinates (`Point`, `Vec2`), dimensions (`Size`, `Rect`), colors (`Color`), ranges, small fixed-size data.
 
-#### Value-Type Inheritance (Newtype)
+#### Value Type Inheritance
 
 A type that inherits from a pure value type and declares **no fields of its own** is
 itself a pure value type — a **newtype**: a distinct name for the parent's exact layout.
@@ -849,7 +849,7 @@ type EntityId is Hash128 {   // newtype: same bits, distinct name
 
 > Tracked: T1723
 
-#### Primitives in the Four-Struct Model
+#### Primitives in the Four Struct Model
 
 Since primitives are regular types, `int` works like any other type in the four-struct model:
 
@@ -860,7 +860,7 @@ Since primitives are regular types, `int` works like any other type in the four-
 
 The `int` vtable contains getter/setter for the raw value plus all operator methods (`+`, `-`, `==`, etc.). For performance, the compiler optimizes away unnecessary indirection for primitives (e.g., `int` on the stack is just an `i64` in practice, with the vtable/instance/variant/type pointers elided when not needed).
 
-### 5.3 Variable Declarations
+### Variable Declarations
 
 Variable declarations use **type-first** syntax (Dart/C++ style):
 
@@ -910,7 +910,7 @@ i8 bad = 128i8;         // ERROR: 128 overflows i8 (max 127)
 u8 big = 256u8;         // ERROR: 256 overflows u8 (max 255)
 ```
 
-### 5.4 Inheritance
+### Inheritance
 
 A type declares its parent types with `is`. There is no distinction between inheritance and interface implementation — both use the same keyword. An interface is simply a type whose methods are all `` `abstract `` — it uses the same `is` keyword and the same vtable machinery.
 
@@ -943,7 +943,7 @@ type Circle is Shape, Drawable {
 }
 ```
 
-#### Sealed by Default (`` `open ``)
+#### Sealed by Default
 
 > Tracked: T1537
 
@@ -980,7 +980,7 @@ Sealing is **per type, not inherited**: a *concrete* child of an `` `open `` or 
 type Wheel is Circle {}   // ERROR: cannot inherit from sealed type `Circle`
 ```
 
-#### Closed Hierarchies (`` `sealed ``)
+#### Closed Hierarchies
 
 The concrete/abstract defaults give two states: no `is` at all, or `is` by anyone, anywhere. A third is often wanted — a hierarchy whose case set is **fixed and owned by one module**: extensible *inside* the declaring module (its own cases derive from the base) but closed *outside* it. This is the standard shape for a closed tagged union whenever an enum won't serve — notably a *recursive* one, since directly-recursive enums are rejected (T0628), so any recursive closed union must be a class hierarchy. Mark the base `` `sealed ``:
 
@@ -1009,7 +1009,7 @@ The seal is **transitive**: no subtype of a `` `sealed `` type may be `` `open `
 | concrete | sealed (no `is`) | `` `open `` (global) | `` `sealed `` (inapplicable — nothing to scope) |
 | `` `abstract `` / `` `structural `` | open (global) | `` `sealed `` (module-scoped) | `` `open `` (redundant — already open) |
 
-**Interaction with value newtypes.** A value type used as a newtype base (see §5.3, T1527; sealing tracked in T1537) must likewise be `` `open ``:
+**Interaction with value newtypes.** A value type used as a newtype base (see [Variable Declarations](#variable-declarations), T1527; sealing tracked in T1537) must likewise be `` `open ``:
 
 ```promise
 type Hash128 `open { u128 value `value; }   // pure value type: every field is `value-placed
@@ -1055,7 +1055,7 @@ Structural satisfaction uses **relaxed signature matching**: the concrete type's
 - **Failable**: a non-failable concrete method satisfies a failable interface method (but not vice versa). The adapter wraps the result in a success failable struct.
 - **Optional return**: a concrete method returning `T` satisfies an interface requiring `T?`. The adapter wraps the result as `some`.
 - **Covariant return**: a concrete method returning `U` satisfies an interface requiring `T` (or `T?`) when `T` is a structural interface and `U` satisfies `T`. The adapter thunk coerces the return value's vtable to the target interface's view. This applies to both non-generic (`Writer`) and generic (`Iterator[int]`) structural return types.
-- **Receiver**: the concrete receiver may be **less** demanding than the requirement's, never more — a `this` (shared) method satisfies a `~this` requirement, but a `~this` method never satisfies a `this` one, which would let a shared borrow of the view mutate through it (§6.2). An explicitly declared `is` is stricter still: it requires the borrow kinds to match exactly, so a requirement written `close!(~this)` implemented as `close(this)` is a declaration error naming both. (The explicit-`is` half is enforced today; implicit structural satisfaction does not yet compare receivers at all — tracked as T2185.)
+- **Receiver**: the concrete receiver may be **less** demanding than the requirement's, never more — a `this` (shared) method satisfies a `~this` requirement, but a `~this` method never satisfies a `this` one, which would let a shared borrow of the view mutate through it ([Borrowing and Moving](#borrowing-and-moving)). An explicitly declared `is` is stricter still: it requires the borrow kinds to match exactly, so a requirement written `close!(~this)` implemented as `close(this)` is a declaration error naming both. (The explicit-`is` half is enforced today; implicit structural satisfaction does not yet compare receivers at all — tracked as T2185.)
 
 Structural interfaces can also declare **abstract factory methods** — static constructors that enable generic factory patterns:
 
@@ -1084,7 +1084,7 @@ When a value crosses a type boundary to a view whose slot layout **or slot shape
 
 A type's **own** vtable always carries the shapes that type's own declarations promise, so the adaptation belongs to the view and never to the concrete. A slot cannot hold both: with `Child is Parent` where `Parent` declares `close!(~this)` and `Child` overrides it non-failably, a call through `Child` as a static type reads that slot as `void`, while a call through `Parent` reads the same slot as a failable struct. Rewriting the slot would fix one caller and break the other.
 
-#### Protocol Interfaces (`` `structural(protocol: true) ``)
+#### Protocol Interfaces
 
 Structural satisfaction is permissive by design: a type satisfies an interface by accident of signature, which is exactly what lets two sides compose when neither knew about the other. That permissiveness has a failure mode. An author who half-remembers an interface writes a method with the right *name* and the wrong *shape* — the type then satisfies nothing, silently, and the mistake surfaces much later at the first call site that actually needed the interface, if it ever surfaces at all.
 
@@ -1195,7 +1195,7 @@ type ConstProducer[T] is Producer[T] {
 - **Method dispatch**: inherited methods have their type parameters substituted. Calling `get()` on a `Wrapper[int]` returns `int`, not `T`.
 - All parent type arguments must be valid types (no raw type parameters from an unrelated scope).
 
-### 5.5 Generics
+### Generics
 
 Generics use **square brackets** `[]`. Constraints are expressed inline in the type parameter list.
 
@@ -1236,7 +1236,7 @@ type Hashable {
 
 All primitive types (`int`, `f64`, `string`, `bool`, etc.) implement `Equal` and `Ordered`. `string` and `int` also implement `Hashable`. User-defined types can implement these interfaces to participate in generic algorithms like `sort`, `map` key lookup, and stream combinators like `distinct()`, `min()`, and `max()`.
 
-#### Method-Level Generics
+#### Method Level Generics
 
 Methods can have their own type parameters, independent of the enclosing type's generic parameters. This enables transformation methods like `map[R]` where the return type differs from the owner's type parameter.
 
@@ -1288,7 +1288,7 @@ c := Container[int](item: 7);
 string result = c.map_to[string](|int x| -> "got {x}");
 ```
 
-### 5.6 Enums (Algebraic Data Types)
+### Enums
 
 ```promise
 enum Option[T] {
@@ -1360,7 +1360,7 @@ bool flat = s.is_flat;   // getter (property syntax)
 - Enum methods support expression bodies (`=> expr;`), failable return types (`!`), default parameters, and all standard method features.
 - Generic enum methods are not yet supported (deferred to monomorphization support).
 
-### 5.7 Constructors
+### Constructors
 
 Promise supports implicit constructors (auto-generated from fields) and explicit `new` constructors (user-defined with validation). Factory constructors provide named alternative construction paths. The `new`/`drop` pair forms a symmetric constructor/destructor lifecycle.
 
@@ -1383,7 +1383,7 @@ User(name: "Alice")                       // ERROR: missing required field 'age'
 
 A field is **required** if it is not `T?` and does not have `= default`. All required fields must be provided. Default expressions are evaluated at the call site each time the argument is omitted (see Section 9.4).
 
-#### `Self` Type Alias
+#### The Self Type Alias
 
 `Self` is a compiler-supported type alias meaning "the enclosing type with all generic parameters as-is." After monomorphization, `Self` resolves to the concrete type.
 
@@ -1433,7 +1433,7 @@ type Box[T] {
 Box[int] b = Box[int].wrap(v: 42);   // b.value is int, not T
 ```
 
-#### `` `final `` Fields
+#### Final Fields
 
 A field annotated `` `final `` can be assigned during construction but is frozen afterward. The compiler generates a vtable getter but **no setter**.
 
@@ -1465,7 +1465,7 @@ Additional rules:
 - `` `final `` is orthogonal to placement — `` `final \`value `` is valid, as is `` `final `` on an ordinary field
 - `` `copy `` types can have `` `final `` fields — bitwise copies get the same frozen values
 
-#### Explicit `new` Constructor
+#### Explicit Constructors
 
 When a type needs validation or computed initialization, define a `new` method. It **replaces** the implicit constructor.
 
@@ -1514,7 +1514,7 @@ type Point {
 Point(radius: 5.0, angle: 1.57)    // named after new() params
 ```
 
-#### Failable `new`
+#### Failable Constructors
 
 Append `!` to make `new` failable. The caller must handle the error using standard error handling (see Section 7).
 
@@ -1552,9 +1552,9 @@ A factory is a method annotated `` `factory ``. It provides named alternative co
 - Can modify `` `final `` fields **declared on its own type**, on locally-created instances
 - Can return child types (return type is `Self` or a type that `is Self`)
 - Can be failable (`!`)
-- Can be declared `` `abstract `` on `` `structural `` interfaces (see §5.4) to enable generic factory patterns
+- Can be declared `` `abstract `` on `` `structural `` interfaces (see [Inheritance](#inheritance)) to enable generic factory patterns
 
-`` `factory `` implies `` `mono `` placement (see §9.2) — per-monomorphization, all generics resolved. This is necessary because a factory on `Box[T]` must know which `T` to create. A factory has **no `this` receiver**. Abstract factories on structural interfaces get an **implicit `Self` return type** when none is specified.
+`` `factory `` implies `` `mono `` placement (see [Methods](#methods)) — per-monomorphization, all generics resolved. This is necessary because a factory on `Box[T]` must know which `T` to create. A factory has **no `this` receiver**. Abstract factories on structural interfaces get an **implicit `Self` return type** when none is specified.
 
 **Why a factory, and not just `` `mono ``.** A `` `final `` field is never reassigned once its instance exists, so a value that was correct at construction stays correct perpetually. Two distinct sets of code bear on it:
 
@@ -1827,7 +1827,7 @@ Enums whose variants carry payloads follow the same rules as any other instance.
 construction expression at all, so naming one needs no `?` / `^` / `?!`, even on an enum whose
 other variants carry payloads.
 
-#### Definite-Assignment Analysis
+#### Definite Assignment Analysis
 
 The compiler uses flow-sensitive analysis (shared infrastructure) for three checks:
 1. Every `` `final `` field is assigned on all paths through `new`
@@ -1836,25 +1836,25 @@ The compiler uses flow-sensitive analysis (shared infrastructure) for three chec
 
 ---
 
-## 6. Ownership & Memory Management
+## Ownership and Memory Management
 
 Promise uses Rust-style ownership with borrowing and lifetimes.
 
-### 6.1 Core Rules
+### Core Ownership Rules
 
 1. Every value has exactly **one owner**.
-2. When the owner goes out of scope **and the value has not been moved**, the value is **dropped** — its `drop()` runs and its memory is freed (see §16.3).
+2. When the owner goes out of scope **and the value has not been moved**, the value is **dropped** — its `drop()` runs and its memory is freed (see [The drop Method](#the-drop-method)).
 3. A value may be borrowed by **either** one mutable reference (type `T~`) **or** any number of shared references (type `T&`) at a time — never both at once. Borrows of **disjoint fields** of the same value do not conflict (a shared borrow of `v.x` and a shared borrow of `v.y` may coexist).
 4. References must not outlive their referent.
 5. A moved-from variable is invalid — it may not be read, borrowed, or moved again — **until it is reassigned**, which revives it as a fresh owner (*move resurrection*).
 
-While a value is borrowed it may not be moved, consumed, reassigned, or borrowed in a conflicting mode; the compiler reports "cannot move/use … while it is borrowed". Ownership is tracked **per control-flow path**: when a value is moved on some paths but not others, the compiler inserts a drop flag and drops it only on the paths where it still has an owner (see §16.3).
+While a value is borrowed it may not be moved, consumed, reassigned, or borrowed in a conflicting mode; the compiler reports "cannot move/use … while it is borrowed". Ownership is tracked **per control-flow path**: when a value is moved on some paths but not others, the compiler inserts a drop flag and drops it only on the paths where it still has an owner (see [The drop Method](#the-drop-method)).
 
-Throughout this section `T&` and `T~` name the shared- and mutable-reference **types**, used for locals and return types. **Parameters and receivers** default to a shared (read-only) borrow when unmarked (`T name`); a mutable borrow reuses the `~` sigil (`T~ name`), and the keyword `move` transfers ownership. See §6.2.
+Throughout this section `T&` and `T~` name the shared- and mutable-reference **types**, used for locals and return types. **Parameters and receivers** default to a shared (read-only) borrow when unmarked (`T name`); a mutable borrow reuses the `~` sigil (`T~ name`), and the keyword `move` transfers ownership. See [Borrowing and Moving](#borrowing-and-moving).
 
-**Borrows are stack-only — there are no reference fields.** A borrow may live in a parameter, a local, or a return value — all bounded by the call stack, so the compiler checks them one function at a time. A borrow may **not** be stored in a struct field or otherwise escape onto the heap; holding a borrow in heap data would require threading lifetimes through types (the hardest part of a borrow checker) for little gain. To keep or share a reference *inside* a struct, use **`Ref[T]`** — a reference-counted shared-ownership handle (§17.4). The rule is one line: *borrow for momentary access; `Ref[T]` to keep or share.* Whether a `Ref`'s counter is atomic is an implementation detail, not part of the type — it is non-atomic when the value never crosses a `go`/channel/`Task` boundary and atomic when it might.
+**Borrows are stack-only — there are no reference fields.** A borrow may live in a parameter, a local, or a return value — all bounded by the call stack, so the compiler checks them one function at a time. A borrow may **not** be stored in a struct field or otherwise escape onto the heap; holding a borrow in heap data would require threading lifetimes through types (the hardest part of a borrow checker) for little gain. To keep or share a reference *inside* a struct, use **`Ref[T]`** — a reference-counted shared-ownership handle ([Ownership Across Goroutines](#ownership-across-goroutines)). The rule is one line: *borrow for momentary access; `Ref[T]` to keep or share.* Whether a `Ref`'s counter is atomic is an implementation detail, not part of the type — it is non-atomic when the value never crosses a `go`/channel/`Task` boundary and atomic when it might.
 
-### 6.2 Borrowing and Moving
+### Borrowing and Moving
 
 A parameter declares how the callee accesses its argument. There are three modes. The **shared (read-only) borrow is the unmarked default**; the two that deviate from read-only access are marked — `~` (the mutable-reference sigil) for write access, and the keyword `move` for taking ownership:
 
@@ -1908,7 +1908,7 @@ Invariant: **`move` on an argument ⇔ a named, reusable binding of yours is con
 
 **A `move` inside a loop body must consume a value the body itself owns.** Moving a binding declared *outside* the loop is rejected — the back edge re-reaches the move site with the binding already moved, so the second iteration would consume a freed value. The loop is not a special case; it is the same "value is gone" rule the straight-line `f(move x); f(move x);` already trips, applied to the one control-flow edge the source does not spell out. Re-establish ownership inside the body: declare the value there (`for … { string v = build(); f(move v); }`), or reassign the binding after the move (`acc = grow(move acc, x);`). A move every path of which leaves the loop — `if done { f(move v); break; }`, or a body ending in `break`/`return`/`raise` — never reaches the back edge, so it stays legal.
 
-#### Receivers (`this`)
+#### Receivers
 
 A method's receiver uses the same markers, written on `this`:
 
@@ -1929,9 +1929,9 @@ type Counter {
 
 #### Partial moves and captures
 
-A field may be moved out of a value individually. Moving a field leaves the other fields usable (a *partial move*); however a field whose type defines its own `drop()` may **not** be moved out of a still-live aggregate (`cannot move field … — use .clone()`). Closures follow the same rules: `Copy` values are captured by copy, while a non-`Copy` value must be captured with `move`, which transfers ownership into the closure and invalidates the outer binding (see §12).
+A field may be moved out of a value individually. Moving a field leaves the other fields usable (a *partial move*); however a field whose type defines its own `drop()` may **not** be moved out of a still-live aggregate (`cannot move field … — use .clone()`). Closures follow the same rules: `Copy` values are captured by copy, while a non-`Copy` value must be captured with `move`, which transfers ownership into the closure and invalidates the outer binding (see [Streams Ranges and Generators](#streams-ranges-and-generators)).
 
-### 6.3 Lifetimes
+### Lifetimes
 
 The compiler uses **aggressive lifetime elision** — in practice, explicit lifetime annotations are almost never needed. The elision rules:
 
@@ -2017,7 +2017,7 @@ m(Ref[int] a) {
 
 Rationale: the previous unrestricted decay produced a steady stream of codegen dup-on-read patches around contexts where a borrow leaked into an owned-tracking path (vector index assigns, slice assigns, map index reads, optional fields, etc.). Restricting the decay to Copy at the type level removes the root cause once instead of patching each downstream symptom.
 
-### 6.4 Copy and Clone
+### Copy and Clone
 
 `` `copy `` and `` `clone `` are built-in meta annotations that control assignment semantics:
 
@@ -2051,14 +2051,14 @@ type Connection {
 }
 ```
 
-- **Pure value types**: Types where ALL fields have `` `value `` placement are automatically `` `copy ``. No heap allocation — all data is embedded directly in the Value struct. Behave like primitives (pass-by-value, no `drop()`). Cannot have non-copy fields or `drop()` methods. The only permitted state-bearing `is` parent is another pure value type: a fieldless child of a value type is a layout-preserving **newtype** that adds methods, not fields (see *Value-Type Inheritance*); `` `structural `` interface parents are always permitted and add no state. Carrying `` `structural `` does not make one an interface view — it stays register-resident and can only be satisfied by its own value newtypes (§5.2, T1550).
+- **Pure value types**: Types where ALL fields have `` `value `` placement are automatically `` `copy ``. No heap allocation — all data is embedded directly in the Value struct. Behave like primitives (pass-by-value, no `drop()`). Cannot have non-copy fields or `drop()` methods. The only permitted state-bearing `is` parent is another pure value type: a fieldless child of a value type is a layout-preserving **newtype** that adds methods, not fields (see *Value-Type Inheritance*); `` `structural `` interface parents are always permitted and add no state. Carrying `` `structural `` does not make one an interface view — it stays register-resident and can only be satisfied by its own value newtypes ([The Four Struct Model](#the-four-struct-model), T1550).
 - `` `copy ``: Bitwise copy on assignment (primitives, small value types). The compiler verifies all fields are themselves `` `copy ``. No method generated — the copy is a direct memory copy.
 - `` `clone ``: The compiler auto-generates a `clone() Self` method that deep-copies all fields. If the type also defines an explicit `clone() Self` method, the explicit method takes precedence.
 - Types that are `` `copy `` are implicitly copied on assignment. Others are moved.
 
-### 6.5 Sendable and Sharable
+### Sendable and Sharable
 
-Two further capabilities govern whether a type may cross a **goroutine boundary**. They are what §17.4's boundary rule is checked against:
+Two further capabilities govern whether a type may cross a **goroutine boundary**. They are what [Ownership Across Goroutines](#ownership-across-goroutines)'s boundary rule is checked against:
 
 - `` `sendable `` — values of the type may be **moved** across a boundary.
 - `` `sharable `` — a reference to the type may be **shared** across one, because the type carries whatever synchronization that requires.
@@ -2071,9 +2071,9 @@ The capabilities also constrain the primitives' own element types: `Channel[T]` 
 
 ---
 
-## 7. Error Handling
+## Error Handling
 
-### 7.1 The `!` Failable Convention
+### The Failable Convention
 
 Functions that can fail use `!` after the function name. Under the hood, this desugars to a result struct — a pair of `(value, error)`.
 
@@ -2097,7 +2097,7 @@ validate!(string input) {
 }
 ```
 
-### 7.2 Calling Failable Functions
+### Calling Failable Functions
 
 In a **failable function** (name has `!`), a naked call to another failable function **auto-propagates** the error — if the callee fails, the caller immediately returns the error to its own caller. This is the most common case and requires no extra syntax.
 
@@ -2216,7 +2216,7 @@ if err is present {
 }
 ```
 
-#### Summary
+#### Call form summary
 
 | Call form | Behavior | Context |
 |-----------|----------|---------|
@@ -2257,7 +2257,7 @@ wrapper!() string {
 
 **Note:** `!` and `? _ { }` also work on `T?` optionals (see Section 14). `?!` targets failable errors; `!` targets optionals. Auto-propagation does not cross lambda boundaries. Inside a non-`!` lambda, failable calls must be handled explicitly with `?^`, `?`, or `?!`.
 
-### 7.3 Error Types
+### Error Types
 
 The base `error` type is defined in the standard library with a `message` field:
 
@@ -2302,7 +2302,7 @@ type DbError is AppError { string query; }
 fail() ? e is AppError { return e.code; };
 ```
 
-### 7.4 `raise` Statement
+### The raise Statement
 
 `raise` is used to return an error from a `!`-function. It is **not** an exception — it is sugar for returning the error half of the result struct. The raised value must be an `error` or an error subtype.
 
@@ -2326,7 +2326,7 @@ raise IoError("disk full", code: 28);                   // mixed
 
 ---
 
-## 8. Meta Annotations (Backtick Attributes)
+## Meta Annotations
 
 Backtick `` ` `` provides metadata on declarations. Meta annotations are placed **after** the definition name (and any parameters/return type) and **before** the body or statement terminator.
 
@@ -2339,7 +2339,7 @@ Backtick `` ` `` provides metadata on declarations. Meta annotations are placed 
 
 The backtick has one known friction point: bash, markdown, and some IDEs treat it as a string delimiter. This is a manageable trade-off — the backtick's visual quietness in source code outweighs the occasional need to escape it in documentation or shell contexts.
 
-### 8.1 Syntax
+### Annotation Syntax
 
 ```
 MetaAnnotation = '`' Identifier [ '(' MetaParams ')' ] ;
@@ -2363,7 +2363,7 @@ Meta annotations appear in post-definition position:
 - **Functions**: `add(int a, int b) int `meta { ... }`
 - **Parameters**: `foo(int x `doc("description"), int y `deprecated) { ... }`
 
-### 8.2 Examples
+### Annotation Examples
 
 ```promise
 type OldThing `serializable(tag: "kind") `deprecated("Use NewThing instead") {
@@ -2380,13 +2380,13 @@ testAddition() `test {
 }
 ```
 
-### 8.3 The annotation set
+### The annotation set
 
 Every annotation, what it means, its targets and its parameters: [annotations.md](annotations.md). That document is where an annotation is defined; this section defines only how one is written.
 
 The set is **closed** — both the annotation names and each annotation's parameters. There are no user-defined annotations, and no annotation accepts a parameter it does not declare.
 
-### 8.4 Documentation (`` `doc ``)
+### Documentation Annotations
 
 `` `doc `` attaches documentation directly to the AST node. Unlike comments, `` `doc `` is preserved in the parsed tree, unambiguously bound to its declaration, and available to tooling, IDE support, and AI agents at compile time.
 
@@ -2414,7 +2414,7 @@ The parameter is a plain string. Tooling can extract structured sections (parame
 
 Parameter-level `` `doc `` annotations are placed after the parameter name (and before any default value), providing per-parameter documentation that is structurally bound to each parameter rather than embedded in a free-text block.
 
-### 8.5 Platform Filtering (`` `target ``) {#platform-filtering}
+### Platform Filtering
 
 `` `target(cond) `` is a compile-time annotation that includes or excludes a declaration based on the current build target. Only one variant of a filtered pair is compiled per target — the other is invisible to both the type checker and codegen.
 
@@ -2455,7 +2455,7 @@ Conditions can be combined with `!` (not), `||` (or), and `&&` (and).
 
 This is Promise's only form of platform-specific variation. There are no preprocessor directives, `#ifdef` blocks, or build tags. Platform variants are explicit, structurally separate declarations — visible to the reader and verifiable by the type checker on the appropriate target.
 
-### 8.6 Resource Embedding (`` `embed ``)
+### Resource Embedding
 
 `` `embed(path) `` embeds file contents into the compiled binary at compile time. It applies to module-level getters — the compiler reads the file at compile time and generates the getter body. This enables self-contained binaries that bundle assets, templates, schemas, and other resources without runtime file dependencies.
 
@@ -2518,11 +2518,11 @@ When `compress: true`, the compiler gzip-compresses the data at compile time. Th
 
 ---
 
-## 9. Functions & Methods
+## Functions and Methods
 
 Functions are declared without a keyword — the name, parameter list, and optional return type are sufficient to identify a function declaration. This follows the Dart/C++/Java convention.
 
-### 9.1 Free Functions
+### Free Functions
 
 ```promise
 greet(string name) string {
@@ -2530,7 +2530,7 @@ greet(string name) string {
 }
 ```
 
-### 9.2 Methods
+### Methods
 
 Methods are defined inside the type body. A method either takes a **receiver** or it does not. A method with a receiver needs no placement annotation — there is only one kind. A receiver-less method declares which of two placements it has: `` `global `` or `` `mono ``, with `` `factory `` as the construction-path form of the latter.
 
@@ -2565,7 +2565,7 @@ type Counter {
 }
 ```
 
-#### Global Methods (`` `global ``)
+#### Global Methods
 
 Global methods are **namespaced functions** — no `this` is passed, no `Self` is available in the body. The type serves purely as a namespace. These replace the `static` keyword from other languages. Cannot be used on generic types (use `` `mono `` instead).
 
@@ -2587,7 +2587,7 @@ Counter c = Counter.create(42);
 Counter z = Counter.zero();
 ```
 
-#### Mono Methods (`` `mono ``)
+#### Mono Methods
 
 Mono methods are **per-monomorphization namespaced functions**. Like `` `global ``, no `this` is passed, but the type's generic parameters are resolved and `Self` is available in the body. One copy exists per concrete type instantiation.
 
@@ -2609,7 +2609,7 @@ m := Wrapper[string].defaultCount();
 
 **Data Placement** — `` `global `` and `` `mono `` are **method** placements only; there are no per-type or per-monomorphization fields. A per-type or per-monomorphization *field* would be global mutable state — reachable from anywhere that can name the type, absent from every function signature, and unsynchronized across goroutines — which Section 9.2 → *No Module-Level Variables* rules out for the whole language. Per-monomorphization *data* is expressed as a `` `mono `` method returning it (`sprite_path() string `mono`), which needs no storage and cannot be mutated.
 
-### 9.3 Module-Level Getters and Setters
+### Module Level Getters and Setters
 
 Functions like `os.get_working_dir()` and `os.set_working_dir("/tmp")` are computed properties of the environment. The call-site parentheses are noise, and the `get_`/`set_` prefixes are boilerplate. Module-level getters and setters extend the same property syntax already used on types (see Section 5.2.1) to file and module scope.
 
@@ -2643,7 +2643,7 @@ set working_dir(string path) `public `doc("Changes the current working directory
 
 The setter body receives the assigned value as its parameter. Setters may also be failable.
 
-#### Call-Site Syntax
+#### Getter and setter call sites
 
 At the call site, getters are accessed with dot syntax (no parentheses) and setters via assignment:
 
@@ -2671,15 +2671,15 @@ Getters and setters are independent declarations — they do not need to be pair
 - **Setter only** → write-only property. Useful for fire-and-forget configuration.
 - **Both** → read-write property (e.g., `os.working_dir`).
 
-#### Visibility
+#### Getter and setter visibility
 
 Module-level getters and setters follow the same visibility rules as functions. The `` `public `` annotation exports them to importers. Without it, they are file-private.
 
-#### Relationship to Type-Level Getters
+#### Relationship to Type Level Getters
 
 Type-level getters and setters (declared inside `type { ... }`) dispatch through the vtable and receive `this`. Module-level getters and setters have no receiver — they are plain functions with property syntax. The grammar rules are shared; the distinction is whether the declaration appears inside a type body or at file scope.
 
-#### No Module-Level Variables
+#### No Module Level Variables
 
 Promise does **not** support module-level mutable variables (global mutable state). There is no way to declare a variable at file scope — all mutable state must live inside function-scoped locals, type instances, or be threaded explicitly through parameters.
 
@@ -2697,7 +2697,7 @@ Module-level getters and setters (Section 9.3) provide property syntax for compu
 
 There are no module-level initializer blocks, `init()` functions, or static constructors. No code runs automatically when a module is imported — code only executes when something explicitly calls it. This eliminates an entire class of ordering bugs (module A's initializer depends on module B's initializer having already run) and makes the program's startup behavior fully predictable from `main()`.
 
-### 9.3a Naming Conventions
+### Naming Conventions
 
 #### Full English Words with Approved Exceptions
 
@@ -2760,7 +2760,7 @@ sha256(u8[] data) u8[] { ... }               // not secure_hash_algorithm_256
 
 Acronyms embedded in a `PascalCase` name are capitalized as a normal word (`JsonEncoder`, `HttpRequest`, `TcpListener`, `UuidV4`), never left fully upper-case — this keeps word boundaries visible in names that combine several.
 
-### 9.4 Named Arguments, Defaults & Optional Parameters
+### Named Arguments Defaults and Optional Parameters
 
 #### Definition Syntax
 
@@ -2789,7 +2789,7 @@ connect!(string host `doc("hostname"), int port `doc("port number") = 8080) Conn
 
 **`T?` vs `Option[T]`:** Only the `T?` sugar triggers skippability. If a parameter is declared with `Option[T]` explicitly, it is a required parameter of optional type — the caller must provide it.
 
-#### Call-Site Syntax
+#### Named argument call sites
 
 At any call site, an argument can be passed by name using `name: expression`, where `name` matches a parameter name from the definition.
 
@@ -2868,7 +2868,7 @@ Config(port: 9090);                                 // ERROR: missing required f
 
 When a type defines an explicit `new` constructor, the implicit constructor is replaced — call site arguments match `new`'s parameter names instead of field names. See Section 5.7 for full constructor design including `new`, failable constructors, factories, `` `final `` fields, and inheritance.
 
-### 9.5 Lambdas / Closures
+### Lambdas and Closures
 
 ```promise
 add := |int a, int b| -> int { return a + b; };
@@ -2913,7 +2913,7 @@ f := |int a| -> int {
 
 Named arguments are **not available** when calling through a function-type variable, because function types erase parameter names (see Section 9.6). Named arguments only work when calling a known function or lambda directly.
 
-### 9.6 Function Types
+### Function Types
 
 Function types use arrow syntax instead of a keyword:
 
@@ -2940,7 +2940,7 @@ fn(1, 2);                  // VALID: positional through function-type variable
 fn(a: 1, b: 2);            // ERROR: function type has no parameter names
 ```
 
-**Failable function types** carry the `!` producer marker (§7.1) as a **prefix on the whole function type**, before the parameter list:
+**Failable function types** carry the `!` producer marker ([The Failable Convention](#the-failable-convention)) as a **prefix on the whole function type**, before the parameter list:
 
 ```promise
 !(int) -> int                      // failable producer taking an int, returning an int
@@ -2948,7 +2948,7 @@ fn(a: 1, b: 2);            // ERROR: function type has no parameter names
 !() -> User                        // failable producer taking nothing, returning a User
 ```
 
-The marker sits on the producer, not on the result, because failability is a property of *calling* the function — not of the value it yields (there is no failable value type `int!`, §17.2.1). This is also the notation used in diagnostics when rendering a failable function type — e.g. a non-sendable capture error reports `!(int) -> int`.
+The marker sits on the producer, not on the result, because failability is a property of *calling* the function — not of the value it yields (there is no failable value type `int!`, [Failable Goroutines](#failable-goroutines)). This is also the notation used in diagnostics when rendering a failable function type — e.g. a non-sendable capture error reports `!(int) -> int`.
 
 Failability is part of the type: a non-failable function is not assignable to a failable function type, nor the reverse. A failable function type is inhabited by a reference to a declared failable function; a call through it needs the usual `?^` / `?!` / `? e { … }` handling at the call site:
 
@@ -2959,7 +2959,7 @@ double_or_raise!(int x) int { … }
 int r = f(3)?^;                    // propagate
 ```
 
-### 9.7 No Function/Method Overloading
+### No Overloading
 
 Promise does not support **function or method overloading** — defining multiple functions or methods with the same name but different parameter signatures. Each function name within a scope must be unique.
 
@@ -2979,9 +2979,9 @@ Note that **operator overloading** (defining `+`, `==`, etc. as methods inside a
 
 ---
 
-## 10. Control Flow
+## Control Flow
 
-### 10.1 If / Else
+### If and Else
 
 ```promise
 if x > 0 {
@@ -2996,7 +2996,7 @@ if x > 0 {
 abs := if x >= 0 { x } else { -x };
 ```
 
-### 10.2 Match (Pattern Matching)
+### Match
 
 `match` tests a value against a series of patterns. Arms are checked top-to-bottom; the first match executes. The compiler verifies **exhaustiveness** — all possible cases must be covered (use `_` as a catch-all).
 
@@ -3074,9 +3074,9 @@ match animal {
 - **Bindings are scoped**: a binding like `d` in `Dog d =>` is only valid in that arm's body.
 - **No fallthrough**: each arm is independent. There is no implicit fallthrough between arms.
 
-### 10.3 Type Checking with `is` and Casting with `as`
+### Type Checking and Casting
 
-#### `is` — runtime type check with narrowing
+#### Runtime type check with narrowing
 
 The `is` keyword tests whether a value is an instance of a given type. Inside the `if` block, the compiler **narrows** the variable to the checked type:
 
@@ -3100,7 +3100,7 @@ if animal is Dog && animal.age > 5 {
 bool isDog = animal is Dog;   // no narrowing — just a bool test
 ```
 
-#### `as` — type casting
+#### Type casting
 
 `as` performs a safe cast, returning an optional. `as!` performs an unsafe cast that panics on failure:
 
@@ -3116,7 +3116,7 @@ animal as Dog ?: defaultDog;            // cast or default
 (animal as Dog)?.bark();                // cast and chain
 ```
 
-#### `is` keyword disambiguation
+#### Keyword disambiguation
 
 The `is` keyword appears in three contexts. The parser disambiguates by syntactic position:
 
@@ -3128,7 +3128,7 @@ The `is` keyword appears in three contexts. The parser disambiguates by syntacti
 
 These never conflict — type declarations and expression patterns occupy different syntactic positions.
 
-### 10.4 Loops
+### Loops
 
 ```promise
 // While
@@ -3176,7 +3176,7 @@ The `for item in expr` loop is **structural** — it works on any value that can
 
 ---
 
-## 11. strings & Interpolation
+## Strings and Interpolation
 
 strings are UTF-8 encoded, owned, and heap-allocated.
 
@@ -3197,11 +3197,11 @@ string slices (`&str` equivalent) use `string&` for borrowed string data.
 
 ---
 
-## 12. Streams, Ranges & Generators
+## Streams Ranges and Generators
 
 Promise provides a unified iteration and streaming abstraction through two core interfaces: `Stream[T]` (a reusable factory that produces cursors) and `Iterator[T]` (a single-pass cursor that yields elements one at a time). Lowercase forms (`stream[T]`, `iter[T]`) are syntactic sugar. Because Promise has no function coloring and uses goroutine-based transparent I/O, a single `Stream[T]` type handles both synchronous and asynchronous data sources — a generator that performs I/O simply suspends its goroutine during the blocking operation, with no change to its type signature.
 
-### 12.1 Core Interfaces
+### Core Stream Interfaces
 
 ```promise
 type Iterator[T] `structural {
@@ -3253,7 +3253,7 @@ type Stream[T] `structural {
 - **Terminal operations are eager.** Calling `stream.collect()` or `stream.count()` consumes the stream and produces a result.
 - **Constraint-dependent combinators**: `distinct()` requires `T: Equal`. `min()` and `max()` require `T: Ordered`. These constraints are enforced at the call site via generic bounds.
 
-### 12.2 For-in Desugaring
+### For in Desugaring
 
 The `for item in expr` loop desugars into `Stream[T]` and `Iterator[T]` operations:
 
@@ -3280,7 +3280,7 @@ for i, item in collection { body }
 for (i, item) in collection.enumerate() { body }
 ```
 
-### 12.3 Ranges
+### Ranges
 
 The `..` operator constructs a `range` value. `..` produces a half-open (exclusive end) range; `..=` produces an inclusive range:
 
@@ -3304,9 +3304,9 @@ type Range[T: Ordered] {
 }
 ```
 
-A range is **iterable** — `for x in 0..10 { … }` and `yield * 1..=3` work because the compiler lowers a range loop directly to a counting loop. But a `Range` is **not** a `Stream` and has **no `iter()` or combinator methods** (`.filter` / `.map` / `.fold`). To transform a range's values, iterate it into a collection first, then use the `Iterator` combinators (§13).
+A range is **iterable** — `for x in 0..10 { … }` and `yield * 1..=3` work because the compiler lowers a range loop directly to a counting loop. But a `Range` is **not** a `Stream` and has **no `iter()` or combinator methods** (`.filter` / `.map` / `.fold`). To transform a range's values, iterate it into a collection first, then use the `Iterator` combinators ([Collections](#collections)).
 
-### 12.4 Generator Functions
+### Generator Functions
 
 A function whose return type is `stream[T]` (or `Stream[T]`) and whose body contains `yield` is a **generator function**. The compiler transforms its body into a coroutine via LLVM `presplitcoroutine` intrinsics that implements `Iterator[T]`. No special modifier keyword is needed — the return type plus the presence of `yield` is sufficient.
 
@@ -3365,7 +3365,7 @@ example() stream[int] {
 }
 ```
 
-A `go { … }` / `go! { … }` block body is compiled into its own coroutine and has no consumer driving `next()`, so `yield` there is rejected for the same reason (§17.2). Produce the values over a channel and `yield` them from the generator body:
+A `go { … }` / `go! { … }` block body is compiled into its own coroutine and has no consumer driving `next()`, so `yield` there is rejected for the same reason ([Explicit Concurrency](#explicit-concurrency)). Produce the values over a channel and `yield` them from the generator body:
 
 ```promise
 // ERROR — yield inside a go block
@@ -3384,7 +3384,7 @@ example() stream[int] {
 
 The compiler transforms each `yield` point into a state in a state machine. Local variables are captured as fields of the generated type. The `next()` method resumes execution from the last yield point and runs until the next `yield` or until the function body completes (returning `none`). This transformation is purely a compiler concern — generators look and feel like ordinary functions to the caller.
 
-### 12.5 Collections as Streams
+### Collections as Streams
 
 Built-in collection types implement `Stream[T]`, supporting `for-in` iteration. The combinators live on `Iterator[T]`, so reach them via `.iter().<combinator>()` — e.g. `v.iter().filter(...).collect()`:
 
@@ -3399,7 +3399,7 @@ Built-in collection types implement `Stream[T]`, supporting `for-in` iteration. 
 
 `map[K, V]` also provides `.keys() Stream[K]` and `.values() Stream[V]` for iterating only keys or values.
 
-### 12.6 Channels as Streams
+### Channels as Streams
 
 A `channel[T]` is iterable: `ch.iter()` returns a `stream[T]`, and from there the standard stream combinators apply (the combinators live on the stream, not the channel itself):
 
@@ -3423,14 +3423,14 @@ Calling `ch.iter()` multiple times does **not** produce independent cursors over
 
 ---
 
-## 13. Collections
+## Collections
 
 Built-in collection types with generic support:
 
 ```promise
 // Array (fixed-size, stack-allocated)
 int[3] arr = [1, 2, 3];
-u32[64] w = [0u32; 64];    // repeat literal: 64 copies of 0u32 (see §13.1a)
+u32[64] w = [0u32; 64];    // repeat literal: 64 copies of 0u32 (see [Fixed Array Repeat Literal](#fixed-array-repeat-literal))
 
 // Vector (dynamic, heap-allocated) — T[] is sugar for Vector[T]
 int[] list = [1, 2, 3, 4, 5];
@@ -3455,7 +3455,7 @@ squares := numbers.iter().map[int](|int n| -> n * n).collect();   // [1, 4, 9, 1
 sum := numbers.fold(0, (acc, n) -> acc + n);       // 15
 ```
 
-### 13.1 Vector (`T[]`)
+### Vector
 
 `T[]` is syntactic sugar for `Vector[T]`, a generic dynamic array backed by a contiguous heap-allocated buffer. Vectors use a doubling growth strategy (0 → 4 → 8 → 16 → ...) and handle millions of elements efficiently.
 
@@ -3517,7 +3517,7 @@ for n in nums { print_line("{n}"); }          // value iteration
 for i, n in nums { print_line("{i}: {n}"); }  // indexed iteration
 ```
 
-### 13.1a Fixed-Array Repeat Literal (`[x; n]`)
+### Fixed Array Repeat Literal
 
 A sized array `T[n]` has no default initialization (an uninitialized variable requires an optional type — no hidden defaults). The **repeat literal** bulk-initializes one:
 
@@ -3546,7 +3546,7 @@ primary
 
 **Why a repeat literal rather than a `.filled` constructor:** the obvious spelling `u32[64].filled(0u32, 64)` does not parse — `u32[64]` in expression position reads as *indexing* `u32` by `64` (`expression '[' expression ']'`), not as a sized-array type. That ambiguity is inherent: `a[64]` is legitimate indexing when `a` is a value. Distinguishing a type from a value there would need a semantic predicate or a sema-side reinterpretation of every index expression — a wide parser/sema change. (`u32[]` *does* work in expression position because the empty-bracket slice form has its own unambiguous rule, which is why `u32[].filled(...)` parses.) The repeat literal sidesteps the ambiguity with one new LL(1) alternative nowhere near the index rule, and solves the general problem (any `n`, any element type) rather than one call site. Sema still improves the `u32[64].filled(...)` diagnostic to point at the repeat literal.
 
-### 13.2 Map (`map[K, V]`)
+### Map
 
 `map[K, V]` is a generic hash map using open addressing with linear probing. Keys must satisfy the `Hashable + Equal` constraints.
 
@@ -3588,7 +3588,7 @@ m.remove("x");                   // true
 keys := m.keys();                // ["y"]
 ```
 
-### 13.3 Tuple
+### Tuple
 
 Tuples are fixed-size heterogeneous collections with positional access and destructuring:
 
@@ -3599,7 +3599,7 @@ Tuples are fixed-size heterogeneous collections with positional access and destr
 
 ---
 
-## 14. Nullable Types
+## Nullable Types
 
 Promise does not have null. Optional values use `Option[T]`, with sugar `T?`:
 
@@ -3617,7 +3617,7 @@ string name = "Alice";
 string? maybeName = name;       // OK — implicit T → T?
 ```
 
-### 14.1 Working with Optionals
+### Working with Optionals
 
 There are three ways to test and unwrap optional values, from lightest to most explicit.
 
@@ -3642,7 +3642,7 @@ Inside the `if cc` block, `cc` is narrowed to `T`. Inside the `if !cc` block, `c
 
 This works for any `T?` where `T` is not `bool`. For `bool?`, the compiler emits an error because the intent is ambiguous — use `is present` instead (see below).
 
-#### `is present` / `is absent`
+#### Presence tests
 
 For explicit presence testing that works with **any** `T?` — including `bool?` — use the `is present` and `is absent` patterns. These are contextual keywords: `present` and `absent` are only special after `is` in pattern position; in all other contexts they are normal identifiers.
 
@@ -3686,7 +3686,7 @@ Post-divergence narrowing requires: (1) the condition is `is absent` or `!cc`, (
 
 `is present` and `is absent` extend the existing `is` pattern matching keyword (see Section 10.3 for the full `is` keyword disambiguation table). They cannot collide with type names — `present` and `absent` are contextual keywords recognized only after `is` in pattern position.
 
-#### Unwrap binding with `:=`
+#### Unwrap binding
 
 When you want to unwrap into a **new name**, use `:=` inside an `if` condition:
 
@@ -3710,7 +3710,7 @@ while item := iter.next() {
 
 This is the mechanism underlying `for-in` loop desugaring (see Section 12.2).
 
-### 14.2 Force Unwrap (`!`)
+### Force Unwrap
 
 The `!` operator on an optional extracts the inner value, panicking at runtime if the optional is `none`. This is symmetric with failable `!` (which panics on error):
 
@@ -3733,7 +3733,7 @@ process(x!);                    // use as function argument
 
 The `as!` operator also works for optional unwrapping: `x as! T` where `x` is `T?` extracts `T` and panics on none. This is equivalent to `x!` but uses cast syntax.
 
-### 14.3 Optional Handler (`? _ { }`)
+### Optional Handler
 
 The `?` operator on an optional handles the `none` case inline, mirroring the error handler syntax. The handler block provides a recovery value or diverges:
 
@@ -3768,7 +3768,7 @@ The disambiguation rule by operator:
 
 The failable layer is always consumed first. When a value is `int?!` (failable returning optional), an error-layer operator binds before an optional-layer one — so `fetch()?!!` reads as `?!` (panic on error) then `!` (unwrap the optional). A bare `!` or `? _ { }` applied to a plain `Optional[T]` acts on the optional layer.
 
-### 14.4 Other Optional Operations
+### Other Optional Operations
 
 ```promise
 // `?.` chaining — short-circuits to none if the receiver is absent
@@ -3784,17 +3784,17 @@ match result {
 }
 ```
 
-### 14.5 Optional Parameters
+### Optional Parameters
 
 When `T?` is used as a **function/method parameter type**, the parameter is implicitly optional — the caller may omit it, and the function receives `none` (see Section 9.4). To declare a required parameter of type `Option[T]`, use `Option[T]` explicitly instead of the `T?` sugar. For how `T?` interacts with stream iteration, see Section 12.
 
 ---
 
-## 16. Resource Management
+## Resource Management
 
 Promise provides deterministic, ownership-driven resource cleanup without garbage collector finalizers. Two mechanisms work together: **`use` bindings** for scoped resource lifetime, and **`drop()` methods** for general cleanup when an owner goes out of scope.
 
-### 16.1 I/O Interfaces
+### IO Interfaces
 
 The standard library defines a set of structural interfaces for I/O, following the Go model of small, composable abstractions:
 
@@ -3865,7 +3865,7 @@ type BufferedWriter is Writer {
 }
 ```
 
-### 16.2 `use` Bindings
+### Use Bindings
 
 A `use` binding ties a resource's lifetime to the enclosing scope. When the scope exits — whether by normal fall-through, `return`, `raise`, `break`, or `continue` — the compiler automatically calls `close()` on the bound variable.
 
@@ -3920,7 +3920,7 @@ writeData!(string path, u8[] data) {
 
 In a non-failable function, close errors are silently suppressed (there is nowhere to propagate them).
 
-### 16.3 The `drop()` Method
+### The drop Method
 
 Any type can define a `drop()` method for general-purpose cleanup. The compiler inserts `drop()` calls when a value's owner goes out of scope and the value has not been moved.
 
@@ -3957,7 +3957,7 @@ transfer(bool condition) {
 }
 ```
 
-### 16.4 Interaction Between `use` and `drop()`
+### Interaction Between use and drop
 
 `use` and `drop()` are complementary:
 
@@ -3996,7 +3996,7 @@ main!() {
 }
 ```
 
-### 16.5 Summary
+### Resource management summary
 
 | Mechanism | Trigger | Method Called | Error Handling | Use Case |
 |-----------|---------|-------------|----------------|----------|
@@ -4006,11 +4006,11 @@ main!() {
 
 ---
 
-## 17. Concurrency
+## Concurrency
 
 Promise uses goroutine-style lightweight coroutines. The runtime multiplexes goroutines onto OS threads and transparently handles I/O scheduling — all blocking I/O calls automatically suspend the current goroutine and resume it when the operation completes. There is **no function coloring**: functions that perform I/O have normal signatures and look identical to pure functions.
 
-### 17.1 Transparent I/O
+### Transparent IO
 
 Functions are never declared as "async". The runtime is the async engine — any function that performs I/O automatically yields the goroutine during the blocking operation:
 
@@ -4026,16 +4026,16 @@ fetchUser!(int id) User {
 user := fetchUser(42)?^;
 ```
 
-### 17.2 Explicit Concurrency with `go`
+### Explicit Concurrency
 
-`go` is an **expression** that launches a goroutine. A plain `go` returns a `task[T]`, where `T` is the result type of the block or call; the failable form `go!` returns a `failable_task[T]` (§17.2.1). The `<-` operator receives the result, suspending the current goroutine until it is ready.
+`go` is an **expression** that launches a goroutine. A plain `go` returns a `task[T]`, where `T` is the result type of the block or call; the failable form `go!` returns a `failable_task[T]` ([Failable Goroutines](#failable-goroutines)). The `<-` operator receives the result, suspending the current goroutine until it is ready.
 
 **Producing the result.** `go` takes either an expression or a block, and the two forms yield `T` differently:
 
 - **Expression form** — `go <expr>` (e.g. `go score(board)`): the spawned expression *is* the result; `T` is its type.
 - **Block form** — `go { … }`: the body yields its result either as a **trailing expression** — the block's last statement is a bare expression, whose value is the result — or with an **explicit `return <expr>`**, exactly like a function body. `T` is the type of that value, unified across all paths that produce one.
 
-`T` is always **inferred** — from the expression, from the trailing expression, or from the block's `return` statements — and is never written at the spawn site; only *failability* is chosen there (`go` vs `go!`, §17.2.1). A block that yields no value on any path has `T = Void`.
+`T` is always **inferred** — from the expression, from the trailing expression, or from the block's `return` statements — and is never written at the spawn site; only *failability* is chosen there (`go` vs `go!`, [Failable Goroutines](#failable-goroutines)). A block that yields no value on any path has `T = Void`.
 
 **A block picks one style and holds to it.** The two forms are alternatives, not ingredients: as soon as a block contains a single `return <expr>`, it is in explicit-return style, and *every* value-producing path must then end in `return <expr>`. A trailing bare expression in such a block is a compile error (*"this block returns with `return`; a trailing expression is discarded"*, with the fix-it hint *"did you mean `return <expr>;`?"*), never a second, silent exit. Mixing is rejected rather than resolved, because a reader scanning for how a block produces its value should have to check exactly one thing.
 
@@ -4055,9 +4055,9 @@ bad := go {                                        // error: mixing — `return 
 
 In either style, a bare `return;` on one path while another path produces a value is a compile error (*"missing return value (expected T)"*): every path of a value-producing body must produce one. In a `T = Void` block, a bare `return;` is an ordinary early exit.
 
-The examples in this section spawn **non-failable** producers, so each yields a plain `task[T]`. Spawning a producer that can fail (a name ending in `!`, such as `fetchUser!`) uses `go!` and is covered in §17.2.1.
+The examples in this section spawn **non-failable** producers, so each yields a plain `task[T]`. Spawning a producer that can fail (a name ending in `!`, such as `fetchUser!`) uses `go!` and is covered in [Failable Goroutines](#failable-goroutines).
 
-A goroutine must own what it touches (§17.4), so each spawn below hands the callee a value of its own. That ownership can come from a **copy** — `.clone()` — or from a **transfer**: `move` at a call site, or binding the value to a local inside a block. These examples use `.clone()` throughout only because each binding is reused by the next one; a spawn that is finished with the value would `move` it instead and pay nothing.
+A goroutine must own what it touches ([Ownership Across Goroutines](#ownership-across-goroutines)), so each spawn below hands the callee a value of its own. That ownership can come from a **copy** — `.clone()` — or from a **transfer**: `move` at a call site, or binding the value to a local inside a block. These examples use `.clone()` throughout only because each binding is reused by the next one; a spawn that is finished with the value would `move` it instead and pay nothing.
 
 ```promise
 // Fire-and-forget (task[Void] result ignored)
@@ -4092,16 +4092,16 @@ c := <-t3;
 
 `task[T]` is a **single-owner handle** (like `Mutex[T]`/`MutexGuard[T]`): it is move-only and has no `clone()`. It may be a *direct* element of one collection (`Task[T][]` push/iterate/await/drop is supported), but a type that transitively contains a single-owner handle — including one nested inside a user-type field or enum variant (`Holder{Task[T] t}`, `enum E { Held(Task[T] t) }`) — is **non-cloneable**. Every context that would structurally (implicitly) copy such a value is a compile error: `clone()`/`filled()` on such a collection, slicing it (`v[a:b]`), pushing an indexed element of it (`dest.push(src[i])`), destructuring a handle-owning variant field in `match`, and nesting one inside another container (`Vector[Vector[Task[T]]]`, `Map[K, Task[T][]]`). Moving a freshly-constructed value (`dest.push(Holder(t: go …))`) is still allowed. Refcounted handles (`Ref[T]`, `Channel[T]`) are duplicable and unaffected.
 
-### 17.2.1 Failable Goroutines — `go!` and `failable_task[T]`
+### Failable Goroutines
 
-A goroutine runs asynchronously, so an error it produces **cannot** flow back to the code that spawned it the way a normal failable call propagates to its caller (§7.2). Promise makes this split explicit with two spawn forms, and **which one you use is always written at the spawn site** — a goroutine's failability is never inferred.
+A goroutine runs asynchronously, so an error it produces **cannot** flow back to the code that spawned it the way a normal failable call propagates to its caller ([Calling Failable Functions](#calling-failable-functions)). Promise makes this split explicit with two spawn forms, and **which one you use is always written at the spawn site** — a goroutine's failability is never inferred.
 
 | Spawn form | Goroutine kind | Result type | Who handles an error that escapes the body |
 |---|---|---|---|
 | `go f()` · `go { … }` | non-failable | `task[T]` | the goroutine itself — its body must handle its own errors |
 | `go! f()` · `go! { … }` | failable | `failable_task[T]` | whoever **receives** the task, at the `<-` |
 
-In both forms `T` is the **success** type. There is no failable *value* type — `int!` is not a type; `!` is a producer marker (§7.1). `failable_task[T]` is a distinct handle type whose producer is fallible, exactly as a function name ending in `!` marks a fallible function. It is **not** a `task[T!]` and not a `T!` — those notations do not exist.
+In both forms `T` is the **success** type. There is no failable *value* type — `int!` is not a type; `!` is a producer marker ([The Failable Convention](#the-failable-convention)). `failable_task[T]` is a distinct handle type whose producer is fallible, exactly as a function name ending in `!` marks a fallible function. It is **not** a `task[T!]` and not a `T!` — those notations do not exist.
 
 #### Spawning
 
@@ -4175,14 +4175,14 @@ An operation **escapes** the body — and so makes it failable — when its erro
 
 An error that is handled inside the body does *not* escape: `?!` panics in the goroutine, and `? { }` / `? e is T { } else { }` recovers.
 
-Neither does merely *defining* something that can fail. Failability is a property of **calling** a fallible producer, never of a value (§7.1) — so only a call site can escape:
+Neither does merely *defining* something that can fail. Failability is a property of **calling** a fallible producer, never of a value ([The Failable Convention](#the-failable-convention)) — so only a call site can escape:
 
 - A nested `go! { … }` runs **asynchronously**: its errors are delivered to *its own* receiver. Spawning it is never an escape, and an error raised inside it does not by itself make the enclosing body failable. The enclosing body becomes failable only where it **consumes** that task with `<-`, and it is that receive — an ordinary failable call, per the first bullet — that escapes.
-- A lambda body is governed by its own signature, so a failable call inside it must be handled there (§7.2). Binding a lambda, or binding a reference to a failable function, is likewise not an escape; only **calling** it is.
+- A lambda body is governed by its own signature, so a failable call inside it must be handled there ([Calling Failable Functions](#calling-failable-functions)). Binding a lambda, or binding a reference to a failable function, is likewise not an escape; only **calling** it is.
 
 #### Receiving
 
-Receiving with `<-` is where a failable task's error surfaces. **A `<-` on a `failable_task[T]` is itself a failable operation** that yields `T` — semantically identical to calling a failable function — so it obeys the ordinary error rules of §7.2:
+Receiving with `<-` is where a failable task's error surfaces. **A `<-` on a `failable_task[T]` is itself a failable operation** that yields `T` — semantically identical to calling a failable function — so it obeys the ordinary error rules of [Calling Failable Functions](#calling-failable-functions):
 
 - In a **failable function**, a bare receive auto-propagates:
   ```promise
@@ -4228,7 +4228,7 @@ v := go! fetchUser(42)?!;
 
 So `go! f()?!`, `go! f()?^`, and `go! f() ? e { … }` are all rejected. The inline launch-await-handle form is `(<-go! f())?!` (the failable counterpart of the plain `<-go f()` await).
 
-**`select` over tasks.** A `failable_task[T]` may be awaited in a `select` arm. Selecting an arm **consumes** that task, and its binding is a **failable receive**: the goroutine's error surfaces in the arm and obeys §7.2 — auto-propagated in a failable function, or handled in the arm within a non-failable one:
+**`select` over tasks.** A `failable_task[T]` may be awaited in a `select` arm. Selecting an arm **consumes** that task, and its binding is a **failable receive**: the goroutine's error surfaces in the arm and obeys [Calling Failable Functions](#calling-failable-functions) — auto-propagated in a failable function, or handled in the arm within a non-failable one:
 
 ```promise
 select {
@@ -4239,7 +4239,7 @@ select {
 
 Tasks whose arm was **not** selected are not consumed and retain their obligation to be received or moved afterward (see below).
 
-#### Fire-and-forget must be non-failable
+#### Fire and forget must be non failable
 
 A `failable_task[T]` carries an error that **someone must receive**. Dropping one without ever receiving it would silently swallow that error, so discarding a `failable_task[T]` is a compile error:
 
@@ -4253,11 +4253,11 @@ A plain `task[T]` (including `task[Void]`) may be discarded as before.
 
 > **The rule:** a goroutine's error is handled by **exactly one** party — *inside* the goroutine (making it non-failable and freely fire-and-forgettable) or *outside* by whoever receives the `failable_task[T]`. It is never silently dropped.
 
-#### `failable_task[T]` is a single-owner handle
+#### A failable task is a single owner handle
 
 Like `task[T]`, a `failable_task[T]` is a **single-owner handle**: move-only, no `clone()`, and subject to the same non-cloneable-transitivity rules described above for `task[T]`. Its failability is part of its type, so it crosses field, collection, parameter, and return boundaries like any other type — `failable_task[int][]`, `Holder{ failable_task[int] t }`, `process(failable_task[int] t)`.
 
-#### `failable_task[T]` is linear (must-use)
+#### A failable task is must use
 
 A `task[T]` is droppable — an unreceived one may go out of scope (fire-and-forget). A `failable_task[T]` is **not**: it carries an error that must reach exactly one receiver, so it is a **must-use** value. Every `failable_task[T]` is *discharged* before its owner's scope ends, by either:
 
@@ -4275,7 +4275,7 @@ Letting one reach end of scope undischarged is a compile error:
 
 **Must-use is transitive.** A type that transitively owns a `failable_task[T]` — a field (`Holder{ failable_task[T] t }`), an enum payload, or a collection element (`failable_task[T][]`) — is itself must-use: it cannot be implicitly dropped, only **moved** onward or **drained**. Draining is the aggregate form of receive:
 
-- `<-tasks`, where `tasks : failable_task[T][]`, is a **failable** operation that consumes the collection, awaits every task, and yields `T[]` — succeeding only if all succeeded, else failing with the **first** error by index (§7.2). The remaining errors are discharged by the drain, not silently swallowed by a drop.
+- `<-tasks`, where `tasks : failable_task[T][]`, is a **failable** operation that consumes the collection, awaits every task, and yields `T[]` — succeeding only if all succeeded, else failing with the **first** error by index ([Calling Failable Functions](#calling-failable-functions)). The remaining errors are discharged by the drain, not silently swallowed by a drop.
 - A user type holding a task field is discharged by moving it, or by destructuring out the field and receiving it.
 
 ```promise
@@ -4283,7 +4283,7 @@ handles := ids.map(id => go! fetchUser(id));  // handles : failable_task[User][]
 users := <-handles;                           // drain: awaits all, propagates first error, consumes handles
 ```
 
-#### Summary
+#### Spawn form summary
 
 | Expression | Meaning |
 |---|---|
@@ -4294,19 +4294,19 @@ users := <-handles;                           // drain: awaits all, propagates f
 | `go { … }` | non-failable scope → `task[T]` (block handles its own errors) |
 | `go! { … }` | failable scope → `failable_task[T]` (escaping error captured) |
 | `go! { … }` — body cannot fail | **compile error** → use plain `go` |
-| `yield` / `yield*` inside a `go { … }` / `go! { … }` block | **compile error** → the block is a separate coroutine; `yield` belongs to the generator body (§12.4) |
-| `go { … }` / `go! { … }` block result | yielded by a trailing expression **or** by `return <expr>` — one style per block; `T` inferred either way (§17.2) |
+| `yield` / `yield*` inside a `go { … }` / `go! { … }` block | **compile error** → the block is a separate coroutine; `yield` belongs to the generator body ([Generator Functions](#generator-functions)) |
+| `go { … }` / `go! { … }` block result | yielded by a trailing expression **or** by `return <expr>` — one style per block; `T` inferred either way ([Explicit Concurrency](#explicit-concurrency)) |
 | trailing expression in a block that also uses `return <expr>` | **compile error** → mixing the two styles is rejected |
 | bare `return;` on a value-producing path | **compile error** → every path must return a value |
 | `<-t` — `t : task[T]` | non-failable receive → `T` (consumes `t`) |
-| `<-t` — `t : failable_task[T]` | **failable** receive → `T` (consumes `t`; auto-propagate or handle per §7.2) |
+| `<-t` — `t : failable_task[T]` | **failable** receive → `T` (consumes `t`; auto-propagate or handle per [Calling Failable Functions](#calling-failable-functions)) |
 | `<-tasks` — `tasks : failable_task[T][]` | **failable** drain → `T[]` (consumes `tasks`; first error by index) |
 | `<-task` in a `select` arm | **failable** receive → `T` (consumes the task; error surfaces in the arm) |
 | `(<-go! f())?!` | inline launch + await + panic-on-error |
 | `failable_task[T]` unreceived at scope end | **compile error** → must be received or moved (must-use) |
 | `go! f()` discarded | **compile error** → fire-and-forget must be non-failable |
 
-### 17.3 Channels
+### Channels
 
 Channels are the primary synchronization primitive for streaming data between goroutines:
 
@@ -4331,26 +4331,26 @@ The `<-` operator also works on channels: `value := <-ch;` receives the next val
 
 A `channel[T]` is iterable — `ch.iter()` returns a `stream[T]`, and from there the standard stream combinators (`map`, `filter`, `fold`, …) apply. The combinators belong to the stream, not the channel. See Section 12.6 for details and caveats about destructive iteration.
 
-### 17.4 Ownership Across Goroutines
+### Ownership Across Goroutines
 
-A goroutine's lifetime is **not** bounded by the statement that spawns it. `go f(x)` returns as soon as the goroutine is scheduled — by the time `f` reads `x`, the spawning scope may already have exited and dropped it. Every rule in §6 assumes the opposite: §6.2 makes the shared borrow the *unmarked* default precisely because "a borrow is transient — the value survives the call, and a mutation is observable right there". Across a `go` boundary that premise does not hold, so the absence of a marker — correct at a normal call site, where the borrow ends with the call — would instead be concealing a permanent effect.
+A goroutine's lifetime is **not** bounded by the statement that spawns it. `go f(x)` returns as soon as the goroutine is scheduled — by the time `f` reads `x`, the spawning scope may already have exited and dropped it. Every rule in [Ownership and Memory Management](#ownership-and-memory-management) assumes the opposite: [Borrowing and Moving](#borrowing-and-moving) makes the shared borrow the *unmarked* default precisely because "a borrow is transient — the value survives the call, and a mutation is observable right there". Across a `go` boundary that premise does not hold, so the absence of a marker — correct at a normal call site, where the borrow ends with the call — would instead be concealing a permanent effect.
 
 Promise therefore applies one categorical rule:
 
 > **A borrow — shared or mutable — may never cross a `go` spawn boundary, unless the referent's type is `` `sharable ``.** Everything else a goroutine touches, it must own: by `move` — which requires the type to be `` `sendable `` — or as a freshly built temporary.
 
-`Copy` types (primitives, `char`, `bool`, pure value types) are unaffected — every mode is a by-value copy (§6.2), so nothing is shared and nothing can dangle.
+`Copy` types (primitives, `char`, `bool`, pure value types) are unaffected — every mode is a by-value copy ([Borrowing and Moving](#borrowing-and-moving)), so nothing is shared and nothing can dangle.
 
-The two capabilities are what the boundary is actually checked against (§6.5):
+The two capabilities are what the boundary is actually checked against ([Sendable and Sharable](#sendable-and-sharable)):
 
 - `` `sendable `` — values of the type may be **moved** across a goroutine boundary.
 - `` `sharable `` — a reference to the type may be **shared** across one, because the type carries whatever synchronization that requires.
 
-Both are **derived structurally** — a type is sendable if all its fields are, and likewise sharable — so ordinary user types need no annotation. The tags exist to override the derivation for types whose safety the compiler cannot see: `` `sendable ``/`` `sharable `` assert it (used by the natively-implemented concurrency primitives), `` `not_sendable ``/`` `not_sharable `` deny it. A function value is sendable but not sharable — it crosses a boundary by move (see §9.6 and the spawn-boundary table below).
+Both are **derived structurally** — a type is sendable if all its fields are, and likewise sharable — so ordinary user types need no annotation. The tags exist to override the derivation for types whose safety the compiler cannot see: `` `sendable ``/`` `sharable `` assert it (used by the natively-implemented concurrency primitives), `` `not_sendable ``/`` `not_sharable `` deny it. A function value is sendable but not sharable — it crosses a boundary by move (see [Function Types](#function-types) and the spawn-boundary table below).
 
 #### The spawn site is where ownership transfers
 
-Arguments to `go f(…)` are evaluated in the **spawning** goroutine, and the resulting values are transferred into the **spawned** goroutine's frame. The callee is untouched by this: it still declares an ordinary borrow parameter and still borrows — only now it borrows from the goroutine's own frame rather than the spawner's. This is what keeps §17.2's promise that "concurrency is always a caller-side decision — the callee does not know or care whether it runs in a goroutine". A function is spawnable exactly as written; the *caller* supplies something the goroutine can own.
+Arguments to `go f(…)` are evaluated in the **spawning** goroutine, and the resulting values are transferred into the **spawned** goroutine's frame. The callee is untouched by this: it still declares an ordinary borrow parameter and still borrows — only now it borrows from the goroutine's own frame rather than the spawner's. This is what keeps [Explicit Concurrency](#explicit-concurrency)'s promise that "concurrency is always a caller-side decision — the callee does not know or care whether it runs in a goroutine". A function is spawnable exactly as written; the *caller* supplies something the goroutine can own.
 
 ```promise
 keep(string p) string {           // ordinary shared-borrow parameter — unchanged
@@ -4361,7 +4361,7 @@ main() {
   string s = "hello".clone();
   go keep(move s);                // move — ownership transfers into the goroutine
 
-  go keep("hi".clone());          // temporary — the goroutine owns it (no marker, §6.2)
+  go keep("hi".clone());          // temporary — the goroutine owns it (no marker, [Borrowing and Moving](#borrowing-and-moving))
 
   string t = "hey".clone();
   go keep(t);                     // error: cannot pass a borrow of local 't' across a
@@ -4370,7 +4370,7 @@ main() {
 }
 ```
 
-The block form transfers ownership through a syntax §6.2 already provides: **bind the value inside the block**. A plain assignment of a non-`Copy` value "is *always* a move whose target ownership is visible right there", so binding `obj` to a block-local moves it into the goroutine and invalidates the outer binding. No extra marker is needed, and none exists — `go` takes no capture list, because the binding *is* the capture:
+The block form transfers ownership through a syntax [Borrowing and Moving](#borrowing-and-moving) already provides: **bind the value inside the block**. A plain assignment of a non-`Copy` value "is *always* a move whose target ownership is visible right there", so binding `obj` to a block-local moves it into the goroutine and invalidates the outer binding. No extra marker is needed, and none exists — `go` takes no capture list, because the binding *is* the capture:
 
 ```promise
 Worker obj = Worker();
@@ -4430,9 +4430,9 @@ main() {
 }
 ```
 
-#### Receivers
+#### Receivers across the spawn boundary
 
-A receiver is a borrow (§6.2: "`this` is a shared borrow of the receiver"), so `go obj.method()` carries a borrow across the boundary and is rejected on exactly the same grounds: nothing at the spawn site establishes that `obj` outlives the goroutine, so the goroutine has no basis for calling a method on it at all. Give the goroutine a receiver it owns — bind it inside the block, pass it by `move`, or hold it in a `Ref[T]` and spawn against a duplicated handle:
+A receiver is a borrow ([Borrowing and Moving](#borrowing-and-moving): "`this` is a shared borrow of the receiver"), so `go obj.method()` carries a borrow across the boundary and is rejected on exactly the same grounds: nothing at the spawn site establishes that `obj` outlives the goroutine, so the goroutine has no basis for calling a method on it at all. Give the goroutine a receiver it owns — bind it inside the block, pass it by `move`, or hold it in a `Ref[T]` and spawn against a duplicated handle:
 
 ```promise
 main() {
@@ -4452,7 +4452,7 @@ main() {
 
 Methods on `Copy` and pure value types are unaffected, since the receiver is a by-value copy.
 
-#### Why not "reject only when it escapes"
+#### Why not reject only when it escapes
 
 A narrower rule is tempting: permit `go f(x)` when the resulting `task` provably joins before `x` drops. It is rejected here on the design grounds this document holds throughout:
 
@@ -4475,7 +4475,7 @@ A `` `confined `` type's `Ref`/`Weak` is **rejected at any `go`/channel/`Task` b
 
 ---
 
-## 18. Complete Example
+## Complete Example
 
 ```promise
 use io "github.com/promise-language/std/io/1"
@@ -4532,7 +4532,7 @@ main() {
 
 ---
 
-## 19. Grammar Sketch (ANTLR4)
+## Grammar Sketch
 
 Key productions (simplified):
 
@@ -4627,7 +4627,7 @@ forInStmt: 'for' IDENT (',' IDENT)? 'in' expression block;
 classicForStmt: 'for' varDecl ';' expression ';' expression block;
 forStmt: forInStmt | classicForStmt | 'for' block;   // infinite loop
 
-goExpr: 'go' '!'? (block | expression);   // 'go' → task[T]; 'go!' → failable_task[T] (§17.2.1)
+goExpr: 'go' '!'? (block | expression);   // 'go' → task[T]; 'go!' → failable_task[T] ([Failable Goroutines](#failable-goroutines))
 receiveExpr: '<-' expression;          // receive from task[T] / failable_task[T] / channel[T]
                                        // (<- on a failable_task[T] is a failable operation)
 
@@ -4679,7 +4679,7 @@ FLOAT_LITERAL: ... FLOAT_SUFFIX?;
 
 ---
 
-## 20. Compiler Implementation Plan (Go)
+## Compiler Implementation Plan
 
 Single binary `promise` with the following internal packages:
 
@@ -4698,7 +4698,7 @@ Single binary `promise` with the following internal packages:
 
 ---
 
-## 21. Package Manager (integrated into `promise` binary)
+## Package Manager
 
 ### Dependency Resolution
 
@@ -4710,6 +4710,6 @@ Single binary `promise` with the following internal packages:
 
 ---
 
-## 22. Open Design Questions
+## Open Design Questions
 
 1. **REPL** — Should the toolchain include an interpreter/REPL for rapid prototyping?

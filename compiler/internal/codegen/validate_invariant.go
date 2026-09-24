@@ -12,7 +12,7 @@ import (
 	"github.com/promise-language/promise/compiler/internal/types"
 )
 
-// --- `_validate!` invariants (T1752, docs/language-design.md §5.7 → Validation) ---
+// --- `_validate!` invariants (T1752, docs/language-design.md#constructors → Validation) ---
 //
 // Sema decides WHERE the chain runs and records it in Info.ValidateSites; this
 // file only emits it. Every site is a construction expression whose concrete

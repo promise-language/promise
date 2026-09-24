@@ -42,7 +42,7 @@ type runtimeSource struct {
 }
 
 // compressionBrotli is the only transport codec emitted today (brotli-11 per
-// blob; docs/release-automation.md §3). The content sha256 is always over the
+// blob; docs/release-automation.md#prebuilt-blobs). The content sha256 is always over the
 // UNCOMPRESSED bytes — compression is purely a transport layer. This must stay
 // in lockstep with blobstore.compressionBrotli in the compiler (separate Go
 // module).
@@ -68,7 +68,7 @@ func assetSuffix(compression string) (string, error) {
 // for the host target from the already-fetched prebuilts (T0769 §6 bootstrap
 // producer). It hashes each extracted LLVM tool (the RAW upstream bytes — macOS
 // patch/sign happens at runtime on the view-dir copy, keeping the CAS hash
-// deterministic, §5.1/§10) and emits one entry per tool whose single source is
+// deterministic, T0769 §5.1/§10) and emits one entry per tool whose single source is
 // the pinned upstream LLVM tarball as an `archive` + `archive_path`.
 //
 // llvmCacheDir is FetchAll's returned root for "llvm" (flat `out` files). When
@@ -103,7 +103,7 @@ func GenerateRuntimeManifest(root string, pm *PrebuiltsManifest, llvmCacheDir, t
 }
 
 // llvmKindForTarget returns the manifest Kind for LLVM blobs on target. macOS
-// blobs are KindMachOLLVM (patched + ad-hoc re-signed on materialize, §5.1);
+// blobs are KindMachOLLVM (patched + ad-hoc re-signed on materialize, language-design.md#primitive-types-are-regular-types);
 // other targets are plain blobs. The runtime view builder dispatches on its own
 // host GOOS, so Kind is documentary — but kept honest per-target so the embedded
 // manifest reflects reality.

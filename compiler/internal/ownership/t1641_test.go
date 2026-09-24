@@ -77,7 +77,7 @@ func TestT1641ChannelCaptureNotMoved(t *testing.T) {
 	`)
 }
 
-// A BARE droppable capture is now rejected at the spawn site by §17.4 (T1397),
+// A BARE droppable capture is now rejected at the spawn site by language-design.md#ownership-across-goroutines (T1397),
 // even with no post-spawn use — this test used to accept it, back when T1641's
 // mark-as-moved was the whole rule. The T1641 property it guarded (the capture
 // must not leave the outer binding live) is now enforced one step earlier.
@@ -92,7 +92,7 @@ func TestT1641BareDroppableCaptureRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot borrow")
 }
 
-// The §17.4 rewrite of the case above: binding the capture inside the block
+// The language-design.md#ownership-across-goroutines rewrite of the case above: binding the capture inside the block
 // moves it into the goroutine, which is sound and stays accepted.
 func TestT1641DroppableCaptureBoundInBlockOK(t *testing.T) {
 	ownerOK(t, `

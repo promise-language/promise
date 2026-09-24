@@ -3,7 +3,7 @@ package sema
 import "testing"
 
 // T1752 — `_validate!`, a type invariant every construction path must satisfy
-// (docs/language-design.md §5.7 → Validation).
+// (docs/language-design.md#constructors → Validation).
 
 const t1752Port = "type Port {\n" +
 	"  int value `final;\n" +
@@ -137,7 +137,7 @@ func TestT1752InheritedValidateMakesTheChildsNewFailable(t *testing.T) {
 }
 
 // A factory whose body cannot itself fail STILL needs `!` — the value it yields
-// may be rejected, and a signature that hid that would lie to its caller (§5.7).
+// may be rejected, and a signature that hid that would lie to its caller (language-design.md#constructors).
 func TestT1752NonFailableFactoryBodyStillNeedsTheMarker(t *testing.T) {
 	errs := checkErrs(t, "type Color {\n"+
 		"  int r `final;\n"+
@@ -227,7 +227,7 @@ func TestT1752UnboundFactoryConstructionIsNotDeferred(t *testing.T) {
 	}
 }
 
-// The `final-fixup shape §5.7 documents stays legal: reading and writing the
+// The `final-fixup shape language-design.md#constructors documents stays legal: reading and writing the
 // local's fields does not let the instance escape.
 func TestT1752FactoryFixupShapeIsAccepted(t *testing.T) {
 	checkOK(t, t1752Escaper+
@@ -276,7 +276,7 @@ func TestT1752ErrorOperatorOnAnotherValidatedTypeInAFactoryIsFine(t *testing.T) 
 		"}\nmain() {}")
 }
 
-// --- clone (§5.7: a clone copies an already-valid original) ------------------
+// --- clone (language-design.md#constructors: a clone copies an already-valid original) ------------------
 
 // The exemption is scoped to the clone's OWN type. Building some OTHER
 // validated value inside a clone body still validates it — otherwise a clone

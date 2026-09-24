@@ -62,7 +62,7 @@ Promise compiles to `wasm32-wasi` but only imports two WASI functions (`fd_write
 
 ---
 
-## WASM Sub-Targets
+## WASM Sub Targets
 
 A WASM sub-target is selected by an `Env` field on `TargetInfo`, alongside `OS` and `Arch`:
 
@@ -154,7 +154,7 @@ Post-link, the `wasm32-web` target emits a companion `.js` file (see [Browser JS
 
 ---
 
-## The `wasm_import` Annotation
+## The wasm import Annotation
 
 ### Motivation
 
@@ -199,9 +199,9 @@ if wasmMod, wasmName := wasmImportAttrs(fd); wasmMod != "" {
 
 ---
 
-## IDL-to-Promise Generation Pipeline
+## IDL to Promise Generation Pipeline
 
-### `promise bind` Subcommand
+### The bind Subcommand
 
 ```bash
 # Generate Promise bindings from WIT definitions
@@ -355,7 +355,7 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 
 ## Type Mapping
 
-### WIT → Promise
+### WIT to Promise
 
 | WIT Type | Promise Type | Notes |
 |----------|-------------|-------|
@@ -378,7 +378,7 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 | `own<R>` | `~R` (parameter) / `R` (return) | Unique ownership |
 | `borrow<R>` | `&R` | Shared reference |
 
-### WebIDL → Promise
+### WebIDL to Promise
 
 | WebIDL Type | Promise Type | Notes |
 |-------------|-------------|-------|
@@ -402,7 +402,7 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 | `any` | `JsValue` | Tagged enum (see below) |
 | `object` | `JsValue` | Same enum, `Object` variant |
 
-### `JsValue` — Dynamic Value Enum
+### JsValue the Dynamic Value Enum
 
 WebIDL's `any` and `object` types are dynamic, but Promise doesn't need a built-in `any` type to represent them. Following the same pattern as `JsonValue` in the `json` module, the `web` binding module defines a `JsValue` enum — a tagged union that covers all JS value types using standard language primitives:
 
@@ -502,7 +502,7 @@ This does not catch everything, which is why it is a backstop rather than the ga
 
 ---
 
-## WIT Resources → Promise Ownership
+## WIT Resources to Promise Ownership
 
 WIT resources have lifecycle semantics that map naturally to Promise's ownership model:
 
@@ -591,7 +591,7 @@ main() {
 
 ## Binding Module Structure
 
-### Why External, Not Embedded
+### Why External and Not Embedded
 
 Embedded modules (like `std`, `json`, `os`) are baked into the compiler binary and tied to its release cycle. Binding modules are deliberately kept external because:
 
@@ -603,7 +603,7 @@ Embedded modules (like `std`, `json`, `os`) are baked into the compiler binary a
 
 4. **Faster iteration.** Binding definitions change more frequently than the compiler. External modules can be updated, tested, and released independently.
 
-### `wasi` Module (External Catalog)
+### The wasi Module
 
 The `wasi` module lives in its own git repository and is pinned in `catalog.toml`:
 
@@ -661,7 +661,7 @@ main() {
 }
 ```
 
-### `web` Module (External Catalog)
+### The web Module
 
 Similarly, `web` is an external catalog module:
 
@@ -965,7 +965,7 @@ Over time, the PAL's `fd_write` and `proc_exit` imports could be refactored to u
 
 ## Phased Implementation Roadmap
 
-### Phase 1: Foundation
+### Phase 1 Foundation
 
 **Goal**: Enable hand-written WASM bindings using the `wasm_import` annotation. No IDL parsing yet.
 
@@ -990,7 +990,7 @@ Over time, the PAL's `fd_write` and `proc_exit` imports could be refactored to u
 **Files to create**:
 - `modules/wasi/promise.toml` + `modules/wasi/wasi.pr` (hand-written, minimal)
 
-### Phase 2: WIT Parser and Code Generator
+### Phase 2 WIT Parser and Code Generator
 
 **Goal**: Automated generation of WASI bindings from WIT definitions.
 
@@ -1006,7 +1006,7 @@ Over time, the PAL's `fd_write` and `proc_exit` imports could be refactored to u
 - `compiler/internal/bindgen/ir.go`, `codegen.go`, `wit_to_ir.go`
 - `compiler/cmd/promise/bind.go`
 
-### Phase 3: WebIDL Parser and Browser Target
+### Phase 3 WebIDL Parser and Browser Target
 
 **Goal**: Browser-targeted WASM with auto-generated JS glue.
 
@@ -1023,7 +1023,7 @@ Over time, the PAL's `fd_write` and `proc_exit` imports could be refactored to u
 - `compiler/internal/bindgen/webidl_to_ir.go`, `jsglue.go`
 - `compiler/cmd/promise/bind_webidl.go`
 
-### Phase 4: Component Model (Future)
+### Phase 4 Component Model
 
 **Goal**: Full WASI Component Model support.
 

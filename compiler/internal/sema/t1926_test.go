@@ -124,7 +124,7 @@ func TestT1926_BufferProducedBySubstitutionRejected(t *testing.T) {
 	expectError(t, errs, "cannot be a container element")
 }
 
-// memory-model.md §3: a field held behind a handle is not held by value. Ref's
+// memory-model.md#by-value-versus-behind-a-handle: a field held behind a handle is not held by value. Ref's
 // dup is a refcount bump, so H[Task[int]] duplicates no task and the walk must
 // stop at Ref — which it does because Ref is `native with no Promise-level
 // fields, not because anything names it.
@@ -239,7 +239,7 @@ func TestT1926_UserContainerGenericIndirectionPlainElementOK(t *testing.T) {
 	`)
 }
 
-// --- Annotation plumbing (annotations.md §17 step 6) ---
+// --- Annotation plumbing (annotations.md#adding-an-annotation step 6) ---
 
 // `duplicates_elements is an assertion, so it is `native-only: a type written in
 // Promise derives the property from its fields instead.
@@ -294,7 +294,7 @@ func TestT1926_VectorCarriesDuplicatesElements(t *testing.T) {
 	}
 }
 
-// The premise the whole derivation rests on (annotations.md §1 sanctions
+// The premise the whole derivation rests on (annotations.md#the-one-declaration-rule sanctions
 // identity for exactly this: checking the compiler's own assumptions). Every
 // `native universe type declares zero Promise-level fields, which is why the
 // field walk stops at the behind-a-handle types without naming them, and why
@@ -331,7 +331,7 @@ func TestT1926_NativeUniverseTypesHaveNoFields(t *testing.T) {
 // it derivable, and made the old identity list's stated justification ("native
 // types with no Promise-level fields") false for exactly the two types it was
 // written to excuse. (Set is the same, reached through its Map[T, bool] field;
-// it has no universe pointer left to assert on, which is the point of §6.)
+// it has no universe pointer left to assert on, which is the point of language-design.md#ownership-and-memory-management.)
 func TestT1926_MapIsAnOrdinaryTypeWithFields(t *testing.T) {
 	checkOK(t, `test() {}`)
 	if types.TypMap == nil {
@@ -390,7 +390,7 @@ func TestT1926_ArgGrowingRecursiveGenericTerminates(t *testing.T) {
 // check that decides which args a buffer actually holds (T1926) ---
 
 // A fixed-size array is the other primitive that owns its elements by value
-// (memory-model.md §2), so a user container built on one is judged exactly as a
+// (memory-model.md#the-variable-size-primitives-are-a-closed-set), so a user container built on one is judged exactly as a
 // `T[]`-backed one is. This is the *field*-reached array, distinct from
 // TestT0545_NestedFixedArrayInVectorError where the array IS the element.
 func TestT1926_FixedArrayBufferInUserContainerRejected(t *testing.T) {

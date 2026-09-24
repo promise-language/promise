@@ -2,7 +2,7 @@
 
 > **Tag:** `cloud-persistence` — remaining work to complete this document: `mcp__tracker__list --tag cloud-persistence`
 
-`modules/cloud` (working name — see §12) provides durable, schema-driven, multi-process
+`modules/cloud` (working name — see [Module Name](#module-name)) provides durable, schema-driven, multi-process
 shared state for Promise programs. A client defines `` `serializable `` types and
 performs typed `get` / `put` / `list` / `allocate` operations through a single endpoint.
 The server validates against the type's `schema.Type` (see `docs/schema.md`), mediates
@@ -11,7 +11,7 @@ future round-trips.
 
 ---
 
-## 1. Goals and Non-Goals
+## Goals and Non Goals
 
 ### Goals
 
@@ -31,25 +31,25 @@ future round-trips.
   Sqlite, and Firestore are first-party targets; community implementations can fill in
   others.
 
-### Non-Goals
+### Non Goals
 
 - **Not a query language.** No SQL-equivalent, no joins, no projections. Get by id,
   list by type, traverse references. Sophisticated querying is a separate concern.
 - **Not a CRDT.** Concurrency is per-request atomic at the server. Conflict resolution
   is last-writer-wins or app-level — there is no built-in merge.
-- **Not a sync engine.** "Sync" in §3 refers to the request/response pattern, not to
+- **Not a sync engine.** "Sync" in [Sync Protocol](#sync-protocol) refers to the request/response pattern, not to
   background bidirectional replication. A library on top of `cloud` could implement
   that, but the protocol does not.
 - **Not a blob store reinvention.** Large binary payloads piggyback on the same
-  endpoint (§8) but the storage backend delegates to whatever native blob store the
+  endpoint ([Blobs](#blobs)) but the storage backend delegates to whatever native blob store the
   deployment environment provides.
 
 ---
 
-## 2. Identity
+## Identity
 
 Every type, field, and reference is identified by a `Hash128`. The composition rules
-are defined in `docs/schema.md` §4. This doc only adds the operational implications:
+are defined in `docs/schema.md` [Identity and Hash128](schema.md#identity-and-hash128). This doc only adds the operational implications:
 
 - **Type id** identifies the schema of an entity. Two builds of the same Promise
   source produce the same type ids; this is the wire-stability the storage layer
@@ -60,7 +60,7 @@ are defined in `docs/schema.md` §4. This doc only adds the operational implicat
 - **Entity id** is a single 128-bit identifier — globally unique across all types
   and all instances. It is **the** persistent address of one row. Nothing else is
   part of the identity. The id can come from either side: the server can allocate
-  fresh ids on demand (the typical pattern, via the `Allocate` op in §4.1), or the
+  fresh ids on demand (the typical pattern, via the `Allocate` op in [Allocate](#allocate)), or the
   client can generate them locally (random UUIDs, hashes of payload, deterministic
   application keys) and submit them on a `Put`. The server decides per type whether
   client-supplied ids are accepted.
@@ -74,11 +74,11 @@ type EntityId = Hash128;
 
 The prototype encoded entity ids as `T200I12` strings on the wire — type and
 instance concatenated. Promise drops the bundled type entirely. Earlier drafts of
-this design (see §14 Q1) carried `{Hash128 type_id, Hash128 instance_id}` for the
+this design (see [Open Design Questions](#open-design-questions) Q1) carried `{Hash128 type_id, Hash128 instance_id}` for the
 same reason as the prototype: to let the server route a request to the right
 storage shard without an extra index lookup.
 
-### 2.1 Where the concrete type actually lives
+### Where the concrete type actually lives
 
 Each entity has exactly one concrete type, fixed for its lifetime — the type at
 creation time. Sub-typing means a `Ref[Animal]` field can hold an id whose
@@ -104,7 +104,7 @@ That is the load-bearing observation: identity is one 128-bit value because
 type information is either already on hand (heap value) or recovered as a
 free side-effect of the lookup the server was going to do anyway.
 
-### 2.2 Why the bundled `{type_id, instance_id}` is rejected
+### Why a bundled identity pair is rejected
 
 - **A redundant copy on the wire is a bug source.** If the client's belief about
   an entity's type drifts from the server's record (renamed type without an
@@ -123,7 +123,7 @@ free side-effect of the lookup the server was going to do anyway.
   didn't already do. The server lookup is the path; the type is the
   by-product.
 
-### 2.3 No client-side type hint on Get
+### No client side type hint on Get
 
 A client never knows an entity's concrete type from its id alone — a
 `Ref[Animal]` may hold an id whose entity is a `Dog`, and the client has no
@@ -141,35 +141,35 @@ storage, to the shard the row lives in). The lookup the server needs to do
 anyway to find the row is the same lookup that resolves the type — no
 client-side hinting needed.
 
-### 2.4 128-bit identity and the `u128` dependency
+### 128 bit identity and its dependency
 
-`Hash128` is defined in [docs/schema.md](schema.md) §3 as a value-type wrapper
+`Hash128` is defined in [docs/schema.md](schema.md), under [Functions and Function Types](schema.md#functions-and-function-types) as a value-type wrapper
 around a single native `u128`. The wrapper exists so the type system can tell
 a content hash apart from a plain numeric u128 at compile time; the in-memory
 representation is one 128-bit word. Equality, hashing, and copying are
 single-instruction native operations, and the wire format is just the
 underlying 128 bits.
 
-This is why cloud persistence v1 lists large integers as a prerequisite (§13):
+This is why cloud persistence v1 lists large integers as a prerequisite ([Implementation Phases](#implementation-phases)):
 the entire identity story (entity ids, type ids, field ids, references) rides
 on `Hash128`, which only exists in its single-word form once `u128` lands per
 [docs/large-integers.md](large-integers.md).
 
-### 2.5 The `` `entity `` annotation
+### The entity annotation
 
 User code does not work with `EntityId` directly. Types that should be stored as
-separate cloud rows are marked with `` `entity `` (defined in `docs/schema.md` §4.4):
+separate cloud rows are marked with `` `entity `` (defined in `docs/schema.md` [The entity Annotation](schema.md#the-entity-annotation)):
 
 ```promise
 type Item `entity {
     string title;
     string description;
-    Ref[Folder]? folder;            // reference to another entity (§7)
+    Ref[Folder]? folder;            // reference to another entity ([References Between Types](#references-between-types))
 }
 
 type Folder `entity {
     string name;
-    Inverse[Item] items `inverse(Item.folder);   // server-maintained back-references (§7)
+    Inverse[Item] items `inverse(Item.folder);   // server-maintained back-references ([References Between Types](#references-between-types))
 }
 ```
 
@@ -191,18 +191,18 @@ backend: an `` `entity `` is a row, a `` `serializable `` value embedded in an e
 is part of that row. Cross-row pointers always go through the entity boundary.
 
 References between entities are exposed in user code through two value types
-defined in §7: `Ref[T]` for forward references, `Inverse[T]` for server-maintained
+defined in [References Between Types](#references-between-types): `Ref[T]` for forward references, `Inverse[T]` for server-maintained
 back-references. On the wire, both reduce to `EntityId` values.
 
 ---
 
-## 3. Sync Protocol
+## Sync Protocol
 
 One HTTP endpoint, one POST, one request, one response. The Promise-side wire types
 are `` `serializable `` enums — any Promise client and any Promise-aware server agree
 on the shape because it's just `schema.of[Request]()` / `schema.of[Response]()`.
 
-### 3.1 Request
+### Request
 
 ```promise
 type Request `public `serializable
@@ -225,7 +225,7 @@ enum Op `public `serializable {
         `doc("Enumerate all instances of a type. Returns ids only — fetch payloads with Get."),
 
     Blob(BlobOp op)
-        `doc("Get / set / exists for binary blobs by string key. See §8."),
+        `doc("Get / set / exists for binary blobs by string key. See [Blobs](#blobs)."),
 }
 ```
 
@@ -235,14 +235,14 @@ enum Op `public `serializable {
 module reuses the encode/decode the language already synthesizes; there is no
 parallel value type.
 
-### 3.2 Response
+### Response
 
 ```promise
 type Response `public `serializable {
     int status `doc("HTTP-style status code.");
     EntityId[] allocated `doc("Ids returned by Allocate ops, in op-declaration order.");
     map[EntityId, map[Hash128, Value]?] entities
-        `doc("Instances returned by Get / List ops AND any preempted entities (§6). Value is `none` for deleted/missing.");
+        `doc("Instances returned by Get / List ops AND any preempted entities ([The Preemption Pattern](#the-preemption-pattern)). Value is `none` for deleted/missing.");
     map[Hash128, EntityId[]] lists
         `doc("Type id → instance id list, returned by List ops.");
     BlobResponse? blob;
@@ -261,7 +261,7 @@ Two design notes:
   server inject any number of extra `EntityId → fields` pairs without a separate
   preempt section. Clients merge the whole map into their cache.
 
-### 3.3 Endpoint
+### Endpoint
 
 One HTTP route, conventionally `POST /sync`. Request and response bodies are JSON
 (via `json.encode_string[Request]` / `json.decode_string[Response]`). Other transports
@@ -270,9 +270,9 @@ deployment choice, not a protocol concern.
 
 ---
 
-## 4. Operations in Detail
+## Operations in Detail
 
-### 4.1 Allocate
+### Allocate
 
 ```promise
 Op.Allocate(type_id: Foo._type_id, count: 1)
@@ -291,9 +291,9 @@ id. The server resolves placeholders in op order, so the Put sees the freshly
 allocated id.
 
 `Allocate` is one of two ways to mint an instance id; the other is client-side
-generation, which skips the round-trip entirely — see §4.2.
+generation, which skips the round-trip entirely — see [Put](#put).
 
-### 4.2 Put
+### Put
 
 ```promise
 Op.Put(
@@ -304,7 +304,7 @@ Op.Put(
 ```
 
 Put creates or updates an instance. `data: none` deletes. The `id` may be one
-the server allocated earlier (via `Allocate`, §4.1) or one the client generated
+the server allocated earlier (via `Allocate`, [Allocate](#allocate)) or one the client generated
 locally — random UUIDs, content-addressed hashes, deterministic application
 keys, etc. The server enforces a per-type policy on whether client-supplied ids
 are accepted; an unaccepted client-id Put returns a `client_id_not_allowed`
@@ -327,7 +327,7 @@ The server:
    required, etc.
 4. Validates id ownership — see above.
 5. For an existing id, confirms the recorded type equals `type_id`.
-6. Updates inverse relations (§7). Any entity touched by inverse maintenance is
+6. Updates inverse relations ([References Between Types](#references-between-types)). Any entity touched by inverse maintenance is
    added to `response.entities` so the client cache reflects reality.
 7. Writes through to the storage backend.
 
@@ -347,7 +347,7 @@ Server-allocated ids are useful when the server is the authoritative id namespac
 and locality of allocation matters (monotonic ids for index scans, sequential
 backups, etc.). Most types pick one mode and stick with it.
 
-### 4.3 Get
+### Get
 
 ```promise
 Op.Get(id: some_entity_id)
@@ -358,7 +358,7 @@ the server does not need a type to find the row — it looks up the id in its
 global index, which yields both the row and its concrete `type_id` as a single
 operation. If absent or deleted, `response.entities[id] = none`.
 
-There is no client-side type hint on Get (see §2.3): under inheritance the
+There is no client-side type hint on Get (see [No client side type hint on Get](#no-client-side-type-hint-on-get)): under inheritance the
 client only knows the declared bound from the field's `Ref[T]`, not the
 concrete type, so any hint would either be useless or actively wrong on
 sharded backends.
@@ -367,7 +367,7 @@ The server is allowed (and encouraged) to include other entities it had to load
 anyway — particularly the targets of references on the requested entity, when
 the server already paid the load cost.
 
-### 4.4 List
+### List
 
 ```promise
 Op.List(type_id: Foo._type_id, filter: none)
@@ -382,9 +382,9 @@ that builds on top of `cloud`.
 
 ---
 
-## 5. Client Mutations and Transactions
+## Client Mutations and Transactions
 
-The wire protocol (§3) is already transactional: one `Request` is one server-side
+The wire protocol ([Sync Protocol](#sync-protocol)) is already transactional: one `Request` is one server-side
 transaction. The remaining design question is how the **client** groups its
 mutations into that single request — without scattering explicit transaction
 parameters through every call site, while still preventing accidental partial
@@ -393,9 +393,9 @@ commits.
 The protocol does not change. This section is purely about the client API on top
 of the protocol.
 
-### 5.1 Why Batching Is Not Optional
+### Why Batching Is Not Optional
 
-A single request maps to a single server transaction (§3, §9.2). If a client wanted
+A single request maps to a single server transaction ([Sync Protocol](#sync-protocol), [Concurrency Model](#concurrency-model)). If a client wanted
 to "save" individual mutations as soon as they happen, every entity field
 assignment would round-trip to the server, and a sequence like `item.title = "a";
 item.body = "b"` would either be two transactions (no atomicity) or block on each
@@ -405,7 +405,7 @@ Both are wrong. Mutations have to accumulate locally and commit as one batch.
 Therefore the client API needs a notion of "currently-open transaction" that
 field assignments and entity creations attach to.
 
-### 5.2 The Two Models
+### The Two Models
 
 There are two clean ways to give the client API a transaction handle. Both are
 viable; the trade-off is verbosity vs. implicitness.
@@ -444,7 +444,7 @@ hidden binding to the active transaction. Cross-thread sharing is forbidden by
 construction (entities are not `` `sendable ``, so the type system blocks them
 from being captured into `go` blocks or `task[T]`).
 
-### 5.3 Recommendation: Model B
+### Which Model Is Chosen
 
 Model B aligns with how Promise users will *want* to write the code:
 
@@ -461,7 +461,7 @@ The cost is the thread-local indirection and one rule that can't be checked at
 compile time: mutating an entity outside any active transaction must error at
 runtime.
 
-### 5.4 The Field-Assignment Error Problem
+### The Field Assignment Error Problem
 
 Field assignment in Promise can't be failable — there is no syntax for an `!` on
 a setter. So when a user writes `item.title = "x"` outside a `transact` block,
@@ -481,7 +481,7 @@ the runtime has two options:
 error, not a recoverable condition. The panic message includes the entity type
 and the field being written, plus a hint pointing at `client.transact`.
 
-### 5.5 New-Entity Creation
+### New Entity Creation
 
 Inside a `transact` block, new entities must be bound to the active transaction
 so their fields are mutable:
@@ -500,9 +500,9 @@ the txn, and queues a `Put` for commit time.
 
 Bare `T(...)` constructors on `` `entity ``-typed types are still legal but
 yield an *unbound* entity — useful for tests and in-memory work, but writes to
-its fields outside a `transact` block panic per §5.4.
+its fields outside a `transact` block panic per [The Field Assignment Error Problem](#the-field-assignment-error-problem).
 
-### 5.6 Read-Only Access Outside Transactions
+### Read Only Access Outside Transactions
 
 Reading entity data does not require a transaction. `client.get[T](id)` outside
 any `transact` block returns an entity whose fields can be read freely; only
@@ -518,7 +518,7 @@ main!() {
 }
 ```
 
-### 5.7 What `Transaction` Owns
+### What a Transaction Owns
 
 Conceptually `Transaction` is a value carrying:
 
@@ -539,7 +539,7 @@ ergonomic; the explicit form can layer on later.
 
 ---
 
-## 6. The Preemption Pattern
+## The Preemption Pattern
 
 The preemption rule is one sentence: **the server may include any entity in
 `response.entities`, and the client merges them all into its cache.** No separate
@@ -547,7 +547,7 @@ channel, no flag, no dedicated section.
 
 Server policies that drive preemption:
 
-- **Inverse-relation maintenance** (§7). A `Put` on entity A that updates a
+- **Inverse-relation maintenance** ([References Between Types](#references-between-types)). A `Put` on entity A that updates a
   back-pointer on B includes B in the response.
 - **Reference targets on Get.** Fetching A whose schema contains
   `Reference(B._type_id)` may include B in the response if B was loaded for any
@@ -563,7 +563,7 @@ extra entities are observably indistinguishable from a hot cache.
 
 ---
 
-## 7. References Between Types
+## References Between Types
 
 References are first-class but never appear as bare `EntityId` in user code. Two
 value types in `modules/cloud` cover the two directions of a relationship:
@@ -578,7 +578,7 @@ value types in `modules/cloud` cover the two directions of a relationship:
 Both are explicit value types. Field access is local (no network). Calls that
 fetch payloads are loud (`!`-bearing methods on the value).
 
-### 7.1 `Ref[T]` — Forward References
+### Forward References
 
 ```promise
 type Ref[T: `entity] `public `value `clone `serializable
@@ -636,7 +636,7 @@ main!() {
 }
 ```
 
-### 7.2 `Inverse[T]` — Server-Maintained Back-References
+### Server Maintained Back References
 
 A type declares that one of its reference fields has a server-maintained inverse
 on the target. This is the prototype's `R201B` pattern: a `Ref[Folder]` on `Item`
@@ -699,7 +699,7 @@ that motivated this split in the first place. Picking the right one matters:
 | `iter()` | Streaming through a large set, processing as you go | Paginated (server-driven page size) |
 | `list()` | Need the whole set and will use most of it | One batched fetch |
 
-### 7.3 Cascading Deletes
+### Cascading Deletes
 
 An inverse relation does **not** imply cascade. Deleting a `Folder` does not delete
 its `Item`s; it just removes the back-pointers. Cascade is a per-relation policy,
@@ -708,7 +708,7 @@ expressed as `` `inverse(Item.folder, on_delete: cascade) ``. Default is `unlink
 
 ---
 
-## 8. Blobs
+## Blobs
 
 Binary payloads (images, large strings, opaque bytes) are addressed by string keys,
 not by `EntityId`. A blob lifecycle is independent of the entity that references it
@@ -733,7 +733,7 @@ fetch can share one round-trip.
 
 ---
 
-## 9. Server Architecture
+## Server Architecture
 
 The server is a Promise program that:
 
@@ -761,7 +761,7 @@ First-party implementations: `MemoryBackend` (testing, ephemeral), `SqliteBacken
 community module since it pulls in Google Cloud client deps the catalog should not
 depend on.
 
-### 9.1 Validation
+### Validation
 
 For every `Put`, the server walks the incoming `data` map against
 `schema.Type.Object.fields`:
@@ -775,10 +775,10 @@ Validation runs against the schema the server compiled with. A client that has a
 older schema (missing a field, or with a renamed-but-unpinned field) gets a clear
 error referencing the offending `Hash128`, not a stack trace.
 
-### 9.2 Concurrency Model
+### Concurrency Model
 
 One request = one server-side transaction. Within a request, ops apply atomically in
-the order specified in §3.2. Across requests, last-writer-wins on the storage
+the order specified in [Response](#response). Across requests, last-writer-wins on the storage
 backend; if stronger semantics are needed, the backend implementation provides them
 (Firestore transactions, Sqlite `BEGIN IMMEDIATE`, etc.).
 
@@ -788,7 +788,7 @@ new optional fields on `Op.Put` and `Response`.
 
 ---
 
-## 10. Schema Evolution
+## Schema Evolution
 
 Every type and field carries a `Hash128` id. The evolution model is therefore: as
 long as a construct's id stays stable, the wire format is stable. Source-side
@@ -811,7 +811,7 @@ via a build flag.
 
 ---
 
-## 11. Lessons Carried From the Prototype
+## Lessons Carried From the Prototype
 
 The Promis system at `~/prog/djabi_data/` is the closest existing analog. Promise
 inherits:
@@ -835,7 +835,7 @@ Promise diverges:
 - **No `T<n>I<m>` string keys, and no bundled type id either.** Identity is a
   single 128-bit value. The prototype tied type and instance together so the
   server could route a request without an index; Promise drops the tie and
-  requires backends to maintain a global id index (§2.3). The result is one
+  requires backends to maintain a global id index ([No client side type hint on Get](#no-client-side-type-hint-on-get)). The result is one
   fewer field on the wire and one fewer way for client/server type beliefs to
   drift.
 - **Many-to-many inverse relations land in v1**, not as a TODO.
@@ -844,7 +844,7 @@ Promise diverges:
 
 ---
 
-## 12. Module Name
+## Module Name
 
 This doc uses `cloud` as the catalog module name. It's accurate and short, but
 generic enough that future Promise features (cloud functions, cloud blobs as a
@@ -863,9 +863,9 @@ under any name.
 
 ---
 
-## 13. Implementation Phases
+## Implementation Phases
 
-### Phase 0 — Prerequisites
+### Phase 0 Prerequisites
 
 1. **Native large integer types** (`u128` at minimum, full ladder per
    [docs/large-integers.md](large-integers.md)). `Hash128` — and therefore every
@@ -881,7 +881,7 @@ under any name.
    `modules/tls` into both), so the default transport is covered.
 5. `[executable]` table support in `promise.toml` parsing.
 
-### Phase 1 — Wire Types and Client
+### Phase 1 Wire Types and Client
 
 5. `Request` / `Response` / `Op` / `Value` / `EntityId` `` `serializable `` types.
 6. `Ref[T]` and `Inverse[T]` value types with their methods (`get!`, `id`, `count!`,
@@ -892,28 +892,28 @@ under any name.
    `put[T]`, `list[T]`, `allocate[T]`).
 9. JSON over HTTP transport.
 
-### Phase 2 — In-Memory Backend and Server
+### Phase 2 In Memory Backend and Server
 
 10. `Backend` structural interface; `MemoryBackend` implementation.
 11. `cloud.Server` — schema registration, validation, dispatch, inverse-relation
     maintenance.
 12. `promise cloud serve` CLI for spinning up a local in-memory server.
 
-### Phase 3 — Persistent Backend
+### Phase 3 Persistent Backend
 
 13. `SqliteBackend` — single-node persistent. The default for non-distributed
     deployments.
 14. `cloud.Server` extensions: optimistic concurrency tokens, server-side filters
     (when a use case justifies a query layer).
 
-### Phase 4 — Community Backends
+### Phase 4 Community Backends
 
 15. `cloud_firestore` (community module) — Firestore-backed, GCP-managed.
 16. `cloud_postgres` (community module) — Postgres-backed.
 
 ---
 
-## 14. Open Design Questions
+## Open Design Questions
 
 **Q1 (settled): `EntityId` is a single 128-bit value.**
 Identity is a bare `Hash128` (which becomes a `u128` alias once the large-integer
@@ -922,9 +922,9 @@ bundled. Operations that need to know the type on creation (`Put` of a new id,
 `Allocate`, `List`) carry it as an explicit op parameter; `Get` takes the id
 alone — there is no client-side type hint, because under inheritance the
 client only ever knows the declared `Ref[T]` bound, not the concrete type
-(§2.3).
+([No client side type hint on Get](#no-client-side-type-hint-on-get)).
 
-The load-bearing observation (§2.1) is that the concrete type is **never** what
+The load-bearing observation ([Where the concrete type actually lives](#where-the-concrete-type-actually-lives)) is that the concrete type is **never** what
 identity is for — it's a property of the entity itself, encoded in the heap
 value's vtable / RTTI and recorded by the server next to the row. To act on an
 entity you either have it in hand (concrete type is right there) or you're
@@ -943,7 +943,7 @@ wire copy that can drift from the server's record is a bug source; (c) the
 client doesn't know the concrete type anyway (only the bound), so it couldn't
 even supply a correct type alongside the id on Get; (d) backends need a global
 id index anyway to support cross-type references, so the bundled type never
-did meaningful routing work the index didn't already do. Full rationale in §2.
+did meaningful routing work the index didn't already do. Full rationale in [Identity](#identity).
 
 Phantom-typed variants (`EntityId[T]`) were also considered and dropped —
 they would force every reference field to be generic and complicate the
@@ -957,7 +957,7 @@ Earlier drafts asked whether `Request` / `Response` should carry an explicit
 **client-context fields** that let the server resolve which version of which
 binary it is talking to:
 
-- **Project id** (the `[executable] id` from `docs/schema.md` §6.1) — identifies
+- **Project id** (the `[executable] id` from `docs/schema.md` [The executable Table](schema.md#the-executable-table)) — identifies
   which executable.
 - **Module epoch** — identifies the catalog version the build was made against.
 - **Build commit** (optional) — exact source revision, when available.
@@ -992,7 +992,7 @@ recompilation, which points at model 2 — but with two refinements:
   uploading, not only *what schema they use*. This is access-control concern —
   the request carries an account / API key (resolved against the server's
   identity provider) so the server can authorize writes and isolate tenants.
-  This is an `auth`-style concern (`docs/ai-platform.md` §4 covers the
+  This is an `auth`-style concern (`docs/ai-platform.md` [The auth module](ai-platform.md#the-auth-module) covers the
   primitives), threaded through the request envelope.
 
 The whole client-side handshake / upload / cache / auth shape is an

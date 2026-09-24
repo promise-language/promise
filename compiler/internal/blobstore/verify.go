@@ -27,7 +27,7 @@ type VerifyResult struct {
 }
 
 // Verify re-hashes every blobs/ and archives/ entry and compares it against its
-// content address (the filename) — the integrity self-healing of §4.4/§6. The
+// content address (the filename) — the integrity self-healing of T0769 §4.4/§6. The
 // fetch path trusts the cache by presence (never re-hashed per hit), so this is
 // the only thing that turns a bit-rotted / truncated / partially-written CAS
 // back into a working one.

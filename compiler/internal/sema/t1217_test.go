@@ -2,7 +2,7 @@ package sema
 
 import "testing"
 
-// T1217: a plain `go {}` block body is a non-failable scope (§17.2.1), even when
+// T1217: a plain `go {}` block body is a non-failable scope (language-design.md#failable-goroutines), even when
 // the enclosing function is failable. Previously sema scoped failability to the
 // enclosing fn, so a bare failable call auto-propagated and `raise` was allowed
 // inside a goroutine body — both then panicked codegen (the goroutine's result
@@ -143,7 +143,7 @@ func TestT1217GoBlockTypedHandlerElseOK(t *testing.T) {
 }
 
 // --- Unaffected control: `return` inside a `go {}` yields the GOROUTINE's result
-// (T1385, §17.2 explicit-return style), a separate mechanism from T1217's
+// (T1385, language-design.md#explicit-concurrency explicit-return style), a separate mechanism from T1217's
 // non-failable scope, and must be untouched. Here the fire-and-forget block's only
 // path returns, so it satisfies the all-paths rule; the enclosing `int` result is
 // irrelevant to it. ---

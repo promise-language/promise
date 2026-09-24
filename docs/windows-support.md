@@ -6,17 +6,17 @@
 
 ---
 
-## 1. Overview
+## Overview
 
 Promise targets Windows natively via the MSVC ABI (`x86_64-pc-windows-msvc`). The compiler binary (`promise.exe`) is built on Windows using Go, and produces Windows executables by compiling LLVM IR through `opt` → `llc` → `lld-link`, linking against a self-generated link surface (own import libs + codegen-emitted crt0/TLS/builtins) that resolves only to DLLs shipped with Windows.
 
-That link surface is **host-agnostic** (§3.3): the import libs are embedded in every compiler binary, not just the Windows one, and everything else it needs is codegen-emitted — so `promise build -target x86_64-pc-windows-msvc` produces a `.exe` from a Linux or macOS host with nothing fetched and no Windows toolchain anywhere. Cross-compilation as a whole is tracked under T0524.
+That link surface is **host-agnostic** ([Linking against a self generated zero dependency surface](#linking-against-a-self-generated-zero-dependency-surface)): the import libs are embedded in every compiler binary, not just the Windows one, and everything else it needs is codegen-emitted — so `promise build -target x86_64-pc-windows-msvc` produces a `.exe` from a Linux or macOS host with nothing fetched and no Windows toolchain anywhere. Cross-compilation as a whole is tracked under T0524.
 
 **Non-goals:** MinGW/Cygwin.
 
 ---
 
-## 2. Support Matrix
+## Support Matrix
 
 Windows is a first-class, fully-supported target. Core language, standard library, M:N scheduler, file I/O, process execution, signals, stack-overflow detection, and release builds all work. `windows-amd64` is a full CI matrix member (built + tested on every PR and `main`/`next` push, see T0774), and the full test suite passes on Windows.
 
@@ -47,16 +47,16 @@ Windows is a first-class, fully-supported target. Core language, standard librar
 
 ---
 
-## 3. Architecture
+## Architecture
 
-### 3.1 Target Triple
+### Target Triple
 
 ```
 x86_64-pc-windows-msvc    (amd64)
 aarch64-pc-windows-msvc   (arm64, future)
 ```
 
-### 3.2 LLVM Pipeline
+### LLVM Pipeline
 
 ```
 .pr source → frontend → LLVM IR
@@ -67,7 +67,7 @@ aarch64-pc-windows-msvc   (arm64, future)
 
 Note: No LTO yet on Windows (unlike Linux/macOS which use bitcode → linker with `--lto-O1`). See T0049.
 
-### 3.3 Linking — self-generated zero-dependency surface (T0772)
+### Linking against a self generated zero dependency surface
 
 `lld-link` (LLD's COFF/MSVC mode) links against a **self-generated link surface**
 that needs **no Visual Studio Build Tools, no Windows SDK, and re-hosts no
@@ -96,7 +96,7 @@ into the compiler binary (~21 KiB total), then extracted to
 CRT objects). Regenerate with `bin/release winlink`.
 
 The embed is **unconditional, not host-gated** — a Linux or macOS compiler
-carries the same import libs as the Windows one. That is what makes §1's
+carries the same import libs as the Windows one. That is what makes [Overview](#overview)'s
 cross-linking work with nothing to download: at 21 KiB the surface is cheaper to
 embed everywhere than to publish as a per-target blob, so `windows-amd64` needs
 no entry in the prebuilts manifest and no `sysroot` blob at all.
@@ -112,7 +112,7 @@ own DllMain initializes the heap and per-thread errno on load and on each
 x86_64 only for now (single calling convention, no name decoration); arm64
 Windows import-lib generation is a follow-up.
 
-### 3.4 No SDK discovery
+### No SDK discovery
 
 The old `findWindowsSDK()` probe (VS env vars, Windows Kits paths, `vswhere.exe`)
 is **removed**. A fresh Windows machine needs no probe hit and no Microsoft files
@@ -121,11 +121,11 @@ points `/libpath:` at the extracted import-lib dir and `/entry:__promise_start`.
 
 ---
 
-## 4. Platform Abstraction Layer (PAL)
+## Platform Abstraction Layer
 
 The WindowsPAL in `codegen/pal/windows.go` emits LLVM IR that calls Win32 API functions. All Win32 functions are declared as LLVM externals — the linker resolves them from the self-generated import libs (kernel32, advapi32, ws2_32, ucrtbase). All PAL methods are implemented; there are no stubs.
 
-### 4.1 PAL surface
+### PAL surface
 
 | Category | PAL Functions | Win32 API |
 |----------|--------------|-----------|
@@ -155,7 +155,7 @@ Promise's panic recovery uses **TLS-flag propagation, not `setjmp`/`longjmp`**
 `ucrtbase.dll` still initializes per-thread errno via its `DLL_THREAD_ATTACH`
 callback on bare `CreateThread` threads.
 
-### 4.2 Process & signal behavior notes
+### Process and signal behavior notes
 
 - **Self-signaling** (`pal_kill` with `pid == GetCurrentProcessId()`): SIGINT →
   `GenerateConsoleCtrlEvent(CTRL_C_EVENT)`, SIGTERM → `CTRL_BREAK_EVENT`. Other
@@ -163,7 +163,7 @@ callback on bare `CreateThread` threads.
 - **Console control events:** only SIGINT/SIGTERM have Windows equivalents; per-signal
   enable flags ensure only registered signals are delivered.
 
-### 4.3 Windows-Specific Codegen (`codegen/windows.go`)
+### Windows specific codegen
 
 | Function | Purpose |
 |----------|---------|
@@ -173,19 +173,19 @@ callback on bare `CreateThread` threads.
 
 ---
 
-## 5. Toolchain & Build System
+## Toolchain and Build System
 
-### 5.1 Prerequisites
+### Prerequisites
 
 - **Go 1.25+** — builds the compiler itself
 - **LLVM 22+** — full clang+llvm release (needs `opt.exe`, `llc.exe`, `lld-link.exe`)
 - **Java 11+** — ANTLR4 parser generation (optional if the parser is already generated; the generated parser is committed)
 
 No Visual Studio Build Tools and no Windows SDK are required — the link surface is
-self-generated (T0772, §3.3). Release builds (`bin/build --release`) embed the LLVM
+self-generated (T0772, [Linking against a self generated zero dependency surface](#linking-against-a-self-generated-zero-dependency-surface)). Release builds (`bin/build --release`) embed the LLVM
 tools into the binary, so an installed LLVM is only needed for non-release builds.
 
-### 5.2 Bootstrap & Build
+### Bootstrap and Build
 
 ```cmd
 .\make.cmd               :: bootstrap — compile build tools to bin\
@@ -201,14 +201,14 @@ re-run `.\make.cmd` after changing `tools/` sources.
 
 ---
 
-## 6. Key Design Decisions
+## Key Design Decisions
 
 - **MSVC ABI, not MinGW**: native Windows experience. MSVC ABI is what Windows developers and tools expect.
-- **No Visual Studio Build Tools / Windows SDK (T0772)**: the link surface is self-generated (own import libs from license-clean `.def` symbol lists + codegen-emitted crt0/TLS/`__chkstk`/`_fltused`), so a fresh machine links runnable `.exe`s with zero local dependencies and no Microsoft `.lib` redistribution. See §3.3.
+- **No Visual Studio Build Tools / Windows SDK (T0772)**: the link surface is self-generated (own import libs from license-clean `.def` symbol lists + codegen-emitted crt0/TLS/`__chkstk`/`_fltused`), so a fresh machine links runnable `.exe`s with zero local dependencies and no Microsoft `.lib` redistribution. See [Linking against a self generated zero dependency surface](#linking-against-a-self-generated-zero-dependency-surface).
 - **lld-link, not link.exe**: LLD ships with LLVM, is open-source, and works identically across platforms.
 - **CRITICAL_SECTION, not SRWLock**: safer match for `pthread_mutex_t` semantics (recursive, owning).
-- **`CreateFileA` + `_open_osfhandle`, not UCRT `_open` (T1742)**: no CRT open grants `FILE_SHARE_DELETE` (none of `_SH_DENY*` control delete sharing), so an `_open`-ed file could not be renamed over or removed — the exact workload [io.md](io.md) §3 builds on. Opening through `CreateFileA` and wrapping the `HANDLE` in a CRT descriptor keeps `_read`/`_write`/`_lseeki64`/`_close` working unchanged while giving explicit control of the access rights and share mode, and makes `_get_osfhandle` yield a handle that `FlushFileBuffers`/`LockFileEx` accept. It is unconditional: an opt-in flag would give Windows two file-open semantics and force every library helper to choose one. It does **not** close the gap — delete-pending remains, stated in [io.md](io.md) §6.2. Two consequences worth knowing: `CreateFileA` reports failure via `GetLastError` rather than `errno`, so the PAL translates Win32 codes to errno in `emitWinErrToErrno` (shared with `pal_dir_open`); and `lpSecurityAttributes = NULL` yields a **non-inheritable** handle, so open `File`s no longer leak into spawned processes (`pal_spawn` sets pipe-handle inheritability explicitly, and Promise exposes no descriptor passing).
-- **`FileRenameInfoEx` with POSIX semantics as `MoveFileEx`'s fallback (T1930)**: `FILE_SHARE_DELETE` (above) is what lets an open file be *deleted*; it does not let `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` replace an open *destination*, whose replace step is a classic `FileRenameInformation` and fails with `ERROR_ACCESS_DENIED` while any handle to the target lives. [io.md](io.md) §3 is built on renaming over a file a reader holds open, so `pal_file_rename` answers `ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION` by retrying through `SetFileInformationByHandle(FileRenameInfoEx)` with `FILE_RENAME_FLAG_POSIX_SEMANTICS` — the Windows 10 1709+ primitive that behaves as `rename(2)` does, swapping the name immediately while open handles keep reading the replaced file. `MoveFileEx` stays *first* so that every rename which succeeds today keeps `MOVEFILE_WRITE_THROUGH`'s durability and only the case that is a hard error today takes the other path; there, durability is restored by `FlushFileBuffers` on the renamed handle (hence the `GENERIC_WRITE` it is opened with, which `DELETE` alone would not satisfy). When the fallback fails too, the original `MoveFileEx` error is reported — it describes the caller's problem, where the fallback's own may be no more than "unsupported on this volume".
+- **`CreateFileA` + `_open_osfhandle`, not UCRT `_open` (T1742)**: no CRT open grants `FILE_SHARE_DELETE` (none of `_SH_DENY*` control delete sharing), so an `_open`-ed file could not be renamed over or removed — the exact workload [io.md](io.md), under [Atomic replace](io.md#atomic-replace) builds on. Opening through `CreateFileA` and wrapping the `HANDLE` in a CRT descriptor keeps `_read`/`_write`/`_lseeki64`/`_close` working unchanged while giving explicit control of the access rights and share mode, and makes `_get_osfhandle` yield a handle that `FlushFileBuffers`/`LockFileEx` accept. It is unconditional: an opt-in flag would give Windows two file-open semantics and force every library helper to choose one. It does **not** close the gap — delete-pending remains, stated in [io.md](io.md), under [Platform differences a caller can observe](io.md#platform-differences-a-caller-can-observe). Two consequences worth knowing: `CreateFileA` reports failure via `GetLastError` rather than `errno`, so the PAL translates Win32 codes to errno in `emitWinErrToErrno` (shared with `pal_dir_open`); and `lpSecurityAttributes = NULL` yields a **non-inheritable** handle, so open `File`s no longer leak into spawned processes (`pal_spawn` sets pipe-handle inheritability explicitly, and Promise exposes no descriptor passing).
+- **`FileRenameInfoEx` with POSIX semantics as `MoveFileEx`'s fallback (T1930)**: `FILE_SHARE_DELETE` (above) is what lets an open file be *deleted*; it does not let `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` replace an open *destination*, whose replace step is a classic `FileRenameInformation` and fails with `ERROR_ACCESS_DENIED` while any handle to the target lives. [io.md](io.md), under [Atomic replace](io.md#atomic-replace) is built on renaming over a file a reader holds open, so `pal_file_rename` answers `ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION` by retrying through `SetFileInformationByHandle(FileRenameInfoEx)` with `FILE_RENAME_FLAG_POSIX_SEMANTICS` — the Windows 10 1709+ primitive that behaves as `rename(2)` does, swapping the name immediately while open handles keep reading the replaced file. `MoveFileEx` stays *first* so that every rename which succeeds today keeps `MOVEFILE_WRITE_THROUGH`'s durability and only the case that is a hard error today takes the other path; there, durability is restored by `FlushFileBuffers` on the renamed handle (hence the `GENERIC_WRITE` it is opened with, which `DELETE` alone would not satisfy). When the fallback fails too, the original `MoveFileEx` error is reported — it describes the caller's problem, where the fallback's own may be no more than "unsupported on this volume".
 - **CreateThread, not _beginthreadex (T0772)**: keeps the worker-thread surface on an always-present DLL. Safe because panic recovery uses TLS-flag propagation, not `setjmp`/`longjmp` (T0146–T0148), so no CRT per-thread state is required; ucrtbase's `DLL_THREAD_ATTACH` still initializes per-thread errno on bare `CreateThread` threads.
 - **No `setjmp`/`longjmp`**: panic recovery uses TLS-flag propagation on every target. This is what makes the `CreateThread` choice safe.
 - **`Platform.line_separator`**: `\r\n` on Windows, `\n` elsewhere. Correct for console output; the test harness normalizes `\r\n` before comparing snapshot output (T0046).

@@ -6,11 +6,11 @@ What may allocate, who owns what is allocated, and how every other type is built
 set of primitives that can.
 
 This document owns *allocation*. Two neighbours own the rest, and neither restates the other:
-**layout** — how a type's fields are arranged across the four structs — is §5.2 of
+**layout** — how a type's fields are arranged across the four structs — is [The Four Struct Model](language-design.md#the-four-struct-model) of
 [language-design.md](language-design.md); **ownership** — who may hold, borrow or move a value, and
-when it is dropped — is §6 of the same document.
+when it is dropped — is [Ownership and Memory Management](language-design.md#ownership-and-memory-management) of the same document.
 
-## 1. Fixed and variable allocation
+## Fixed and variable allocation
 
 Every allocation in a Promise program is one of two kinds, and the distinction is not *where* the
 memory lives but *whether its size is known when the code is compiled*.
@@ -28,7 +28,7 @@ memory lives but *whether its size is known when the code is compiled*.
 has fields, and every field has a type with a size; there is no way to spell "a run of `n` elements"
 for a runtime `n` except by holding something that already provides it.
 
-## 2. The variable-size primitives are a closed set
+## The variable size primitives are a closed set
 
 Exactly three types own an allocation whose size is not known at compile time:
 
@@ -44,9 +44,9 @@ compiler change** — and a change here is a change to this document first.
 
 Everything else that appears to allocate variably does so by holding one of these three.
 
-## 3. By value versus behind a handle
+## By value versus behind a handle
 
-The column that matters most in §2 is the last one. It is not about allocation at all — it is about
+The column that matters most in [The variable size primitives are a closed set](#the-variable-size-primitives-are-a-closed-set) is the last one. It is not about allocation at all — it is about
 what happens when the *owner* is duplicated, and it is the distinction the rest of the language
 keys on.
 
@@ -55,7 +55,7 @@ keys on.
   (realloc), insertion (push), and literal lowering all move or copy element *values*, and each of
   those is a place where an element could be duplicated. This is the one cell of the table the
   compiler cannot derive — `Vector` has no fields to derive it from — so it is declared, by
-  `` `duplicates_elements `` ([annotations.md](annotations.md) §7). Every other by-value container
+  `` `duplicates_elements `` ([annotations.md](annotations.md), under [Duplication](annotations.md#duplication)). Every other by-value container
   reaches the property through a field and carries no annotation.
 - **Behind a handle** — `Channel[T]`, `string`, and the non-allocating handles `Ref[T]`, `Weak[T]`,
   `Task[T]`, `Mutex[T]`, `MutexGuard[T]`. Duplicating the handle does not touch the payload: it
@@ -67,7 +67,7 @@ handle only where duplication is provably absent. A behind-a-handle container's 
 its own, because its payload is never copied: `Ref[Task[T]]` is cloneable although `Task[T]` is
 not, since cloning the `Ref` produces a second handle to one task rather than a second task.
 
-## 4. Everything else is composition
+## Everything else is composition
 
 ```
 Map[K, V]   =  Vector (its bucket array)  +  hashing and probing
@@ -85,11 +85,11 @@ Two consequences, and they are the reason this section exists:
   container does with its elements is derivable from its fields and type arguments, because its
   allocation behaviour is inherited entirely from the primitives it holds. A compiler decision that
   tests for `Map` or `Set` by identity is therefore not merely inelegant — it asserts a property
-  the type's own fields already determine, which [annotations.md](annotations.md) §1 forbids.
+  the type's own fields already determine, which [The one declaration rule](annotations.md#the-one-declaration-rule) forbids.
 
   The compiler *may* know such a type for an unrelated reason: `Map` carries `` `builtin(map) ``
   because `{:}` and the `map[K, V]` alias have to denote something. That is a syntax binding, and
-  §1 bounds what it licenses — binding syntax, constructing values, checking the compiler's own
+  [Fixed and variable allocation](#fixed-and-variable-allocation) bounds what it licenses — binding syntax, constructing values, checking the compiler's own
   assumptions, and nothing else. The distinction is exactly the one a user's own `MyMap` makes
   visible: it cannot be written with `{:}`, and in every other respect it must behave as `Map`
   does.
@@ -98,10 +98,10 @@ Two consequences, and they are the reason this section exists:
   is being handled incorrectly, silently. Special-casing the standard library's containers does not
   fix such a bug; it conceals it in the one place it would have been noticed.
 
-## 5. Ownership of an allocation
+## Ownership of an allocation
 
 Every allocation has exactly one owner at a time, and the owner is responsible for releasing it.
-That is §6's subject; what belongs here is where the obligation sits for each of the three
+That is [Ownership and Memory Management](language-design.md#ownership-and-memory-management)'s subject; what belongs here is where the obligation sits for each of the three
 primitives.
 
 - A by-value buffer is released when its owner is dropped. A `Vector[T]` dropped at scope exit

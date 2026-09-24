@@ -1,6 +1,6 @@
 // T2163: a refcounted `sharable handle passed as an argument to the fast
 // `go f(…)` call path must be DUPLICATED at the spawn boundary
-// (docs/language-design.md §17.4). That path retained `channel[T]` only — a
+// (docs/language-design.md#ownership-across-goroutines). That path retained `channel[T]` only — a
 // `Ref[T]` or `Weak[T]` argument got no refcount bump and no goroutine-side
 // release, so the spawner's drop (an NLL early drop at the call, which is
 // typically its last use, or plain scope exit) freed the referent while the
@@ -48,7 +48,7 @@ send_int(int n, channel[int] done) {
   done.send(n);
 }
 
-// `move` params CONSUME the handle — §17.4's table, row 1: ownership transfers
+// `move` params CONSUME the handle — language-design.md#ownership-across-goroutines's table, row 1: ownership transfers
 // rather than duplicating. The callee drops it exactly once.
 consume_ref(Ref[int] move r, channel[int] done) {
   done.send(r.borrow);
@@ -165,7 +165,7 @@ call_two_refs_same_handle() `test {
   assert(v == 14, "same Ref in two arg positions, got " + v.to_string());
 }
 
-// §17.4: "`config` still usable here — it was duplicated, not moved." The
+// language-design.md#ownership-across-goroutines: "`config` still usable here — it was duplicated, not moved." The
 // spawner keeps its own handle and may go on using it after the spawn.
 call_still_usable_after_spawn() `test {
   r := Ref[int](7);
@@ -244,7 +244,7 @@ call_copy_arg_no_retain() `test {
 
 // --- reached with c.typeSubst active ---------------------------------------
 
-// A generic spawner, so codegen reaches the §17.4 arm inside a monomorphized
+// A generic spawner, so codegen reaches the language-design.md#ownership-across-goroutines arm inside a monomorphized
 // body where the argument type must be substituted before it can be classified.
 // Two instantiations, to be sure the substitution is per-instance.
 spawn_generic_ref[T](T seed, channel[int] done) {
@@ -377,7 +377,7 @@ failable_go_call_ref_error() `test {
 }
 
 // --- Borrows that are not a plain local or parameter -----------------------
-// §17.4 is about the handle crossing the boundary, not about how the name that
+// language-design.md#ownership-across-goroutines is about the handle crossing the boundary, not about how the name that
 // carries it happens to be bound. Every shape below is a BORROW whose owner
 // stays behind, so each must be duplicated; keying the retain off the binding
 // kind would have covered only the first two sections of this file.
@@ -405,7 +405,7 @@ for_in_binding_over_handles() `test {
   assert(sum == 7, "for-in handle binding, got " + sum.to_string());
 }
 
-// A `~` mutable-borrow parameter. `Ref[T]` is `sharable, so §17.4's table
+// A `~` mutable-borrow parameter. `Ref[T]` is `sharable, so language-design.md#ownership-across-goroutines's table
 // admits it where a non-sharable `T~` would be rejected outright.
 relay_mut_borrow(Ref[int] ~r, channel[int] done) {
   go send_ref(r, done);

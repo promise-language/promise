@@ -16,7 +16,7 @@ import (
 // The clone is a distinct inode that shares src's blocks until one of them is
 // written, so materializing a 375 MB toolchain view costs metadata rather than
 // 375 MB of I/O — and PatchAndSignMachO may still rewrite the result without
-// touching the CAS blob, which §5.1 requires to stay the raw upstream bytes
+// touching the CAS blob, which distribution.md#macos requires to stay the raw upstream bytes
 // (T2133). A hardlink would be cheaper still and is exactly what that rule
 // forbids here.
 //
@@ -31,7 +31,7 @@ func CloneFile(src, dst string) error {
 }
 
 // PatchAndSignMachO patches an extracted LLVM Mach-O file so it can find
-// libLLVM in its own directory, then re-signs it ad-hoc (§5.1). Lifted verbatim
+// libLLVM in its own directory, then re-signs it ad-hoc (distribution.md#macos). Lifted verbatim
 // from the old extractCompressedLLVM macOS block (main.go). Homebrew tools set
 // @rpath to @loader_path/../lib and may hardcode absolute Homebrew dylib paths;
 // we:

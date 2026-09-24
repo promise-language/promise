@@ -20,7 +20,7 @@ import (
 // release artifacts the consumer side (T0769/T0770) reads: the dependency blobs,
 // the embedded runtime manifest with ranked acquisition sources, the thin/full
 // compiler variants, and the manifest-integrity gate. See T0773 and
-// docs/release-automation.md §2 (build-order).
+// docs/release-automation.md#the-build-order-constraint (build-order).
 //
 // Hosting (authoritative, T0773 planning): prebuilt blobs are published as
 // **GitHub release assets** on github.com/promise-language/promise, named by
@@ -87,7 +87,7 @@ subcommands:
              [--notes-file <path>|-] [--notes <text>]
   cut stable [--dry-run] [--reason <text>] [--commit <commit>] [--run-ci] [--no-ci-wait] [--confirm-year]
              [--notes-file <path>|-] [--notes <text>]
-        gated release orchestrator (T0943, docs/release-automation.md §6.3).
+        gated release orchestrator (T0943, docs/release-automation.md#cutting-with-enforced-gates).
         cut next refreshes the moving epoch-next pre-release at HEAD; cut stable
         derives the epoch (no --epoch flag), runs every gate, then tags, pushes,
         and bumps catalog.toml — all only when every gate is green. --dry-run
@@ -220,7 +220,7 @@ func llvmTargetEntry(root, target string) (*PrebuiltsManifest, *TargetEntry, err
 	return pm, t, nil
 }
 
-// runReleaseBlobs collects the host's dependency blobs into --out (§2 step 1).
+// runReleaseBlobs collects the host's dependency blobs into --out (release-automation.md#the-build-order-constraint step 1).
 //
 // Today that is the host LLVM toolchain (opt/llc/lld), fetched into the prebuilts
 // cache by FetchAll and copied out raw+executable. Each file is named by its
@@ -280,7 +280,7 @@ func runReleaseBlobs(root string, args []string) error {
 }
 
 // runReleaseManifest hashes the collected blobs, packs hash-named artifacts for
-// upload, and writes the embedded manifest with ranked sources (§2 steps 2–3).
+// upload, and writes the embedded manifest with ranked sources (release-automation.md#the-build-order-constraint steps 2–3).
 //
 // With --from-catalog (T0797), the mode flips: no blobs need to be staged
 // locally. Sha/size/sources come straight from `tools/build/blobs.json` (the
@@ -375,7 +375,7 @@ func runReleaseManifest(root string, args []string) error {
 	// Pack each blob brotli-compressed under "<content hash><suffix>".
 	// Content-addressed names make this idempotent across releases: an unchanged
 	// dependency hashes the same, so the (already-compressed) artifact exists and
-	// is left untouched — never recompressed (brotli-11 is slow; §3).
+	// is left untouched — never recompressed (brotli-11 is slow; release-automation.md#prebuilt-blobs).
 	if err := os.MkdirAll(*pack, 0o755); err != nil {
 		return err
 	}
@@ -385,7 +385,7 @@ func runReleaseManifest(root string, args []string) error {
 	for i, f := range tEntry.ClientFiles() {
 		src := filepath.Join(blobsDir, f.Out)
 		dst := filepath.Join(*pack, entries[i].SHA256+suffix)
-		if !Exists(dst) { // same hash already packed → reuse (brotli-11 is slow; §3)
+		if !Exists(dst) { // same hash already packed → reuse (brotli-11 is slow; release-automation.md#prebuilt-blobs)
 			if err := compressFileBrotli(src, dst); err != nil {
 				return fmt.Errorf("pack %s: %w", f.Out, err)
 			}
@@ -522,7 +522,7 @@ func BuildRuntimeManifestFromCatalog(root, target, epoch string) (*runtimeManife
 // catalog-miss note.
 //
 // Which arches land here is a host-workflow decision, matching the "full binary
-// pre-stages the host workflow" rule (distribution.md §1.2): a Linux host gets
+// pre-stages the host workflow" rule (distribution.md#variants): a Linux host gets
 // its OWN arch, so `promise build` can resolve the files even when the binary
 // carries no embedded copy. A non-Linux host gets none — a darwin box only
 // needs them once cross-compilation lands, and emitting entries it can't use
@@ -639,7 +639,7 @@ func runReleaseManifestFromCatalog(root, host, outPath string) error {
 	return nil
 }
 
-// runReleaseVerifyManifest is the build-time integrity gate (§5 publish job): for
+// runReleaseVerifyManifest is the build-time integrity gate (language-design.md#type-system publish job): for
 // every manifest entry it locates a packaged artifact in --against and fails the
 // run on any sha256 mismatch or missing artifact, so a bogus entry never reaches
 // users. The build-time counterpart to T0771's runtime CAS verify+repair.
@@ -725,7 +725,7 @@ func verifyManifestEntry(e runtimeManifestEntry, againstDir string) error {
 }
 
 // compressFileBrotli streams src → dst brotli-compressed at the maximum quality
-// (level 11; docs/release-automation.md §3). Slow but rare (only on a new
+// (level 11; docs/release-automation.md#prebuilt-blobs). Slow but rare (only on a new
 // dependency version) and content-cacheable; the resolver decompresses on fetch.
 func compressFileBrotli(src, dst string) error {
 	in, err := os.Open(src)

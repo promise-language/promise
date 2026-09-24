@@ -1477,8 +1477,8 @@ var t1883Shapes = []struct {
 
 // T1883: the bare form of implicit error propagation must generate *exactly*
 // what the explicit `?^` form generates, at every site that unwraps one.
-// §7.2 of docs/language-design.md gives the bare form in "all expression
-// positions" and §11 calls `?^` "equivalent to a bare failable call", so
+// language-design.md#calling-failable-functions of docs/language-design.md gives the bare form in "all expression
+// positions" and language-design.md#strings-and-interpolation calls `?^` "equivalent to a bare failable call", so
 // byte-identical function bodies are the language's own claim, not a proxy for
 // it — and unlike a `AssertContains(drop)` spot-check it cannot pass by
 // emitting the drop in the wrong place.

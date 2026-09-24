@@ -19,7 +19,7 @@ func TestUpdateURLKeyedEntry(t *testing.T) {
 	epoch := cli.CompilerEpoch(t)
 
 	// Create a local bare git repo with two module commits; the newer one carries
-	// the epoch-<E> tag the resolver should re-resolve to (§9.8 step 3).
+	// the epoch-<E> tag the resolver should re-resolve to (module-system.md#cross-epoch-module-versioning step 3).
 	bareDir := filepath.ToSlash(clitest.ShortRepoDir(t))
 	workDir := clitest.ShortRepoDir(t)
 	projDir := clitest.TempDir(t)

@@ -1302,7 +1302,7 @@ func (c *Compiler) emitViewMethodAdapter(
 			// { i8* typeinfo, i8* payload }, so load the concrete receiver from field 1.
 			// Asking about the representation rather than listing the handle types
 			// keeps this in step with the box site and covers any future handle
-			// (annotations.md §1).
+			// (annotations.md#the-one-declaration-rule).
 			boxType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
 			typedPtr := c.block.NewBitCast(params[paramIdx], irtypes.NewPointer(boxType))
 			payloadField := c.block.NewGetElementPtr(boxType, typedPtr,

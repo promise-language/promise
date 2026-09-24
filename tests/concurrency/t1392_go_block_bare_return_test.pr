@@ -6,7 +6,7 @@
 // Codegen now stores a DEFINED default on that exit (storeGoResultDefault), so `<-t`
 // observes a defined value and never a spurious error.
 //
-// T1385/§17.2: a bare `return;` on a VALUE-producing path is now a compile error
+// T1385/language-design.md#explicit-concurrency: a bare `return;` on a VALUE-producing path is now a compile error
 // ("missing return value (expected T)"), so every body that can reach this exit is
 // `T = Void`. That narrows what the default has to be: a plain `go {}` void body has
 // no result buffer at all (the caller stores the 0x1 sentinel), and a `go! {}` void
@@ -14,7 +14,7 @@
 // {ok, null}. The value side of the original coverage moved to
 // t1385_go_block_return_test.pr, where an explicit `return <expr>` produces one.
 //
-// §17.2 keys that rule on the BLOCK alone, so a discarded fire-and-forget
+// language-design.md#explicit-concurrency keys that rule on the BLOCK alone, so a discarded fire-and-forget
 // `go { … };` statement is rejected identically to a bound one — the fire-and-forget
 // bodies below are therefore void (binding the non-void call, `ignored := …`, is one
 // of the two documented repairs).

@@ -1,10 +1,10 @@
 // T2171: a refcounted `sharable handle reaching a goroutine from a for-in
 // BINDING — over a vector, a fixed-size array or a map — must be duplicated at
-// the spawn boundary (docs/language-design.md §17.4). The two block spawn sites
+// the spawn boundary (docs/language-design.md#ownership-across-goroutines). The two block spawn sites
 // keyed their duplication off the captured name's BINDING KIND — an owned local's
 // drop binding, or a borrowed value parameter — and such a binding is neither: it
 // ALIASES the container's element storage, and the container's owner drops it,
-// elements and all, while the goroutine still holds the pointer. §17.4 conditions
+// elements and all, while the goroutine still holds the pointer. language-design.md#ownership-across-goroutines conditions
 // the duplication on the TYPE being `sharable, never on how the name is bound.
 //
 // Every case below spawns from a helper, so the container is dropped at that
@@ -297,7 +297,7 @@ block_forin_weak() `test {
 }
 
 // --- the retain is balanced: the referent outlives every handle ------------
-// §17.4: "the referent cannot be freed while any handle survives". The container
+// language-design.md#ownership-across-goroutines: "the referent cannot be freed while any handle survives". The container
 // and its clone both die in the helper and the goroutine releases what the spawn
 // retained, so the caller's original must still be readable — an over-release
 // would free the referent under it, an unbalanced retain would leak (the harness

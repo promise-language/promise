@@ -21,7 +21,7 @@ type targetSpec struct {
 // knownTargets returns every triple this compiler can generate LLVM IR for.
 //
 // The list is a static property of the compiler: it never varies with what is
-// installed or cached on the host (docs/distribution.md §1.1/§4 — dependencies
+// installed or cached on the host (docs/distribution.md#what-is-always-in-the-binary-and-what-is-fetched-on-demand/distribution.md#the-dependency-store — dependencies
 // are content-addressed blobs named by the embedded manifest, so a cold cache
 // means "not fetched yet", never "unsupported"). Generating IR needs no
 // sysroot, CRT or linker, so `emit-ir` validates against this set, while the

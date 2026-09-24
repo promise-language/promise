@@ -23,9 +23,9 @@ const (
 )
 
 // metaTargetWords maps each sema.MetaTarget constant to the word annotations.md
-// §6 spells it with, and metaValueWords does the same for sema.metaValueKind.
+// the Index spells it with, and metaValueWords does the same for sema.metaValueKind.
 // Encountering a constant absent from either map is a hard error rather than a
-// skip: a new declaration kind or value form is a change to what §6 can express,
+// skip: a new declaration kind or value form is a change to what the Index can express,
 // so it must force this check to be updated instead of silently passing.
 var metaTargetWords = map[string]string{
 	"TargetType":    "types",
@@ -36,8 +36,8 @@ var metaTargetWords = map[string]string{
 	"TargetParam":   "parameters",
 	"TargetVariant": "variants",
 	// TargetReturn is declared in sema but no annotation targets a return
-	// type, so §6 has no word for one. Registering the first such annotation
-	// must fail here until §6 gains the spelling — which is the point.
+	// type, so the Index has no word for one. Registering the first such annotation
+	// must fail here until the Index gains the spelling — which is the point.
 }
 
 var metaValueWords = map[string]string{
@@ -53,9 +53,9 @@ var metaValueWords = map[string]string{
 type annotationGapKind int
 
 const (
-	// gapUndocumented — the compiler registers a name §6 has no row for.
+	// gapUndocumented — the compiler registers a name the Index has no row for.
 	gapUndocumented annotationGapKind = iota
-	// gapUnregistered — §6 has a row naming nothing the compiler registers.
+	// gapUnregistered — the Index has a row naming nothing the compiler registers.
 	gapUnregistered
 	// gapTargets — the row's targets disagree with builtinMetas.
 	gapTargets
@@ -66,13 +66,13 @@ const (
 func (k annotationGapKind) String() string {
 	switch k {
 	case gapUndocumented:
-		return "registered by the compiler with no row in " + annotationsDoc + " §6"
+		return "registered by the compiler with no row in " + annotationsDoc + "#index"
 	case gapUnregistered:
-		return "has a row in " + annotationsDoc + " §6 but the compiler registers no such annotation"
+		return "has a row in " + annotationsDoc + "#index but the compiler registers no such annotation"
 	case gapTargets:
-		return "targets in " + annotationsDoc + " §6 disagree with builtinMetas"
+		return "targets in " + annotationsDoc + "#index disagree with builtinMetas"
 	case gapParameters:
-		return "parameters in " + annotationsDoc + " §6 disagree with metaParamSpecs"
+		return "parameters in " + annotationsDoc + "#index disagree with metaParamSpecs"
 	}
 	return "unknown gap"
 }
@@ -90,10 +90,10 @@ type annotationGap struct {
 // A gap listed here is not reported; a gap that is not listed is.
 //
 // It lives in this file rather than in the document because docs/org/normative.md
-// §3 makes a specification a statement of the end state carrying no status, and
+// "A specification states the end state" makes a specification a statement of the end state carrying no status, and
 // no inline marker naming an item. The tag query is the status section, so the
 // exception ledger belongs to the checker — which is the rule docs/normative.md
-// §5 states in the other direction.
+// "What is checked" states in the other direction.
 //
 // The item ID is for the reader. Pre-commit runs offline and cannot reach the
 // tracker, so nothing here verifies the item is still open — that is review's
@@ -105,22 +105,22 @@ var annotationGaps = map[string][]annotationGap{
 	"inline": {{gapUndocumented, "T1922", "inlining hint with no codegen consumer; implement or delete"}},
 	"packed": {{gapUndocumented, "T1922", "layout directive with no codegen consumer; implement or delete"}},
 
-	// T1923 — the field-placement surface §9 does not admit.
-	"instance": {{gapUndocumented, "T1923", "explicit spelling of the default placement; §16 rejects it"}},
-	"variant":  {{gapUndocumented, "T1923", "per-monomorphization field placement; §9 and §16 forbid it"}},
-	"value":    {{gapTargets, "T1923", "registered on methods too, where it is inert; §9 makes it a field placement"}},
+	// T1923 — the field-placement surface the Field placement section does not admit.
+	"instance": {{gapUndocumented, "T1923", "explicit spelling of the default placement; the Not annotations table rejects it"}},
+	"variant":  {{gapUndocumented, "T1923", "per-monomorphization field placement; Field placement and the Not annotations table forbid it"}},
+	"value":    {{gapTargets, "T1923", "registered on methods too, where it is inert; Field placement makes it a field placement"}},
 
-	// T1564 — §13 requires the symbol; the contract still makes it optional.
-	"extern": {{gapParameters, "T1564", "`symbol` is optional in metaParamSpecs; §13 requires it"}},
+	// T1564 — Foreign interfaces requires the symbol; the contract still makes it optional.
+	"extern": {{gapParameters, "T1564", "`symbol` is optional in metaParamSpecs; Foreign interfaces requires it"}},
 
 	// T2017 / T2018 — parameters the document does not admit.
-	"deprecated": {{gapParameters, "T2017", "accepts named `since` and a second spelling of `message`; §11 specifies one positional `message`"}},
-	"test":       {{gapParameters, "T2018", "accepts `allow_leaks`; §12 lists four parameters and §16 rejects it"}},
+	"deprecated": {{gapParameters, "T2017", "accepts named `since` and a second spelling of `message`; Visibility and documentation specifies one positional `message`"}},
+	"test":       {{gapParameters, "T2018", "accepts `allow_leaks`; Testing lists four parameters and the Not annotations table rejects it"}},
 
 	// Specified ahead of implementation — the document leads, as it may.
-	"builtin": {{gapUnregistered, "T1413", "specified in §10 with its full role table; not yet registered"}},
-	"open":    {{gapUnregistered, "T1537", "specified in §10 with §5.4's transition table; not yet registered"}},
-	"sealed":  {{gapUnregistered, "T1537", "specified in §10 with §5.4's transition table; not yet registered"}},
+	"builtin": {{gapUnregistered, "T1413", "specified in Type shape dispatch and construction with its full role table; not yet registered"}},
+	"open":    {{gapUnregistered, "T1537", "specified in Type shape dispatch and construction with language-design.md's transition table; not yet registered"}},
+	"sealed":  {{gapUnregistered, "T1537", "specified in Type shape dispatch and construction with language-design.md's transition table; not yet registered"}},
 }
 
 // annotationParam is one declared parameter, in the form both the document and
@@ -140,26 +140,26 @@ type annotationSpec struct {
 	named      []annotationParam // sorted by name
 }
 
-// checkAnnotationCoverage reconciles docs/annotations.md §6 — the normative
+// checkAnnotationCoverage reconciles docs/annotations.md Index — the normative
 // list of annotations — against builtinMetas and metaParamSpecs, the compiler's
 // registration of the same closed set. Eight assertions:
 //
-//  1. every registered annotation has a §6 row;
-//  2. every §6 row names a registered annotation;
+//  1. every registered annotation has a Index row;
+//  2. every Index row names a registered annotation;
 //  3. each row's targets and parameters match the Go tables;
-//  4. every §6 name has an entry of its own (a heading, or a row in a grouped
+//  4. every Index name has an entry of its own (a heading, or a row in a grouped
 //     entry table) — a row with no entry documents nothing;
-//  5. every entry names a §6 row, so no entry documents a non-annotation;
-//  6. each entry's Targets/Parameters line repeats its own §6 row — the
+//  5. every entry names a Index row, so no entry documents a non-annotation;
+//  6. each entry's Targets/Parameters line repeats its own Index row — the
 //     document renders the contract twice, and the two copies must agree;
-//  7. §6 and §16 "Not annotations" are disjoint, so no name is both part of
+//  7. the Index and "Not annotations" are disjoint, so no name is both part of
 //     the language and rejected by it;
 //  8. builtinMetas and metaParamSpecs describe the same set of names.
 //
 // Known divergences are excused by annotationGaps, which is itself checked for
 // staleness. Only assertions 1-3 are ledgerable: the rest are the document's
 // internal consistency, which nothing outside the document can excuse. Without
-// all of this the document drifts exactly as language-design.md §8.3 did:
+// all of this the document drifts exactly as language-design.md's annotation section did:
 // thirteen missing rows is what an unchecked table looks like after two years.
 //
 // A tree with no compiler source is not a Promise checkout (RunStructuralChecks
@@ -285,34 +285,34 @@ func checkAnnotationCoverage(root string) error {
 	// (4) A row with no entry of its own documents nothing but its own name,
 	// and (6) an entry that does have one must repeat that row rather than
 	// paraphrase it. The second is what keeps the document's two renderings
-	// of one contract from drifting the way §6 and the Go tables would
+	// of one contract from drifting the way the Index and the Go tables would
 	// without assertions 1-3.
 	for _, name := range doc.order {
 		entry, ok := doc.entry[name]
 		if !ok {
 			problems = append(problems, fmt.Sprintf(
-				"  `%s has a §6 row but no entry in %s", name, annotationsDoc))
+				"  `%s has an Index row but no entry in %s", name, annotationsDoc))
 			continue
 		}
 		row := doc.index[name]
 		if !equalStrings(entry.targets, row.targets) {
 			problems = append(problems, fmt.Sprintf(
-				"  `%s: the entry says targets %q, its §6 row says %q",
+				"  `%s: the entry says targets %q, its Index row says %q",
 				name, renderTargets(entry.targets), renderTargets(row.targets)))
 		}
 		if !equalParams(entry.positional, row.positional) || !equalParams(entry.named, row.named) {
 			problems = append(problems, fmt.Sprintf(
-				"  `%s: the entry says parameters %q, its §6 row says %q",
+				"  `%s: the entry says parameters %q, its Index row says %q",
 				name, renderParams(entry), renderParams(row)))
 		}
 	}
 
-	// (5) An entry for a name §6 does not list documents something that is
+	// (5) An entry for a name the Index does not list documents something that is
 	// not an annotation — the mirror of (4).
 	for _, name := range sortedNames(doc.entry) {
 		if _, ok := doc.index[name]; !ok {
 			problems = append(problems, fmt.Sprintf(
-				"  `%s has an entry in %s but no §6 row", name, annotationsDoc))
+				"  `%s has an entry in %s but no Index row", name, annotationsDoc))
 		}
 	}
 
@@ -320,7 +320,7 @@ func checkAnnotationCoverage(root string) error {
 	for _, name := range doc.order {
 		if doc.rejected[name] {
 			problems = append(problems, fmt.Sprintf(
-				"  `%s is listed both in %s §6 and in its \"Not annotations\" table", name, annotationsDoc))
+				"  `%s is listed both in %s#index and in its \"Not annotations\" table", name, annotationsDoc))
 		}
 	}
 
@@ -344,14 +344,14 @@ func ledgeredGap(name string, kind annotationGapKind) bool {
 
 // annotationDoc is what the reconciliation needs to read out of the document.
 //
-// index and entry are the document's two renderings of one contract — the §6
+// index and entry are the document's two renderings of one contract — the Index
 // row and the entry that expands it — so both are parsed into the same shape
 // and compared. A name present in one and not the other is itself a finding.
 type annotationDoc struct {
-	index    map[string]annotationSpec // §6 rows, by annotation name
-	order    []string                  // §6 row order, so findings read top to bottom
+	index    map[string]annotationSpec // Index rows, by annotation name
+	order    []string                  // Index row order, so findings read top to bottom
 	entry    map[string]annotationSpec // the Targets/Parameters an entry declares
-	rejected map[string]bool           // §16 "Not annotations"
+	rejected map[string]bool           // "Not annotations"
 }
 
 // annotationIndexHeader and annotationRejectedHeader locate the document's
@@ -359,9 +359,9 @@ type annotationDoc struct {
 // renumbering the document cannot silently disable half the check. A missing
 // table is a finding, never a skip.
 //
-// Several tables carry the index signature: the first is §6 itself, and each
+// Several tables carry the index signature: the first is the Index itself, and each
 // later one is a *grouped entry* — annotations documented as a table row
-// instead of a heading each, as §15's field annotations are. They are read the
+// instead of a heading each, as "Serialization"'s field annotations are. They are read the
 // same way because they say the same thing, which is what lets one comparison
 // cover both.
 var (
@@ -372,7 +372,7 @@ var (
 // docParam matches one rendered parameter: `name` (kind, positional|named[, optional]).
 var docParam = regexp.MustCompile("^`([A-Za-z_][A-Za-z0-9_]*)`\\s*\\(\\s*([a-z-]+)\\s*,\\s*(positional|named)\\s*(,\\s*optional\\s*)?\\)$")
 
-// entrySchema matches an entry's opening line, which restates its §6 row:
+// entrySchema matches an entry's opening line, which restates its Index row:
 //
 //   - **Targets** types, enums · **Parameters** — none
 //
@@ -380,7 +380,7 @@ var docParam = regexp.MustCompile("^`([A-Za-z_][A-Za-z0-9_]*)`\\s*\\(\\s*([a-z-]
 var entrySchema = regexp.MustCompile(`^- \*\*Targets\*\* (.+?) · \*\*Parameters\*\* (.+)$`)
 
 // parseAnnotationDoc reads what the reconciliation compares out of
-// annotations.md: the §6 index, the "Not annotations" table, and every entry —
+// annotations.md: the Index table, the "Not annotations" table, and every entry —
 // whether it is a `###` heading with a schema line or a row in a grouped entry
 // table.
 func parseAnnotationDoc(path string) (annotationDoc, error) {
@@ -451,21 +451,25 @@ func parseAnnotationDoc(path string) (annotationDoc, error) {
 	}
 
 	// The other kind of entry is a `###` heading, which may name a pair —
-	// "`sendable` / `sharable`" — in which case its schema line speaks for
+	// "sendable and sharable" — in which case its schema line speaks for
 	// both, and the two rows it repeats must therefore agree.
+	//
+	// The schema line, not the heading's spelling, is what makes a heading an
+	// entry: heading text is letters, digits and spaces only (org/normative
+	// #sections), so an entry heading looks exactly like a section heading and
+	// nothing in it can mark the difference. A heading whose schema line is
+	// missing is therefore read as a section and contributes no entry — which
+	// assertion 4 reports as the row having no entry at all, the same finding
+	// by a different name.
 	for i, line := range lines {
 		if !strings.HasPrefix(line, "### ") {
 			continue
 		}
-		names := headingNames(line)
-		if len(names) == 0 {
-			continue // a section heading, not an entry
-		}
 		targetCell, paramCell, ok := entrySchemaLine(lines, i+1)
 		if !ok {
-			return annotationDoc{}, fmt.Errorf("annotation coverage: %s: the entry %q has no "+
-				"\"- **Targets** … · **Parameters** …\" line", annotationsDoc, strings.TrimPrefix(line, "### "))
+			continue // a section heading, not an entry
 		}
+		names := headingNames(line)
 		spec, err := parseDocSpec(targetCell, paramCell)
 		if err != nil {
 			return annotationDoc{}, fmt.Errorf("annotation coverage: %s: the entry %q: %w",
@@ -635,16 +639,18 @@ func annotationName(cell string) string {
 }
 
 // headingNames extracts every name from an entry heading, so a heading covering
-// a pair — one naming `sendable and `sharable together — documents both. A
-// heading with no backticks names a section rather than an annotation ("###
-// Field annotations") and contributes nothing.
+// a pair — one naming `sendable and `sharable together — documents both.
+//
+// A heading carries no punctuation, so the two spellings an annotation name can
+// need are restored here: " and " separates the names in a pair, and a space
+// inside one name stands for the underscore the name is written with
+// everywhere else ("not sendable" is `not_sendable). Neither substitution is
+// ambiguous — no annotation is named "and", and none contains a real space.
 func headingNames(line string) []string {
 	var names []string
-	for _, part := range strings.Split(strings.TrimPrefix(line, "### "), "/") {
-		if !strings.Contains(part, "`") {
-			continue
-		}
-		if name := annotationName(part); name != "" {
+	for _, part := range strings.Split(strings.TrimPrefix(line, "### "), " and ") {
+		name := strings.Join(strings.Fields(part), "_")
+		if name != "" {
 			names = append(names, name)
 		}
 	}
@@ -680,7 +686,7 @@ func parseBuiltinMetas(path string) (map[string][]string, error) {
 			word, ok := metaTargetWords[id.Name]
 			if !ok {
 				return nil, fmt.Errorf("annotation coverage: %s: unknown MetaTarget %s — add it to "+
-					"metaTargetWords in tools/build/common/annotationcheck.go, and give %s a spelling in %s §6",
+					"metaTargetWords in tools/build/common/annotationcheck.go, and give %s a spelling in %s#index",
 					filepath.ToSlash(path), id.Name, id.Name, annotationsDoc)
 			}
 			targets = append(targets, word)
@@ -751,7 +757,7 @@ func parseGoParamSpec(path, name string, value goast.Expr) (annotationSpec, erro
 				spec.named = named
 			default:
 				return spec, fmt.Errorf("annotation coverage: %s: metaParamSpecs[%q] has unknown field %q — "+
-					"a new field is a change to what %s §6 must record",
+					"a new field is a change to what %s#index must record",
 					filepath.ToSlash(path), name, field.Name, annotationsDoc)
 			}
 		}
@@ -809,7 +815,7 @@ func parseGoPositional(path, name string, value goast.Expr) ([]annotationParam, 
 				p.optional = id.Name == "true"
 			default:
 				return nil, fmt.Errorf("annotation coverage: %s: metaPositional has unknown field %q — "+
-					"a new field is a change to what %s §6 must record",
+					"a new field is a change to what %s#index must record",
 					filepath.ToSlash(path), field.Name, annotationsDoc)
 			}
 		}
@@ -847,7 +853,7 @@ func parseGoNamed(path, name string, value goast.Expr) ([]annotationParam, error
 	return out, nil
 }
 
-// goValueKind maps a metaValueKind constant to the word §6 spells it with.
+// goValueKind maps a metaValueKind constant to the word the Index spells it with.
 func goValueKind(path, name string, value goast.Expr) (string, error) {
 	id, ok := value.(*goast.Ident)
 	if !ok {
@@ -857,7 +863,7 @@ func goValueKind(path, name string, value goast.Expr) (string, error) {
 	word, ok := metaValueWords[id.Name]
 	if !ok {
 		return "", fmt.Errorf("annotation coverage: %s: unknown metaValueKind %s — add it to metaValueWords "+
-			"in tools/build/common/annotationcheck.go, and give %s a spelling in %s §6",
+			"in tools/build/common/annotationcheck.go, and give %s a spelling in %s#index",
 			filepath.ToSlash(path), id.Name, id.Name, annotationsDoc)
 	}
 	return word, nil
@@ -957,7 +963,7 @@ func equalParams(a, b []annotationParam) bool {
 }
 
 // renderTargets and renderParams write a spec in the document's own spelling,
-// so a finding can be pasted straight into the §6 row it is about.
+// so a finding can be pasted straight into the Index row it is about.
 func renderTargets(targets []string) string {
 	if len(targets) == 0 {
 		return "(none)"

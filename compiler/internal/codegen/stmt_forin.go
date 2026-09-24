@@ -74,7 +74,7 @@ func (c *Compiler) genForInIterableWith(eval func() value.Value) value.Value {
 
 // T1896: every value branch below evaluates the iterable with
 // genExprAutoPropagate, not genExpr. A for-in subject is an expression position
-// like any other (§7.2 of docs/language-design.md gives implicit propagation in
+// like any other (language-design.md#calling-failable-functions of docs/language-design.md gives implicit propagation in
 // "all expression positions"), so a bare failable call there must be unwrapped
 // before the value reaches the iteration emitter — previously the raw
 // {i1, i8*, i8*} result struct was handed to genForInVector, which GEP'd it as

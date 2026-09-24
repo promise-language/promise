@@ -25,7 +25,7 @@ func (c *Compiler) genVectorLen(e *ast.MemberExpr) value.Value {
 // genMapLen returns the length of a map via the runtime.
 // foldWideToI64 folds a wide integer value (width a multiple of 64) down to a
 // single i64 by XOR-ing its 64-bit limbs, so wide types can feed the uniform
-// i64 hash interface (§3.5 of docs/large-integers.md).
+// i64 hash interface (large-integers.md#hash-output-width of docs/large-integers.md).
 func (c *Compiler) foldWideToI64(val value.Value, width uint64) value.Value {
 	wide := val.Type().(*irtypes.IntType)
 	// Lowest limb.

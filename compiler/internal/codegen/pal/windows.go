@@ -483,7 +483,7 @@ func (p *WindowsPAL) emitWinErrReturnI32(blk *ir.Block, winErr value.Value, errn
 //	6 = WRONLY create/append GENERIC_WRITE,              OPEN_ALWAYS  + _O_APPEND   (append)
 //	7 = RDWR create          GENERIC_READ|GENERIC_WRITE, OPEN_ALWAYS                (no trunc/append)
 //
-// Mode 7 backs the temporary-slot protocol in docs/io.md §3.4 — the slot is opened
+// Mode 7 backs the temporary-slot protocol in docs/io.md#orphan-reclamation — the slot is opened
 // before the lock decides whether it is stale, so it must neither truncate nor
 // append. OPEN_ALWAYS without _O_APPEND is exactly O_RDWR|O_CREAT.
 //
@@ -884,7 +884,7 @@ const winOverlappedSize = 32
 // concurrent read_content failed with EACCES (T1968). Locking a sentinel byte
 // no data operation can touch keeps the contention semantics (the range is the
 // same for every locker) while making the lock genuinely advisory, matching
-// flock and io.md §5.3. Locking beyond EOF is explicitly legal Win32.
+// flock and io.md#advisory-everywhere-and-windows-locks-a-sentinel-byte. Locking beyond EOF is explicitly legal Win32.
 const (
 	winLockSentinelOffLow  = 0xFFFFFFFE
 	winLockSentinelOffHigh = 0xFFFFFFFF
@@ -932,13 +932,13 @@ func (p *WindowsPAL) winEmitOsfHandleGuard(module *ir.Module, fn *ir.Func, entry
 // replaces the destination; plain MoveFile fails instead. MOVEFILE_WRITE_THROUGH
 // (0x8) makes the rename durable before returning, and is what lets pal_dir_sync
 // be a no-op on Windows — a directory handle cannot be flushed there, so the
-// guarantee docs/io.md §3.2 needs has to ride on the rename itself.
+// guarantee docs/io.md#why-the-final-sync-is-not-optional needs has to ride on the rename itself.
 //
 // MoveFileEx alone is not enough, though: its replace step is a classic
 // NtSetInformationFile(FileRenameInformation), which fails with
 // ERROR_ACCESS_DENIED while *any* handle to the destination is open — including
 // one opened with FILE_SHARE_DELETE, so T1742's share mode does not rescue it.
-// docs/io.md §6.2 states that an open file can be renamed over, so those two
+// docs/io.md#platform-differences-a-caller-can-observe states that an open file can be renamed over, so those two
 // error codes fall back to SetFileInformationByHandle(FileRenameInfoEx) with
 // FILE_RENAME_FLAG_POSIX_SEMANTICS — the Windows 10 1709+ primitive that behaves
 // as rename(2) does: the name is swapped immediately and the handles still open
@@ -1136,7 +1136,7 @@ func (p *WindowsPAL) winEmitPosixRename(module *ir.Module, fn *ir.Func, blk *ir.
 
 	// 7. FileRenameInfoEx has no MOVEFILE_WRITE_THROUGH equivalent, so the
 	//    directory entry is made durable by flushing the renamed file — that is
-	//    what keeps docs/io.md §3.2's promise (and pal_dir_sync's no-op) true on
+	//    what keeps docs/io.md#why-the-final-sync-is-not-optional's promise (and pal_dir_sync's no-op) true on
 	//    this path. Best-effort: the rename has already happened and cannot be
 	//    undone, so a flush failure must not turn a completed rename into an error.
 	flushBlk.NewCall(flushFileBuffers, handle)
@@ -1286,7 +1286,7 @@ func (p *WindowsPAL) EmitFileSync(module *ir.Module) *ir.Func {
 // EmitDirSync defines @pal_dir_sync as a no-op returning 0.
 //
 // A directory handle cannot be flushed on Windows; MOVEFILE_WRITE_THROUGH in
-// pal_file_rename carries the same guarantee instead (docs/io.md §3.2). The entry
+// pal_file_rename carries the same guarantee instead (docs/io.md#why-the-final-sync-is-not-optional). The entry
 // point still exists so a caller assembling the durable-write sequence by hand
 // writes one portable sequence rather than branching on the platform.
 func (p *WindowsPAL) EmitDirSync(module *ir.Module) *ir.Func {
@@ -1303,8 +1303,8 @@ func (p *WindowsPAL) EmitDirSync(module *ir.Module) *ir.Func {
 // LockFileEx locks a byte range; the range taken is the sentinel byte at
 // 2^64-2, not the file's data — see winLockSentinelOffLow for why (T1968).
 // Ownership is per HANDLE, which is what makes it match flock's
-// per-open-file-description model (docs/io.md §5.2), and with the sentinel
-// range it is advisory in effect too, as §5.3 records.
+// per-open-file-description model (docs/io.md#why-flock-and-what-it-costs), and with the sentinel
+// range it is advisory in effect too, as io.md#advisory-everywhere-and-windows-locks-a-sentinel-byte records.
 //
 // LOCKFILE_FAIL_IMMEDIATELY = 0x1, LOCKFILE_EXCLUSIVE_LOCK = 0x2.
 func (p *WindowsPAL) EmitFileLock(module *ir.Module) *ir.Func {
@@ -1350,7 +1350,7 @@ func (p *WindowsPAL) EmitFileLock(module *ir.Module) *ir.Func {
 	okBlk := fn.NewBlock(".ok")
 	blk.NewCondBr(failed, errBlk, okBlk)
 
-	// Contention must reach the Promise layer as the one code docs/io.md §7 names
+	// Contention must reach the Promise layer as the one code docs/io.md#errors names
 	// for "held elsewhere", or try_lock would raise where it should return false.
 	// ERROR_LOCK_VIOLATION (33) is translated here rather than in
 	// emitWinErrToErrno, which maps it to EINVAL for its other callers — there it
@@ -2350,7 +2350,7 @@ func (p *WindowsPAL) EmitSpawn(module *ir.Module) *ir.Func {
 }
 
 // EmitExecReplace defines @pal_exec_replace(i8* path, i8** argv) → i32 on Windows.
-// Windows has no true execve (§2.5 caveat): CreateProcessA launches path as a
+// Windows has no true execve (distribution.md#the-stub-launcher caveat): CreateProcessA launches path as a
 // child (inheriting the console/std handles), waits for it, and ExitProcess()es
 // with the child's exit code — so the same-PID/signal guarantee holds only on
 // Unix. Returns -1 only when the process cannot be launched (T0770).

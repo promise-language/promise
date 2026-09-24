@@ -4,7 +4,7 @@
 
 ---
 
-## 1. Design
+## Design
 
 Promise is distributed as **one downloadable artifact per platform** — the compiler binary. That single artifact is simultaneously:
 
@@ -13,22 +13,22 @@ Promise is distributed as **one downloadable artifact per platform** — the com
 - the **compiler / tool / package manager**, and
 - the **self-updater** (`promise update`).
 
-These are *logically one thing* — you download one file — but the stub is *physically a separate, tiny program* carried inside the compiler and extracted during install (§2.5). This is the resolution of "same binary vs different binaries": ship one, extract the small piece.
+These are *logically one thing* — you download one file — but the stub is *physically a separate, tiny program* carried inside the compiler and extracted during install ([The stub launcher](#the-stub-launcher)). This is the resolution of "same binary vs different binaries": ship one, extract the small piece.
 
-### 1.1 What is always in the binary vs fetched on demand
+### What is always in the binary and what is fetched on demand
 
 The original model embedded **everything** in the binary (~61 MB on Linux, more on macOS). That does not scale: a single binary cannot carry every dependency for every *cross-compilation target*. The target model separates two classes of payload:
 
 | Class | Examples | How it's carried |
 |-------|----------|------------------|
 | **Always embedded** (small, always needed) | Compiler frontend + codegen, standard library source, the tiny stub, the **dependency manifest** | Compiled in / `go:embed` |
-| **Fetched on demand** (large, target-specific) | LLVM host tools (`opt`, `llc`, `lld`, `libLLVM`), wasm runner (`wasmtime`/Node harness), CRTs (musl), target sysroots | Content-addressed cache (§4) |
+| **Fetched on demand** (large, target-specific) | LLVM host tools (`opt`, `llc`, `lld`, `libLLVM`), wasm runner (`wasmtime`/Node harness), CRTs (musl), target sysroots | Content-addressed cache ([The dependency store](#the-dependency-store)) |
 
-The binary embeds a **manifest** — one entry per heavy dependency, separating **content identity** (`logical name`, `sha256`, `size`) from **acquisition** (a ranked list of sources describing *how* to obtain it). The `sha256` identifies the blob's *content* — it is the cache key and the integrity check — **not** a download URL. At the moment a dependency is required, the compiler looks it up in the shared content-addressed cache (`~/.promise/cache/blobs/sha256/<hash>`); if present it is used, if absent it is acquired by trying the manifest's sources in order, **verified against the embedded `sha256`**, cached, and used. That hash is the **trust anchor** — an acquired blob needs no separate signature, only a content match. The acquisition layer is deliberately flexible (a source may be a direct download *or* a path inside a compressed archive); see §4 for the entry shape and why this matters for the private→public transition.
+The binary embeds a **manifest** — one entry per heavy dependency, separating **content identity** (`logical name`, `sha256`, `size`) from **acquisition** (a ranked list of sources describing *how* to obtain it). The `sha256` identifies the blob's *content* — it is the cache key and the integrity check — **not** a download URL. At the moment a dependency is required, the compiler looks it up in the shared content-addressed cache (`~/.promise/cache/blobs/sha256/<hash>`); if present it is used, if absent it is acquired by trying the manifest's sources in order, **verified against the embedded `sha256`**, cached, and used. That hash is the **trust anchor** — an acquired blob needs no separate signature, only a content match. The acquisition layer is deliberately flexible (a source may be a direct download *or* a path inside a compressed archive); see [The dependency store](#the-dependency-store) for the entry shape and why this matters for the private→public transition.
 
-### 1.2 Variants (thin / full / all)
+### Variants
 
-A variant differs only in **which blobs ship pre-staged into the cache**. The embedded compiler and the runtime fetch mechanism (§4) are *identical* across all variants — any blob not already in the cache is acquired the same way. The variant just changes how often that happens. So this is a packaging knob, a point on a spectrum, not three different programs:
+A variant differs only in **which blobs ship pre-staged into the cache**. The embedded compiler and the runtime fetch mechanism ([The dependency store](#the-dependency-store)) are *identical* across all variants — any blob not already in the cache is acquired the same way. The variant just changes how often that happens. So this is a packaging knob, a point on a spectrum, not three different programs:
 
 | Variant | Pre-staged blobs | Size (approx.) | Network |
 |---------|------------------|---------------|---------|
@@ -40,25 +40,25 @@ A variant differs only in **which blobs ship pre-staged into the cache**. The em
 
 **"Full" is host-workflow by default because bundling every target is large — not because of any mechanism limit.** Targeting `wasm32-wasi` or `linux-arm64` from a macOS host fetches those target blobs on a thin or full binary, and finds them already pre-staged on an **all** binary. Behavior is identical either way; only the disk-vs-network tradeoff differs. The **all** build is the choice for fully air-gapped cross-compilation and long-term archival ("must still work in 5 years, for every target, with no network").
 
-> **The `all` variant is designed now, shipped later.** Cross-compilation is not working yet, so cross-target blobs — and therefore the **all** variant — have nothing to pre-stage today. The point of describing it here is that the *mechanism requires no change*: an **all** build is just a full build with the cross-target blobs added to the pre-stage set; any blob that is missing is still fetched identically (§4). First releases ship **thin** and **full** only; the **all** variant is added once cross-compilation lands (it's a release-packaging step, not new runtime code).
+> **The `all` variant is designed now, shipped later.** Cross-compilation is not working yet, so cross-target blobs — and therefore the **all** variant — have nothing to pre-stage today. The point of describing it here is that the *mechanism requires no change*: an **all** build is just a full build with the cross-target blobs added to the pre-stage set; any blob that is missing is still fetched identically ([The dependency store](#the-dependency-store)). First releases ship **thin** and **full** only; the **all** variant is added once cross-compilation lands (it's a release-packaging step, not new runtime code).
 
-### 1.3 Why content-addressing (not per-epoch copies)
+### Why content addressing
 
-A content-addressed store **deduplicates across epochs and targets**. Two installed epochs built on the same LLVM 22 share **one** cached copy keyed by hash, instead of each epoch carrying its own `bin/llvm/`. Epoch directories shrink to *references* (which blob hashes they need); `promise remove <epoch>` becomes "drop this epoch's references, then GC blobs referenced by *no* installed epoch." That "no installed epoch" qualifier is load-bearing: because blobs are shared, GC must be rooted at the union of **all** installed epochs' manifests so removing one never deletes a blob another still uses — see §4's GC mechanism. This supersedes the per-epoch `bin/llvm/` layout in [epoch-versioned-installs.md](archive/epoch-versioned-installs.md).
+A content-addressed store **deduplicates across epochs and targets**. Two installed epochs built on the same LLVM 22 share **one** cached copy keyed by hash, instead of each epoch carrying its own `bin/llvm/`. Epoch directories shrink to *references* (which blob hashes they need); `promise remove <epoch>` becomes "drop this epoch's references, then GC blobs referenced by *no* installed epoch." That "no installed epoch" qualifier is load-bearing: because blobs are shared, GC must be rooted at the union of **all** installed epochs' manifests so removing one never deletes a blob another still uses — see [The dependency store](#the-dependency-store)'s GC mechanism. This supersedes the per-epoch `bin/llvm/` layout in [epoch-versioned-installs.md](archive/epoch-versioned-installs.md).
 
 ---
 
-## 2. Installation
+## Installation
 
-### 2.1 Linux & macOS — install script
+### The Linux and macOS install script
 
 ```sh
 curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh
 ```
 
-**Where the script comes from.** The install scripts are **published as GitHub release assets** by the release pipeline ([release-automation.md](release-automation.md) §5) — they are the committed `scripts/install.*` files, attached to every release (nothing *generates* them). `releases/latest/download/install.sh` is GitHub's stable redirect to the newest release's copy; a `promise-lang.org/install.sh` vanity redirect can front it later. Anonymous fetch requires the repo to be public — the same gate as the binaries (§1).
+**Where the script comes from.** The install scripts are **published as GitHub release assets** by the release pipeline ([release-automation.md](release-automation.md), under [Release workflow](release-automation.md#release-workflow)) — they are the committed `scripts/install.*` files, attached to every release (nothing *generates* them). `releases/latest/download/install.sh` is GitHub's stable redirect to the newest release's copy; a `promise-lang.org/install.sh` vanity redirect can front it later. Anonymous fetch requires the repo to be public — the same gate as the binaries ([Design](#design)).
 
-The script ([scripts/install.sh](../scripts/install.sh)) detects OS/arch, downloads the matching binary (**thin** by default) from the same release, verifies its SHA256 against `SHA256SUMS`, and runs `./binary install` (§2.4). It supports `--epoch` today; the `--full` / `--all` variant flags (which select the `-full` / `-all` asset suffixes, §2.3) are planned:
+The script ([scripts/install.sh](../scripts/install.sh)) detects OS/arch, downloads the matching binary (**thin** by default) from the same release, verifies its SHA256 against `SHA256SUMS`, and runs `./binary install` ([What install does](#what-install-does)). It supports `--epoch` today; the `--full` / `--all` variant flags (which select the `-full` / `-all` asset suffixes, [Direct download](#direct-download)) are planned:
 
 ```sh
 BASE=https://github.com/promise-language/promise/releases/latest/download
@@ -70,7 +70,7 @@ curl -sSfL $BASE/install.sh | sh -s -- --full      # planned (selects the -full 
 set, both `install.sh` and `install.ps1` **skip** GitHub release resolution and download
 the assets (`<asset>.gz`, `SHA256SUMS`) directly from that base URL. This is a manual
 **testing** hook for installing from a staged mirror — e.g. an R2/dist bucket produced by
-`bin/release publish-install` ([release-automation.md](release-automation.md) §5a):
+`bin/release publish-install` ([release-automation.md](release-automation.md), under [End to end install gate](release-automation.md#end-to-end-install-gate)):
 
 ```sh
 PROMISE_BASE_URL=https://<your-mirror>/dist sh install.sh --full
@@ -80,9 +80,9 @@ PROMISE_BASE_URL=https://<your-mirror>/dist sh install.sh --full
 users — GitHub releases are the only install source. `install.cmd` does **not** honor it
 (it always fetches `install.ps1` from GitHub).
 
-### 2.2 Windows — install script
+### The Windows install script
 
-> The committed [`scripts/install.ps1`](../scripts/install.ps1) (real implementation) and [`scripts/install.cmd`](../scripts/install.cmd) (thin shim) are attached to every release by the pipeline ([release-automation.md](release-automation.md) §5). As with §2.1, the `irm … | iex` one-liner only works for outside users once the repo (or a releases-only mirror) is public — the scripts and the binaries they fetch are release assets that currently require auth.
+> The committed [`scripts/install.ps1`](../scripts/install.ps1) (real implementation) and [`scripts/install.cmd`](../scripts/install.cmd) (thin shim) are attached to every release by the pipeline ([release-automation.md](release-automation.md), under [Release workflow](release-automation.md#release-workflow)). As with [The Linux and macOS install script](#the-linux-and-macos-install-script), the `irm … | iex` one-liner only works for outside users once the repo (or a releases-only mirror) is public — the scripts and the binaries they fetch are release assets that currently require auth.
 
 Windows needs **two one-liners**, one per shell, because the PowerShell idiom does not work in `cmd.exe` (`irm`/`iex` are PowerShell cmdlets — pasting them into `cmd.exe` yields `'irm' is not recognized`). This mirrors the Claude CLI installer:
 
@@ -96,18 +96,18 @@ irm https://github.com/promise-language/promise/releases/latest/download/install
 curl -fsSL https://github.com/promise-language/promise/releases/latest/download/install.cmd -o install.cmd && install.cmd && del install.cmd
 ```
 
-(Same hosting as §2.1 — `install.ps1` / `install.cmd` are committed in `scripts/` and attached to each release; a `promise-lang.org` vanity redirect can front them later.)
+(Same hosting as [The Linux and macOS install script](#the-linux-and-macos-install-script) — `install.ps1` / `install.cmd` are committed in `scripts/` and attached to each release; a `promise-lang.org` vanity redirect can front them later.)
 
-`install.ps1` is the real implementation (platform/arch detection, download, checksum, `promise install`, **User `PATH` via `[Environment]::SetEnvironmentVariable(..., 'User')`**). `install.cmd` is a **thin shim** that re-invokes PowerShell (`powershell -ExecutionPolicy Bypass -Command "irm … | iex"`) so there is a single real implementation. Direct download (§2.3) is the no-script fallback for locked-down environments.
+`install.ps1` is the real implementation (platform/arch detection, download, checksum, `promise install`, **User `PATH` via `[Environment]::SetEnvironmentVariable(..., 'User')`**). `install.cmd` is a **thin shim** that re-invokes PowerShell (`powershell -ExecutionPolicy Bypass -Command "irm … | iex"`) so there is a single real implementation. Direct download ([Direct download](#direct-download)) is the no-script fallback for locked-down environments.
 
 **Zero local dependencies is the bar — met on Windows (T0772) and Linux (T1774).** The Windows
 compiler embeds its own self-generated link surface (own import libs from
 license-clean `.def` symbol lists + codegen-emitted crt0/TLS/`__chkstk`), so
 installing on a fresh Windows machine "just works" with no "install Visual Studio
 Build Tools ≥ version X first" and no Microsoft `.lib` redistribution. macOS will
-embed its SDK stubs the analogous way (§5). See §5.2.
+embed its SDK stubs the analogous way ([Platform notes](#platform-notes)). See [Windows](#windows).
 
-### 2.3 Direct download
+### Direct download
 
 Published assets are **gzip-compressed** (T0796) — the `.gz` suffix follows the variant and any `.exe`. The decompressed binary name is the same `promise-<os>-<arch>[-<variant>][.exe]` shape (the **bare** name is the **thin** variant; the variant suffix goes *after* the target triple and before any `.exe`):
 
@@ -115,11 +115,11 @@ Published assets are **gzip-compressed** (T0796) — the `.gz` suffix follows th
 |---------|----------------------------|------------------------------|
 | thin (default) | `promise-linux-amd64.gz` / `promise-linux-amd64` | `promise-windows-amd64.exe.gz` / `promise-windows-amd64.exe` |
 | full | `promise-linux-amd64-full.gz` / `promise-linux-amd64-full` | `promise-windows-amd64-full.exe.gz` / `promise-windows-amd64-full.exe` |
-| all *(planned, §1.2)* | `promise-linux-amd64-all.gz` | `promise-windows-amd64-all.exe.gz` |
+| all *(planned, [Variants](#variants))* | `promise-linux-amd64-all.gz` | `promise-windows-amd64-all.exe.gz` |
 
 `SHA256SUMS` is computed over the **`.gz` asset** — the bytes that are downloaded — and the install scripts / `promise update` verify the checksum before decompressing.
 
-Gzip is the universal compressor: `gunzip` ships on every POSIX system, and Windows decompresses via the built-in `System.IO.Compression.GzipStream`. Brotli/zstd/xz would chicken-and-egg the bootstrap (the decompressor lives *inside* the promise binary, which is what we're trying to install). The brotli-11 compression in §4 / [release-automation.md](release-automation.md) §3 is a different path — for dependency blobs the *already-installed* promise binary fetches at runtime.
+Gzip is the universal compressor: `gunzip` ships on every POSIX system, and Windows decompresses via the built-in `System.IO.Compression.GzipStream`. Brotli/zstd/xz would chicken-and-egg the bootstrap (the decompressor lives *inside* the promise binary, which is what we're trying to install). The brotli-11 compression in [Build and test CI](release-automation.md#build-and-test-ci) / [release-automation.md](release-automation.md), under [Prebuilt blobs](release-automation.md#prebuilt-blobs) is a different path — for dependency blobs the *already-installed* promise binary fetches at runtime.
 
 ```sh
 # thin (default — smallest; fetches the host toolchain on first use)
@@ -137,14 +137,14 @@ chmod +x promise-linux-amd64-full
 
 `promise install` handles everything from here, regardless of variant.
 
-### 2.4 What `promise install` does
+### What install does
 
 `promise install` (`runInstall()` in [cmd/promise/main.go](../compiler/cmd/promise/main.go)) installs into the Promise home directory (default `~/.promise/`, overridable via `PROMISE_HOME`):
 
 1. **Determine the embedded epoch** from the embedded catalog.
 2. **Install the compiler** → `~/.promise/epochs/<epoch>/bin/promise` (move/copy self).
 3. **Stage dependencies**: a *full* binary unpacks its bundled blobs into the content-addressed cache (`~/.promise/cache/blobs/sha256/<hash>`); a *thin* binary records the manifest so they are fetched on first use.
-4. **Extract the stub — forward-only** → `~/.promise/bin/promise`. The stub is replaced **only if the embedded stub's version is newer** than the installed one — read from the `~/.promise/bin/.promise-stub-version` sidecar (a file read, *not* by executing the stub, which would trampoline; §2.5), and rewritten atomically alongside the stub. Stubs are never downgraded.
+4. **Extract the stub — forward-only** → `~/.promise/bin/promise`. The stub is replaced **only if the embedded stub's version is newer** than the installed one — read from the `~/.promise/bin/.promise-stub-version` sidecar (a file read, *not* by executing the stub, which would trampoline; [The stub launcher](#the-stub-launcher)), and rewritten atomically alongside the stub. Stubs are never downgraded.
 5. **Write `~/.promise/active`** with the current epoch.
 6. **Set `PATH`**: print the export line (Unix) or set the User `PATH` env var (Windows).
 
@@ -154,7 +154,7 @@ Resulting layout:
 ~/.promise/
   bin/
     promise               ← the tiny stub (Promise-compiled, forward-updated)
-    .promise-stub-version ← installed stub version (read by install — never executes the stub; §2.5)
+    .promise-stub-version ← installed stub version (read by install — never executes the stub; [The stub launcher](#the-stub-launcher))
   active                  ← "2026.0"
   epochs/
     2026.0/bin/promise   ← the real compiler for this epoch
@@ -163,7 +163,7 @@ Resulting layout:
     build/               ← compile cache
 ```
 
-### 2.5 The stub (launcher)
+### The stub launcher
 
 The on-`PATH` `~/.promise/bin/promise` is the **stub**: the thing the user runs, which does *not* compile anything itself — it locates the correct epoch's real compiler and hands off to it. (Synonyms seen elsewhere: *shim*, *launcher*, *trampoline*; they all mean this one object.)
 
@@ -179,17 +179,17 @@ The stub is a tiny Promise-written binary ([tools/stub/main.pr](../tools/stub/ma
 1. **Check its reserved env vars first.** If `PROMISE_STUB_VERSION` is set, the stub prints its own version and exits; `PROMISE_STUB_INFO` additionally prints the resolved epoch and the target binary it *would* exec. These are checked *before* epoch resolution. Using an **env var, not a flag**, keeps the stub a pure pass-through that **never parses args** — it forwards every argument untouched — and matches how it reads `PROMISE_EPOCH`. So `promise --version` still trampolines to the active compiler, as users expect; you opt into stub introspection explicitly via the env var.
 2. Resolve the target epoch: `PROMISE_EPOCH` → project `promise.toml` `[module].epoch` → `~/.promise/active`.
 3. `exec` `~/.promise/epochs/<epoch>/bin/promise`, forwarding all args.
-4. If that epoch is not installed → clear error directing the user to an **explicit** recovery: `run: promise install <epoch>` (stage it without changing the active epoch — §2.6) **or** edit `[module].epoch` in `promise.toml` to an already-installed epoch. The stub **never** auto-downloads the pinned epoch: `promise.toml` is attacker-controllable, so silently fetching+installing+executing the pinned toolchain on `promise build` would let a crafted repo run a known-vulnerable epoch. Auto-install on build is off by default, permanently — recovery is always an explicit user step. *(planned: T0977 — the stub today still prints the stale `promise update <epoch>` hint, which fails since `update` is forward-only; T0977 corrects the text and adds `install <epoch>`.)*
+4. If that epoch is not installed → clear error directing the user to an **explicit** recovery: `run: promise install <epoch>` (stage it without changing the active epoch — [Updating](#updating)) **or** edit `[module].epoch` in `promise.toml` to an already-installed epoch. The stub **never** auto-downloads the pinned epoch: `promise.toml` is attacker-controllable, so silently fetching+installing+executing the pinned toolchain on `promise build` would let a crafted repo run a known-vulnerable epoch. Auto-install on build is off by default, permanently — recovery is always an explicit user step. *(planned: T0977 — the stub today still prints the stale `promise update <epoch>` hint, which fails since `update` is forward-only; T0977 corrects the text and adds `install <epoch>`.)*
 
-The stub knows only the *epoch-resolution contract* (the `active` file format and the `promise.toml` epoch key) plus its own `PROMISE_STUB_*` env vars — a small, stable surface, not the full install layout. Because it does so little, **newer stubs are guaranteed to support older compilers**, which is what makes the forward-only update rule (§2.4 step 4) safe.
+The stub knows only the *epoch-resolution contract* (the `active` file format and the `promise.toml` epoch key) plus its own `PROMISE_STUB_*` env vars — a small, stable surface, not the full install layout. Because it does so little, **newer stubs are guaranteed to support older compilers**, which is what makes the forward-only update rule ([What install does](#what-install-does) step 4) safe.
 
-**Stub versioning & the forward-only rule.** §2.4 step 4 replaces the stub only when the installer's embedded stub is *newer* than the installed one — so the installer must discover the installed stub's version. It **cannot** rely on running the stub for this: the stub forwards args, so `~/.promise/bin/promise --version` trampolines to the active *compiler* and reports the compiler's version; and `PROMISE_STUB_VERSION` only works if the *installed* stub already understands it — an older stub that predates the var would just trampoline. Therefore:
-- **The install decision reads a sidecar file, never executes the stub.** Whenever the installer writes the stub it atomically writes its version to `~/.promise/bin/.promise-stub-version` next to it; §2.4 step 4 compares its embedded version against that file with a plain read. This is robust against an installed stub that is older, broken, or missing — and it is the only way to honor "never downgrade", since you cannot compare against a version you cannot read.
+**Stub versioning & the forward-only rule.** [What install does](#what-install-does) step 4 replaces the stub only when the installer's embedded stub is *newer* than the installed one — so the installer must discover the installed stub's version. It **cannot** rely on running the stub for this: the stub forwards args, so `~/.promise/bin/promise --version` trampolines to the active *compiler* and reports the compiler's version; and `PROMISE_STUB_VERSION` only works if the *installed* stub already understands it — an older stub that predates the var would just trampoline. Therefore:
+- **The install decision reads a sidecar file, never executes the stub.** Whenever the installer writes the stub it atomically writes its version to `~/.promise/bin/.promise-stub-version` next to it; [What install does](#what-install-does) step 4 compares its embedded version against that file with a plain read. This is robust against an installed stub that is older, broken, or missing — and it is the only way to honor "never downgrade", since you cannot compare against a version you cannot read.
 - **`PROMISE_STUB_VERSION=1 promise` is for humans and `promise doctor`** — a way to ask the *running* stub directly — *not* the mechanism the installer relies on.
 
 > **Windows `exec` caveat.** Windows has no true `execve`; the stub there does `CreateProcess` + wait + propagate the child's exit code. The same-PID guarantee holds only on Unix. Documented so the PID/signal reasoning above is not assumed on Windows.
 
-### 2.6 Updating
+### Updating
 
 The update channel (which release stream `update` follows) is **orthogonal** to the
 active epoch (which compiler runs builds). The channel is persisted in
@@ -211,11 +211,11 @@ active epoch (which compiler runs builds). The channel is persisted in
   **present on disk without activating it**: download + stage `epochs/<epoch>/`, leaving
   `~/.promise/active` untouched. This is the install-vs-activate split (rustup's `toolchain
   install` vs `default`): because epoch resolution prefers a project's `promise.toml` pin
-  over the active epoch (§2.5 step 2), a pinned project only needs its epoch **present** —
+  over the active epoch ([The stub launcher](#the-stub-launcher) step 2), a pinned project only needs its epoch **present** —
   it never needs to be active. This is the recovery the missing-epoch error points at
-  (§2.5 step 4), and it avoids the global side effects of activation (a later `promise init`
+  ([The stub launcher](#the-stub-launcher) step 4), and it avoids the global side effects of activation (a later `promise init`
   scaffolding the now-active epoch; other *unpinned* projects silently switching toolchains).
-  **`promise install` with no argument is unchanged — it is the bootstrap installer (§2.4),
+  **`promise install` with no argument is unchanged — it is the bootstrap installer ([What install does](#what-install-does)),
   a different operation on the critical install path.**
 - **`promise use <epoch>`** — activate a specific/historical epoch (= `install <epoch>`
   **+ set active**), **downloading it on demand** if not installed. The shared
@@ -228,24 +228,24 @@ Re-running install with a newer binary replaces the installation in place and fo
 
 ---
 
-## 3. Release Artifacts
+## Release Artifacts
 
-Each release publishes to **GitHub Releases** at `github.com/promise-language/promise`, tagged `epoch-YYYY.N`. See [release-automation.md](release-automation.md) for the full pipeline. Asset names follow `promise-<os>-<arch>[-<variant>][.exe].gz` — bare prefix = **thin**, `-full`, `-all` (variant suffix after the target; see §2.3). Binaries are **gzip-compressed only** (no raw asset is published — T0796).
+Each release publishes to **GitHub Releases** at `github.com/promise-language/promise`, tagged `epoch-YYYY.N`. See [release-automation.md](release-automation.md) for the full pipeline. Asset names follow `promise-<os>-<arch>[-<variant>][.exe].gz` — bare prefix = **thin**, `-full`, `-all` (variant suffix after the target; see [Direct download](#direct-download)). Binaries are **gzip-compressed only** (no raw asset is published — T0796).
 
 | Asset (bare prefix = thin / `-full` / `-all`) | Platform / role |
 |-------|-----------------|
 | `promise-linux-amd64.gz` / `-full.gz` / `-all.gz` | Linux x86_64 (musl static). thin + full; all *(planned)*. |
 | `promise-darwin-arm64.gz` / `-full.gz` / `-all.gz` | macOS Apple Silicon. thin + full; all *(planned)*. |
-| `promise-darwin-amd64.gz` | macOS Intel — *deferred* (unverifiable without working Xcode CLT; see [release-automation.md](release-automation.md) §7). |
+| `promise-darwin-amd64.gz` | macOS Intel — *deferred* (unverifiable without working Xcode CLT; see [release-automation.md](release-automation.md), under [Open items](release-automation.md#open-items)). |
 | `promise-windows-amd64.exe.gz` / `-full.exe.gz` / `-all.exe.gz` | Windows x86_64. thin + full; all *(planned)*. |
-| dependency blobs | Prebuilt dependencies (host LLVM, wasm runner, CRTs, sysroots) referenced by content `sha256` in the manifest. Acquired on demand by thin binaries. **How they're packaged is an acquisition detail** — one-file-per-hash assets, or a few compressed archives that each yield many blobs (§4). Not assumed to be one named download per hash. |
+| dependency blobs | Prebuilt dependencies (host LLVM, wasm runner, CRTs, sysroots) referenced by content `sha256` in the manifest. Acquired on demand by thin binaries. **How they're packaged is an acquisition detail** — one-file-per-hash assets, or a few compressed archives that each yield many blobs ([The dependency store](#the-dependency-store)). Not assumed to be one named download per hash. |
 | `SHA256SUMS` | Checksums for the top-level **`.gz` assets** (what's downloaded — verified before decompressing). |
 
-The install script downloads only the top-level binary (and `SHA256SUMS`); every dependency is acquired at runtime against the embedded manifest and verified by content `sha256` (§4).
+The install script downloads only the top-level binary (and `SHA256SUMS`); every dependency is acquired at runtime against the embedded manifest and verified by content `sha256` ([The dependency store](#the-dependency-store)).
 
 ---
 
-## 4. The dependency store
+## The dependency store
 
 ```
 ~/.promise/cache/
@@ -254,10 +254,10 @@ The install script downloads only the top-level binary (and `SHA256SUMS`); every
     7c21…/wasmtime
     a0e4…/libLLVM.dylib
   archives/sha256/
-    1b7c…                ← a cached archive (bandwidth optimization only; §4.2 Archive reuse)
+    1b7c…                ← a cached archive (bandwidth optimization only; [Fetch flow](#fetch-flow) Archive reuse)
 ```
 
-### 4.1 Manifest entry: content identity vs acquisition
+### Manifest entry content identity and acquisition
 
 Each manifest entry separates *what the blob is* from *where/how to get it*. The `sha256` is the content address — the cache key and the integrity check — and is **decoupled from the download**. Acquisition is a **ranked list of sources**, tried in order until one yields bytes matching `sha256`. A source is either a **direct blob** or a **path inside a compressed archive**:
 
@@ -284,7 +284,7 @@ This is exactly the shape the producer `bin/release manifest` emits (T0773): the
 
 **Why the flexibility matters — especially private→public.** Multiple ranked sources let one manifest serve several acquisition paths at once: while the repo is private (§ release-automation), a source can point at the authenticated private release (or a temporary bucket) and a public mirror/CDN can be added or promoted later — same content `sha256`, new path. It also allows sourcing straight from an upstream vendor archive (e.g. an official LLVM release tarball) rather than re-hosting every tool. A runtime mirror/base override (e.g. `PROMISE_BLOB_MIRROR`) can additionally rewrite source hosts for corporate mirrors and air-gapped installs without rebuilding the binary.
 
-### 4.2 Fetch flow
+### Fetch flow
 
 When the compiler needs dependency `X`:
 1. Resolve `X` → manifest entry (`sha256` + ranked `sources`).
@@ -292,23 +292,23 @@ When the compiler needs dependency `X`:
 3. Miss → walk `sources` in order:
    - **blob**: download the bytes.
    - **archive**: download the archive (coalesced — one archive fetched once per resolution pass; optionally verified against `archive_sha256` *before* extracting), then extract `archive_path`. Whether the archive is *kept* for reuse across runs depends on `archive_sha256` — see *Archive reuse* below.
-   - **verify** the resulting bytes against `sha256`. On match, go to step 4. On **mismatch**, handle it loudly (§4.3), then try the next source.
+   - **verify** the resulting bytes against `sha256`. On match, go to step 4. On **mismatch**, handle it loudly ([Content mismatch is loud and never silent](#content-mismatch-is-loud-and-never-silent)), then try the next source.
 4. Store the verified bytes at `~/.promise/cache/blobs/sha256/<sha256>` and use them.
 
 **Archive reuse.** Within one resolution pass a shared archive is fetched once and every blob that references it is extracted from that single download. *Across* runs and epochs the archive is **persistently cached only when its `archive_sha256` is given** — that asserted content address is what makes cross-run reuse safe and verifiable, so the archive is stored at `~/.promise/cache/archives/sha256/<archive_sha256>` and a later first-time extraction of another member skips the re-download. Without `archive_sha256` there is no trustworthy content key, so the archive is used within the pass and then discarded (the per-blob `sha256` still verifies every extracted blob either way). Two refinements: on first touch the resolver may extract *all* manifest blobs that reference the same archive — when the members are all wanted (e.g. the host LLVM tools) this materializes every blob and the archive needn't be kept at all; and cached archives are GC'd like blobs, **evicted first once all their referenced blobs are materialized** (at that point the archive is dead weight).
 
-### 4.3 Content mismatch is loud, never silent
+### Content mismatch is loud and never silent
 
 A source whose bytes don't match the expected `sha256` is a real defect — almost always a **bogus manifest entry** or a wrong/corrupted published artifact — and it has just cost the user a possibly large (≈170 MB) download for nothing. We never want that discarded silently while everyone falls through to the next source. On mismatch the resolver must:
 
 - **Warn with full detail** — dependency name, the source URL, expected vs actual `sha256`, and the bytes wasted. Cheap defenses first: if the manifest's `size` is known, abort a download that overshoots it; verify `archive_sha256` before paying extraction cost.
-- **Emit an opt-in integrity-mismatch telemetry signal** (§4.4) so a broken release is detected centrally within minutes rather than via scattered user reports — this is exactly the "downloaded, but the content isn't what I expected" case worth reporting.
+- **Emit an opt-in integrity-mismatch telemetry signal** ([Telemetry](#telemetry)) so a broken release is detected centrally within minutes rather than via scattered user reports — this is exactly the "downloaded, but the content isn't what I expected" case worth reporting.
 - **Negative-cache the bad source for the run** so the same wrong bytes are not re-downloaded repeatedly within one build.
 - If **all sources fail**, hard-error naming the dependency and that the manifest or release is likely broken (suggest `promise doctor`) — never proceed as if the dependency were absent-but-optional.
 
-**The real fix is upstream:** the mismatch path is a safety net, not the norm. The release pipeline verifies every manifest entry against the actually-published artifacts *before* the release is cut ([release-automation.md](release-automation.md) §5), so a bogus entry never ships in the first place.
+**The real fix is upstream:** the mismatch path is a safety net, not the norm. The release pipeline verifies every manifest entry against the actually-published artifacts *before* the release is cut ([release-automation.md](release-automation.md), under [Release workflow](release-automation.md#release-workflow)), so a bogus entry never ships in the first place.
 
-### 4.4 Telemetry (opt-in, integrity-only)
+### Telemetry
 
 Consistent with Promise's no-hidden-effects stance, mismatch telemetry is **opt-in and disclosed**, never on by default. When enabled it sends only the **integrity-mismatch** signal — dependency name, source, expected/actual `sha256`, epoch, platform — *not* general usage or build contents, and exists solely to surface broken releases fast. Treated as a design candidate (open item), not an assumed feature.
 
@@ -324,24 +324,24 @@ Cached archives (`cache/archives/sha256/`) are pure bandwidth optimization — n
 
 **Integrity & self-healing — a corrupt CAS must never be unrecoverable.** For speed the cache trusts entries by *presence* — step 2 of the fetch flow does not re-hash on every hit — so on-disk corruption (bit rot, a partial write, a truncated file) would otherwise be used forever and **permanently break every build, with no way out**. Two safeguards keep that from becoming a wedged toolchain:
 - **Atomic, verified writes.** The resolver downloads/extracts to a temp path, checks the `sha256`, and only then renames into `blobs/sha256/<hash>` (or `archives/sha256/<hash>`). An interrupted fetch can never leave a half-written entry that looks valid by presence.
-- **`promise doctor` verifies the CAS and repairs it.** It re-hashes every entry in `blobs/` and `archives/` and compares against its content address (the directory/file name), then **removes or quarantines any entry that fails** so the next use re-fetches a clean copy. Corruption is therefore always recoverable: `promise doctor [--repair]` turns a broken cache back into a working one instead of leaving the compiler permanently wedged. This check is the integrity counterpart to cache reclamation (which only reclaims space) and to the release-time manifest gate (§4.3, which guards the *source* rather than the *cache*).
+- **`promise doctor` verifies the CAS and repairs it.** It re-hashes every entry in `blobs/` and `archives/` and compares against its content address (the directory/file name), then **removes or quarantines any entry that fails** so the next use re-fetches a clean copy. Corruption is therefore always recoverable: `promise doctor [--repair]` turns a broken cache back into a working one instead of leaving the compiler permanently wedged. This check is the integrity counterpart to cache reclamation (which only reclaims space) and to the release-time manifest gate ([Content mismatch is loud and never silent](#content-mismatch-is-loud-and-never-silent), which guards the *source* rather than the *cache*).
 
 **Build-order consequence.** A thin binary embeds the *hashes* of its prebuilts, so the prebuilts must be built and hashed **before** the compiler binary is finalized. This ordering is the central constraint of the release pipeline ([release-automation.md](release-automation.md)).
 
 ---
 
-## 5. Platform notes
+## Platform notes
 
-### 5.1 macOS
+### macOS
 
 The compiler fetches LLVM tools (`opt`, `llc`, `lld`, `libLLVM.dylib`) as content-addressed blobs (full builds pre-stage them). On extraction, Mach-O blobs are patched and re-signed: `install_name_tool -add_rpath @loader_path`, `-change` to rewrite absolute Homebrew paths to `@rpath/<name>`, `-id @rpath/<name>`, then `codesign --force --sign -` (ad-hoc). `DYLD_LIBRARY_PATH` points the tools at the extracted dylibs.
 
 **SDK requirement → target: zero-dep.** macOS still needs the macOS SDK sysroot for `-lSystem` (today via Xcode Command Line Tools, `xcode-select --install`). The zero-dependency goal is to bundle the minimal SDK surface (`libSystem.tbd` stubs + essential headers) as a fetched blob — like Go shipping its own linker — so a fresh macOS machine needs no prerequisites.
 
-### 5.2 Windows
+### Windows
 
 Native MSVC ABI (`x86_64-pc-windows-msvc`); `opt` → `llc` → `lld-link` against a
-**self-generated link surface**. See [windows-support.md](windows-support.md) §3.3
+**self-generated link surface**. See [windows-support.md](windows-support.md), under [Linking against a self generated zero dependency surface](windows-support.md#linking-against-a-self-generated-zero-dependency-surface)
 for compiler internals.
 
 **Zero local dependencies — done (T0772).** Installing on a fresh Windows machine
@@ -359,11 +359,11 @@ only the program entry and the thread launcher needed the static MSVC CRT, and
 both are self-supplied. No Microsoft toolchain file is re-hosted, repackaged, or
 fetched. (x86_64 first; arm64 is a follow-up.)
 
-### 5.3 Linux
+### Linux
 
 Fully static via musl. The musl CRT objects are a fetched blob (full builds pre-stage them). No system dependencies beyond the kernel.
 
-That bar applies to the **toolchain** as well as to the binaries it produces, and the upstream LLVM release binaries do not meet it on their own: `lld` declares a dependency on `libxml2.so.2` — used only by LLVM's COFF manifest merger, which Promise never invokes — and is linked `BIND_NOW`, so on a machine without libxml2 (a base Linux install has none) the linker cannot start and every build fails at the link step. Promise therefore **supplies that library itself**: when the per-target toolchain view is materialized, the compiler emits a stub `libxml2.so.2` beside the tools, in the directory it already puts on `LD_LIBRARY_PATH`. This is the ELF counterpart of the Windows import libs generated from `.def` symbol lists (§5.2) — we own the link surface instead of asking the user to install one.
+That bar applies to the **toolchain** as well as to the binaries it produces, and the upstream LLVM release binaries do not meet it on their own: `lld` declares a dependency on `libxml2.so.2` — used only by LLVM's COFF manifest merger, which Promise never invokes — and is linked `BIND_NOW`, so on a machine without libxml2 (a base Linux install has none) the linker cannot start and every build fails at the link step. Promise therefore **supplies that library itself**: when the per-target toolchain view is materialized, the compiler emits a stub `libxml2.so.2` beside the tools, in the directory it already puts on `LD_LIBRARY_PATH`. This is the ELF counterpart of the Windows import libs generated from `.def` symbol lists ([Windows](#windows)) — we own the link surface instead of asking the user to install one.
 
 The stub's symbol and version surface is **read out of the shipped `lld`**, not hardcoded, so bumping the pinned LLVM cannot silently desync it. Only libraries on an explicit allowlist are stubbed, and only ones whose code genuinely never runs: `libstdc++`, `libgcc_s`, `libz`, `libm` and `libc` are real dependencies with real behavior and are never faked. Every stub symbol resolves to a trap instruction, so an unexpected call fails loudly rather than silently misbehaving. The stub is generated unconditionally rather than only when the host lacks the real library, so the toolchain behaves identically on every machine instead of depending on what happens to be installed.
 
@@ -377,9 +377,9 @@ Expected limitation (static musl): the static `libcrypto.a` uses musl's static `
 
 ---
 
-## 6. CI / building & publishing releases
+## Building and publishing releases
 
-The pull-request CI matrix (build + test per platform) and the tag-triggered release pipeline are described in **[release-automation.md](release-automation.md)**. That doc covers the new-model specifics the original §7 did not: building the prebuilt dependency **blobs**, hashing them, embedding the manifest (the build-order constraint), producing **thin + full** variants, building the **Promise stub** per target, and publishing everything to a GitHub Release on an `epoch-*` tag.
+The pull-request CI matrix (build + test per platform) and the tag-triggered release pipeline are described in **[release-automation.md](release-automation.md)**. That doc covers the new-model specifics this document's earlier release section did not: building the prebuilt dependency **blobs**, hashing them, embedding the manifest (the build-order constraint), producing **thin + full** variants, building the **Promise stub** per target, and publishing everything to a GitHub Release on an `epoch-*` tag.
 
 CI usage stays a one-liner:
 
@@ -398,4 +398,4 @@ COPY promise-linux-amd64-full /usr/local/bin/promise
 RUN promise install
 ```
 
-`promise doctor` (T0174) verifies the environment (toolchain blobs present **and content-valid**, SDK reachable, PATH set), **repairs a corrupted content-addressed cache** by evicting any `blobs/`/`archives/` entry that fails its content hash (§4 *Integrity & self-healing*), and exits non-zero on a missing or unrepairable component — useful as a CI preflight.
+`promise doctor` (T0174) verifies the environment (toolchain blobs present **and content-valid**, SDK reachable, PATH set), **repairs a corrupted content-addressed cache** by evicting any `blobs/`/`archives/` entry that fails its content hash ([The dependency store](#the-dependency-store) *Integrity & self-healing*), and exits non-zero on a missing or unrepairable component — useful as a CI preflight.

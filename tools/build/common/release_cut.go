@@ -18,7 +18,7 @@ import (
 
 // release_cut.go implements `bin/release cut next|stable` — the gated release
 // orchestrator (T0943). It encodes the manual release procedure
-// (docs/release-automation.md §6.2) as enforced preflight gates so neither a
+// (docs/release-automation.md#the-procedure) as enforced preflight gates so neither a
 // maintainer nor an agent can skip a step: a tag/push happens only when every
 // gate is green, `--dry-run` changes nothing, and a gate may be bypassed only
 // with `--reason "<text>"`, which is recorded into the tag/commit message so any
@@ -33,7 +33,7 @@ import (
 // releaseUploader/blobFetcher stub pattern) so release_cut_test.go is hermetic.
 
 // requiredPlatforms is the CI/release matrix gate-7 evaluates and gate-4 checks
-// blob hosting for. darwin-amd64 is deferred (docs/release-automation.md §7).
+// blob hosting for. darwin-amd64 is deferred (docs/release-automation.md#open-items).
 //
 // Adding a platform here makes it release-blocking: `bin/release cut` refuses
 // to tag until that platform has a green CI job at the target SHA and its
@@ -421,7 +421,7 @@ var (
 	errClockBehind  = errors.New("device clock is behind the last released epoch")
 )
 
-// deriveStableTarget implements the epoch-derivation table (§6.3). It returns
+// deriveStableTarget implements the epoch-derivation table (language-design.md#lifetimes). It returns
 // the target epoch, whether a year change must be confirmed, and an error for
 // the gap/clock-behind refusals. For the multi-year-gap refusal it still returns
 // the candidate target (Y.0) so the orchestrator can proceed under --reason.

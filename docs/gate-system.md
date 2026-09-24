@@ -46,7 +46,7 @@ Edit and commit gates run locally (fast, synchronous). Periodic and platform gat
 
 ---
 
-## Class 1: Edit Gates
+## Class 1 Edit Gates
 
 **Purpose:** Prevent forbidden patterns from being written to files. Instant, zero-latency enforcement.
 
@@ -95,15 +95,15 @@ Edit and commit gates run locally (fast, synchronous). Periodic and platform gat
 
 ---
 
-## Class 2: Commit Gates (Ratchets)
+## Class 2 Commit Gates
 
 **Purpose:** Enforce that quality metrics only improve over time. Block commits that regress.
 
 **Mechanism:** `bin/verify` and every gate write a flat `gate-values.json` sidecar to `.promise-home/`, whose metric names match the names in `baselines.json` — no translation layer. Advancing a baseline from it is the **workspace's** job, uniform across every managed repository; this project carried its own `bin/commitgate` for it until that tool was deleted, unwired, in favour of the shared one. Nothing in this repository moves a baseline.
 
-### Non-ratchet commit checks
+### Non ratchet commit checks
 
-Not every commit-time check is a ratcheted metric. Pass/fail invariants that have no baseline to move are enforced elsewhere, and which tool carries which is [build-tools.md](build-tools.md#pre-commit-hook-binprecommit-guard)'s to say: the hook (`bin/precommit-guard`) takes the checks that need the staged set — commit identity, staged-file rules, formatting, the ratchet below — and `bin/verify`'s structural phase takes the sweeps that do not, among them three **documentation checks** (`common.CheckDocs`, T1675):
+Not every commit-time check is a ratcheted metric. Pass/fail invariants that have no baseline to move are enforced elsewhere, and which tool carries which is [build-tools.md](build-tools.md#pre-commit-hook)'s to say: the hook (`bin/precommit-guard`) takes the checks that need the staged set — commit identity, staged-file rules, formatting, the ratchet below — and `bin/verify`'s structural phase takes the sweeps that do not, among them three **documentation checks** (`common.CheckDocs`, T1675):
 
 - **Dangling Markdown links** -- every relative `.md` link target across all git-tracked Markdown must exist on disk. Scoped by `git ls-files`, so generated and untracked trees are skipped without an ignore list.
 - **Index coverage** -- every tracked `docs/*.md` is linked from `docs/index.md`. Top level only; `docs/archive/` is intentionally unindexed.
@@ -196,7 +196,7 @@ The `coverage` entry above is **Pending** (has direction but no value -- will be
 7. If improvement: updates `baselines.json` in-place, stages it with the commit
 8. Queries tracker for active exceptions (gate ID + tracker bug ID + expiry)
 
-**Defense-in-depth:** The `.githooks/pre-commit` hook runs a lightweight check that `baselines.json` values only improve vs. the committed version. Informational and Pending entries are skipped. The hook also rejects commits when running the formatter would introduce changes, so unformatted code never reaches origin and surfaces as a spurious diff the next time someone runs verify. Both are the commit gate's, not this repository's — see [build-tools.md](build-tools.md#pre-commit-hook-binprecommit-guard).
+**Defense-in-depth:** The `.githooks/pre-commit` hook runs a lightweight check that `baselines.json` values only improve vs. the committed version. Informational and Pending entries are skipped. The hook also rejects commits when running the formatter would introduce changes, so unformatted code never reaches origin and surfaces as a spurious diff the next time someone runs verify. Both are the commit gate's, not this repository's — see [build-tools.md](build-tools.md#pre-commit-hook).
 
 **Key files:**
 - `tools/build/common/verify_summary.go` -- `GateValues` type + IO, `ParseTestSummaryLine`
@@ -209,7 +209,7 @@ The `coverage` entry above is **Pending** (has direction but no value -- will be
 
 ---
 
-## Class 3: Periodic Gates
+## Class 3 Periodic Gates
 
 **Purpose:** Run slow quality checks on a schedule. Detect regressions that cannot be caught in the fast edit/commit loop.
 
@@ -230,7 +230,7 @@ The `coverage` entry above is **Pending** (has direction but no value -- will be
 | `install-thin` | Daily | per-platform | `bin/gate install --variant thin --system` | No |
 | `install-full` | Daily | per-platform | `bin/gate install --variant full --system` | No |
 
-**Install gates (T0803).** `install-thin` / `install-full` validate the real end-to-end user install path — fetch the published install script, run it (download → checksum → decompress → `promise install`), sanity-check, then run the full test suite through the freshly **installed** binary (not `bin/promise`). Each runs in a clean ephemeral arena (hence `--system`: the arena *is* the clean environment). The **thin** variant exercises the first-compile blob-fetch path (network up); the **full** variant runs the suite online too (some tests legitimately fetch external catalog modules like `wasi_preview_2`), and *additionally* proves offline operation via a separate self-contained compile+run under a network blackhole (the `offline` phase) — confirming the host LLVM toolchain blobs were pre-staged at install. While the repo is private they point `PROMISE_BASE_URL` at the prebuilts dist bucket ([release-automation.md](release-automation.md) §5a; removed by T0804). Heavy (full install + full suite), so daily.
+**Install gates (T0803).** `install-thin` / `install-full` validate the real end-to-end user install path — fetch the published install script, run it (download → checksum → decompress → `promise install`), sanity-check, then run the full test suite through the freshly **installed** binary (not `bin/promise`). Each runs in a clean ephemeral arena (hence `--system`: the arena *is* the clean environment). The **thin** variant exercises the first-compile blob-fetch path (network up); the **full** variant runs the suite online too (some tests legitimately fetch external catalog modules like `wasi_preview_2`), and *additionally* proves offline operation via a separate self-contained compile+run under a network blackhole (the `offline` phase) — confirming the host LLVM toolchain blobs were pre-staged at install. While the repo is private they point `PROMISE_BASE_URL` at the prebuilts dist bucket ([release-automation.md](release-automation.md), under [End to end install gate](release-automation.md#end-to-end-install-gate); removed by T0804). Heavy (full install + full suite), so daily.
 
 **Filter model:** Each gate can filter by:
 - `os`: darwin, linux, windows (detected from agent environment)
@@ -248,7 +248,7 @@ The tracker knows each agent's OS and idle status, dispatching to the right targ
 
 ---
 
-## Class 4: Platform Gates
+## Class 4 Platform Gates
 
 **Purpose:** Verify that commits work on platforms not available on the committing host.
 
@@ -276,9 +276,9 @@ WASM is cross-platform (runs anywhere with wasmtime) so it is a commit gate, not
 
 ---
 
-## Gate Output Schema (`bin/gate`) (T0763)
+## Gate Output Schema
 
-The tracker gates (`test`, `wasm-test`, `wasm-web-test`, `go-test`, `stress`, `coverage`, `wasm-size`, `install`, `latest-invariant`) emit a single JSON envelope (`GateOutput`) on stdout. The contract gates ([below](#the-contract-gates-and-the-judge-binrun)) emit the flow envelope instead. Human-readable progress goes to stderr either way, so stdout is always clean machine-readable JSON. This section is the contract: it is not printed by any command, because a command printing an embedded copy is a second copy that drifts from this one silently.
+The tracker gates (`test`, `wasm-test`, `wasm-web-test`, `go-test`, `stress`, `coverage`, `wasm-size`, `install`, `latest-invariant`) emit a single JSON envelope (`GateOutput`) on stdout. The contract gates ([below](#the-contract-gates-and-the-judge)) emit the flow envelope instead. Human-readable progress goes to stderr either way, so stdout is always clean machine-readable JSON. This section is the contract: it is not printed by any command, because a command printing an embedded copy is a second copy that drifts from this one silently.
 
 ### One envelope for all subcommands
 
@@ -294,7 +294,7 @@ The tracker gates (`test`, `wasm-test`, `wasm-web-test`, `go-test`, `stress`, `c
 
 Metric-only gates (`stress`, `coverage`, `wasm-size`) omit `files`. Test gates populate it. The envelope shape is identical so the tracker ingests one schema. Every row above also carries the four `cas_*` [store metrics](#store-metrics), which describe what the run cost rather than what it measured.
 
-### Single-target invariant
+### Single target invariant
 
 One gate invocation reports exactly one target, stamped once at the top of the envelope — never per record. `bin/gate test` reports the host (e.g. `linux-amd64`) and is host-only; `bin/gate wasm-test` reports `wasm32-wasi`; `bin/gate wasm-web-test` reports `wasm32-web`; `go-test`/`stress`/`coverage`/`wasm-size` report the host they ran on. Any unknown argument (including `-wasm` to `bin/gate test`) is rejected — wasm tests are separate single-target gates (`bin/gate wasm-test`, `bin/gate wasm-web-test`).
 
@@ -399,7 +399,7 @@ Metrics are **derived by counting records**, so they always agree with the `file
 
 The single source for all four is a ledger the compiler appends to, one line per occurrence, in the directory holding its own binary (`bin/.promise-cas.jsonl` in a worktree). It is beside the *binary* and not inside a Promise home on purpose: a run fans out into many compiler processes, those processes may each choose a different home, and a per-home tally cannot see the very case that matters — which is exactly how three private homes went unnoticed for eighteen days. Appends are atomic, so concurrent compilers need no lock, and nothing is written on the warm path.
 
-### Runner stream (`promise test --json`)
+### Runner stream
 
 The gate is built on `promise test --json`, which streams one JSON record per line (newline-delimited JSON) as each test completes — robust to abrupt termination, since only a trailing partial line can be lost. Each line carries an **absolute** `file`, plus `test`, `status`, `elapsed`, and optional `context`. The gate parses these, relativizes the paths, groups by file, and derives the metrics above.
 
@@ -411,7 +411,7 @@ A record's `context` is bounded (≈50 lines / 4 KB, with a `… (truncated)` ma
 
 ---
 
-## The contract gates, and the judge (`bin/run`)
+## The contract gates and the judge
 
 These gates speak the contract the flow SDK and BASE share, and the SDK **fails closed**: a gate or judge that cannot answer means *no*.
 
@@ -513,7 +513,7 @@ A gate run must never be able to invoke a model. Gates are unattended CI: they r
 
 ---
 
-## Multi-Agent Safety
+## Multi Agent Safety
 
 **Edit gates:** Each agent runs independently. Gates loaded from same `edit_gates.json` in repo.
 
@@ -527,28 +527,28 @@ A gate run must never be able to invoke a model. Gates are unattended CI: they r
 
 ## Implementation Phases
 
-### Phase 1: Edit Gates
+### Phase 1 Edit Gates
 - Extend `guard.go` for Edit/Write hooks
 - Create `edit_gates.json` with `no-allow-leaks` gate
 - Update `.claude/settings.json`
 
-### Phase 2: Commit Gates
+### Phase 2 Commit Gates
 - Create `commit_gate.go` (cross-platform)
 - Create `baselines.json` with current platform metrics
 - Update `/commit` skill and `.githooks/pre-commit`
 
-### Phase 3: Periodic Gates
+### Phase 3 Periodic Gates
 - Extend tracker with periodic gate scheduling + OS-aware dispatch
 - Create `bin/size-report.sh`
 - Create exception audit script
 - Define initial periodic gate schedule
 
-### Phase 4: Platform Gates
+### Phase 4 Platform Gates
 - Extend tracker with commit-triggered platform dispatch
 - Update `/commit` to notify tracker
 - Set up agent runners on Linux/Windows hosts
 
-### Phase 5: Agent Learning Cost
+### Phase 5 Agent Learning Cost
 - Design standard task set for agent evaluation
 - Create measurement framework
 - Add as weekly periodic gate

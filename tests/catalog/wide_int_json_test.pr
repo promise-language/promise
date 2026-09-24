@@ -1,6 +1,6 @@
 // tests/catalog/wide_int_json_test.pr — JSON encode/decode of wide integers.
 // Wide integers serialize as decimal strings (Ethereum-style), preserving the
-// full value losslessly through the json module. See docs/large-integers.md §6.
+// full value losslessly through the json module. See docs/large-integers.md#catalog-module-impact.
 use json;
 
 type Account `serializable `public {

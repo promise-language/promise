@@ -46,7 +46,7 @@ There is no C runtime. Every runtime function is codegen-emitted LLVM IR or pure
 
 ---
 
-## C-to-Codegen Migration
+## C to Codegen Migration
 
 Completed in 10 steps. All computation-only C functions replaced with codegen-emitted LLVM IR or pure Promise. Only IO/process functions remain in C.
 
@@ -73,7 +73,7 @@ Also done: LLVM intrinsics for all `memcpy`/`memmove`, libc `memcmp` for equalit
 
 The remaining C runtime functions all depend on IO or process control. Phase 3 replaces them with a Platform Abstraction Layer (PAL) — codegen-emitted LLVM IR with per-target implementations, eliminating all C runtime files.
 
-### What Remains in C (to be replaced)
+### What Remains in C
 
 | C function | File | Libc calls | What it does |
 |------------|------|------------|--------------|
@@ -108,7 +108,7 @@ PAL replaces libc calls with platform-native equivalents. Instead of `printf("%l
 
 The key insight: **all remaining C functions reduce to just two primitives** — `write(fd, buf, len)` and `exit(code)`. The `fork`/`waitpid` in the test runner adds a third (`pal_spawn`), but it's only needed for test mode.
 
-### PAL Interface (Go side)
+### PAL Interface on the Go side
 
 ```go
 // compiler/internal/codegen/pal/pal.go
@@ -142,7 +142,7 @@ func ForTarget(triple string) PAL {
 
 Each PAL backend emits a **defined** LLVM IR function (not a `declare` — a full `define` with basic blocks), so no C object files are needed. The function bodies contain platform-specific calls or inline syscalls.
 
-### Per-Platform LLVM IR
+### Per Platform LLVM IR
 
 **`pal_write(fd, buf, len)` — macOS (libSystem.dylib)**:
 
@@ -204,7 +204,7 @@ entry:
 
 Initially keep as a C function or use libSystem/libc calls. Raw `fork` syscall is possible on Linux but the waitpid + status macro logic is nontrivial in pure IR. Can be migrated later or kept as the single remaining C function until Phase 5 (concurrency) provides thread-based isolation.
 
-### Migration: C Functions → PAL + Codegen
+### Migrating C Functions to PAL and Codegen
 
 Each C print function becomes a codegen-emitted LLVM IR function that formats the value, then calls `pal_write`:
 
@@ -240,7 +240,7 @@ POSIX and Windows both use integer-like handles for IO. PAL uses `i32` file desc
 
 On Windows, `pal_write` maps fd 0/1/2 to the corresponding HANDLE, then calls `WriteFile`. On WASM/WASI, fd 1/2 map to WASI's `fd_write` with the same integers. On WASM/browser, a JS-provided import handles the mapping.
 
-### Step-by-Step Implementation Plan
+### Step by Step Implementation Plan
 
 **Step 1: PAL infrastructure + `pal_write` + `pal_exit` (macOS + Linux)**
 
@@ -334,7 +334,7 @@ Three PAL backends: PosixPAL (macOS + Linux via libc), WindowsPAL (Win32 API + U
 | Linking | Mach-O | ELF | PE/COFF | WASM binary |
 | Address size | 64-bit | 64-bit | 64-bit | **32-bit** |
 
-### Architecture: 5 Layers
+### Architecture in 5 Layers
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -357,7 +357,7 @@ Three PAL backends: PosixPAL (macOS + Linux via libc), WindowsPAL (Win32 API + U
 - **Windows**: fundamentally different API surface (Win32). `WriteFile` instead of `write`, `ExitProcess` instead of `exit`. File descriptors → HANDLE mapping needed.
 - **WASM**: 32-bit pointers, no threads, no filesystem without WASI. Codegen needs a `ptrSize` constant instead of hardcoded 8. No fork/process isolation — test runner runs functions directly.
 
-### Layer 0: Future PAL Functions
+### Layer 0 Future PAL Functions
 
 Phase 3 starts with just `pal_write`, `pal_exit`, and `pal_spawn`. The full PAL grows as later phases need more primitives:
 
@@ -455,7 +455,7 @@ pal_close(fd) → err
 pal_stat(path, buf) → err
 ```
 
-### Layer 1: Memory + Intrinsics
+### Layer 1 Memory and Intrinsics
 
 LLVM intrinsics (already done): `@llvm.memcpy`, `@llvm.memmove`, `@llvm.memset`.
 
@@ -465,7 +465,7 @@ Memory allocator phasing:
 3. **Later**: mmap-based arena allocator (macOS/Linux), VirtualAlloc-based (Windows), bump allocator (WASM)
 4. **Much later**: Per-goroutine allocation pools once concurrency lands
 
-### Layer 3: Concurrency — Platform-Adaptive
+### Layer 3 Concurrency
 
 Two modes because WASM cannot do threads:
 
@@ -513,13 +513,13 @@ This gives **no function coloring** — every function looks synchronous.
 
 **Implementation language**: Start with C for the scheduler, migrate to Promise once the language has unsafe pointers, inline assembly, and atomic ops.
 
-### Layer 4: Standard Library (Pure Promise)
+### Layer 4 Standard Library
 
 Everything built on top of Layers 0-3: map (already done), iterators, streams, crypto, compression, networking, etc. All platform-independent.
 
 ---
 
-## The `opt` + `llc` + `lld` Pipeline
+## The opt llc and lld Pipeline
 
 ### Why
 
@@ -527,7 +527,7 @@ Clang is currently used as a convenience driver — it compiles LLVM IR, runs op
 
 `opt` (LLVM optimizer), `llc` (LLVM static compiler), and `lld` (LLVM linker) are standalone tools that handle exactly what Promise needs: optimization, IR-to-object codegen, and linking. `llc` and `lld` support all targets in a single binary, enabling cross-compilation without additional toolchains.
 
-### Phase 7b — Linux Pipeline (Done)
+### Phase 7b Linux Pipeline
 
 On Linux, `compileAndLink()` dispatches to the LLVM pipeline by default. Non-Linux platforms and `PROMISE_USE_CLANG=1` use the clang fallback.
 
@@ -651,7 +651,7 @@ linking against the host's glibc CRT. Those objects are the requested target's o
 runtime, not a toolchain that could be pinned — the `[binaries.musl]` prebuilt
 (T0530) is the *musl* CRT and cannot stand in for them. The call site carries a
 `// path-ok:` marker saying so; every other lookup in the compiler is subject to
-the rule ([build-tools.md](build-tools.md) §4).
+the rule ([build-tools.md](build-tools.md), under [LLVM staging](build-tools.md#llvm-staging)).
 
 ### Linux Linker Invocation
 
@@ -691,7 +691,7 @@ ld.lld \
 
 Both paths support x86_64 and aarch64 (different emulation mode and dynamic linker path).
 
-### Per-Platform Linker Commands
+### Per Platform Linker Commands
 
 | Target | Pipeline | LTO |
 |--------|---------|-----|
@@ -755,7 +755,7 @@ lld-link promise.obj /out:output.exe \
 
 Windows is the most complex — MSVC library paths are deeply nested and version-dependent. Discovery: parse `vswhere` output or read `VS*COMNTOOLS` environment variables. Consider keeping clang as fallback on Windows.
 
-### Cross-Compilation
+### Cross Compilation
 
 With `llc` + `lld`, cross-compilation requires no cross-toolchain:
 
@@ -778,7 +778,7 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 - **macOS**: requires macOS SDK (`-lSystem`). Cross-compiling *to* macOS from Linux/Windows needs the SDK files (legally gray area).
 - **Windows**: requires MSVC CRT libs. Cross-compiling *to* Windows needs the Windows SDK.
 
-### Implementation (7b + 7b' Done, rest planned)
+### Implementation
 
 **`cmd/promise/main.go` — implemented functions**:
 
@@ -829,7 +829,7 @@ The **compiler-rt builtins archive** (`libclang_rt.builtins.a`) rides the exact 
 
 **Fallback strategy**: `PROMISE_USE_CLANG=1` forces the clang pipeline on any platform. This lets users on platforms without native linker support continue working.
 
-### Coroutine Pass Verification (Done)
+### Coroutine Pass Verification
 
 Verified with LLVM 22 on Linux and macOS:
 
@@ -920,14 +920,14 @@ make install
 
 These objects are built once per musl release and checked into the Promise release artifacts (not the source repo — too large). A CI job rebuilds them when the musl version is bumped.
 
-### macOS — SDK sysroot requirement
+### macOS SDK sysroot requirement
 
 Apple requires linking against `-lSystem`, which normally means the macOS SDK
 sysroot from Xcode or CommandLineTools. Promise does not consult either: it
 links against a bundled, hand-authored `libSystem.tbd` stub instead (see
-[distribution.md](distribution.md) §5.1, `findMacOSSDK`/`ensureBundledSDK` in
+[distribution.md](distribution.md), under [macOS](distribution.md#macos), `findMacOSSDK`/`ensureBundledSDK` in
 `compiler/cmd/promise/main.go`), the same zero-dependency approach as the
-Windows self-generated import libs (§3.3-equivalent, T0772) and Linux's vendored
+Windows self-generated import libs ([Linking against a self generated zero dependency surface](windows-support.md#linking-against-a-self-generated-zero-dependency-surface)-equivalent, T0772) and Linux's vendored
 musl. No host Xcode/CommandLineTools installation, version, or license state is
 a build input (T1609) — the alternative, pinning to a specific host SDK, breaks
 on the next machine that ships only a newer one, which is exactly how this
@@ -944,7 +944,7 @@ ld64.lld promise.o -o output \
   -platform_version macos 14.0.0 14.0.0
 ```
 
-### Windows — MSVC dependency
+### Windows MSVC dependency
 
 Windows requires MSVC CRT libraries (`libcmt.lib`, `kernel32.lib`) from the Visual Studio Build Tools or Windows SDK. Path discovery is complex (`vswhere`, registry, env vars).
 
@@ -955,7 +955,7 @@ Options:
 
 Initial plan: require VS Build Tools, with clang fallback. Revisit if bundling a Windows CRT becomes feasible.
 
-### Future — static LLVM (single binary)
+### Static LLVM in a single binary
 
 The bundled-binaries approach (Phase 7) is the pragmatic first step. The long-term ideal is statically linking LLVM into the `promise` binary via the LLVM C API + CGo:
 

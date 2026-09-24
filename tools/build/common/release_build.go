@@ -22,8 +22,8 @@ import (
 //  3. Phase C (final): rebuild with -tags=embed_stub (+embed_llvm for full) so the
 //     final binary embeds the stub for install-time extraction.
 //
-// The manifest's hashes must exist before the binary is finalized (distribution.md
-// §4.4) — that is why `bin/release blobs`+`manifest` run first and their output is
+// The manifest's hashes must exist before the binary is finalized
+// (distribution.md#manifest-entry-content-identity-and-acquisition) — that is why `bin/release blobs`+`manifest` run first and their output is
 // passed in via --manifest.
 
 // runReleaseBuild builds the thin or full compiler variant. Thin arg-parser
@@ -95,7 +95,7 @@ func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host, tag s
 		}
 		// OpenSSL static archives (Linux only, T1596 / #28). Best-effort: skips (with
 		// a note) when not pinned/hosted. A full release embeds them when pinned;
-		// the thin/full flavour switch (docs/distribution.md §1,§4) will later
+		// the thin/full flavour switch (docs/distribution.md#design,distribution.md#the-dependency-store) will later
 		// gate this per flavour.
 		fmt.Println("Embedding OpenSSL (best-effort)...")
 		if err := EmbedOpenSSL(root); err != nil {

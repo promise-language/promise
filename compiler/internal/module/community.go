@@ -12,12 +12,12 @@ import (
 )
 
 // DefaultCommunityCatalogURL is the well-known location of the community catalog
-// repo (§9.9). It is a living git repo (not frozen in the compiler binary), so a
+// repo (module-system.md#compatibility-and-the-community-catalog). It is a living git repo (not frozen in the compiler binary), so a
 // module's per-epoch compatibility can be recorded WITHOUT a compiler update.
 const DefaultCommunityCatalogURL = "https://github.com/promise-community/catalog"
 
 // CommunityCatalogURL returns the community catalog repo URL, honoring the
-// PROMISE_COMMUNITY_CATALOG override (mirrors / air-gapped environments, §17) and
+// PROMISE_COMMUNITY_CATALOG override (mirrors / air-gapped environments, module-system.md#open-questions) and
 // falling back to the well-known constant. Mirrors the PROMISE_HOME / release-URL
 // override convention so a single env var redirects the whole community tier.
 func CommunityCatalogURL() string {
@@ -137,7 +137,7 @@ type IndexEntry struct {
 
 // CompatIndex is the per-epoch compatibility index — one JSON file per epoch
 // (index/<epoch>.json) in the community catalog repo. A module ABSENT from the
-// index for an epoch means "no verified version for that epoch" (§9.10). Per-epoch
+// index for an epoch means "no verified version for that epoch" (module-system.md#when-a-module-has-no-compatible-version). Per-epoch
 // files (vs one big file) keep the repo append-only across epochs with clean diffs
 // and let a post-release verdict be added without rewriting prior epochs.
 type CompatIndex struct {
@@ -158,7 +158,7 @@ func ParseCompatIndex(data []byte) (*CompatIndex, error) {
 }
 
 // Verified returns the recorded entry for name and true when the index records a
-// verified commit for it, or (zero, false) when the module is absent — the §9.10
+// verified commit for it, or (zero, false) when the module is absent — the module-system.md#when-a-module-has-no-compatible-version
 // "no verified version for this epoch" signal.
 func (idx *CompatIndex) Verified(name string) (IndexEntry, bool) {
 	if idx == nil {
@@ -174,7 +174,7 @@ func (idx *CompatIndex) Verified(name string) (IndexEntry, bool) {
 // LoadCompatIndex reads index/<epoch>.json from a fetched community catalog
 // checkout. Returns (nil, nil) when no index file exists for the epoch yet — an
 // epoch with no recorded verdicts is the same, for resolution, as a module absent
-// from the index (§9.10).
+// from the index (module-system.md#when-a-module-has-no-compatible-version).
 func LoadCompatIndex(catalogDir, epoch string) (*CompatIndex, error) {
 	path := filepath.Join(catalogDir, "index", epoch+".json")
 	data, err := os.ReadFile(path)
@@ -231,7 +231,7 @@ func IndexedEpochs(catalogDir string) ([]string, error) {
 
 // HighestIndexedEpoch scans all per-epoch index files and returns the largest
 // epoch (and its recorded tag) for which name has a verified commit, or ("","")
-// when name is recorded for no epoch. Feeds the §9.10 "highest verified epoch"
+// when name is recorded for no epoch. Feeds the module-system.md#when-a-module-has-no-compatible-version "highest verified epoch"
 // message in the community tier.
 func HighestIndexedEpoch(catalogDir, name string) (epoch, tag string) {
 	epochs, err := IndexedEpochs(catalogDir)
@@ -261,7 +261,7 @@ func sortEpochsAsc(epochs []string) {
 	}
 }
 
-// Tier classifies a module by its URL (§9.9 — "no separate flag"). It drives the
+// Tier classifies a module by its URL (module-system.md#compatibility-and-the-community-catalog — "no separate flag"). It drives the
 // verdict source: community modules trust the catalog's CI index; ad-hoc modules
 // are verified locally on add.
 type Tier int

@@ -61,12 +61,12 @@ func annotationTree(t *testing.T, metas, specs, doc string) string {
 // the whole entry text, heading and schema line together.
 func annotationDocument(indexRows, rejectedRows, entries []string) string {
 	var b strings.Builder
-	b.WriteString("# Annotations\n\n## 6. Index\n\n")
+	b.WriteString("# Annotations\n\n## Index\n\n")
 	b.WriteString("| " + strings.Join(annotationIndexHeader, " | ") + " |\n|---|---|---|---|\n")
 	for _, r := range indexRows {
 		b.WriteString(r + "\n")
 	}
-	b.WriteString("\n## 7. Entries\n\n")
+	b.WriteString("\n## Entries\n\n")
 	if entries == nil {
 		for _, r := range indexRows {
 			entries = append(entries, entryFor(r))
@@ -75,7 +75,7 @@ func annotationDocument(indexRows, rejectedRows, entries []string) string {
 	for _, e := range entries {
 		b.WriteString(e + "\n\n- **Effect** something.\n\n")
 	}
-	b.WriteString("## 16. Not annotations\n\n")
+	b.WriteString("## Not annotations\n\n")
 	b.WriteString("| " + strings.Join(annotationRejectedHeader, " | ") + " |\n|---|---|\n")
 	for _, r := range rejectedRows {
 		b.WriteString(r + "\n")
@@ -90,7 +90,14 @@ func entryFor(indexRow string) string {
 	if !ok {
 		return ""
 	}
-	return "### " + cells[0] + "\n\n" + schemaLine(cells[1], cells[2])
+	return "### " + entryHeading(annotationName(cells[0])) + "\n\n" + schemaLine(cells[1], cells[2])
+}
+
+// entryHeading spells one annotation name the way a heading must: letters,
+// digits and spaces only (org/normative#sections), so the underscore in
+// `not_sendable becomes a space. headingNames reverses it.
+func entryHeading(name string) string {
+	return strings.ReplaceAll(name, "_", " ")
 }
 
 func schemaLine(targets, params string) string {
@@ -143,14 +150,14 @@ func TestAnnotationCoverageCoherentTreePassesWithCRLF(t *testing.T) {
 }
 
 func TestAnnotationCoverageRegisteredAnnotationNeedsARow(t *testing.T) {
-	// The failure mode this check exists for: language-design.md §8.3 was
+	// The failure mode this check exists for: language-design.md#the-annotation-set was
 	// missing thirteen rows because nothing asserted the compiler's table
 	// against it.
 	root := annotationTree(t,
 		copyMetas+embedMetas+"\t\"mono\": {TargetMethod},\n",
 		copySpecs+embedSpecs+"\t\"mono\": noParams,\n",
 		coherentDocument())
-	expectFinding(t, checkAnnotationCoverage(root), "`mono", "no row in docs/annotations.md §6")
+	expectFinding(t, checkAnnotationCoverage(root), "`mono", "no row in docs/annotations.md#index")
 }
 
 func TestAnnotationCoverageRowNeedsARegisteredAnnotation(t *testing.T) {
@@ -170,7 +177,7 @@ func TestAnnotationCoverageTargetsMustMatch(t *testing.T) {
 		copyMetas+embedMetas+"\t\"value\": {TargetField, TargetMethod},\n",
 		copySpecs+embedSpecs+"\t\"value\": noParams,\n", doc)
 	expectFinding(t, checkAnnotationCoverage(root),
-		"`value", "targets in docs/annotations.md §6 disagree",
+		"`value", "targets in docs/annotations.md#index disagree",
 		"document says \"fields\"", "builtinMetas says \"fields, methods\"")
 }
 
@@ -214,7 +221,7 @@ func TestAnnotationCoverageParametersMustMatch(t *testing.T) {
 			doc := annotationDocument([]string{copyRow, tc.row}, []string{rejectedRow}, nil)
 			root := annotationTree(t, copyMetas+embedMetas, copySpecs+embedSpecs, doc)
 			expectFinding(t, checkAnnotationCoverage(root),
-				"`embed", "parameters in docs/annotations.md §6 disagree", tc.want)
+				"`embed", "parameters in docs/annotations.md#index disagree", tc.want)
 		})
 	}
 }
@@ -228,7 +235,7 @@ func TestAnnotationCoveragePositionalOrderIsSignificant(t *testing.T) {
 		"| `` `wasm_import `` | functions | `name` (string, positional); `module` (string, positional) | Host import |"},
 		[]string{rejectedRow}, nil)
 	root := annotationTree(t, copyMetas+"\t\"wasm_import\": {TargetFunc},\n", copySpecs+specs, doc)
-	expectFinding(t, checkAnnotationCoverage(root), "`wasm_import", "parameters in docs/annotations.md §6 disagree")
+	expectFinding(t, checkAnnotationCoverage(root), "`wasm_import", "parameters in docs/annotations.md#index disagree")
 }
 
 // --- the ledger ---
@@ -257,8 +264,8 @@ func TestAnnotationCoverageLedgerExcusesOnlyTheGapItNames(t *testing.T) {
 		"embed": {{gapParameters, "T9999", "known"}},
 	})
 	err := checkAnnotationCoverage(root)
-	expectFinding(t, err, "targets in docs/annotations.md §6 disagree")
-	if strings.Contains(err.Error(), "parameters in docs/annotations.md §6 disagree") {
+	expectFinding(t, err, "targets in docs/annotations.md#index disagree")
+	if strings.Contains(err.Error(), "parameters in docs/annotations.md#index disagree") {
 		t.Errorf("the ledgered parameter gap must stay excused, got:\n%v", err)
 	}
 }
@@ -306,16 +313,16 @@ func TestAnnotationCoverageRowWithoutAnEntryIsAFinding(t *testing.T) {
 	doc := annotationDocument([]string{copyRow, embedRow}, []string{rejectedRow},
 		[]string{entryFor(copyRow)})
 	root := annotationTree(t, copyMetas+embedMetas, copySpecs+embedSpecs, doc)
-	expectFinding(t, checkAnnotationCoverage(root), "`embed has a §6 row but no entry")
+	expectFinding(t, checkAnnotationCoverage(root), "`embed has an Index row but no entry")
 }
 
 func TestAnnotationCoverageEntryWithoutARowIsAFinding(t *testing.T) {
-	// The mirror: an entry for a name §6 does not list documents something
+	// The mirror: an entry for a name annotations.md#index does not list documents something
 	// that is not an annotation.
 	doc := annotationDocument([]string{copyRow}, []string{rejectedRow},
 		[]string{entryFor(copyRow), entryFor(embedRow)})
 	root := annotationTree(t, copyMetas, copySpecs, doc)
-	expectFinding(t, checkAnnotationCoverage(root), "`embed has an entry in docs/annotations.md but no §6 row")
+	expectFinding(t, checkAnnotationCoverage(root), "`embed has an entry in docs/annotations.md but no Index row")
 }
 
 func TestAnnotationCoveragePairHeadingDocumentsBothNames(t *testing.T) {
@@ -328,7 +335,7 @@ func TestAnnotationCoveragePairHeadingDocumentsBothNames(t *testing.T) {
 		"| `` `sharable `` | types | — | Assert aliasing |"},
 		[]string{rejectedRow},
 		[]string{entryFor(copyRow),
-			"### `` `sendable `` / `` `sharable ``\n\n" + schemaLine("types", "— none")})
+			"### sendable and sharable\n\n" + schemaLine("types", "— none")})
 	root := annotationTree(t, metas, specs, doc)
 	if err := checkAnnotationCoverage(root); err != nil {
 		t.Fatalf("one heading may document a pair, got:\n%v", err)
@@ -345,10 +352,10 @@ func TestAnnotationCoveragePairHeadingCannotStraddleDifferingRows(t *testing.T) 
 		"| `` `sharable `` | types, enums | — | Assert aliasing |"},
 		[]string{rejectedRow},
 		[]string{entryFor(copyRow),
-			"### `` `sendable `` / `` `sharable ``\n\n" + schemaLine("types", "— none")})
+			"### sendable and sharable\n\n" + schemaLine("types", "— none")})
 	root := annotationTree(t, metas, specs, doc)
 	expectFinding(t, checkAnnotationCoverage(root),
-		"`sharable: the entry says targets \"types\", its §6 row says \"enums, types\"")
+		"`sharable: the entry says targets \"types\", its Index row says \"enums, types\"")
 }
 
 func TestAnnotationCoverageGroupedEntryTableCountsAsAnEntry(t *testing.T) {
@@ -368,7 +375,7 @@ func TestAnnotationCoverageGroupedEntryTableCountsAsAnEntry(t *testing.T) {
 }
 
 func TestAnnotationCoverageGroupedEntryRowIsReconciledToo(t *testing.T) {
-	// A grouped entry is still an entry: its row must repeat §6's, not
+	// A grouped entry is still an entry: its row must repeat annotations.md#index's, not
 	// paraphrase it.
 	metas := copyMetas + "\t\"skip\": {TargetField},\n"
 	specs := copySpecs + "\t\"skip\": noParams,\n"
@@ -378,7 +385,7 @@ func TestAnnotationCoverageGroupedEntryRowIsReconciledToo(t *testing.T) {
 		" |\n|---|---|---|---|\n| `` `skip `` | fields, variants | — | Omit the field. |\n"
 	root := annotationTree(t, metas, specs, doc)
 	expectFinding(t, checkAnnotationCoverage(root),
-		"`skip: the entry says targets \"fields, variants\", its §6 row says \"fields\"")
+		"`skip: the entry says targets \"fields, variants\", its Index row says \"fields\"")
 }
 
 // --- the entry repeats its row ---
@@ -391,19 +398,19 @@ func TestAnnotationCoverageEntryMustRepeatItsRow(t *testing.T) {
 	}{
 		{
 			"targets paraphrased",
-			"### `` `embed ``\n\n" + schemaLine("module-level getters",
+			"### embed\n\n" + schemaLine("module-level getters",
 				"`path` (string, positional); `compress` (bool, named)"),
 			"unknown target \"module-level getters\"",
 		},
 		{
 			"targets narrowed",
-			"### `` `embed ``\n\n" + schemaLine("functions, methods",
+			"### embed\n\n" + schemaLine("functions, methods",
 				"`path` (string, positional); `compress` (bool, named)"),
-			"`embed: the entry says targets \"functions, methods\", its §6 row says \"functions\"",
+			"`embed: the entry says targets \"functions, methods\", its Index row says \"functions\"",
 		},
 		{
 			"parameters paraphrased",
-			"### `` `embed ``\n\n" + schemaLine("functions",
+			"### embed\n\n" + schemaLine("functions",
 				"`path` (string, positional); `compress` (bool, named); `strip` (bool, named)"),
 			"`embed: the entry says parameters",
 		},
@@ -419,16 +426,19 @@ func TestAnnotationCoverageEntryMustRepeatItsRow(t *testing.T) {
 }
 
 func TestAnnotationCoverageEntryWithoutASchemaLineIsAnError(t *testing.T) {
+	// Heading text carries no mark that separates an entry from a section, so
+	// the schema line is what makes one. A heading without it is read as a
+	// section, and the annotation it meant to document is left with no entry.
 	doc := annotationDocument([]string{copyRow, embedRow}, []string{rejectedRow},
-		[]string{entryFor(copyRow), "### `` `embed ``"})
+		[]string{entryFor(copyRow), "### embed"})
 	root := annotationTree(t, copyMetas+embedMetas, copySpecs+embedSpecs, doc)
-	expectFinding(t, checkAnnotationCoverage(root), "has no", "**Targets**")
+	expectFinding(t, checkAnnotationCoverage(root), "`embed has an Index row but no entry")
 }
 
 func TestAnnotationCoverageWrappedSchemaLineIsJoined(t *testing.T) {
 	// A long contract wraps in the source; Markdown joins it and so must the
 	// reconciliation, or every wide entry would read as malformed.
-	wrapped := "### `` `embed ``\n\n- **Targets** functions · **Parameters** `path` (string, positional);\n" +
+	wrapped := "### embed\n\n- **Targets** functions · **Parameters** `path` (string, positional);\n" +
 		"  `compress` (bool, named)"
 	doc := annotationDocument([]string{copyRow, embedRow}, []string{rejectedRow},
 		[]string{entryFor(copyRow), wrapped})
@@ -480,7 +490,7 @@ func TestAnnotationCoverageNamedParameterCannotBeOptional(t *testing.T) {
 // --- the compiler's own tables ---
 
 func TestAnnotationCoverageUnknownMetaTargetIsAHardError(t *testing.T) {
-	// A new declaration kind changes what §6 can express, so it must force
+	// A new declaration kind changes what annotations.md#index can express, so it must force
 	// this check to be updated rather than silently skip the annotation.
 	root := annotationTree(t, copyMetas+"\t\"getter\": {TargetGetter},\n",
 		copySpecs+"\t\"getter\": noParams,\n", coherentDocument())
@@ -608,7 +618,7 @@ func overwriteSema(t *testing.T, root, rel, content string) {
 func TestAnnotationCoverageMalformedBuiltinMetasIsAnError(t *testing.T) {
 	// The check reads the tables with Go's own parser, so anything it cannot
 	// reduce to name -> targets must be reported rather than skipped: an
-	// entry silently dropped here is an annotation §6 is never asked about.
+	// entry silently dropped here is an annotation annotations.md#index is never asked about.
 	cases := []struct {
 		name string
 		body string
@@ -631,7 +641,7 @@ func TestAnnotationCoverageMalformedMetaParamSpecsIsAnError(t *testing.T) {
 	// The same for the parameter contract, one malformation per shape the
 	// reader knows how to descend into. `optional` and the two "unknown
 	// field" arms matter most: a field this check cannot read is a
-	// parameter dimension §6 would have no way to record.
+	// parameter dimension annotations.md#index would have no way to record.
 	cases := []struct {
 		name string
 		body string
@@ -710,7 +720,7 @@ func TestAnnotationCoverageSemaVarWithoutAnInitializerIsAnError(t *testing.T) {
 	// `var builtinMetas map[string][]MetaTarget` with the entries filled in
 	// by an init() is a table this check cannot read. The declaration is
 	// there, so a name-only match would find it and then reconcile the
-	// document against an empty set — reporting every §6 row as naming an
+	// document against an empty set — reporting every annotations.md#index row as naming an
 	// unregistered annotation. It must fail as an unreadable table instead.
 	root := annotationTree(t, copyMetas, copySpecs, coherentDocument())
 	overwriteSema(t, root, builtinMetasGo, "package sema\n\n"+
@@ -740,7 +750,7 @@ func TestAnnotationCoverageSemaVarMayShareItsDeclaration(t *testing.T) {
 // --- malformed document tables ---
 
 // groupedEntryTable renders a "### <heading>" section whose body is a table
-// with the index signature — the shape §15's field annotations use, where
+// with the index signature — the shape annotations.md#serialization's field annotations use, where
 // several annotations share one entry.
 func groupedEntryTable(heading string, rows ...string) string {
 	return "\n### " + heading + "\n\n| " + strings.Join(annotationIndexHeader, " | ") +
@@ -808,8 +818,8 @@ func TestAnnotationCoverageUnknownParameterKindIsAnError(t *testing.T) {
 }
 
 func TestAnnotationCoverageRowMayCarryTheParameterListInItsName(t *testing.T) {
-	// §16 spells one rejected name `` `align(N) ``, so a cell's name is what
-	// precedes its parameter list. A §6 row written the same way still names
+	// annotations.md#not-annotations spells one rejected name `` `align(N) ``, so a cell's name is what
+	// precedes its parameter list. A annotations.md#index row written the same way still names
 	// the annotation the compiler registers.
 	doc := annotationDocument([]string{copyRow, "| `` `align(N) `` | types | `n` (int, positional) | Alignment |"},
 		[]string{rejectedRow}, nil)
@@ -834,22 +844,22 @@ func TestAnnotationCoverageTableRuleIsOptional(t *testing.T) {
 
 func TestAnnotationCoverageUnreadableSchemaLineIsAnError(t *testing.T) {
 	// Half a schema line is not a schema line: an entry that declares
-	// targets but no parameters has nothing to reconcile against its row.
+	// targets but no parameters has nothing to reconcile against its row, so
+	// its heading reads as a section and its row is left without an entry.
 	doc := annotationDocument([]string{copyRow, embedRow}, []string{rejectedRow},
-		[]string{entryFor(copyRow), "### `` `embed ``\n\n- **Targets** functions"})
+		[]string{entryFor(copyRow), "### embed\n\n- **Targets** functions"})
 	root := annotationTree(t, copyMetas+embedMetas, copySpecs+embedSpecs, doc)
-	expectFinding(t, checkAnnotationCoverage(root), "has no", "**Parameters**")
+	expectFinding(t, checkAnnotationCoverage(root), "`embed has an Index row but no entry")
 }
 
 func TestAnnotationCoverageEntryAtEndOfDocumentStillNeedsASchemaLine(t *testing.T) {
 	// The scan for a schema line normally stops at the next heading; the
 	// last entry in the file has none, and must not pass by running out of
 	// document.
-	doc := coherentDocument() + "\n### `` `mono ``\n"
-	root := annotationTree(t,
-		copyMetas+embedMetas+"\t\"mono\": {TargetMethod},\n",
-		copySpecs+embedSpecs+"\t\"mono\": noParams,\n", doc)
-	expectFinding(t, checkAnnotationCoverage(root), "the entry \"`` `mono ``\" has no", "**Targets**")
+	doc := annotationDocument([]string{copyRow, embedRow}, []string{rejectedRow},
+		[]string{entryFor(copyRow)}) + "\n### embed\n"
+	root := annotationTree(t, copyMetas+embedMetas, copySpecs+embedSpecs, doc)
+	expectFinding(t, checkAnnotationCoverage(root), "`embed has an Index row but no entry")
 }
 
 // --- the shape of a finding ---
@@ -895,7 +905,7 @@ func TestAnnotationCoverageOptionalPositionalIsPartOfTheContract(t *testing.T) {
 			"| `` `deprecated `` | types | `message` (string, positional) | Mark deprecated |"},
 			[]string{rejectedRow}, nil)
 		expectFinding(t, checkAnnotationCoverage(annotationTree(t, metas, specs, doc)),
-			"`deprecated", "parameters in docs/annotations.md §6 disagree",
+			"`deprecated", "parameters in docs/annotations.md#index disagree",
 			"metaParamSpecs says \"`message` (string, positional, optional)\"")
 	})
 }

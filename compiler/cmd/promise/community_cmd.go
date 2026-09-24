@@ -16,7 +16,7 @@ import (
 var nowFunc = time.Now
 
 // runPackageCheckEpoch implements `promise package check-epoch [<epoch>]`: the
-// module-owner self-verify (§9.9, the "`promise use E` → `promise test`" loop as
+// module-owner self-verify (module-system.md#compatibility-and-the-community-catalog, the "`promise use E` → `promise test`" loop as
 // one command). It verifies the module in the cwd against the epoch (default: the
 // running compiler's epoch) and, on success, prints the publish hint (push an
 // `epoch-<E>` git tag). Exits non-zero on failure.
@@ -82,7 +82,7 @@ func runPackageCheckEpoch(args []string) {
 }
 
 // runPackageBuildIndex implements `promise package build-index <catalog-dir>
-// <epoch> [-report]`: the community-catalog CI matrix builder (§9.9–§9.10). For
+// <epoch> [-report]`: the community-catalog CI matrix builder (module-system.md#compatibility-and-the-community-catalog–module-system.md#when-a-module-has-no-compatible-version). For
 // every module listed in <catalog-dir>/modules.toml it resolves + verifies the
 // epoch-appropriate commit under the epoch-<E> compiler (the same engine the
 // client uses), writes the verified commits into index/<epoch>.json, and
@@ -90,7 +90,7 @@ func runPackageCheckEpoch(args []string) {
 // per-user local test run for listed modules.
 //
 // Exits non-zero when any listed module fails (so CI surfaces it) — except with
-// -report (the §9.10 pre-release nudge), which prints the unsupported list and
+// -report (the module-system.md#when-a-module-has-no-compatible-version pre-release nudge), which prints the unsupported list and
 // exits 0 so it never blocks the release.
 func runPackageBuildIndex(args []string) {
 	report := false
@@ -182,7 +182,7 @@ func runPackageBuildIndex(args []string) {
 			fmt.Printf("  - %s\n", name)
 		}
 		if report {
-			// Pre-release nudge (§9.10): surface the gap, but never fail the run —
+			// Pre-release nudge (module-system.md#when-a-module-has-no-compatible-version): surface the gap, but never fail the run —
 			// it cannot force an unmaintained module to update.
 			fmt.Println("\n(pre-release report — these authors should publish an epoch-" + epoch + " tag)")
 			return

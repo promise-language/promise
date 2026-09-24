@@ -3,7 +3,7 @@
 # Runs `promise package build-index` for the current stable epoch across every
 # module in modules.toml, then commits the updated index/<epoch>.json + matrix.md
 # back to the catalog repo. This removes the per-user local test run for listed
-# modules (docs/community-catalog.md §4).
+# modules (docs/community-catalog.md#catalog-ci-and-the-compatibility-matrix).
 name: compat-matrix
 
 on:
@@ -37,8 +37,8 @@ jobs:
 
       - name: Commit the updated index + matrix
         run: |
-          git config user.name "promise-community-bot"
-          git config user.email "bot@promise-community.org"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add index/ matrix.md
           if ! git diff --cached --quiet; then
             git commit -m "ci: update compat index for epoch ${{ steps.epoch.outputs.epoch }}"

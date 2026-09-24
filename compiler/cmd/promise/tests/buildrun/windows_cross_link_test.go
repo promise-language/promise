@@ -47,7 +47,7 @@ func windowsCrossTripleIsNative() bool {
 // kernel32/advapi32/ws2_32/secur32/crypt32/ncrypt/bcrypt have shipped since
 // forever; ucrtbase.dll is in Windows 10 and later.
 //
-// This set is the zero-dependency promise of docs/windows-support.md §3.3
+// This set is the zero-dependency promise of docs/windows-support.md#linking-against-a-self-generated-zero-dependency-surface
 // stated as an assertion. An import outside it means a Promise program now
 // needs something the user has to install — the regression this test exists to
 // catch, and one that no amount of "it linked" can reveal.
@@ -178,7 +178,7 @@ func TestWindowsCrossLinkImportsOnlyShippedDLLs(t *testing.T) {
 		if !windowsShippedDLLs[dll] {
 			t.Errorf("cross-built .exe imports %s, which does not ship with Windows\n"+
 				"  a Promise program must run on a stock install with nothing added "+
-				"(docs/windows-support.md §3.3)\n"+
+				"(docs/windows-support.md#linking-against-a-self-generated-zero-dependency-surface)\n"+
 				"  if this import is legitimate, add its .def symbol list under "+
 				"tools/build/winlink/def/ and extend windowsShippedDLLs", dll)
 		}

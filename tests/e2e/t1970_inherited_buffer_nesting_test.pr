@@ -118,7 +118,7 @@ inherited_task_field_is_a_move_only_collection() `test {
   assert(v.len == 0, "container emptied");
 }
 
-// memory-model.md §3: a handle held behind a refcount is not held by value, so the
+// memory-model.md#by-value-versus-behind-a-handle: a handle held behind a refcount is not held by value, so the
 // element dup is a refcount bump rather than an alias and the read stays legal.
 // This is the false-positive guard — resolving the inherited field must not turn
 // `Ref` into a rejection, and the payload must be released exactly once.

@@ -192,7 +192,7 @@ func TestT1053_VectorOriginNotInterior(t *testing.T) {
 
 // --- `interior is `native-only: user declarations are rejected (T1921) ---
 //
-// `interior is a user-facing annotation (docs/language-design.md §6.2). These
+// `interior is a user-facing annotation (docs/language-design.md#borrowing-and-moving). These
 // pin the non-generic-Named path of recvIsInterior / the write check, which the
 // generic stdlib primitives (Channel/Mutex, all *Instance) never exercise.
 

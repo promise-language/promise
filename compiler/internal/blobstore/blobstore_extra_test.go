@@ -78,7 +78,7 @@ func TestResolveMemberNotFound(t *testing.T) {
 
 // TestResolveArchiveSHA256Mismatch verifies an archive whose bytes don't match
 // the asserted archive_sha256 is rejected before extraction (cheap defense,
-// §4.3) and produces a hard error (not the offline message — it's a content,
+// distribution.md#content-mismatch-is-loud-and-never-silent) and produces a hard error (not the offline message — it's a content,
 // not a network, failure).
 func TestResolveArchiveSHA256Mismatch(t *testing.T) {
 	archive := makeTar(map[string][]byte{"bin/opt": []byte("opt")})
@@ -114,7 +114,7 @@ func TestResolveArchiveSHA256Mismatch(t *testing.T) {
 
 // TestPersistentArchiveCacheReuse verifies that when a blob is missing but its
 // asserted archive is already in archives/sha256/<hash>, the resolver re-extracts
-// from the cached archive without any network access (§4.2 archive reuse).
+// from the cached archive without any network access (distribution.md#fetch-flow archive reuse).
 func TestPersistentArchiveCacheReuse(t *testing.T) {
 	opt := []byte("opt-binary-reuse")
 	archive := makeTar(map[string][]byte{"bin/opt": opt})
@@ -527,7 +527,7 @@ func TestNewStoreRootsUnderPromiseHome(t *testing.T) {
 
 // TestIntegrityTelemetryOptIn verifies the integrity-mismatch telemetry stub is
 // silent by default and only emits when the explicit opt-in env var is set (no
-// hidden effects, §4.4 design candidate).
+// hidden effects, distribution.md#telemetry design candidate).
 func TestIntegrityTelemetryOptIn(t *testing.T) {
 	// Default (env unset): the function must do nothing and not panic.
 	reportIntegrityMismatch("llvm-opt", "https://x/opt", "aa", "bb", "2026.0")

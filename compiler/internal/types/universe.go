@@ -32,7 +32,7 @@ var (
 
 	// Generic native types (in Universe scope)
 	TypTask         *Named // Task[T] — concurrency handle from go expressions
-	TypFailableTask *Named // FailableTask[T] — handle from `go!` (§17.2.1); result buffer holds a failable {ok,value,err} aggregate
+	TypFailableTask *Named // FailableTask[T] — handle from `go!` (language-design.md#failable-goroutines); result buffer holds a failable {ok,value,err} aggregate
 	TypChannel      *Named // Channel[T] — channel type
 	TypVector       *Named // Vector[T] — dynamic array
 	TypArc          *Named // Ref[T] — reference counting for shared ownership

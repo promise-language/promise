@@ -18,7 +18,7 @@ import (
 // emitCloseErrCheck the captured error is saved-but-never-freed. The fix mirrors
 // the value-return path: capture the cap and call emitCloseErrCheck to route it.
 //
-// T1385/§17.2: a bare `return;` is legal only on a non-value path, so the body is
+// T1385/language-design.md#explicit-concurrency: a bare `return;` is legal only on a non-value path, so the body is
 // `failable_task[Void]`. What this covers is the bare-return EXIT, not the result
 // type — the close-error routing on that exit is unchanged. (The sibling
 // explicit-return exit is covered by TestT1385_FailableExplicitReturnStoresOk.)

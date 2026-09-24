@@ -11,7 +11,7 @@ import (
 // TestPatchAndSignMachOBestEffort verifies the macOS patch+sign step is
 // best-effort: on a non-Mach-O file the install_name_tool/otool/codesign
 // invocations fail harmlessly without panicking and the file is left in place
-// (§5.1). Real Mach-O patching is exercised end-to-end by the build; this guards
+// (distribution.md#macos). Real Mach-O patching is exercised end-to-end by the build; this guards
 // the no-crash contract the resolver relies on.
 func TestPatchAndSignMachOBestEffort(t *testing.T) {
 	dir := t.TempDir()

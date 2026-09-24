@@ -247,7 +247,7 @@ cloneable_produces_an_independent_copy() `test {
 mutex_guard_closes_directly() `test {
   // MutexGuard[T] declares `is Closer` (T1952 restored it): its close(~this) is
   // non-failable where Closer requires close!(~this), a documented relaxed match
-  // (§5.3) that the crossing now adapts. This pins the direct call the type
+  // (language-design.md#variable-declarations) that the crossing now adapts. This pins the direct call the type
   // publishes; the boxed form is covered in
   // tests/e2e/mutex_guard_box_structural_test.pr.
   Mutex[int] m = Mutex[int](5);
@@ -282,7 +282,7 @@ type _ExactCloser is Closer {
 
 type _RelaxedCloser is Closer {
   int fd;
-  close(~this) `doc("Non-failable close — the documented relaxed match (§5.3) http.Client and MutexGuard[T] use.") {
+  close(~this) `doc("Non-failable close — the documented relaxed match (language-design.md#variable-declarations) http.Client and MutexGuard[T] use.") {
   }
 }
 

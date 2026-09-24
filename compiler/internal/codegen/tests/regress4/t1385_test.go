@@ -7,7 +7,7 @@ import (
 	"github.com/promise-language/promise/compiler/internal/codegen/codegentest"
 )
 
-// T1385 / §17.2 explicit-return style: `return <expr>` inside a `go {}` / `go! {}`
+// T1385 / language-design.md#explicit-concurrency explicit-return style: `return <expr>` inside a `go {}` / `go! {}`
 // block produces the GOROUTINE's result. genReturnStmt's coroutine branch used to
 // handle only the bare form, so a `return <expr>` either fell into the enclosing
 // function's `ret` path or stored nothing. It now evaluates the value, moves it out

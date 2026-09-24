@@ -52,7 +52,7 @@ var downloadClient = &http.Client{
 // const) so tests can drive the stall path without waiting a real minute.
 var downloadStallTimeout = 60 * time.Second
 
-// OfflineError is the exact §4.4 message emitted when a dependency is uncached
+// OfflineError is the exact distribution.md#telemetry message emitted when a dependency is uncached
 // and the network is unreachable. It points at the remedies owned by T0771
 // (the -full build / `promise install`, which folds in toolchain pre-staging
 // per T1008).
@@ -67,7 +67,7 @@ var errArchiveDeclined = errors.New("LLVM toolchain download declined (large-arc
 // Resolver performs one resolution pass over the CAS + manifest. Reuse a single
 // Resolver across a batch of Resolve calls (e.g. building the LLVM view dir) so
 // a shared archive is downloaded once and bad sources are negative-cached for
-// the whole pass (§4.2/§4.3).
+// the whole pass (distribution.md#fetch-flow/distribution.md#content-mismatch-is-loud-and-never-silent).
 type Resolver struct {
 	store *Store
 	m     *Manifest
@@ -77,7 +77,7 @@ type Resolver struct {
 	// references the same archive.
 	archiveCache map[string]string
 	// badSources negative-caches source URLs whose bytes failed verification or
-	// download this pass, so wrong/broken bytes aren't re-fetched (§4.3).
+	// download this pass, so wrong/broken bytes aren't re-fetched (distribution.md#content-mismatch-is-loud-and-never-silent).
 	badSources map[string]bool
 	// satisfied records entry names already materialized this pass via the
 	// materialize-all archive optimization, so the outer loop short-circuits.
@@ -150,7 +150,7 @@ func (r *Resolver) Resolve(name string) (string, error) {
 	}
 	hash := normalizeHash(entry.SHA256)
 
-	// Fast path — CAS hit, lock-free (trusted by presence, §4.2 step 2).
+	// Fast path — CAS hit, lock-free (trusted by presence, distribution.md#fetch-flow step 2).
 	if r.store.Has(hash) {
 		return r.store.BlobPath(hash), nil
 	}
@@ -212,7 +212,7 @@ func (r *Resolver) Close() {
 	}
 }
 
-// fetch walks an entry's ranked sources until one verifies (§4.2 step 3).
+// fetch walks an entry's ranked sources until one verifies (distribution.md#fetch-flow step 3).
 func (r *Resolver) fetch(entry *ManifestEntry) (string, error) {
 	hash := normalizeHash(entry.SHA256)
 	var sawNetworkError bool
@@ -282,7 +282,7 @@ func (r *Resolver) fetch(entry *ManifestEntry) (string, error) {
 }
 
 // fetchBlob downloads a direct blob source to a temp file, aborting if the
-// stream overshoots the manifest size (cheap defense, §4.3). A compressed source
+// stream overshoots the manifest size (cheap defense, distribution.md#content-mismatch-is-loud-and-never-silent). A compressed source
 // is transparently decompressed before the caller verifies the uncompressed
 // content sha256.
 func (r *Resolver) fetchBlob(entry *ManifestEntry, src Source) (string, error) {
@@ -311,7 +311,7 @@ func (r *Resolver) fetchBlob(entry *ManifestEntry, src Source) (string, error) {
 // fresh temp file the caller then hashes against the uncompressed content
 // sha256. The compressed download is uncapped (compressed < uncompressed), but
 // the decompressed output is bounded to entry.Size (+1 to detect overshoot) as a
-// decompression-bomb defense, preserving the §4.3 overshoot guarantee.
+// decompression-bomb defense, preserving the distribution.md#content-mismatch-is-loud-and-never-silent overshoot guarantee.
 func (r *Resolver) fetchBlobBrotli(entry *ManifestEntry, u string) (string, error) {
 	comp, err := os.CreateTemp(r.tmpDir, "blobz-*")
 	if err != nil {
@@ -357,7 +357,7 @@ func (r *Resolver) fetchBlobBrotli(entry *ManifestEntry, u string) (string, erro
 
 // fetchFromArchive obtains the shared archive once per pass and extracts the
 // requested archive_path. When archive_sha256 is given it is verified before
-// paying extraction cost (§4.3) and the archive persistently cached (§4.2).
+// paying extraction cost (distribution.md#content-mismatch-is-loud-and-never-silent) and the archive persistently cached (distribution.md#fetch-flow).
 func (r *Resolver) fetchFromArchive(entry *ManifestEntry, src Source) (string, error) {
 	archiveURL := r.rewrite(src.Archive)
 	extractRoot, ok := r.archiveCache[archiveURL]
@@ -483,7 +483,7 @@ func (r *Resolver) extractArchiveFile(archivePath, archiveURL string) (string, e
 
 // materializeAllFromArchive verifies+commits every not-yet-present manifest
 // entry whose first source references the same archive URL, from the single
-// already-extracted tree (§4.2 materialize-all optimization). Best-effort:
+// already-extracted tree (distribution.md#fetch-flow materialize-all optimization). Best-effort:
 // failures here are ignored — the entry is fetched normally when later resolved.
 func (r *Resolver) materializeAllFromArchive(archiveURL, extractRoot string) {
 	for i := range r.m.Entries {
@@ -552,7 +552,7 @@ func (r *Resolver) copyOut(srcPath string) (string, error) {
 	return tmpName, nil
 }
 
-// rewrite applies the PROMISE_BLOB_MIRROR base-URL override (§4.1) to an ARCHIVE
+// rewrite applies the PROMISE_BLOB_MIRROR base-URL override (distribution.md#manifest-entry-content-identity-and-acquisition) to an ARCHIVE
 // source: scheme + host are replaced with the mirror base, preserving the path
 // (archives are upstream vendor files, not content-addressed). Blob sources use
 // rewriteBlob — a flat CAS layout. Enables corporate mirrors / air-gapped
@@ -614,7 +614,7 @@ func sourceKey(s Source) string {
 	return "blob:" + s.Blob
 }
 
-// loudMismatch warns with full detail on a content mismatch (§4.3).
+// loudMismatch warns with full detail on a content mismatch (distribution.md#content-mismatch-is-loud-and-never-silent).
 func loudMismatch(name, srcURL, expected, got string, bytesWasted int64) {
 	fmt.Fprintf(os.Stderr,
 		"warning: content mismatch for %q\n  source:   %s\n  expected: %s\n  actual:   %s\n  wasted:   %d bytes (this source rejected; trying next)\n",

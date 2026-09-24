@@ -2,7 +2,7 @@
 // The fire-and-forget cases below are leak-checked without any barrier of their
 // own: the harness drains outstanding goroutines before snapshotting alloc_count
 // (T1639). Do not add a sleep to "let the goroutine finish" (T1632).
-// T1397: §17.4 forbids borrowing a receiver across a go spawn boundary, so all
+// T1397: language-design.md#ownership-across-goroutines forbids borrowing a receiver across a go spawn boundary, so all
 // `go obj.method()` patterns use a go block with a binding to move ownership.
 type Counter {
   int value;

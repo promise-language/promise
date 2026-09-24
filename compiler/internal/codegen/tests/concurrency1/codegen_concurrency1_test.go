@@ -1635,7 +1635,7 @@ func TestGoroutineExitSkipsFreeForTask(t *testing.T) {
 	codegentest.AssertContains(t, ir, "do_free:")
 }
 
-// T2162: §17.4 ("Ownership Across Goroutines") requires a refcounted `sharable
+// T2162: language-design.md#ownership-across-goroutines ("Ownership Across Goroutines") requires a refcounted `sharable
 // handle to be DUPLICATED where it crosses a `go` boundary — "the goroutine's
 // handle is created before the spawner's can drop". The B0163 loops read the
 // handle type off the captured name's DROP BINDING, which a borrowed PARAMETER
@@ -1721,7 +1721,7 @@ func TestT2162_GoCallChannelParamRetained(t *testing.T) {
 }
 
 // T2162: the via-block call path (genGoCallExprViaBlock, reached by a method
-// call) carries the same arm. The receiver is a pure value type so §17.4's
+// call) carries the same arm. The receiver is a pure value type so language-design.md#ownership-across-goroutines's
 // separate receiver-borrow rejection does not mask the case under test.
 func TestT2162_GoCallViaBlockChannelParamRetained(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
@@ -1861,7 +1861,7 @@ func TestT2162_GenericSpawnerRefParamRetained(t *testing.T) {
 
 // T2163: the fast `go f(…)` path retained `channel[T]` only, so a Ref[T]
 // argument crossed as a bare borrow and the spawner's drop freed the Arc under
-// the running goroutine. §17.4 requires every refcounted `sharable handle to be
+// the running goroutine. language-design.md#ownership-across-goroutines requires every refcounted `sharable handle to be
 // duplicated at the boundary, and the accepted set is the one
 // ownership.isRefcountedHandle already exempts from the borrow rejection —
 // Channel, Ref and Weak alike. Supersedes T2162's TestT2162_GoCallRefParamNotRetained,
@@ -1911,7 +1911,7 @@ func TestT2163_GoCallRefLocalRetained(t *testing.T) {
 	// The spawner is main's coroutine; ExtractFunc skips the ramp call site.
 	mainIR := codegentest.ExtractFunc(ir, ".goroutine.main")
 	codegentest.AssertContains(t, mainIR, "arcdup.inc")
-	// §17.4's ordering invariant: "the goroutine's handle is created before the
+	// language-design.md#ownership-across-goroutines's ordering invariant: "the goroutine's handle is created before the
 	// spawner's can drop" — so the retain must precede the ramp call, which is
 	// what hands the arguments to promise_g_new / promise_sched_enqueue.
 	dupIdx := strings.Index(mainIR, "arcdup.inc")
@@ -1973,7 +1973,7 @@ func TestT2163_GoCallWeakParamRetained(t *testing.T) {
 	codegentest.AssertContains(t, coroIR, `call void @"Weak[int].drop"`)
 }
 
-// T2163: a `move` argument TRANSFERS the handle (§17.4's table, row 1) rather
+// T2163: a `move` argument TRANSFERS the handle (language-design.md#ownership-across-goroutines's table, row 1) rather
 // than duplicating it — the callee owns and drops it and the caller's flag is
 // cleared, so a retain here would be released one time too many. The widened
 // arm must keep its hands off the move path.
@@ -2186,7 +2186,7 @@ func TestT2163_GoCallFieldReadRetained(t *testing.T) {
 	codegentest.AssertContains(t, coroIR, `call void @"Ref[int].drop"`)
 }
 
-// T2171: §17.4 conditions the spawn-boundary duplication of a refcounted
+// T2171: language-design.md#ownership-across-goroutines conditions the spawn-boundary duplication of a refcounted
 // `sharable handle on the TYPE being sharable, never on how the name carrying it
 // is bound. Both block spawn sites keyed it off the captured name's BINDING KIND
 // — an owned local's drop binding, or a borrowed value parameter — and a for-in
@@ -2355,7 +2355,7 @@ func TestT2171_GenericForInBindingRetained(t *testing.T) {
 // T2171: a capture referenced ONLY inside a lambda in the block. collectBlockIdents
 // does not walk the lambda body — it reads sema's capture set (T0740) — so this
 // capture has no *ast.IdentExpr anywhere in the block. Recording a representative
-// ident instead of the type left it typeless and silently exempt from the §17.4
+// ident instead of the type left it typeless and silently exempt from the language-design.md#ownership-across-goroutines
 // duplication; the capture set is the only place its type is reachable.
 func TestT2171_GoBlockLambdaOnlyCaptureRetained(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `

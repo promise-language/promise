@@ -1,5 +1,5 @@
 // T1900: a bare failable call as a `match` scrutinee must auto-propagate
-// (§7.2: auto-propagation works in all expression positions; §11: `?^` is
+// (language-design.md#calling-failable-functions: auto-propagation works in all expression positions; language-design.md#strings-and-interpolation: `?^` is
 // equivalent to a bare failable call). Before the fix the raw failable
 // aggregate reached the match codegen: a codegen panic for int/enum subjects,
 // a runtime segfault for string subjects, and a wrong answer for optional

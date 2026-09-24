@@ -1,5 +1,5 @@
 // T0967: a `use`-bound value whose type defines BOTH close() and drop() must run
-// close() ONLY at scope exit — drop() is suppressed (language-design §16.4: `use`
+// close() ONLY at scope exit — drop() is suppressed (language-design language-design.md#interaction-between-use-and-drop: `use`
 // takes precedence). This guards against the double-cleanup hazard where close()
 // and drop() both release the same resource.
 //

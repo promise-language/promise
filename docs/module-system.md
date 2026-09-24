@@ -6,9 +6,9 @@ This document describes the module system model: a **mono-versioned global catal
 
 ---
 
-## 1. Motivation
+## Motivation
 
-### 1.1 The Version Hell Problem
+### The Version Hell Problem
 
 Every modern package ecosystem suffers from version management complexity:
 
@@ -19,7 +19,7 @@ Every modern package ecosystem suffers from version management complexity:
 
 All of these systems share a fundamental assumption: **each package versions independently.** This means the user (or their AI agent) must solve a constraint satisfaction problem at build time: "find a set of versions where everything is compatible." This problem is NP-complete in general, and even when solvable, produces builds that no one has ever tested in that exact combination.
 
-### 1.2 Why This Matters for AI Agents
+### Why This Matters for AI Agents
 
 Promise is designed for AI-agent efficiency. Version management is the single worst failure mode for AI-generated code:
 
@@ -28,7 +28,7 @@ Promise is designed for AI-agent efficiency. Version management is the single wo
 3. **Configuration overhead.** Writing `Cargo.toml`, `package.json`, or `go.mod` is boilerplate that adds zero information but creates opportunities for errors. An AI agent generating a self-contained program shouldn't need to also generate a dependency manifest.
 4. **Non-determinism.** Two agents generating the same logical program may produce different dependency versions, leading to different behavior. This violates "one obvious way."
 
-### 1.3 The Insight: Version the World, Not the Parts
+### Version the World and Not the Parts
 
 Operating system distributions solved this decades ago. Debian stable, Ubuntu LTS, and NixOS all ship a **curated set of packages tested together as a unit**. You don't pick individual package versions — you pick a distribution release, and everything is guaranteed to work.
 
@@ -41,7 +41,7 @@ Promise applies this model to a programming language ecosystem:
 
 ---
 
-## 2. Design Principles
+## Design Principles
 
 Every decision in this proposal is evaluated against Promise's core principles:
 
@@ -55,9 +55,9 @@ Every decision in this proposal is evaluated against Promise's core principles:
 
 ---
 
-## 3. The Global Catalog
+## The Global Catalog
 
-### 3.1 What It Is
+### What the Catalog Is
 
 The **catalog** is a curated, tested, mono-versioned set of modules that constitutes the entire Promise module ecosystem. It includes:
 
@@ -92,7 +92,7 @@ The standard library source lives in `std/` and is embedded in the compiler bina
 
 During early language development, keeping catalog modules in-repo avoids the overhead of coordinating across many repositories. A module can start in `modules/<name>/`, be iterated atomically alongside the compiler and std, and later graduate to its own repository by adding a `url` + `commit` to its catalog entry and removing the `modules/<name>/` directory.
 
-### 3.2 `catalog.toml`
+### The catalog manifest
 
 The catalog manifest maps module names to their source locations:
 
@@ -124,13 +124,13 @@ description = "Cryptographic primitives"
 Key properties:
 - **Flat namespace.** Module names are simple identifiers (`json`, `http`, `crypto`). No URLs, no paths, no version numbers in names.
 - **Embedded or external.** A catalog entry **without** `url`/`commit` is an **embedded module** — its source lives in `modules/<name>/` in the compiler repo and is compiled into the binary. An entry **with** `url`/`commit` is an **external module** — fetched from git on first use. From the user's perspective, both are just `use name`. This allows modules to start embedded (fast iteration during early development) and graduate to external repos when stable.
-- **`subdir` (external only).** An external entry may add `subdir = "path/to/module"` when the module lives in a subdirectory of its repo rather than at the root — the same field and the same rules as a `[require.NAME]` entry (§6.2). It is rejected on an embedded entry, which has no repo to address into.
+- **`subdir` (external only).** An external entry may add `subdir = "path/to/module"` when the module lives in a subdirectory of its repo rather than at the root — the same field and the same rules as a `[require.NAME]` entry ([Remote Module Pinning](#remote-module-pinning)). It is rejected on an embedded entry, which has no repo to address into.
 - **Fetch-ready URLs (external only).** The `url` field stores the full git-fetchable URL including protocol and authentication info (e.g., `https://github.com/...`, `git@github.com:...`, `ssh://git@git.corp.com/...`). This is the URL passed directly to `git clone` — not the normalized canonical form used for identity/deduplication (which strips schemes and suffixes). The catalog entry is the source of truth for *how* to fetch each module.
 - **Pinned commits (external only).** Each external module points to an exact commit hash. No ranges, no "latest", no resolution. Embedded modules are versioned implicitly by the compiler commit (they're in the same repo).
 - **Implicit dependencies.** Catalog modules declare dependencies via `use` declarations in their source code, not in catalog.toml. The compiler resolves them transitively at build time. The catalog CI validates that all inter-module dependencies form a DAG (no cycles).
 - **Self-contained.** Catalog modules may only depend on other catalog modules — never on remote or local modules. The catalog is a closed world: every dependency in the graph is tested, versioned, and shipped together. This is enforced at build time (catalog modules with `[require]` entries are rejected) and by the catalog CI pipeline (see Section 8.1).
 
-### 3.3 What's NOT in the Catalog
+### What Is Not in the Catalog
 
 The catalog is curated, not exhaustive. Not every Promise module needs to be in it. Modules outside the catalog are **sourced modules** — either local (path-based) or remote (URL-based) — imported via `use alias "location"` declarations (see Section 9).
 
@@ -138,9 +138,9 @@ The catalog aims to cover the "90% use case" — the modules that most programs 
 
 ---
 
-## 4. Epochs
+## Epochs
 
-### 4.1 What Is an Epoch?
+### What an Epoch Is
 
 An **epoch** is a tagged release of the catalog. It is a single identifier (not a semantic version) that uniquely determines:
 
@@ -158,7 +158,7 @@ Epoch names follow the format `YYYY.N` where `YYYY` is the year and `N` is a seq
 2027.0    — first release of 2027
 ```
 
-### 4.2 Epoch Guarantees
+### Epoch Guarantees
 
 Within an epoch, the following are guaranteed:
 
@@ -167,7 +167,7 @@ Within an epoch, the following are guaranteed:
 3. **All integration tests pass.** Cross-module tests covering common interaction patterns pass.
 4. **API stability.** The epoch is immutable once tagged. No silent updates, no "re-releases."
 
-### 4.3 Epoch Channels
+### Epoch Channels
 
 There are two channels at any given time:
 
@@ -178,7 +178,7 @@ There are two channels at any given time:
 
 There is no `nightly` or `beta`. The `next` channel serves the purpose of both — it's where you test upcoming changes. When `next` passes all tests and is deemed ready, it becomes the new `stable` and a new `next` begins.
 
-### 4.4 Breaking Changes Between Epochs
+### Breaking Changes Between Epochs
 
 Epochs **may contain breaking changes.** This is by design — it's the mechanism by which the ecosystem evolves. However:
 
@@ -186,20 +186,20 @@ Epochs **may contain breaking changes.** This is by design — it's the mechanis
 - Breaking changes are **documented.** Each epoch has a migration guide listing what changed and how to update your code.
 - Breaking changes are **atomic for the first-party catalog.** You never see a "half-migrated" first-party catalog: you're either on epoch `2026.2` (old API) or `2026.3` (new API), and within an epoch everything the catalog ships works completely.
 
-This atomic guarantee applies only to modules the catalog team owns (embedded + first-party). **Community and ad-hoc modules cannot be coordinated atomically** — they live in repos the team does not control. They track epochs with `epoch-*` tags and are verified per epoch instead (§9.8–§9.10), and a source-breaking epoch can leave one without a compatible version until its author re-tags (§9.10).
+This atomic guarantee applies only to modules the catalog team owns (embedded + first-party). **Community and ad-hoc modules cannot be coordinated atomically** — they live in repos the team does not control. They track epochs with `epoch-*` tags and are verified per epoch instead ([Cross Epoch Module Versioning](#cross-epoch-module-versioning)–[When a Module Has No Compatible Version](#when-a-module-has-no-compatible-version)), and a source-breaking epoch can leave one without a compatible version until its author re-tags ([When a Module Has No Compatible Version](#when-a-module-has-no-compatible-version)).
 
-**Scope of "breaking."** Breaking changes are allowed to reach the **language and core type system**, not just stdlib/catalog APIs — there is no frozen cross-epoch source compatibility and no editions mechanism yet (§9.8). Such source-level breaks are expected to be **rare and deliberately costly**: each one strands every community/ad-hoc module that has not yet published a verified tag for the new epoch (§9.10). The single-compiler-per-build model (§9.8) is what makes this concrete — one compiler compiles all dependency source, so a dependency written for an older epoch only keeps working while the newer compiler still accepts its source. Editions (a compiler that retains older epochs' front-ends) remain a possible future lever to soften this; see §17.
+**Scope of "breaking."** Breaking changes are allowed to reach the **language and core type system**, not just stdlib/catalog APIs — there is no frozen cross-epoch source compatibility and no editions mechanism yet ([Cross Epoch Module Versioning](#cross-epoch-module-versioning)). Such source-level breaks are expected to be **rare and deliberately costly**: each one strands every community/ad-hoc module that has not yet published a verified tag for the new epoch ([When a Module Has No Compatible Version](#when-a-module-has-no-compatible-version)). The single-compiler-per-build model ([Cross Epoch Module Versioning](#cross-epoch-module-versioning)) is what makes this concrete — one compiler compiles all dependency source, so a dependency written for an older epoch only keeps working while the newer compiler still accepts its source. Editions (a compiler that retains older epochs' front-ends) remain a possible future lever to soften this; see [Open Questions](#open-questions).
 
 This is radically simpler than semver, where a breaking change in one package can cascade unpredictably through the dependency graph and requires each downstream maintainer to independently update.
 
 ---
 
-## 5. Import Syntax
+## Import Syntax
 
-### 5.1 `use` Declarations (Module Imports)
+### Use Declarations
 
 The `use` keyword at file scope imports a module by its catalog name. A `use` declaration
-binds its alias **in the file that declares it, and nowhere else** — see §5.2.
+binds its alias **in the file that declares it, and nowhere else** — see [Import Scope](#import-scope).
 
 **Note on keyword reuse:** Promise also uses `use` inside function bodies for scoped resource bindings (`use x = File.open("path")`). There is no ambiguity — module imports (`useDecl`) appear at file scope before declarations, while resource bindings (`useBinding`) appear inside statement blocks. The grammar separates them structurally.
 
@@ -223,14 +223,14 @@ main() {
 }
 ```
 
-### 5.2 Import Scope
+### Import Scope
 
 **Imports are file-scoped.** A `use` declaration binds its alias in the file that declares it,
 and in no other file. Every file that references a module must declare its own `use` for it —
 including the module's own `*_test.pr` files.
 
 This is the **one exception** to a module's shared namespace. Types, enums, and functions
-declared anywhere in a module are visible throughout it (§6.5, §10.3). Import aliases are not.
+declared anywhere in a module are visible throughout it ([Visibility](#visibility), [Separate Compilation Considerations](#separate-compilation-considerations)). Import aliases are not.
 
 ```promise
 // easing.pr
@@ -261,7 +261,7 @@ angles.pr:4:11: undefined module 'math'
 resolve every name in it. If one file's import supplied the alias for its siblings, the
 `math.deg_to_rad` call in `angles.pr` would be unresolvable without first hunting down
 whichever sibling happened to declare `use math;`. That is precisely the hidden configuration
-the self-contained readability principle rules out (§2). It also means a file can be read in
+the self-contained readability principle rules out ([Design Principles](#design-principles)). It also means a file can be read in
 isolation by a tool, or moved between modules, without its meaning changing.
 
 **Rules:**
@@ -292,13 +292,13 @@ isolation by a tool, or moved between modules, without its meaning changing.
    ```
 
    A named import is unused when the file contains no `alias.` reference. An anonymous import
-   (§5.3) is unused when the file references none of the names it injects. The implicit
+   ([Aliasing](#aliasing)) is unused when the file references none of the names it injects. The implicit
    `use std as _;` every file is compiled with never warns.
 
    A warning rather than an error: a stray import is a tidiness problem, not a correctness
    one, and failing a build over it is a poor trade for one-shot code generation.
 
-### 5.3 Aliasing
+### Aliasing
 
 If a module name is inconvenient, alias it with `as`:
 
@@ -320,13 +320,13 @@ main() {
 }
 ```
 
-The sourced form (§5.5) spells the same thing with `_` in the alias position:
+The sourced form ([Sourced Module Imports](#sourced-module-imports)) spells the same thing with `_` in the alias position:
 
 ```promise
 use _ "./libs/models";
 ```
 
-An anonymous import is **file-scoped like any other** (§5.2): the injected names are visible
+An anonymous import is **file-scoped like any other** ([Import Scope](#import-scope)): the injected names are visible
 only in the declaring file, so that file's own import list still accounts for every bare name
 in it. This is exactly how `std` is provided — every file is compiled with an implicit
 `use std as _;`, which is why `print_line`, `Vector`, `Map`, and `assert` need no prefix.
@@ -339,20 +339,20 @@ Use anonymous imports sparingly. A named import tells the reader where `path.joi
 *at the call site*; an anonymous one tells them only at the top of the file. Prefer named
 imports unless the module is meant to read as an extension of the language itself.
 
-### 5.4 No Selective Unqualified Imports
+### No Selective Unqualified Imports
 
 There is no `from json use parse` or `use json { parse }`. A module is imported **whole** —
-either qualified under a name (§5.1), or injected entire under `as _` (§5.3). Individual
+either qualified under a name ([Use Declarations](#use-declarations)), or injected entire under `as _` ([Aliasing](#aliasing)). Individual
 symbols cannot be cherry-picked out of a module. This serves two purposes:
 
 1. **Self-contained readability.** Under a named import, `json.parse(...)` tells you where
    `parse` comes from at the call site. Under an anonymous import, the file's own import list
-   — never a sibling file's (§5.2) — accounts for it. A selective import would give the worst
+   — never a sibling file's ([Import Scope](#import-scope)) — accounts for it. A selective import would give the worst
    of both: an unprefixed name whose origin is one entry buried in a list.
 2. **One obvious way.** There's no choice between importing `parse` and importing `json` and
    calling `json.parse`. No style debates, no inconsistency across codebases.
 
-### 5.5 Sourced Module Imports (Local and Remote)
+### Sourced Module Imports
 
 For modules **not in the catalog** — project-local modules, private libraries, experimental packages, pre-catalog prototypes — use a sourced import with an explicit alias and a location string:
 
@@ -399,14 +399,14 @@ warning: absolute local import path "/opt/shared/auth" is non-portable
 
 **Local modules** point to a directory containing its own `promise.toml`. The path is always relative to the project's module root (the directory containing the project's `promise.toml`), not the importing source file. This means every source file in the project uses the same path to reference the same local module, regardless of which subdirectory the source file lives in. Subdirectories without a `promise.toml` are organizational — their `.pr` files belong to the parent module.
 
-**Remote modules** point to a git repository containing a `promise.toml` — at the repo root, or at the `subdir` named by a `[require.NAME]` entry (§6.2) when the module lives inside a larger, not-necessarily-Promise repo. They must be pinned to a specific git commit hash in the project's `promise.toml` `[require]` section (see Section 6.2). The compiler clones (or fetches from cache) the repository at the pinned commit. If a source file references a remote URL that has no `[require]` entry, the compiler errors:
+**Remote modules** point to a git repository containing a `promise.toml` — at the repo root, or at the `subdir` named by a `[require.NAME]` entry ([Remote Module Pinning](#remote-module-pinning)) when the module lives inside a larger, not-necessarily-Promise repo. They must be pinned to a specific git commit hash in the project's `promise.toml` `[require]` section (see Section 6.2). The compiler clones (or fetches from cache) the repository at the pinned commit. If a source file references a remote URL that has no `[require]` entry, the compiler errors:
 
 ```
 error: remote module "github.com/someone/parser" has no pin in promise.toml
   hint: run `promise package pin "github.com/someone/parser"` to add one
 ```
 
-### 5.6 Standard Library — Just Part of the Catalog
+### The Standard Library Is Part of the Catalog
 
 From the user's perspective, `use io` and `use json` look and work identically — both are catalog modules resolved by the epoch. The difference is purely operational:
 
@@ -438,7 +438,7 @@ time        — clocks, durations, formatting
 
 The boundary between embedded and external is a packaging decision, not a language one. Modules can move between tiers across epochs — an embedded module graduates to external by moving its source to a separate repo and adding `url` + `commit` to its catalog entry.
 
-### 5.7 Import Summary
+### Import Summary
 
 The import syntax has two grammar forms, covering three semantic tiers:
 
@@ -446,12 +446,12 @@ The import syntax has two grammar forms, covering three semantic tiers:
 |------|------|---------|------------|
 | `use name` | Catalog | `use json` | Looked up in catalog at project's epoch |
 | `use name as alias` | Catalog | `use json as j` | As above; bound under `alias` in this file |
-| `use name as _` | Catalog | `use path as _` | As above; names injected unprefixed into this file (§5.3) |
+| `use name as _` | Catalog | `use path as _` | As above; names injected unprefixed into this file ([Aliasing](#aliasing)) |
 | `use alias "location"` | Local | `use models "./libs/models"` | Directory relative to `promise.toml` |
 | `use alias "location"` | Remote | `use parser "github.com/someone/parser"` | Git repo, pinned by commit hash in `promise.toml` |
-| `use _ "location"` | Local / Remote | `use _ "./libs/models"` | As above; names injected unprefixed into this file (§5.3) |
+| `use _ "location"` | Local / Remote | `use _ "./libs/models"` | As above; names injected unprefixed into this file ([Aliasing](#aliasing)) |
 
-Every form binds **only in the file that declares it** (§5.2).
+Every form binds **only in the file that declares it** ([Import Scope](#import-scope)).
 
 Local and remote imports share the same grammar rule — the compiler disambiguates based on the location string prefix (starts with `./`, `../`, `/`, or a drive letter like `C:` → local; everything else → remote).
 
@@ -472,7 +472,7 @@ Local and remote imports share the same grammar rule — the compiler disambigua
 within a file. If a catalog module name collides with a needed alias, use `as` on one of them
 to resolve the conflict. Across files there is no constraint — aliases are file-local, so two
 files in a module may name the same module differently, and the same import may (and normally
-does) appear in every file that uses it. See §5.2 for the full scope rules.
+does) appear in every file that uses it. See [Import Scope](#import-scope) for the full scope rules.
 
 **Grammar:** The grammar has two import forms — bare identifier for catalog, identifier with string literal for sourced:
 
@@ -485,7 +485,7 @@ useDecl
 
 bindingName
     : IDENT
-    | UNDERSCORE                           // `_` — anonymous import (§5.3)
+    | UNDERSCORE                           // `_` — anonymous import ([Aliasing](#aliasing))
     ;
 ```
 
@@ -496,11 +496,11 @@ and sourced spellings of the same anonymous import.
 
 ---
 
-## 6. Module Structure
+## Module Structure
 
-### 6.1 `promise.toml` File
+### The project manifest
 
-Every module (including your project) has a `promise.toml` file at its root — the root of the *module*, which for a module published from a subdirectory of a larger repo is that subdirectory (§6.2), not the repo. The file uses standard [TOML](https://toml.io) format, so editors and IDEs provide syntax highlighting, validation, and completion out of the box.
+Every module (including your project) has a `promise.toml` file at its root — the root of the *module*, which for a module published from a subdirectory of a larger repo is that subdirectory ([Remote Module Pinning](#remote-module-pinning)), not the repo. The file uses standard [TOML](https://toml.io) format, so editors and IDEs provide syntax highlighting, validation, and completion out of the box.
 
 ```toml
 [module]
@@ -524,7 +524,7 @@ The module name must be a valid Promise identifier. It must be unique within the
 
 **Catalog self-containment enforcement:** The catalog self-containment rule (catalog modules may not depend on sourced modules — see Section 3.2 and 8.1) is enforced by the **catalog CI pipeline**, not by the compiler. A module's `promise.toml` does not declare whether it is a catalog module — that status is determined by its presence in `catalog.toml`. The compiler treats all modules identically; the catalog CI adds the extra validation layer (rejecting `[require]` sections, sourced `use` imports, etc.).
 
-### 6.2 Remote Module Pinning
+### Remote Module Pinning
 
 Catalog modules need no version declaration — the epoch handles it. Local modules use whatever is on disk. But remote modules must be pinned to a git commit hash in `promise.toml`:
 
@@ -575,9 +575,9 @@ Rules:
 
 - **`subdir` is repo-relative and must stay inside the repo.** Absolute paths, `..` components, and empty components are rejected when the manifest is parsed. `./a/b/`, `a/b/` and `a\b` all normalize to `a/b`.
 - **Named-only.** `subdir` has no meaning on the flat `[require]` table, whose key is the repo URL — a repo could then only ever contribute one module. `promise package pin` writes flat entries and takes no `subdir`.
-- **One checkout per (url, commit).** Every module addressed in a repo shares a single fetch and a single checkout; only the module's own directory is compiled (the containment rule in §5.5 already stops a module from absorbing a subdirectory that carries its own `promise.toml`).
+- **One checkout per (url, commit).** Every module addressed in a repo shares a single fetch and a single checkout; only the module's own directory is compiled (the containment rule in [Sourced Module Imports](#sourced-module-imports) already stops a module from absorbing a subdirectory that carries its own `promise.toml`).
 - **Distinct identities.** A subdir module's global identity is `<normalized-url>//<subdir>`, so two modules from one repo get different IR prefixes and different cache entries. A module addressed at the repo root keeps the bare URL as its identity, exactly as before.
-- **Independent verification.** The §9.9 compatibility gate compiles and tests the addressed module alone, and caches its verdict per identity — a failing sibling in the same repo cannot poison it. Tags remain repo-scoped (§9.8), so two modules in one repo may settle on different commits.
+- **Independent verification.** The [Compatibility and the Community Catalog](#compatibility-and-the-community-catalog) compatibility gate compiles and tests the addressed module alone, and caches its verdict per identity — a failing sibling in the same repo cannot poison it. Tags remain repo-scoped ([Cross Epoch Module Versioning](#cross-epoch-module-versioning)), so two modules in one repo may settle on different commits.
 
 Add one from the command line with:
 
@@ -602,7 +602,7 @@ promise package pin "github.com/someone/promise-parser" v2.1.0        # resolve 
 promise package pin "github.com/someone/promise-parser" a1b2c3d       # pin to exact commit
 ```
 
-### 6.3 No Lockfile (for Catalog Modules)
+### No Lockfile for Catalog Modules
 
 There is no `promise.lock` for catalog modules. The epoch **is** the lock. Two developers on the same epoch will always get identical catalog module source code, because the catalog pins exact commits per epoch.
 
@@ -614,7 +614,7 @@ This eliminates an entire class of problems:
 - No `promise update` that silently changes behavior
 - No divergence between lockfile and manifest
 
-### 6.4 Directory Layout
+### Directory Layout
 
 Unchanged from the existing design. Flat layout, no required `src/`:
 
@@ -641,7 +641,7 @@ myapp/
       auth.pr
 ```
 
-### 6.5 Visibility
+### Visibility
 
 Top-level declarations are **module-private by default**. Annotate with `` `public `` to export. Members of a public type are **public by default** — use `_` prefix to mark internal members:
 
@@ -672,7 +672,7 @@ _next_id() int {            // private function — not exported
 - **Module level**: top-level declarations (types, enums, functions) need `` `public `` to be exported. This makes a module's API surface immediately obvious.
 - **Member level**: members of a public type are public by default. The `_` prefix convention marks members as private. This avoids the verbosity of annotating every method/field while keeping the convention lightweight and visible.
 
-**Test files are part of the module.** Files matching `*_test.pr` within a module directory (or its subdirectories, excluding nested modules) are compiled as part of the module's compilation unit during `promise test`. They can access all declarations — public and private — without needing `use <self>`. They do, however, declare their **own** imports: a test file that references `net.` needs its own `use net;` even when the implementation file beside it already has one (§5.2). This is the same approach Go uses (`_test.go` files are in the same package).
+**Test files are part of the module.** Files matching `*_test.pr` within a module directory (or its subdirectories, excluding nested modules) are compiled as part of the module's compilation unit during `promise test`. They can access all declarations — public and private — without needing `use <self>`. They do, however, declare their **own** imports: a test file that references `net.` needs its own `use net;` even when the implementation file beside it already has one ([Import Scope](#import-scope)). This is the same approach Go uses (`_test.go` files are in the same package).
 
 All `*_test.pr` files in a module compile together into a single test binary (not one binary per file). Test functions use the `` `test `` annotation. Compiled test binaries are cached in the build cache — re-running unchanged tests skips compilation entirely. Non-module test files (standalone `.pr` files with `` `test `` or `` `test(expected=...) `` annotations) are also cached, keyed on source content + compiler + std library + target + local module dependencies.
 
@@ -686,7 +686,7 @@ lerp_test() `test {
 
 Self-importing (`use <own-module-name>;` inside a test file) is a compile error with a helpful message directing the user to remove the import.
 
-**Import alias collisions.** Import aliases are file-scoped (§5.2), so this rule is about one
+**Import alias collisions.** Import aliases are file-scoped ([Import Scope](#import-scope)), so this rule is about one
 file's own import list: all aliases must be unique **within a file**. Declaring the same import
 in two files of a module is not a collision — it is the norm. If a catalog module name collides
 with a sourced import alias in the same file, the compiler reports an error:
@@ -702,9 +702,9 @@ Both catalog and sourced imports can be aliased: `use json as j` for catalog, or
 
 ---
 
-## 7. `promise sync` — Toolchain Management
+## Toolchain Management
 
-### 7.1 Syncing
+### Syncing
 
 The `promise sync` command updates the compiler and catalog to a specific epoch:
 
@@ -722,7 +722,7 @@ What `promise sync` does:
 
 Since the catalog manifest is embedded in the compiler binary, there is no separate catalog download step. One binary = one epoch.
 
-### 7.2 Toolchain Directory
+### Toolchain Directory
 
 The current `promise install` creates `~/.promise/bin/` and `~/.promise/lib/std/`. The epoch-based layout extends this:
 
@@ -753,7 +753,7 @@ The current `promise install` creates `~/.promise/bin/` and `~/.promise/lib/std/
 
 Multiple epochs can coexist. The compiler binary in `~/.promise/epochs/<epoch>/bin/promise` is used when building a project pinned to that epoch. The shim at `~/.promise/bin/promise` reads the project's `promise.toml` and dispatches to the correct epoch's compiler.
 
-### 7.3 Project Epoch Resolution
+### Project Epoch Resolution
 
 When you run `promise build` or `promise run`, the compiler:
 
@@ -764,7 +764,7 @@ When you run `promise build` or `promise run`, the compiler:
 
 This means you can work on multiple projects targeting different epochs without manual switching. Each project uses the compiler version that matches its epoch.
 
-### 7.4 First-Run Experience
+### First Run Experience
 
 ```bash
 # Install Promise for the first time — downloads a single self-contained binary
@@ -793,9 +793,9 @@ promise run main.pr
 
 ---
 
-## 8. Catalog Governance & Submission
+## Catalog Governance and Submission
 
-### 8.1 Inclusion Criteria
+### Inclusion Criteria
 
 To be accepted into the catalog, a module must meet:
 
@@ -806,7 +806,7 @@ To be accepted into the catalog, a module must meet:
 5. **Scope.** The module should do one thing well. "Kitchen sink" modules that bundle unrelated functionality are split into separate modules.
 6. **License.** Must use a catalog-compatible open-source license.
 
-### 8.2 Submission Process
+### Submission Process
 
 ```
 1. Developer creates a Promise module in their own repository
@@ -821,14 +821,14 @@ To be accepted into the catalog, a module must meet:
 5. If approved, module is added to the next epoch
 ```
 
-### 8.3 Updates
+### Catalog Updates
 
 Module authors submit updates the same way — a PR to the catalog repo bumping the commit hash. The same CI pipeline runs. If any existing module's tests break, the update is blocked until either:
 
 - The update is fixed to maintain compatibility, OR
 - All affected downstream modules are updated in the same PR (coordinated breaking change)
 
-### 8.4 Governance Model
+### Governance Model
 
 The catalog is maintained by the Promise language team and community maintainers. Think of it as a curated distribution, not an open registry:
 
@@ -840,9 +840,9 @@ This is deliberately more restrictive than npm/crates.io. The tradeoff is clear:
 
 ---
 
-## 9. Remote Modules (Non-Catalog)
+## Remote Modules
 
-### 9.1 The Module Ecosystem
+### The Module Ecosystem
 
 The Promise ecosystem has three tiers, covered by two grammar forms:
 
@@ -854,7 +854,7 @@ The Promise ecosystem has three tiers, covered by two grammar forms:
 
 All tiers are first-class. Sourced modules (local and remote) have full access to the type system, generics, ownership, and everything else. The difference is purely in how they're versioned and what guarantees they carry.
 
-### 9.2 Developing a Remote Module
+### Developing a Remote Module
 
 A remote module is a git repository with a `promise.toml` at the root:
 
@@ -881,7 +881,7 @@ The `epoch` key declares which catalog epoch this module is built against. This 
 
 **Publishing:** Push to any git host. That's it. There's no registry to publish to (unless aiming for catalog inclusion). Anyone can use it by adding `use parser "github.com/you/promise-parser"` and pinning in their `promise.toml`.
 
-### 9.3 Using Remote Modules
+### Using Remote Modules
 
 ```promise
 // main.pr
@@ -912,19 +912,19 @@ The compiler:
 4. Reads the remote module's `promise.toml` to confirm the module name
 5. Compiles the remote module and links it
 
-With a named require (§6.2) the source names the module, not its location:
+With a named require ([Remote Module Pinning](#remote-module-pinning)) the source names the module, not its location:
 
 ```promise
 use wire;
 ```
 
-1. Sees `use wire;` with no path, and finds a `[require.wire]` entry (named requires are consulted before the catalog — §9.9 name resolution order)
+1. Sees `use wire;` with no path, and finds a `[require.wire]` entry (named requires are consulted before the catalog — [Compatibility and the Community Catalog](#compatibility-and-the-community-catalog) name resolution order)
 2. Reads `url`, `commit` and, if present, `subdir` from that entry
 3. Clones (or uses cached) the repo at the pinned commit — one checkout per `(url, commit)`, shared by every module addressed in that repo
 4. Descends into `subdir` and reads that directory's `promise.toml`; a missing manifest there is reported as `no promise.toml at "proto/wire" in <url>@<commit>`
 5. Compiles that directory as the module and links it, under the identity `<normalized-url>//<subdir>`
 
-### 9.4 Remote Module Dependency Rules
+### Remote Module Dependency Rules
 
 Remote modules can depend on:
 - **Catalog modules** — via `use json` (resolved at the remote module's declared epoch)
@@ -940,7 +940,7 @@ warning: remote module 'parser' targets epoch 2026.2, project targets 2026.3
 
 The build still proceeds — epoch mismatches are warnings, not errors, because catalog modules aim for backward compatibility between adjacent epochs. But the warning makes the risk explicit.
 
-### 9.5 Transitive Dependencies
+### Transitive Dependencies
 
 Each module declares only its **direct** dependencies — catalog via `use name`, sourced via `use alias "location"` with `[require]` pins for remote ones. The compiler resolves transitive dependencies automatically by walking the dependency graph.
 
@@ -1019,7 +1019,7 @@ error: circular dependency detected
 | Remote → Catalog | `use name` | Self-contained within catalog | Epoch mismatch → warning |
 | Remote → Remote | `use alias "url"` + `[require]` | Walked recursively | Same URL, different commit → error |
 
-### 9.6 Path to Catalog Inclusion
+### Path to Catalog Inclusion
 
 The remote module mechanism is the on-ramp to the catalog:
 
@@ -1030,7 +1030,7 @@ The remote module mechanism is the on-ramp to the catalog:
 
 When a module joins the catalog, users update one line of code per file (drop the URL string) and remove the `[require]` entry from `promise.toml`. The module name stays the same, so all qualified references (`parser.parse(...)`) are unchanged.
 
-### 9.7 Local Development Overrides
+### Local Development Overrides
 
 When developing a remote module alongside a project that uses it, you don't want to push + pin on every change. Use a `[replace]` section in `promise.toml`:
 
@@ -1046,7 +1046,7 @@ epoch = "2026.0"
 "github.com/someone/promise-parser" = "../promise-parser"
 ```
 
-`[replace]` keys on the **repo URL**, so a single line redirects *every* module addressed in that repo — including subdir modules (§6.2). The subdir is then applied under the local path: with `subdir = "proto/wire"`, a replacement pointing at `../base` compiles `../base/proto/wire`. A replaced module keeps its remote identity, so replacing it does not split the build cache.
+`[replace]` keys on the **repo URL**, so a single line redirects *every* module addressed in that repo — including subdir modules ([Remote Module Pinning](#remote-module-pinning)). The subdir is then applied under the local path: with `subdir = "proto/wire"`, a replacement pointing at `../base` compiles `../base/proto/wire`. A replaced module keeps its remote identity, so replacing it does not split the build cache.
 
 The `[replace]` section redirects a module to a local directory during development. **`[replace]` values are always local paths** — it is purely a path-redirection mechanism, never used for changing commit hashes (use `[require]` for commit overrides — see Section 9.5). It is **not** committed to source control (or if committed, the CI should reject it). This is the same pattern as Go's `replace` directive — a development convenience that doesn't affect the published module.
 
@@ -1070,47 +1070,47 @@ warning: catalog module 'json' replaced with local path "../my-json-fork"
 
 This is the escape hatch for Section 15.4 (bleeding-edge fixes).
 
-### 9.8 Cross-Epoch Module Versioning (`epoch-*` tags)
+### Cross Epoch Module Versioning
 
-**One compiler per build.** A program is built by exactly one compiler — the one for the *project's* pinned epoch (§4.1) — and that single compiler compiles **all** of the program's source: the project's own code *and every dependency's source*, regardless of which epoch each dependency was written for. There is no per-module compiler and no frozen cross-epoch ABI; a dependency is recompiled from source by the project's compiler. (A future "editions" mechanism — a compiler that retains older epochs' front-ends — could relax this; it is deliberately **out of scope** for now. See §4.4 and §17.)
+**One compiler per build.** A program is built by exactly one compiler — the one for the *project's* pinned epoch ([What an Epoch Is](#what-an-epoch-is)) — and that single compiler compiles **all** of the program's source: the project's own code *and every dependency's source*, regardless of which epoch each dependency was written for. There is no per-module compiler and no frozen cross-epoch ABI; a dependency is recompiled from source by the project's compiler. (A future "editions" mechanism — a compiler that retains older epochs' front-ends — could relax this; it is deliberately **out of scope** for now. See [Breaking Changes Between Epochs](#breaking-changes-between-epochs) and [Open Questions](#open-questions).)
 
-Section 4 versions *first-party catalog* modules per epoch: the embedded `catalog.toml` records the exact commit each embedded/first-party module ships at for that epoch, and the epoch release gate (§4.2, §8.3) guarantees they all compile and pass their tests together. Remote and community modules live in repos the catalog team does not own, so they need a **decentralized** way to mark which commit is good for which epoch.
+Section 4 versions *first-party catalog* modules per epoch: the embedded `catalog.toml` records the exact commit each embedded/first-party module ships at for that epoch, and the epoch release gate ([Epoch Guarantees](#epoch-guarantees), [Catalog Updates](#catalog-updates)) guarantees they all compile and pass their tests together. Remote and community modules live in repos the catalog team does not own, so they need a **decentralized** way to mark which commit is good for which epoch.
 
-A module repo marks this with **`epoch-YYYY.N` git tags** — the same tag convention the compiler repo uses for its own releases (§4.1). An `epoch-X` tag means **"this source was verified to compile and pass its tests under epoch X."** It is an *as-of-X source marker* — **not** a claim about any other epoch.
+A module repo marks this with **`epoch-YYYY.N` git tags** — the same tag convention the compiler repo uses for its own releases ([What an Epoch Is](#what-an-epoch-is)). An `epoch-X` tag means **"this source was verified to compile and pass its tests under epoch X."** It is an *as-of-X source marker* — **not** a claim about any other epoch.
 
-**The governing rule — verify, never assume.** No `(module, epoch)` pair is ever *assumed* to work. A module is usable on epoch E only once its tests have been **verified to pass under E** (§9.9). This holds even when E is newer than the module's latest tag, and even when the epoch looks non-breaking: forward compatibility is never presumed, only established by running tests.
+**The governing rule — verify, never assume.** No `(module, epoch)` pair is ever *assumed* to work. A module is usable on epoch E only once its tests have been **verified to pass under E** ([Compatibility and the Community Catalog](#compatibility-and-the-community-catalog)). This holds even when E is newer than the module's latest tag, and even when the epoch looks non-breaking: forward compatibility is never presumed, only established by running tests.
 
 **Resolution**, when a project on epoch **E** runs `promise package add <module>` (or `promise package update`):
 
-1. **Candidate:** read the module's tags and pick the largest `epoch-X` tag with `X ≤ E` (numeric comparison, §4.1). With no `epoch-*` tags, the candidate is a `stable` tag if present, else default-branch `HEAD` (with an "unversioned" warning).
-2. **Establish compatibility with E** for that candidate (§9.9) — consult the recorded verdict (community catalog) or run the module's tests under E (ad-hoc):
+1. **Candidate:** read the module's tags and pick the largest `epoch-X` tag with `X ≤ E` (numeric comparison, [What an Epoch Is](#what-an-epoch-is)). With no `epoch-*` tags, the candidate is a `stable` tag if present, else default-branch `HEAD` (with an "unversioned" warning).
+2. **Establish compatibility with E** for that candidate ([Compatibility and the Community Catalog](#compatibility-and-the-community-catalog)) — consult the recorded verdict (community catalog) or run the module's tests under E (ad-hoc):
    - **Verified (tests pass)** → dereference to a commit and **pin it** in `[require]`.
-   - **Verified (compile-only, no tests)** → accepted with a warning; see §9.9.
-   - **Fails / can't be verified** → step back to the next-older `epoch-*` tag and retry. If none verifies → §9.10.
+   - **Verified (compile-only, no tests)** → accepted with a warning; see [Compatibility and the Community Catalog](#compatibility-and-the-community-catalog).
+   - **Fails / can't be verified** → step back to the next-older `epoch-*` tag and retry. If none verifies → [When a Module Has No Compatible Version](#when-a-module-has-no-compatible-version).
 3. The build always uses the pinned commit; moving a tag upstream never changes an existing build until the project runs `promise package update`.
 
-Because the project's compiler compiles the dependency's source, an older `epoch-X` tag only *remains* usable on a newer E while E stays source-compatible with X. **Epochs may make source-breaking changes (rarely — §4.4); when one does, the module's old source stops compiling under the new compiler, its old tags fail verification, and the module must publish a fresh `epoch-E` tag with updated source.** Until it does, a project on E cannot use it (§9.10). This is the deliberate cost of letting the language evolve without a frozen cross-epoch ABI — and projects that stay on their epoch are entirely unaffected (§9.10, reproducibility).
+Because the project's compiler compiles the dependency's source, an older `epoch-X` tag only *remains* usable on a newer E while E stays source-compatible with X. **Epochs may make source-breaking changes (rarely — [Breaking Changes Between Epochs](#breaking-changes-between-epochs)); when one does, the module's old source stops compiling under the new compiler, its old tags fail verification, and the module must publish a fresh `epoch-E` tag with updated source.** Until it does, a project on E cannot use it ([When a Module Has No Compatible Version](#when-a-module-has-no-compatible-version)). This is the deliberate cost of letting the language evolve without a frozen cross-epoch ABI — and projects that stay on their epoch are entirely unaffected ([When a Module Has No Compatible Version](#when-a-module-has-no-compatible-version), reproducibility).
 
 "Different code per epoch" therefore means **different commits behind different tags**. A module normally moves forward on a single history line, adding an `epoch-2026.2` tag once it verifies against `2026.2`. It only *forks* history when a source-breaking epoch forces it to keep an older line alive — then `epoch-2026.1` stays frozen at the old source while new commits target `2026.2`.
 
-**Transitive dependencies** resolve against the **project's** epoch E, never the intermediate module's — there is one global epoch per build (§9.5), so a shared transitive module resolves to a single commit (diamond dedup, §9.5, still applies).
+**Transitive dependencies** resolve against the **project's** epoch E, never the intermediate module's — there is one global epoch per build ([Transitive Dependencies](#transitive-dependencies)), so a shared transitive module resolves to a single commit (diamond dedup, [Transitive Dependencies](#transitive-dependencies), still applies).
 
-**The `next` channel is toolchain-only.** A project must pin a numeric epoch (`YYYY.N`); `epoch = "next"` is rejected. `next` (§4.3) selects which *compiler* you run, not a project epoch, so it never participates in `epoch-X ≤ E` resolution.
+**The `next` channel is toolchain-only.** A project must pin a numeric epoch (`YYYY.N`); `epoch = "next"` is rejected. `next` ([Epoch Channels](#epoch-channels)) selects which *compiler* you run, not a project epoch, so it never participates in `epoch-X ≤ E` resolution.
 
-### 9.9 Compatibility, the Community Catalog & `promise package add`
+### Compatibility and the Community Catalog
 
 > **See also:** [`docs/community-catalog.md`](community-catalog.md) — the catalog repo format (the `modules.toml` name→URL map and the per-epoch `index/<epoch>.json` files), the `promise package build-index` / `check-epoch` tooling, the CI workflow templates, and the module-owner onboarding runbook.
 
-Compatibility is **empirical**: a module at a given commit is *compatible with epoch E* iff, built with the epoch-E compiler, it **compiles and 100% of its `` `test `` functions pass** (a parse or type error counts as a compile failure → incompatible). This is the same gate the first-party catalog uses (§4.2), generalized — and per §9.8 it is **established by running tests, never assumed**.
+Compatibility is **empirical**: a module at a given commit is *compatible with epoch E* iff, built with the epoch-E compiler, it **compiles and 100% of its `` `test `` functions pass** (a parse or type error counts as a compile failure → incompatible). This is the same gate the first-party catalog uses ([Epoch Guarantees](#epoch-guarantees)), generalized — and per [Cross Epoch Module Versioning](#cross-epoch-module-versioning) it is **established by running tests, never assumed**.
 
-**Modules with no tests (ad-hoc tier).** The §9.9 criterion — "compiles and 100% of its `` `test `` functions pass" — is vacuously satisfied when a module ships no `*_test.pr` files. `promise package add` accepts such modules as **compatible (compile-only)**: it runs a compilation check (`promise emit-ir`) to verify the source is type-correct under the epoch's compiler, then emits a per-module warning. The module's *behavioral* compatibility with the epoch is unverified; module authors are encouraged to add tests. Community catalog modules must pass CI tests to be listed (§8.1); the compile-only path applies only to ad-hoc modules added by URL. A module whose source fails to compile under the epoch is still incompatible (§9.10 applies normally).
+**Modules with no tests (ad-hoc tier).** The [Compatibility and the Community Catalog](#compatibility-and-the-community-catalog) criterion — "compiles and 100% of its `` `test `` functions pass" — is vacuously satisfied when a module ships no `*_test.pr` files. `promise package add` accepts such modules as **compatible (compile-only)**: it runs a compilation check (`promise emit-ir`) to verify the source is type-correct under the epoch's compiler, then emits a per-module warning. The module's *behavioral* compatibility with the epoch is unverified; module authors are encouraged to add tests. Community catalog modules must pass CI tests to be listed ([Inclusion Criteria](#inclusion-criteria)); the compile-only path applies only to ad-hoc modules added by URL. A module whose source fails to compile under the epoch is still incompatible ([When a Module Has No Compatible Version](#when-a-module-has-no-compatible-version) applies normally).
 
 Three tiers, distinguished by the module's **URL** (no separate flag):
 
 | Tier | Origin | Brought in by | Versioning | Compatibility established by |
 |------|--------|---------------|-----------|------------------------------|
-| Embedded / first-party catalog | no URL, or `github.com/promise-language/*` | nothing — just `use name;` | embedded `catalog.toml`, re-pinned per epoch (§3.2, §4) | epoch release gate (§4.2) — always 100% |
-| Community | `github.com/promise-community/*`, listed in the community catalog | **`promise package add name`** → pins commit in `[require]` | `epoch-*` tags (§9.8) | community-catalog CI, recorded per epoch |
+| Embedded / first-party catalog | no URL, or `github.com/promise-language/*` | nothing — just `use name;` | embedded `catalog.toml`, re-pinned per epoch ([The catalog manifest](#the-catalog-manifest), [Epochs](#epochs)) | epoch release gate ([Epoch Guarantees](#epoch-guarantees)) — always 100% |
+| Community | `github.com/promise-community/*`, listed in the community catalog | **`promise package add name`** → pins commit in `[require]` | `epoch-*` tags ([Cross Epoch Module Versioning](#cross-epoch-module-versioning)) | community-catalog CI, recorded per epoch |
 | Ad-hoc remote | any other git URL | `promise package add <url> [ref]` → pins commit | `epoch-*` tags if present, else manual | the project's own `promise test`, run on add |
 
 **First-party catalog vs. everything else — the `add` distinction.** Embedded and first-party catalog modules are *determined by the epoch itself* (pinned in the binary's `catalog.toml`), so they need **no** `[require]` entry — `use json;` just works. Community and ad-hoc modules are **not** in the binary; they must be resolved to an epoch-appropriate commit and **pinned in `[require]`** by an explicit **`promise package add`**. A bare `use foo;` whose name is neither std/first-party nor present in `[require]` is a **compile error**:
@@ -1120,36 +1120,36 @@ error: 'foo' is not a first-party catalog module and is not in [require]
   hint: run 'promise package add foo'   (resolves the epoch-appropriate tag and pins it)
 ```
 
-This keeps `promise.toml` the single source of truth — `promise build` never silently mutates it (no hidden effects). It also reconciles `language-design.md` §2: first-party catalog = no add; community / ad-hoc = `add` + pin.
+This keeps `promise.toml` the single source of truth — `promise build` never silently mutates it (no hidden effects). It also reconciles `language-design.md` [Toolchain Architecture](language-design.md#toolchain-architecture): first-party catalog = no add; community / ad-hoc = `add` + pin.
 
 **The community catalog is a single git repo, `github.com/promise-community/catalog`**, carrying two payloads:
 
 - a `name → URL` map, so community modules are *name-addressable* (`promise package add foo`, not a full URL); and
 - a **per-epoch compatibility index**: for each listed module and epoch, the last-known-good commit its CI verified to compile + pass tests under that epoch.
 
-Unlike the embedded first-party catalog (frozen in the binary, one per epoch), the community catalog is a **living** repo, fetched and cached on demand. That is a feature: a module that only achieves `epoch-2026.1` compatibility *after* `2026.1` shipped can be recorded there and become resolvable **without a compiler update**. The repo URL is a well-known constant, overridable for mirrors / air-gapped environments (§17).
+Unlike the embedded first-party catalog (frozen in the binary, one per epoch), the community catalog is a **living** repo, fetched and cached on demand. That is a feature: a module that only achieves `epoch-2026.1` compatibility *after* `2026.1` shipped can be recorded there and become resolvable **without a compiler update**. The repo URL is a well-known constant, overridable for mirrors / air-gapped environments ([Open Questions](#open-questions)).
 
 **Name resolution order** for `promise package add name` / `use name`:
 
-1. `[replace]` (local override, §9.7)
-2. `[require.NAME]` (project alias, §6.2)
-3. embedded first-party catalog (§3.2) — no pin needed
+1. `[replace]` (local override, [Local Development Overrides](#local-development-overrides))
+2. `[require.NAME]` (project alias, [Remote Module Pinning](#remote-module-pinning))
+3. embedded first-party catalog ([The catalog manifest](#the-catalog-manifest)) — no pin needed
 4. community catalog (`github.com/promise-community/catalog`) — `add` resolves + pins
 5. otherwise: not name-addressable — must be an explicit `promise package add <url> [ref]`
 
 The embedded catalog shadows the community catalog on a name collision; an explicit URL always disambiguates.
 
-**Add flow** for a project on epoch E: resolve the candidate tag (§9.8) → establish compatibility with E → on success pin the commit in `[require]` and report it; on failure walk back tags; if none verifies → §9.10. For community modules the verdict comes from the catalog's CI index; for ad-hoc modules `promise` runs the module's tests **locally** on add (or a compile-only check when the module has no tests — see above) and records the result in the local cache (nothing is published centrally — you are on your own).
+**Add flow** for a project on epoch E: resolve the candidate tag ([Cross Epoch Module Versioning](#cross-epoch-module-versioning)) → establish compatibility with E → on success pin the commit in `[require]` and report it; on failure walk back tags; if none verifies → [When a Module Has No Compatible Version](#when-a-module-has-no-compatible-version). For community modules the verdict comes from the catalog's CI index; for ad-hoc modules `promise` runs the module's tests **locally** on add (or a compile-only check when the module has no tests — see above) and records the result in the local cache (nothing is published centrally — you are on your own).
 
 > **Implementation (ad-hoc tier).** The local verdict cache lives at `<PromiseHome>/compat/`, one small JSON file per `(url, commit, epoch)` tuple, recording whether that commit compiled and passed 100% of its tests under that epoch. Compile-only verdicts (modules with no `*_test.pr`) are cached the same way, with `compile_only: true` in the JSON; they are invalidated and re-run on compiler changes (same rule as full verdicts). A verdict is keyed by URL + commit + epoch and invalidated when the compiler build changes (a rebuilt compiler can flip a source-breaking verdict within an epoch), so repeat `add`s and the diamond-dedup common case do not re-run tests. Ad-hoc verdicts are **never** published — they are private to the machine that ran them. Verification must run under the project's epoch, so `promise package add`/`update` require this compiler's epoch to match the project's (`promise use <E>` otherwise); `promise package check-upgrade <E′>` runs the verification with the epoch-E′ compiler instead.
 
-**Keeping a module up to date (module-owner side).** An owner makes their module usable on a new epoch E by: `promise use E` → `promise test`; on success, push an `epoch-E` git tag. The helper `promise package check-epoch [<E>]` bundles the verify step (and prints the publish hint on success) so an owner can self-check before tagging — see [`docs/community-catalog.md`](community-catalog.md) §5. For community-catalog modules the catalog's CI does this across all listed modules automatically and records the verdict; ad-hoc owners run it themselves (or list in the community catalog to get it). A community module **may have its own dependencies**, but its compatibility with E is transitive: if any of its deps has no E-compatible version, the module itself is incompatible with E (§9.10 applies to it too). (Contrast first-party catalog modules, which may depend only on `std` — §9.4.)
+**Keeping a module up to date (module-owner side).** An owner makes their module usable on a new epoch E by: `promise use E` → `promise test`; on success, push an `epoch-E` git tag. The helper `promise package check-epoch [<E>]` bundles the verify step (and prints the publish hint on success) so an owner can self-check before tagging — see [`docs/community-catalog.md`](community-catalog.md), under [Module owner workflow](community-catalog.md#module-owner-workflow). For community-catalog modules the catalog's CI does this across all listed modules automatically and records the verdict; ad-hoc owners run it themselves (or list in the community catalog to get it). A community module **may have its own dependencies**, but its compatibility with E is transitive: if any of its deps has no E-compatible version, the module itself is incompatible with E ([When a Module Has No Compatible Version](#when-a-module-has-no-compatible-version) applies to it too). (Contrast first-party catalog modules, which may depend only on `std` — [Remote Module Dependency Rules](#remote-module-dependency-rules).)
 
-### 9.10 When a Module Has No Compatible Version
+### When a Module Has No Compatible Version
 
-This case is **intrinsic** to decentralized modules and to the decision (§9.8, §4.4) that the language may make source-breaking changes without a frozen cross-epoch ABI. First-party modules avoid it because the catalog team owns them and updates them atomically in the same epoch (§4.4); a module in a repo the team does not control cannot be coordinated that way. It can't be *prevented* — only made clean and recoverable.
+This case is **intrinsic** to decentralized modules and to the decision ([Cross Epoch Module Versioning](#cross-epoch-module-versioning), [Breaking Changes Between Epochs](#breaking-changes-between-epochs)) that the language may make source-breaking changes without a frozen cross-epoch ABI. First-party modules avoid it because the catalog team owns them and updates them atomically in the same epoch ([Breaking Changes Between Epochs](#breaking-changes-between-epochs)); a module in a repo the team does not control cannot be coordinated that way. It can't be *prevented* — only made clean and recoverable.
 
-**Detection is a pre-build verification gate, not a raw compile failure.** Because compatibility is established by the verification step (§9.9) *before* a dependency is trusted, `promise` detects "no compatible version" at resolve time and emits one actionable error — the user never sees raw compiler errors buried inside the dependency's source:
+**Detection is a pre-build verification gate, not a raw compile failure.** Because compatibility is established by the verification step ([Compatibility and the Community Catalog](#compatibility-and-the-community-catalog)) *before* a dependency is trusted, `promise` detects "no compatible version" at resolve time and emits one actionable error — the user never sees raw compiler errors buried inside the dependency's source:
 
 ```
 error: module 'foo' has no version compatible with epoch 2026.3
@@ -1158,13 +1158,13 @@ error: module 'foo' has no version compatible with epoch 2026.3
   options:
     - pin this project to epoch ≤ 2026.1            (trades newer language features for foo)
     - use a fork:   promise package add github.com/you/foo-fork
-    - redirect locally while fixing:  [replace] foo = "../foo"   (§9.7)
+    - redirect locally while fixing:  [replace] foo = "../foo"   ([Local Development Overrides](#local-development-overrides))
     - or wait for foo to publish an epoch-2026.3 tag
 ```
 
-The escape hatches are those in §15.3 (author disappeared) and §15.4 (bleeding-edge fix): commit pinning, `[require]` forks, and `[replace]`.
+The escape hatches are those in [What if a module author disappears](#what-if-a-module-author-disappears) (author disappeared) and [What if I need a bleeding edge fix](#what-if-i-need-a-bleeding-edge-fix) (bleeding-edge fix): commit pinning, `[require]` forks, and `[replace]`.
 
-**Reproducibility makes "always build" unconditional.** A project that already builds keeps building **forever**, independent of ecosystem churn: its dependencies are pinned to commits, a fetched commit stays in the local cache even if the upstream repo is later deleted (§6.2), and its epoch's compiler remains installable indefinitely via `promise use <epoch>` (§7.2). Nothing about a *newer* epoch or a moved tag can break a project that stays on its epoch. So §9.10 only ever blocks an **upgrade** — never an existing build.
+**Reproducibility makes "always build" unconditional.** A project that already builds keeps building **forever**, independent of ecosystem churn: its dependencies are pinned to commits, a fetched commit stays in the local cache even if the upstream repo is later deleted ([Remote Module Pinning](#remote-module-pinning)), and its epoch's compiler remains installable indefinitely via `promise use <epoch>` ([Toolchain Directory](#toolchain-directory)). Nothing about a *newer* epoch or a moved tag can break a project that stays on its epoch. So [When a Module Has No Compatible Version](#when-a-module-has-no-compatible-version) only ever blocks an **upgrade** — never an existing build.
 
 **Upgrading epochs — previewable and reversible.** To move a project from epoch E to E′:
 
@@ -1172,13 +1172,13 @@ The escape hatches are those in §15.3 (author disappeared) and §15.4 (bleeding
 2. If all clear, set `[module] epoch = "E′"` and run `promise package update` (re-resolves + re-pins each dep to its E′-appropriate tag).
 3. Rollback is trivial and safe: revert `[module] epoch` to E. Commit pins in `[require]` are epoch-independent, so the previous build returns exactly.
 
-**The pre-release compatibility run is the nudge.** Before an epoch ships, the community-catalog CI runs every listed module's tags against it and publishes the matrix, surfacing "these modules don't support the next epoch yet" so authors can be nudged ahead of time — the soft analog of the catalog's atomic coordination (§4.4). It cannot force an unmaintained module to update; that residual is the honest cost of decentralization, and the right trade for keeping the language free to evolve quickly.
+**The pre-release compatibility run is the nudge.** Before an epoch ships, the community-catalog CI runs every listed module's tags against it and publishes the matrix, surfacing "these modules don't support the next epoch yet" so authors can be nudged ahead of time — the soft analog of the catalog's atomic coordination ([Breaking Changes Between Epochs](#breaking-changes-between-epochs)). It cannot force an unmaintained module to update; that residual is the honest cost of decentralization, and the right trade for keeping the language free to evolve quickly.
 
 ---
 
-## 10. Compiler Integration
+## Compiler Integration
 
-### 10.1 Compilation Pipeline
+### Compilation Pipeline
 
 Currently, the compiler processes a single file (or directory of files) as one compilation unit, with `std/*.pr` merged in. The module system adds a layer before this:
 
@@ -1204,7 +1204,7 @@ per-module compile    # existing pipeline (parse → sema → ownership → code
 link                  # combine all module object files → binary
 ```
 
-### 10.2 Module Compilation Model
+### Module Compilation Model
 
 Each module is a **separate compilation unit** that produces:
 
@@ -1229,15 +1229,15 @@ ld.lld /tmp/myapp.o /tmp/json.o /tmp/models.o -o myapp
 
 Modules without dependencies on each other can compile **in parallel** (they're at the same level in the topological sort).
 
-### 10.3 Separate Compilation Considerations
+### Separate Compilation Considerations
 
-Currently, all `.pr` files in a compilation unit share a single namespace for **declarations** — types, enums, and functions are visible across the files of a module regardless of which file declares them. **Import aliases are the exception**: they bind per file (§5.2), so a `use` in one file never supplies the alias for another. With modules, each module has its own namespace. This means:
+Currently, all `.pr` files in a compilation unit share a single namespace for **declarations** — types, enums, and functions are visible across the files of a module regardless of which file declares them. **Import aliases are the exception**: they bind per file ([Import Scope](#import-scope)), so a `use` in one file never supplies the alias for another. With modules, each module has its own namespace. This means:
 
 - **Name mangling** must include the module name. A top-level function `parse` in module `json` becomes `json.parse` in LLVM IR, following the existing `Owner.method` mangling convention. Types become `json.JsonObject`, etc.
 - **Generic monomorphization** crosses module boundaries. If your code uses `Vector[MyType]` from the standard library, the monomorphized version is emitted in YOUR module's IR, not the standard library's. This is already how it works (codegen generates specialized instances at use sites). Monomorphized symbols use `linkonce_odr` linkage so the linker deduplicates identical instantiations across modules.
 - **RTTI** type IDs must be globally unique across modules. The existing string-based type IDs (`"Dog"`, `"Cat"`) need module prefixing (`"myapp.Dog"`, `"zoo.Cat"`).
 
-### 10.4 Incremental Compilation
+### Incremental Compilation
 
 Fast modify-build-test loops are critical for AI agent efficiency. The module system enables fine-grained incremental compilation: **only recompile what changed, skip everything else.**
 
@@ -1303,7 +1303,7 @@ If a module's source changes but its interface hash stays the same, **no depende
 - **`PROMISE_HOME` env var** overrides the `~/.promise/` base directory for all Promise data (caches, LLVM tools, CRT, installs). Useful when `$HOME` is unavailable or for CI environments.
 - **Concurrent build safety.** Multiple `promise test` or `promise build` processes sharing the same cache use shared `flock(2)` on `build/.lock` — they run concurrently without blocking each other (the content-addressed cache is safe for concurrent reads and atomic writes). Each cache write uses `os.CreateTemp` for a unique temp file followed by `os.Rename`, so concurrent processes writing the same cache key use independent temp files — no corruption. `promise clean` acquires an exclusive lock, waiting for all running test/build processes to finish before clearing the cache. The lock is tied to the file descriptor — automatically released on process exit/crash (no stale lockfiles). The `.lock` file is preserved by `promise clean` to avoid invalidating locks held by concurrent processes.
 
-#### The AI Modify-Build-Test Loop
+#### The AI Modify Build Test Loop
 
 The typical AI workflow: modify 1-3 files → build → test → check output → repeat. With incremental compilation:
 
@@ -1355,9 +1355,9 @@ This matches the current architecture (codegen generates specialized instances a
 
 ---
 
-## 11. Discovery & Tooling
+## Discovery and Tooling
 
-### 11.1 `promise catalog` Commands
+### Catalog Commands
 
 ```bash
 promise catalog list                    # list all modules in current epoch
@@ -1366,7 +1366,7 @@ promise doc json                        # show json module's API surface (see 11
 promise doc --search "parse"            # search module descriptions and exports
 ```
 
-### 11.2 `promise doc`
+### The doc command
 
 ```bash
 promise doc json                # view json module documentation
@@ -1378,7 +1378,7 @@ promise doc --export json       # machine-readable API summary (for AI agents)
 
 Documentation is generated from `` `public `` declarations and doc comments in source. No separate doc format — the source is the documentation.
 
-### 11.3 AI Agent Integration
+### AI Agent Integration
 
 The `--export` flag produces a structured document containing every module's public types, functions, and their signatures. An AI agent can load this as context and generate correct `use` declarations and API calls without guessing:
 
@@ -1390,11 +1390,11 @@ The catalog is intentionally small enough that the full API summary fits in a si
 
 ---
 
-## 12. User Journeys
+## User Journeys
 
 This section documents end-to-end workflows for the three primary personas interacting with the Promise module ecosystem.
 
-### 12.1 End User: Download Promise, Build & Run Projects
+### End User Journey
 
 **Goal:** A developer (human or AI agent) downloads Promise for the first time, creates a project that uses catalog and remote modules, and iterates on it.
 
@@ -1418,7 +1418,7 @@ promise version
 
 No `promise sync` needed on first install — the binary IS the epoch. The catalog manifest is embedded, the std library is embedded, LLVM tools are embedded. One download, fully offline-capable for catalog modules (fetched lazily on first use).
 
-#### Single-file mode (no project setup)
+#### Single file mode
 
 ```bash
 # Run a one-liner — no promise.toml needed
@@ -1511,7 +1511,7 @@ promise build    # fetches, compiles, links
 promise test     # run tests
 ```
 
-#### The modify-build-test loop
+#### The modify build test loop
 
 ```bash
 # Edit main.pr...
@@ -1542,7 +1542,7 @@ Set `PROMISE_CACHE_DEBUG=1` to see cache hit/miss/skip diagnostics on stderr:
 [cache SKIP] remote_import.pr (not cacheable)
 ```
 
-### 12.2 Community Module Developer: Create & Publish a Module
+### Community Module Developer Journey
 
 **Goal:** A developer creates a reusable Promise module, publishes it for others to use as a remote module, and eventually submits it to the catalog.
 
@@ -1676,11 +1676,11 @@ When the module is stable, well-tested, and generally useful:
    - They remove the `[require]` entry from `promise.toml`
    - All qualified references (`csv.parse(...)`) are unchanged
 
-### 12.3 Language Developer: Iterate on Promise or Publish an Epoch
+### Language Developer Journey
 
 **Goal:** A Promise language developer works on the compiler, standard library, or catalog modules, tests changes, and cuts a new epoch release.
 
-#### Day-to-day development
+#### Day to day development
 
 ```bash
 cd promise/compiler
@@ -1823,9 +1823,9 @@ This is the mono-versioned model in action: breaking changes are coordinated acr
 
 ---
 
-## 13. Migration from the Original Design
+## Migration from the Original Design
 
-### 12.1 What Changes
+### What Changes
 
 | Aspect | Original Design | This Proposal |
 |--------|----------------|---------------|
@@ -1839,7 +1839,7 @@ This is the mono-versioned model in action: breaking changes are coordinated acr
 | Remote deps | Fetched from URLs | Fetched from git repos, pinned by commit hash |
 | Visibility | Public by default | Private by default, `` `public `` to export |
 
-### 12.2 What Stays the Same
+### What Stays the Same
 
 - Module boundary semantics (`promise.toml` marks a module root)
 - Flat directory layout (no required `src/`)
@@ -1850,7 +1850,7 @@ This is the mono-versioned model in action: breaking changes are coordinated acr
 
 ---
 
-## 14. Comparison with Other Systems
+## Comparison with Other Systems
 
 | Property | npm | Go | Cargo | Elm | Nix | **Promise** |
 |----------|-----|-----|-------|-----|-----|-------------|
@@ -1867,43 +1867,43 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 
 ---
 
-## 15. Risks & Mitigations
+## Risks and Mitigations
 
-### 15.1 "What if the catalog is too small?"
+### What if the catalog is too small
 
 **Risk:** Users need modules that aren't in the catalog.
 **Mitigation:** Sourced modules (local and remote imports) provide a full-featured escape hatch with their own dependency management. The catalog doesn't need to be exhaustive — it needs to cover common needs. Remote modules can graduate to the catalog as they mature.
 
-### 15.2 "What if catalog modules conflict?"
+### What if catalog modules conflict
 
 **Risk:** Two catalog modules want incompatible APIs from a third module.
 **Mitigation:** This is exactly what the mono-versioned model prevents. Conflicts are resolved **before** the epoch is tagged, by the catalog maintainers. The CI enforces it — if tests don't pass, the epoch doesn't ship.
 
-### 15.3 "What if a module author disappears?"
+### What if a module author disappears
 
 **Risk:** A catalog module's author stops maintaining it.
 **Mitigation:** Because module source is pinned by commit hash, an orphaned module doesn't "break" — it just stops getting updates. The catalog team can adopt, fork, or eventually deprecate it.
 
-### 15.4 "What if I need a bleeding-edge fix?"
+### What if I need a bleeding edge fix
 
 **Risk:** A catalog module has a bug fix in its repo that hasn't made it into an epoch yet.
 **Mitigation:** Temporarily import it as a remote module pinned to the fixed commit. When the next epoch includes the fix, switch back to catalog import. The `[replace]` section in `promise.toml` can also redirect a catalog module to a local checkout during development.
 
-### 15.5 "Won't coordinated breaking changes slow everything down?"
+### Will coordinated breaking changes slow everything down
 
 **Risk:** A module can't make breaking changes because it requires updating all dependents.
 **Mitigation:** Yes — but this is a feature, not a bug. Breaking changes should be expensive. They force API designers to think carefully. And when they do happen, they happen atomically — no ecosystem-wide breakage cascade.
 
-### 15.6 "What about private/proprietary modules?"
+### What about private modules
 
 **Risk:** Companies want private module registries.
 **Mitigation:** Private modules are remote modules hosted on private git servers. `use auth "git.corp.com/team/auth-lib"` works with any git host that the developer has access to. No private catalog is needed — the sourced import mechanism handles this cleanly. For fully offline environments, local imports (`use auth "./libs/auth"`) work without any network access.
 
 ---
 
-## 16. Implementation Plan
+## Implementation Plan
 
-### Phase 1: Module Boundaries & Local Imports
+### Phase 1 Module Boundaries and Local Imports
 
 - Parse `promise.toml` (TOML format: `[module]` with `name` and `epoch`)
 - Extend grammar: add bare `USE IDENT (AS IDENT)? SEMI` for catalog imports alongside existing `USE IDENT stringLiteral SEMI` for sourced imports
@@ -1914,7 +1914,7 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 - Compile multi-module projects (project + local modules as separate compilation units, linked together)
 - **Incremental compilation from day one:** content-hash-based caching per module, interface hashing to skip dependent recompilation when only internals change (see Section 10.4)
 
-### Phase 2: Remote Modules
+### Phase 2 Remote Modules
 
 - Parse `[require]` and `[replace]` sections in `promise.toml`
 - Git-based module fetching (clone at pinned commit)
@@ -1923,7 +1923,7 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 - Diamond dependency detection and rejection for remote modules
 - Epoch mismatch warnings
 
-### Phase 3: Catalog Infrastructure
+### Phase 3 Catalog Infrastructure
 
 - Create the catalog repository with `catalog.toml` format
 - Implement `promise sync` (download compiler + catalog manifest)
@@ -1932,14 +1932,14 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 - `promise doc` for module API browsing and search
 - Epoch-based compiler dispatch (project epoch → matching compiler binary)
 
-### Phase 4: Catalog CI & Governance
+### Phase 4 Catalog CI and Governance
 
 - CI pipeline: build all modules, run all tests, run integration tests
 - Epoch tagging workflow
 - Module submission PR template and review process
 - Migration guide generation for epoch transitions
 
-### Phase 5: Tooling & Polish
+### Phase 5 Tooling and Polish
 
 - `promise catalog diff` between epochs
 - `promise doc --export` for AI agent context
@@ -1948,7 +1948,7 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 
 ---
 
-## 17. Open Questions
+## Open Questions
 
 1. **Epoch cadence.** How often should epochs be released? Monthly? Quarterly? On-demand when enough changes accumulate?
 
@@ -1956,7 +1956,7 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 
 3. **Module granularity.** Should `crypto` be one module or split into `crypto/hash`, `crypto/aes`, `crypto/tls`? The flat catalog namespace suggests coarser granularity with submodule-like organization within a single module.
 
-4. ~~**Cross-epoch compatibility.**~~ **Resolved:** A module declares which epochs it supports with `epoch-YYYY.N` tags; a project on epoch E resolves to the largest tag `≤ E`, pinned to a commit. Compatibility is empirical (compiles + tests pass), recorded per epoch in the community catalog for listed modules and checked locally for ad-hoc ones. A project never uses a module built only for a *newer* epoch; if no version supports E, the build fails with actionable options. See §9.8–§9.10.
+4. ~~**Cross-epoch compatibility.**~~ **Resolved:** A module declares which epochs it supports with `epoch-YYYY.N` tags; a project on epoch E resolves to the largest tag `≤ E`, pinned to a commit. Compatibility is empirical (compiles + tests pass), recorded per epoch in the community catalog for listed modules and checked locally for ad-hoc ones. A project never uses a module built only for a *newer* epoch; if no version supports E, the build fails with actionable options. See [Cross Epoch Module Versioning](#cross-epoch-module-versioning)–[When a Module Has No Compatible Version](#when-a-module-has-no-compatible-version).
 
 5. **Catalog size constraint.** Is there a formal limit on catalog size (e.g., "the full API summary must fit in 200K tokens")? This would be a unique and powerful constraint for AI-first design.
 
@@ -1968,4 +1968,4 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 
 9. ~~**Remote module transitivity.**~~ **Resolved:** Transitive dependencies are resolved automatically by walking each module's `promise.toml`. The top-level project only declares direct deps. Conflicts (same URL, different commits) are rejected. See Section 9.5.
 
-10. ~~**Remote module epoch range.**~~ **Resolved:** A module does *not* declare a compatible range. It marks an *as-of* floor with `epoch-YYYY.N` tags (the lower bound); the upper bound is **discovered by testing**, not declared (the author cannot predict which future epoch breaks them). This keeps authoring simple while still letting older projects pick older tags. See §9.8.
+10. ~~**Remote module epoch range.**~~ **Resolved:** A module does *not* declare a compatible range. It marks an *as-of* floor with `epoch-YYYY.N` tags (the lower bound); the upper bound is **discovered by testing**, not declared (the author cannot predict which future epoch breaks them). This keeps authoring simple while still letting older projects pick older tags. See [Cross Epoch Module Versioning](#cross-epoch-module-versioning).

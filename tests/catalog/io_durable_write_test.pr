@@ -1,6 +1,6 @@
 // T1520: the durable-write recipe assembled by hand from the public primitives.
 //
-// docs/io.md §2 claims a caller streaming data too large to buffer into a string
+// docs/io.md#the-public-surface claims a caller streaming data too large to buffer into a string
 // can build the same sequence File.replace_content builds internally, using only
 // rename/sync/Dir.sync/lock. Nothing else exercises that claim: the module's own
 // tests cover each primitive alone, and replace_content covers the composite via
@@ -13,7 +13,7 @@ use os;
 // _durable_write recipe below still syncs the directory the temporary is in.
 _scratch(string name) string => os.temp_dir + "/pr_cat_" + os.process_id.to_string() + "_" + name;
 
-// The sequence from docs/io.md §3.1, written the way a streaming caller would:
+// The sequence from docs/io.md#what-replace-content-does, written the way a streaming caller would:
 // sibling temporary, exclusive lock, write, sync, rename, sync the directory.
 _durable_write!(string path, string temp, string content) {
   io.File f = io.File.create(temp[0:temp.len])?!;

@@ -284,7 +284,7 @@ func TestT1381_ParenTargetFieldReceiveDischarges(t *testing.T) {
 	`)
 }
 
-// §17.2.1 lists "argument" as a discharge path. Moving a failable_task into a
+// language-design.md#failable-goroutines lists "argument" as a discharge path. Moving a failable_task into a
 // `move` parameter transfers the obligation to the callee — discharged here.
 func TestT1381_MoveIntoArgumentDischarges(t *testing.T) {
 	ownerOK(t, `

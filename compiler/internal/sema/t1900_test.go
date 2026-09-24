@@ -3,7 +3,7 @@ package sema
 import "testing"
 
 // T1900: a bare failable call as a `match` scrutinee is an expression position
-// (§7.2), so it must receive the same failable-handling check as any other bare
+// (language-design.md#calling-failable-functions), so it must receive the same failable-handling check as any other bare
 // call site — auto-propagate in a failable function, compile error in a
 // non-failable one. Previously checkMatchExpr ran checkExpr on e.Subject and
 // stopped, so the raw failable aggregate reached the match codegen: a codegen

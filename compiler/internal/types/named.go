@@ -9,7 +9,7 @@ type ParentRef struct {
 }
 
 // ValidateMethodName is the reserved name of a type's invariant method
-// (docs/language-design.md §5.7 → Validation, T1752). A type declares at most
+// (docs/language-design.md#constructors → Validation, T1752). A type declares at most
 // one; it takes a shared `this`, no parameters, no return type, and is failable.
 const ValidateMethodName = "_validate"
 

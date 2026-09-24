@@ -139,7 +139,7 @@ func TestT1970_InheritedUnrelatedBufferDoesNotBlameTypeArg(t *testing.T) {
 	`)
 }
 
-// memory-model.md §3, inherited: a field held behind a handle is not held by
+// memory-model.md#by-value-versus-behind-a-handle, inherited: a field held behind a handle is not held by
 // value. Ref's dup is a refcount bump, so nothing is duplicated and the walk must
 // still stop at Ref once the inherited field resolves to Ref[Mutex[int]].
 func TestT1970_InheritedHandleFieldIsNotByValue(t *testing.T) {
@@ -192,7 +192,7 @@ func TestT1970_InheritedBufferMatchesDeclaredBuffer(t *testing.T) {
 
 // The clone gate, reached through the inherited field rather than through
 // TypeArgs: cloning a container of a type that transitively owns a handle is
-// rejected (language-design.md §17.2).
+// rejected (language-design.md#explicit-concurrency).
 func TestT1970_InheritedHandleContainerNotCloneable(t *testing.T) {
 	errs := checkErrs(t, `
 		type HBase[T] { T m; }
@@ -216,7 +216,7 @@ func TestT1970_InheritedHandleContainerNotCloneable(t *testing.T) {
 
 // firstNestedSingleOwnerHandle, Instance origin: `HDerFixed[U] is HBase[Mutex[int]]`
 // has type argument `int` and an inherited `Mutex[int]` field. Cloning the
-// container would duplicate the handle. (language-design.md §17.2: every context
+// container would duplicate the handle. (language-design.md#explicit-concurrency: every context
 // that would structurally copy a handle-owning value is a compile error.)
 func TestT1970_InheritedFieldOnlyHandleNotCloneable(t *testing.T) {
 	errs := checkErrs(t, `

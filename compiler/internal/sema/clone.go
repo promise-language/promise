@@ -350,20 +350,20 @@ func (c *Checker) rejectStreamTypeArg(pos ast.Pos, typeArgs []types.Type) {
 }
 
 // ownsElementsByValue reports whether duplicating a value of typ also duplicates
-// the elements it holds — the "by value" column of docs/memory-model.md §3, as
+// the elements it holds — the "by value" column of docs/memory-model.md#by-value-versus-behind-a-handle, as
 // opposed to the behind-a-handle types (Ref/Weak/Channel/Task/Mutex/MutexGuard/
 // string) whose dup is a refcount bump or a refusal and never touches the
 // payload.
 //
 // It is DERIVED, not a list of names. The base case is the `duplicates_elements
 // annotation, which only Vector carries — the sole `native primitive that owns a
-// variable-size buffer by value (§2) and so the only one with no Promise-level
+// variable-size buffer by value (memory-model.md#the-variable-size-primitives-are-a-closed-set) and so the only one with no Promise-level
 // fields to derive the property from. A fixed-size array owns its elements the
 // same way. Every other by-value container reaches the property through a FIELD:
 // Map holds Slot[K, V][], Set holds Map[T, bool], and a user's own MyVec[T]
-// holds T[]. None of them is named here, which is the point — annotations.md §1
-// forbids recovering a property by testing a type's identity, and memory-model.md
-// §4 explains why it is unnecessary. (T1926)
+// holds T[]. None of them is named here, which is the point — annotations.md#the-one-declaration-rule
+// forbids recovering a property by testing a type's identity, and
+// memory-model.md#everything-else-is-composition explains why it is unnecessary. (T1926)
 //
 // The walk follows FIELDS ONLY, never TypeArgs. That is what makes the
 // behind-a-handle cases fall out for free: the handle types are `native with zero
@@ -1097,7 +1097,7 @@ func (c *Checker) reportContainerSingleOwnerNesting(pos ast.Pos, elemType types.
 // Slot[K, V][] _buckets; Set reports T through Map[T, bool] _map; and a user's
 // own MyVec[T] { T[] items; } or enum Bag[T] { Items(T[] xs) } report T through
 // exactly the same walk. That is the objective — the standard library's
-// containers are no more special than anyone else's (memory-model.md §4).
+// containers are no more special than anyone else's (memory-model.md#everything-else-is-composition).
 // (T0545/T1926)
 //
 // It reports the args held in a buffer rather than *all* of them, because those

@@ -9,7 +9,7 @@
 // abstract requirements by INTERFACE-relative slot index and therefore calls the
 // wrong method whenever the interface is not the type's first parent.
 //
-// docs/language-design.md §5.4 is explicit that the clause is a checked claim,
+// docs/language-design.md#inheritance is explicit that the clause is a checked claim,
 // not a semantic change: "Structural satisfaction remains available and
 // unchanged... the explicit form is a discipline for published interfaces, not a
 // new requirement of the type system." These tests pin exactly that.

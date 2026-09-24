@@ -8,17 +8,17 @@ A step-by-step guide to proposing, implementing, and shipping new catalog module
 
 ## Table of Contents
 
-1. [Overview](#1-overview)
-2. [Phase 1: Write the Proposal](#2-phase-1-write-the-proposal)
-3. [Phase 2: Set Up the Module](#3-phase-2-set-up-the-module)
-4. [Phase 3: Implement the Module](#4-phase-3-implement-the-module)
-5. [Phase 4: Validate](#5-phase-4-validate)
-6. [Reference: Language Constraints for Module Design](#6-reference-language-constraints-for-module-design)
-7. [Reference: Module Types](#7-reference-module-types)
+1. [Overview](#overview)
+2. [Phase 1: Write the Proposal](#phase-1-write-the-proposal)
+3. [Phase 2: Set Up the Module](#phase-2-set-up-the-module)
+4. [Phase 3: Implement the Module](#phase-3-implement-the-module)
+5. [Phase 4: Validate](#phase-4-validate)
+6. [Reference: Language Constraints for Module Design](#language-constraints-for-module-design)
+7. [Reference: Module Types](#module-types)
 
 ---
 
-## 1. Overview
+## Overview
 
 Promise has four kinds of modules:
 
@@ -50,12 +50,12 @@ Proposal → Setup → Implement → Validate → Ship
 
 ---
 
-## 2. Phase 1: Write the Proposal
+## Phase 1 Write the Proposal
 
 Before writing code, write a design document. This proposal establishes the API contract
 that the implementation must satisfy, and it becomes the module's *design of record* — the
 intended outcome, kept current for the life of the module. Save it as
-`modules/<name>/design.md` (see [Phase 2](#3-phase-2-set-up-the-module) for setup).
+`modules/<name>/design.md` (see [Phase 2](#phase-2-set-up-the-module) for setup).
 
 `design.md` holds the durable design. A separate, optional `plan.md` holds *transient*
 execution notes — work sequencing, open TODOs, migration steps — and may be deleted once
@@ -105,7 +105,7 @@ This helps reviewers verify completeness and helps implementors find reference i
 - What is excluded on WASM and why (no filesystem, no subprocesses, no real threading)
 - Performance considerations (buffering, diff-based rendering, etc.)
 - Thread safety model
-- Cleanup guarantees (`close()` vs `drop()` — see [section 6.5](#65-resource-cleanup-close-vs-drop))
+- Cleanup guarantees (`close()` vs `drop()` — see [section 6.5](#resource-cleanup-with-close-and-drop))
 
 **9. Future extensions** — Things explicitly out of scope for v1, but designed to layer on top.
 This proves the API won't need breaking changes when these are added.
@@ -138,22 +138,22 @@ Before moving to implementation, verify:
 
 - [ ] Every public identifier uses full English words (with approved abbreviations from `docs/language-design.md` section 9.3a)
 - [ ] Naming follows conventions: `snake_case` for functions/methods/fields, `PascalCase` for types/enums/variants
-- [ ] No function overloading — use default/optional parameters instead (see [section 6.1](#61-no-function-overloading))
+- [ ] No function overloading — use default/optional parameters instead (see [section 6.1](#no-function-overloading))
 - [ ] Side-effect-free parameterless access uses getters (`get name Type`), not functions
 - [ ] All `\`public` declarations have `\`doc` annotations
 - [ ] Value types have all fields marked `\`value`
-- [ ] Error types inherit from `error` with an `int code` field (see [section 4.3](#43-define-error-types))
+- [ ] Error types inherit from `error` with an `int code` field (see [section 4.3](#define-error-types))
 - [ ] Error-raising functions are marked `!`
 - [ ] Cleanup resources use `use` binding with `close()` (not manual close)
-- [ ] Platform-specific APIs use `\`target` conditions (see [section 4.4](#44-handle-cross-platform-differences))
-- [ ] WASM-incompatible APIs are excluded with `\`target(!wasm)` (see [section 4.5](#45-wasm-considerations))
+- [ ] Platform-specific APIs use `\`target` conditions (see [section 4.4](#handle-cross-platform-differences))
+- [ ] WASM-incompatible APIs are excluded with `\`target(!wasm)` (see [section 4.5](#wasm-considerations))
 - [ ] The quick start example compiles (mentally) against the API spec
 
 ---
 
-## 3. Phase 2: Set Up the Module
+## Phase 2 Set Up the Module
 
-### 3.1 Create the directory
+### Create the directory
 
 ```bash
 mkdir modules/<name>
@@ -162,7 +162,7 @@ mkdir modules/<name>
 This can happen during Phase 1 — create the directory early so the proposal lives here
 from the start (`modules/<name>/plan.md`).
 
-### 3.2 Create `promise.toml`
+### Create the manifest
 
 Every module needs a `promise.toml` in its root directory:
 
@@ -181,7 +181,7 @@ to detect version mismatches with the project.
 Catalog modules also **cannot** have `[require]` entries (no remote dependencies). They can
 only depend on `std` (which is auto-imported). They cannot import other catalog modules.
 
-### 3.3 Create the source file
+### Create the source file
 
 Create `modules/<name>/<name>.pr`:
 
@@ -192,7 +192,7 @@ Create `modules/<name>/<name>.pr`:
 
 Start with just the file header. Implementation comes in Phase 3.
 
-### 3.4 Create the test file
+### Create the test file
 
 Create `modules/<name>/<name>_test.pr`:
 
@@ -203,7 +203,7 @@ Create `modules/<name>/<name>_test.pr`:
 Test files (`*_test.pr`) are compiled as part of the module and have access to all
 declarations (public and private).
 
-### 3.5 Register in the catalog
+### Register in the catalog
 
 Add an entry to `catalog.toml` in the repo root:
 
@@ -214,7 +214,7 @@ description = "Short description of what the module provides"
 
 This registers the module so the compiler discovers it as an embedded catalog module.
 
-### 3.6 Rebuild
+### Rebuild
 
 ```bash
 ./build
@@ -223,7 +223,7 @@ This registers the module so the compiler discovers it as an embedded catalog mo
 This runs `make resources` (copies modules into the embedded resource directory) and
 rebuilds the compiler binary. The new module is now available to any Promise program.
 
-### 3.7 Verify the empty module loads
+### Verify the empty module loads
 
 ```bash
 bin/promise exec 'use <name>; main() { print_line("ok"); }'
@@ -233,9 +233,9 @@ If this prints `ok`, the module is correctly registered and loadable.
 
 ---
 
-## 4. Phase 3: Implement the Module
+## Phase 3 Implement the Module
 
-### 4.1 Decide what needs native support
+### Decide what needs native support
 
 Most module code should be written in Promise. Only use `native` / `\`extern` functions
 when you need:
@@ -273,7 +273,7 @@ Add the LLVM IR implementation for each platform. Follow existing patterns — l
 
 **c) Register the PAL function** in `pal.go` so codegen emits it.
 
-### 4.2 Write the Promise API
+### Write the Promise API
 
 Implement types and functions in `modules/<name>/<name>.pr`, following the proposal spec.
 
@@ -335,7 +335,7 @@ type Cell `public `doc("One character cell in the screen buffer.") {
 }
 ```
 
-### 4.3 Define error types
+### Define error types
 
 Every module that can fail needs an error type. Follow the established pattern:
 
@@ -375,7 +375,7 @@ open!() Self `factory {
 }
 ```
 
-### 4.4 Handle cross-platform differences
+### Handle cross platform differences
 
 Promise uses the `\`target` annotation for compile-time platform filtering. Only the
 matching variant is compiled — the other is invisible to the type checker and codegen.
@@ -427,7 +427,7 @@ suspend!(~this) `target(posix) `doc("Suspend raw mode for subprocess handoff.");
 - Without `\`target`, a declaration is included on all targets
 - This is Promise's **only** form of platform-specific variation — no preprocessor, no `#ifdef`
 
-### 4.5 WASM considerations
+### WASM considerations
 
 WASM (wasm32-wasi) has significant limitations that affect module design:
 
@@ -450,7 +450,7 @@ WASM (wasm32-wasi) has significant limitations that affect module design:
 - The WASM target is always tested in CI (`bin/verify.sh --wasm`) — if your module compiles
   on WASM (even with most APIs excluded), the remaining code must be correct
 
-### 4.6 Write tests incrementally
+### Write tests incrementally
 
 Add tests to `modules/<name>/<name>_test.pr` as you implement each piece.
 
@@ -502,7 +502,7 @@ screen_with_mouse() `test(exclude: "wasm32", allow_leaks: true) {
 **Temp file naming convention:** Use `/tmp/pr_<mod>t_<suffix>` (e.g., `/tmp/pr_iot_cer`
 for promise_io_test_create_exists_remove). Always clean up temp files at the end of tests.
 
-### 4.7 Handle language limitations
+### Handle language limitations
 
 If you hit a compiler bug, language limitation, or missing feature while implementing:
 
@@ -513,7 +513,7 @@ If you hit a compiler bug, language limitation, or missing feature while impleme
 
 This is a hard rule. Module code should never contain workarounds for compiler issues.
 
-### 4.8 Multiple source files
+### Multiple source files
 
 Small modules typically use a single `.pr` file. Larger modules may split across multiple
 files — all `.pr` files in the module directory (and subdirectories) are merged into a
@@ -551,9 +551,9 @@ bind_test() `test {
 
 Declaring the same import in several files is normal, not a redeclaration. This is what keeps
 a single file readable on its own: every name it uses is accounted for by its own header. See
-`docs/module-system.md` §5.2.
+`docs/module-system.md` [Import Scope](module-system.md#import-scope).
 
-### 4.9 Rebuild after changes
+### Rebuild after changes
 
 After every change to module source:
 
@@ -569,9 +569,9 @@ bin/promise test modules/<name>/
 
 ---
 
-## 5. Phase 4: Validate
+## Phase 4 Validate
 
-### 5.1 Run module tests
+### Run module tests
 
 ```bash
 bin/promise test modules/<name>/
@@ -579,7 +579,7 @@ bin/promise test modules/<name>/
 
 All tests must pass. Check for leaks in the output.
 
-### 5.2 Run the full test suite
+### Run the full test suite
 
 ```bash
 bin/verify
@@ -597,7 +597,7 @@ The WASM suites are a different target's measurement, asked for by name:
 
 **Do not commit if verify fails.**
 
-### 5.3 Write integration tests
+### Write integration tests
 
 If the module interacts with language features in interesting ways, add integration tests
 in `tests/catalog/` or `tests/modules/`:
@@ -613,7 +613,7 @@ term_import() `test {
 }
 ```
 
-### 5.4 Run stress tests (for concurrency-sensitive modules)
+### Run stress tests
 
 ```bash
 bin/promise test -stress 100 modules/<name>/
@@ -622,7 +622,7 @@ bin/promise test -stress 100 modules/<name>/
 This runs all module tests 100 times to detect flaky failures, race conditions, and
 timing-dependent bugs.
 
-### 5.5 Check test coverage
+### Check test coverage
 
 ```bash
 bin/promise test -coverage modules/<name>/
@@ -631,14 +631,14 @@ bin/promise test -coverage modules/<name>/
 Review the coverage report. Ensure all public API methods have at least one test. File
 tasks in the tracker for any coverage gaps.
 
-### 5.6 Update documentation
+### Update documentation
 
 Update `docs/standard-library.md` with the new module:
 - Add a row to the catalog modules table
 - Include file count, line count, test count, and status
 - List the key types and functions
 
-### 5.7 Final checklist
+### Final checklist
 
 Before committing:
 
@@ -657,11 +657,11 @@ Before committing:
 
 ---
 
-## 6. Reference: Language Constraints for Module Design
+## Language Constraints for Module Design
 
 These constraints from the language design directly affect how modules are structured.
 
-### 6.1 No function overloading
+### No function overloading
 
 Promise does **not** support function or method overloading. Each function name within a
 scope must be unique. Use default parameters and optional parameters instead:
@@ -687,7 +687,7 @@ parse_string!(string data) Config ;
 parse_bytes!(u8[] bytes) Config ;
 ```
 
-### 6.2 No module-level variables
+### No module level variables
 
 Promise does not support module-level mutable variables (global mutable state). All mutable
 state lives in function-scoped locals, type instances, or is threaded through parameters.
@@ -696,19 +696,19 @@ This means modules cannot have global singletons, caches, or registries. If pers
 state is needed, model it as a type instance the caller creates and passes around (e.g.,
 `Screen` in the term module, `File` in the io module).
 
-### 6.3 No module initializers
+### No module initializers
 
 No module-level initializer blocks, `init()` functions, or static constructors. No code
 runs automatically when a module is imported — code only executes when something explicitly
 calls it. This makes startup behavior fully predictable from `main()`.
 
-### 6.4 No transitive re-exports
+### No transitive re exports
 
 A module's exported scope contains only its own `\`public` declarations. Symbols from
 `std` (auto-imported via `use std as _`) are **not** re-exported. If a consumer needs
 a type from `std`, they get it from `std` directly (which is always available).
 
-### 6.5 Resource cleanup: `close()` vs `drop()`
+### Resource cleanup with close and drop
 
 Promise has two cleanup mechanisms. Modules must choose the right one:
 
@@ -745,7 +745,7 @@ type Screen `public {
 }
 ```
 
-### 6.6 Catalog module dependency rules
+### Catalog module dependency rules
 
 Embedded catalog modules:
 - **Can** depend on `std` (auto-imported, always available)
@@ -757,7 +757,7 @@ This ensures catalog modules are self-contained and have no circular dependency 
 
 ---
 
-## 7. Reference: Module Types
+## Module Types
 
 ### Embedded catalog module
 
@@ -796,7 +796,7 @@ description = "Some library"
 
 Both `url` and `commit` must be present. The commit pin ensures reproducible builds.
 
-### Local module (project-relative)
+### Local module
 
 ```
 libs/<name>/
@@ -808,7 +808,7 @@ libs/<name>/
 Imported as `use <name> "./libs/<name>";`. Not embedded — lives in the project tree.
 Can depend on catalog modules, other local modules, and remote modules.
 
-### Remote module (project-level dependency)
+### Remote module
 
 Fetched from a git URL. Requires a commit pin in the project's `promise.toml`:
 

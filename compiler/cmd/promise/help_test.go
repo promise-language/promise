@@ -124,7 +124,7 @@ func TestIndexCoversAllCommands(t *testing.T) {
 	}
 }
 
-// TestIndexOmitsRemovedVerbs guards §5: the command index must never advertise
+// TestIndexOmitsRemovedVerbs guards language-design.md#type-system: the command index must never advertise
 // fetch/warm/gc. Also a tripwire so the T1008/T1009 removals don't regress.
 func TestIndexOmitsRemovedVerbs(t *testing.T) {
 	t.Parallel()

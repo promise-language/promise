@@ -14,7 +14,7 @@ import (
 
 // stubVersionSidecar is the file, written next to the installed stub, that
 // records the installed stub's contract version. The forward-only update
-// decision (§2.4 step 4) reads THIS file — it never executes the stub, since a
+// decision (distribution.md#what-install-does step 4) reads THIS file — it never executes the stub, since a
 // stub forwards its args and an older stub predating PROMISE_STUB_VERSION would
 // simply trampoline. A plain file read is the only way to honor "never
 // downgrade" against a stub that may be older, broken, or missing.
@@ -258,7 +258,7 @@ func replaceSymlinkRetrying(symlink func(target, name string) error, target, pat
 }
 
 // writeStubAndSidecar atomically installs the embedded stub binary and its
-// version sidecar into stubBinDir (T0770 §2.4 step 4 / T0722). Both files are
+// version sidecar into stubBinDir (T0770 distribution.md#what-install-does step 4 / T0722). Both files are
 // written via temp+rename so a concurrent reader never sees a partial stub or a
 // version that does not match the binary on disk.
 func writeStubAndSidecar(stubBinDir, binaryName string) error {

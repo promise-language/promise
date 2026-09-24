@@ -978,7 +978,7 @@ func (c *Checker) checkAssignTarget(target ast.Expr) {
 
 // currentReturnResult reports the result type a `return <expr>` at the current
 // position produces. Inside a `go {}` / `go! {}` block body that is the task's
-// element type (§17.2 explicit-return style, T1385); everywhere else it is the
+// element type (language-design.md#explicit-concurrency explicit-return style, T1385); everywhere else it is the
 // enclosing function's result. Getting this wrong inside a go block would both
 // skip the owned-result checks (when the enclosing fn is void, Result() is nil)
 // and apply the borrow-result rules to an owned value (when the enclosing fn

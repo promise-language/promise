@@ -722,7 +722,7 @@ func (p *WasmPAL) EmitDirExists(module *ir.Module) *ir.Func    { return emitStub
 func (p *WasmPAL) EmitErrno(module *ir.Module) *ir.Func        { return emitStubErrno(module) }
 
 // T1520 durability primitives — unsupported here, so -ENOSYS rather than -1
-// (docs/io.md §6.4). pal_dir_sync is a stub too: the Windows 0 return asserts the
+// (docs/io.md#platform-differences-a-caller-can-observe). pal_dir_sync is a stub too: the Windows 0 return asserts the
 // rename already carried durability, which WASM cannot claim.
 func (p *WasmPAL) EmitFileRename(module *ir.Module) *ir.Func   { return emitStubFileRename(module) }
 func (p *WasmPAL) EmitFileSync(module *ir.Module) *ir.Func     { return emitStubFileSync(module) }

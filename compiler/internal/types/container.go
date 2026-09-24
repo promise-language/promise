@@ -212,7 +212,7 @@ func AsTask(t Type) (elem Type, ok bool) {
 }
 
 // IsFailableTask reports whether t is a FailableTask instance
-// (Instance{TypFailableTask, _}) — the handle produced by `go!` (§17.2.1).
+// (Instance{TypFailableTask, _}) — the handle produced by `go!` (language-design.md#failable-goroutines).
 func IsFailableTask(t Type) bool {
 	inst, ok := t.(*Instance)
 	return ok && inst.origin == TypFailableTask
@@ -228,7 +228,7 @@ func AsFailableTask(t Type) (elem Type, ok bool) {
 }
 
 // ContainsFailableTask reports whether typ transitively owns a `failable_task[T]`
-// (§17.2.1). A `failable_task[T]` carries an error that must reach exactly one
+// (language-design.md#failable-goroutines). A `failable_task[T]` carries an error that must reach exactly one
 // receiver, so it — and any type that owns it — is a **must-use** value that may
 // not be implicitly dropped. This predicate drives every must-use decision
 // (linearity enforcement in the ownership pass, expr-statement discard rejection

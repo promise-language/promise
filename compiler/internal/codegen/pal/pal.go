@@ -79,22 +79,22 @@ type PAL interface {
 	// EmitFileSeek defines @pal_file_seek(i32 fd, i64 offset, i32 whence) → i64
 	EmitFileSeek(module *ir.Module) *ir.Func
 	// EmitFileRename defines @pal_file_rename(i8* from, i8* to) → i32 (0=ok, -errno)
-	// Atomic within one filesystem; -EXDEV across filesystems. See docs/io.md §3.
+	// Atomic within one filesystem; -EXDEV across filesystems. See docs/io.md#atomic-replace.
 	EmitFileRename(module *ir.Module) *ir.Func
 	// EmitFileSync defines @pal_file_sync(i32 fd) → i32 (0=ok, -errno)
 	// Forces file contents to stable storage: fsync on Linux, F_FULLFSYNC on
-	// macOS (fsync there does not cross the drive's volatile cache — docs/io.md §4),
+	// macOS (fsync there does not cross the drive's volatile cache — docs/io.md#forcing-data-to-stable-storage),
 	// FlushFileBuffers on Windows.
 	EmitFileSync(module *ir.Module) *ir.Func
 	// EmitDirSync defines @pal_dir_sync(i8* path) → i32 (0=ok, -errno)
 	// Forces a directory entry to stable storage, making a rename durable.
 	// A no-op returning 0 on Windows, where MOVEFILE_WRITE_THROUGH carries it
-	// instead (docs/io.md §3.2).
+	// instead (docs/io.md#why-the-final-sync-is-not-optional).
 	EmitDirSync(module *ir.Module) *ir.Func
 	// EmitFileLock defines @pal_file_lock(i32 fd, i32 exclusive, i32 nonblocking) → i32
 	// Whole-file advisory lock owned by the open file description: flock(2) on
 	// POSIX, LockFileEx on Windows. Returns 0, or -errno; -EWOULDBLOCK when
-	// nonblocking and the lock is held elsewhere (docs/io.md §5).
+	// nonblocking and the lock is held elsewhere (docs/io.md#advisory-locking).
 	EmitFileLock(module *ir.Module) *ir.Func
 	// EmitFileUnlock defines @pal_file_unlock(i32 fd) → i32 (0=ok, -errno)
 	EmitFileUnlock(module *ir.Module) *ir.Func
@@ -1414,7 +1414,7 @@ func emitStubFileRemove(module *ir.Module) *ir.Func {
 
 // The T1520 durability primitives are unsupported on WASM: WASI has no advisory
 // locking and the target has no durability story to offer. They return -ENOSYS
-// (-38) rather than -1 so the Promise layer raises the code docs/io.md §7 names
+// (-38) rather than -1 so the Promise layer raises the code docs/io.md#errors names
 // for "unsupported on this target", instead of an errno that means nothing.
 // pal_dir_sync is included: the Windows 0 return is a statement that the rename
 // already carried durability, which is not true here.

@@ -277,7 +277,7 @@ func WriteModule(t *testing.T, dir, name, epoch string, good bool) {
 		name+"_value() int `public { return 1; }\n")
 	body := "check() `test {\n  assert(" + name + "_value() == 1, \"ok\");\n}\n"
 	if !good {
-		// Genuine parse error → compile failure → incompatible (§9.9).
+		// Genuine parse error → compile failure → incompatible (module-system.md#compatibility-and-the-community-catalog).
 		body = "check() `test {\n  assert(" + name + "_value() == , \"x\");\n}\n"
 	}
 	write(t, filepath.Join(dir, name+"_test.pr"), body)

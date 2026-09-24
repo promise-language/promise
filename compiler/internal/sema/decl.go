@@ -85,12 +85,12 @@ func (c *Checker) declare(file *ast.File) {
 
 	// A module-wide declaration and a file-local import may not share a name: the
 	// import would silently shadow the declaration inside its own file (T1686,
-	// §5.2 rule 3).
+	// module-system.md#import-scope rule 3).
 	c.checkImportDeclCollisions()
 }
 
 // insertNamedImport binds a named module alias into the given scope, reporting a
-// duplicate-import-alias error (§6.5) if the file already binds that alias.
+// duplicate-import-alias error (language-design.md#sendable-and-sharable) if the file already binds that alias.
 // Returns true when the alias was bound (false on a rejected duplicate).
 func (c *Checker) insertNamedImport(u *ast.UseDecl, mod *types.Module, target *types.Scope) bool {
 	if existing := target.Insert(mod); existing != nil {
@@ -111,7 +111,7 @@ func useSpec(mod *types.Module) string {
 }
 
 // checkImportDeclCollisions reports a named file-local import whose alias collides
-// with a module-wide declaration (T1686, §5.2 rule 3). Declarations are visible in
+// with a module-wide declaration (T1686, module-system.md#import-scope rule 3). Declarations are visible in
 // every file, so such an import would shadow the declaration inside its own file —
 // an error rather than silent shadowing.
 func (c *Checker) checkImportDeclCollisions() {
@@ -178,7 +178,7 @@ func (c *Checker) resolveModuleScope(u *ast.UseDecl, mod *types.Module) {
 // visible only in the declaring file. For a file-local glob, a name already
 // resolvable through the parent chain — a module-wide declaration, the injected
 // std glob, or a Universe type — wins; the injected name is skipped so the
-// pre-existing binding stays in force (§5.3). Two anonymous imports in one file
+// pre-existing binding stays in force (language-design.md#variable-declarations). Two anonymous imports in one file
 // that export the same name are a conflict.
 func (c *Checker) mergeGlobImport(u *ast.UseDecl, mod *types.Module, target *types.Scope, fileLocal bool) {
 	scope := mod.Scope()
@@ -196,7 +196,7 @@ func (c *Checker) mergeGlobImport(u *ast.UseDecl, mod *types.Module, target *typ
 			continue
 		}
 		// A file-local glob never overrides a name already in scope via the parent
-		// chain (declaration / injected std / Universe): pre-existing wins (§5.3).
+		// chain (declaration / injected std / Universe): pre-existing wins (language-design.md#variable-declarations).
 		if fileLocal {
 			if existing, _ := target.Parent().LookupParent(name); existing != nil {
 				continue
@@ -433,7 +433,7 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 			named.SetSingleOwner(true)
 		}
 		// T1926: `duplicates_elements is the base case of ownsElementsByValue —
-		// the by-value column of memory-model.md §3, which only a native type
+		// the by-value column of memory-model.md#by-value-versus-behind-a-handle, which only a native type
 		// with no Promise-level fields has to state outright.
 		if c.hasAnnotation(d.Annotations, "duplicates_elements") {
 			named.SetDuplicatesElements(true)
@@ -1764,7 +1764,7 @@ func (c *Checker) resolvePlacement(annotations []*ast.MetaAnnotation) types.Plac
 }
 
 // checkUnusedImports warns for a file-local import that its own file never
-// references (T1686, §5.2 rule 4). File scope makes this decidable: a named
+// references (T1686, module-system.md#import-scope rule 4). File scope makes this decidable: a named
 // import is unused when no `alias.` reference resolved against it; an anonymous
 // import is unused when none of its injected names were referenced in the file.
 // The injected `use std as _;` / `use gzip as _gzip;` (empty Pos().File) never

@@ -18,7 +18,7 @@ import (
 //     function reported the ENCLOSING function's result type, and a legitimate
 //     bare `return;` in a VOID go block was wrongly rejected.
 //
-// The rule keys on the BLOCK alone (§17.2), never on whether the task handle is
+// The rule keys on the BLOCK alone (language-design.md#explicit-concurrency), never on whether the task handle is
 // received: a discarded fire-and-forget `go { … };` statement gets the identical
 // diagnostic. The trailing `;` is insignificant in Promise, so `go { f(x); }` with
 // a value-returning `f` really is value-producing; the repair is to make the block
@@ -92,7 +92,7 @@ func TestT1392NestedBareReturnsInValueGoBlockRejected(t *testing.T) {
 }
 
 // 4. A discarded fire-and-forget `go { … };` statement is rejected exactly like a
-// bound one: §17.2 keys the rule on the block, not on whether the handle is
+// bound one: language-design.md#explicit-concurrency keys the rule on the block, not on whether the handle is
 // received, so the same body cannot be legal as `go {…};` and illegal as
 // `t := go {…};`.
 func TestT1392FireAndForgetValueGoBlockBareReturnRejected(t *testing.T) {
@@ -170,7 +170,7 @@ func TestT1392LambdaBareReturnInsideValueGoBlockAccepted(t *testing.T) {
 	expectNoErrors(t, errs)
 }
 
-// 7. Only the BARE form draws this diagnostic. `return <expr>;` is §17.2's
+// 7. Only the BARE form draws this diagnostic. `return <expr>;` is language-design.md#explicit-concurrency's
 // explicit-return style — a first-class producer of the block's result (T1385) — so a
 // body that produces on every path through `return` is accepted, not rejected.
 func TestT1392ValueReturnInGoBlockNotRejectedHere(t *testing.T) {
@@ -389,7 +389,7 @@ func TestT1392OriginalReproUseBindingValueGoBlockRejected(t *testing.T) {
 }
 
 // 17. The failable analog of case 7: `return <expr>;` in a `go! {}` body produces the
-// block's result (§17.2 explicit-return style, T1385) — only the bare form is rejected.
+// block's result (language-design.md#explicit-concurrency explicit-return style, T1385) — only the bare form is rejected.
 func TestT1392ValueReturnInFailableGoBlockNotRejectedHere(t *testing.T) {
 	errs := checkErrs(t, `
 		produce!(int x) int { if x < 0 { raise error(message: "neg"); } return x; }
@@ -405,7 +405,7 @@ func TestT1392ValueReturnInFailableGoBlockNotRejectedHere(t *testing.T) {
 	expectNoErrorContaining(t, errs, "missing return value")
 }
 
-// 18. A failable `go! {}` cannot be fire-and-forget at all (§17.2.1): a discarded
+// 18. A failable `go! {}` cannot be fire-and-forget at all (language-design.md#failable-goroutines): a discarded
 // `go! { … }` statement is rejected for that reason on top of its body's bare
 // return, so the two diagnostics coexist on the same spawn.
 func TestT1392FailableGoBlockCannotBeFireAndForget(t *testing.T) {

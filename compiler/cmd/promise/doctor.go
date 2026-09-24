@@ -605,7 +605,7 @@ func doctorCheckEpochs() doctorCheck {
 	return c
 }
 
-// doctorCheckCAS verifies the content-addressed dependency cache (§4.4/§6):
+// doctorCheckCAS verifies the content-addressed dependency cache (T0769 §4.4/§6):
 // re-hash every blobs/ and archives/ entry against its content address. Because
 // the fetch path trusts the cache by presence, this is the only thing that
 // turns a bit-rotted / truncated CAS back into a working one. A corrupt entry

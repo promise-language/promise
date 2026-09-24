@@ -938,7 +938,7 @@ func TestMakeLLDAliasesDoNotDuplicateLLD(t *testing.T) {
 // EACCES down the other.
 //
 // The inode: outside Linux the file must be its own, because PatchAndSignMachO
-// rewrites it in place and §5.1 requires the CAS blob to stay the raw upstream
+// rewrites it in place and language-design.md#primitive-types-are-regular-types requires the CAS blob to stay the raw upstream
 // bytes its content hash was computed over.
 func TestMaterializeViewFileLeavesARunnableToolOfItsOwn(t *testing.T) {
 	t.Parallel()

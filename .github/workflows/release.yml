@@ -1,7 +1,7 @@
-# Tag-triggered release pipeline (docs/release-automation.md §5).
+# Tag-triggered release pipeline (docs/release-automation.md#release-workflow).
 #
 # Triggered by an `epoch-*` tag (e.g. `epoch-2026.0`, or `epoch-next` for the
-# pre-release channel). Mirrors the build order of §2 via T0773's `bin/release`
+# pre-release channel). Mirrors the build order of release-automation.md#the-build-order-constraint via T0773's `bin/release`
 # driver — but per T0797 the **per-epoch blobs job is gone**. Prebuilt dependency
 # blobs (LLVM opt/llc/lld) are content-addressed, immutable, and change only on a
 # dep version bump; they are produced + uploaded LOCALLY (T0797) by a
@@ -74,7 +74,7 @@ jobs:
           # linux-arm64` resolves the arm64 LLVM + aarch64 musl CRT entries.
           # scripts/install.sh already maps uname -m aarch64 → promise-linux-arm64.gz,
           # so the asset is consumed by the existing install path with no change.
-          # Deferred (docs/release-automation.md §7): darwin-amd64 (macos-13).
+          # Deferred (docs/release-automation.md#open-items): darwin-amd64 (macos-13).
           if [ "$P" = "all" ]; then
             echo "compiler={\"include\":$compiler}" >> "$GITHUB_OUTPUT"
           else
@@ -244,7 +244,7 @@ jobs:
           if [ "$GITHUB_REF_NAME" = "epoch-next" ]; then
             PRERELEASE="--prerelease"
             TITLE="Promise epoch-next (pre-release)"
-            # epoch-next is a MOVING channel tag, re-cut on every push (§6). A prior
+            # epoch-next is a MOVING channel tag, re-cut on every push (language-design.md#ownership-and-memory-management). A prior
             # run already created its release, and `gh release create` refuses to
             # clobber an existing one — so delete it first. `gh release delete` keeps
             # the git tag by default (no --cleanup-tag), and the tag is the trigger,

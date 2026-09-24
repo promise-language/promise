@@ -9345,7 +9345,7 @@ func runAdd(args []string) {
 
 	nameOrURL := args[0]
 	// An explicit ref disables epoch-aware tag resolution (the user pinned it);
-	// with no ref we resolve the epoch-appropriate `epoch-*` tag (§9.8).
+	// with no ref we resolve the epoch-appropriate `epoch-*` tag (module-system.md#cross-epoch-module-versioning).
 	explicitRef := ""
 	if len(args) == 2 {
 		explicitRef = args[1]
@@ -9440,10 +9440,10 @@ func runAdd(args []string) {
 		}
 	}
 
-	// Community catalog (§9.9 step 4): a bare NAME not found in the embedded
+	// Community catalog (module-system.md#compatibility-and-the-community-catalog step 4): a bare NAME not found in the embedded
 	// catalog resolves through the living community catalog's per-epoch compat
 	// index. The CI-recorded verdict is trusted directly — no local test run
-	// (§9.9). An explicit URL or ref disambiguates to the ad-hoc path and bypasses
+	// (module-system.md#compatibility-and-the-community-catalog). An explicit URL or ref disambiguates to the ad-hoc path and bypasses
 	// this; the embedded catalog already shadowed community on a name collision.
 	if !resolvedByCatalog && explicitRef == "" && isBareName(nameOrURL) {
 		fmt.Fprintf(os.Stderr, "Resolving %s via community catalog for epoch %s...\n", nameOrURL, cfg.Epoch)
@@ -9467,7 +9467,7 @@ func runAdd(args []string) {
 			fmt.Printf("Added %s (community: %s) → %s\n", nameOrURL, curl, shortCommit(ccommit))
 			return
 		}
-		// Not listed in any catalog → not name-addressable (§9.9 step 5).
+		// Not listed in any catalog → not name-addressable (module-system.md#compatibility-and-the-community-catalog step 5).
 		fmt.Fprintf(os.Stderr, "error: '%s' is not a first-party or community catalog module\n", nameOrURL)
 		fmt.Fprintln(os.Stderr, "  hint: add it by git URL — promise package add <git-url> [ref]")
 		os.Exit(1)
@@ -9482,7 +9482,7 @@ func runAdd(args []string) {
 	}
 
 	// Resolve an epoch-appropriate commit and verify it under the project epoch
-	// (§9.8/§9.9). On no compatible version this returns the §9.10 gate error.
+	// (module-system.md#cross-epoch-module-versioning/module-system.md#compatibility-and-the-community-catalog). On no compatible version this returns the module-system.md#when-a-module-has-no-compatible-version gate error.
 	if explicitRef != "" {
 		fmt.Fprintf(os.Stderr, "Resolving %s @ %s (epoch %s)...\n", label, explicitRef, cfg.Epoch)
 	} else {
@@ -9784,7 +9784,7 @@ func runPkgUpdate(args []string) {
 		return
 	}
 
-	// Re-resolution re-runs the epoch-aware tag pick + verification (§9.8 step 3:
+	// Re-resolution re-runs the epoch-aware tag pick + verification (module-system.md#cross-epoch-module-versioning step 3:
 	// moving a tag upstream never changes an existing build until `update`), so it
 	// needs the project-epoch compiler. Resolved lazily on the first git entry —
 	// an update over only non-git (sha256) sources never needs it.
@@ -9810,7 +9810,7 @@ func runPkgUpdate(args []string) {
 			continue
 		}
 
-		// Community modules (§9.9) re-resolve through the FRESH community index
+		// Community modules (module-system.md#compatibility-and-the-community-catalog) re-resolve through the FRESH community index
 		// (authoritative, no local test run) rather than the generic epoch-tag
 		// walk-back. Falls through to the engine path if the URL is no longer
 		// listed in the community catalog.
@@ -10303,10 +10303,10 @@ func runInstall(args []string) {
 	copyFile(execPath, filepath.Join(epochBinDir, binaryName), 0755)
 
 	// Install the launcher stub at ~/.promise/bin/promise (T0770). The stub is
-	// the Promise-built launcher (§2.5) that exec-replaces into the resolved
+	// the Promise-built launcher (distribution.md#the-stub-launcher) that exec-replaces into the resolved
 	// epoch's compiler. Update it FORWARD-ONLY: replace it only when this
 	// installer's embedded stub is newer than the installed one, decided by a
-	// plain read of the sidecar — never by executing the stub (§2.4 step 4).
+	// plain read of the sidecar — never by executing the stub (distribution.md#what-install-does step 4).
 	stubLabel := "launcher (dev: compiler copy)"
 	stubPath := filepath.Join(stubBinDir, binaryName)
 	if hasEmbeddedStub {
@@ -10407,7 +10407,7 @@ func runInstall(args []string) {
 	}
 
 	// Stage heavy dependencies into the content-addressed store and record the
-	// epoch's blob references (T0769, §2.4 step 3 / §4.4). A full-variant binary
+	// epoch's blob references (T0769, distribution.md#what-install-does step 3 / §4.4). A full-variant binary
 	// (hasEmbeddedLLVM) unpacks its bundled LLVM blobs into the shared CAS so the
 	// host workflow runs offline; a thin binary stages nothing and fetches on
 	// first use. Either way blobs.refs is derived from the embedded manifest

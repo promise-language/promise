@@ -98,7 +98,7 @@ func TestSweepSharedBlobSurvives(t *testing.T) {
 	}
 }
 
-// A missing/unreadable ref set makes GC keep everything (§4.4 fail-safe).
+// A missing/unreadable ref set makes GC keep everything (T0769 §4.4 fail-safe).
 func TestSweepFailSafeOnMissingRefs(t *testing.T) {
 	home, s := homeStore(t)
 	b1 := seedBlob(t, s, "b1")
@@ -130,7 +130,7 @@ func TestSweepFailSafeOnMissingRefs(t *testing.T) {
 }
 
 // An archive whose mapped blobs are all materialized is evicted even while an
-// epoch still references it (aggressive archive eviction, §4.4).
+// epoch still references it (aggressive archive eviction, T0769 §4.4).
 func TestSweepAggressiveArchiveEviction(t *testing.T) {
 	home, s := homeStore(t)
 	blob := seedBlob(t, s, "extracted-tool")

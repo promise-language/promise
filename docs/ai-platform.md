@@ -12,29 +12,29 @@ that tie it all together.
 
 ---
 
-## 1. Design Principles
+## Design Principles
 
-### 1.1 AI as First-Class Runtime Target
+### AI as a First Class Runtime Target
 
 Most languages treat AI integration as a library concern — bolted on via HTTP clients and
 JSON serialization. Promise treats AI as a **runtime target**: the language, type system,
 and module catalog are designed so that an AI agent can generate, execute, inspect, and
 orchestrate Promise programs with minimal friction.
 
-### 1.2 Agent-Agnostic by Default
+### Agent Agnostic by Default
 
 The AI modules do not couple to any specific provider (OpenAI, Anthropic, Google, etc.).
 Instead, they define **provider-neutral interfaces** that concrete providers implement.
 A Promise program that uses `ai.Agent` works with any backend — the provider is a
 configuration choice, not a code change.
 
-### 1.3 Sandbox-First Execution
+### Sandbox First Execution
 
 AI-generated code runs in a sandbox by default. The sandbox is not an afterthought bolted
 onto an unrestricted runtime — it is the *default execution mode* for AI-invoked code.
 Escaping the sandbox requires explicit capability grants, visible at the call site.
 
-### 1.4 Structured Over Unstructured
+### Structured Over Unstructured
 
 LLMs work best with structured input and output. Promise's type system (algebraic types,
 `doc()` annotations, structural interfaces) provides machine-readable schemas that
@@ -43,7 +43,7 @@ not hand-written JSON schemas.
 
 ---
 
-## 2. Module Layout
+## Module Layout
 
 The AI platform is split between **catalog modules** (shipped with the compiler, listed
 in `catalog.toml`) and **community modules** (external git repos, pinned per project):
@@ -113,12 +113,12 @@ ai_openai/ ────▶  ai, auth, http, json   (community)
 ```
 
 Catalog modules can depend only on `std` and on other catalog modules listed in
-`catalog.toml` (per `docs/creating-modules.md` §6.6). Community modules can depend on
+`catalog.toml` (per `docs/creating-modules.md` [Catalog module dependency rules](creating-modules.md#catalog-module-dependency-rules)). Community modules can depend on
 any catalog module plus other community modules they explicitly pin.
 
 ---
 
-## 3. `modules/schema` — Shared with Cloud Persistence
+## The schema module
 
 `modules/schema` is described in full in **`docs/schema.md`** because it is the
 shared foundation for both the AI platform and cloud persistence
@@ -143,11 +143,11 @@ specifically consumes and refers the reader to the schema doc for everything els
 
 **What AI tooling adds on top:**
 
-- `Tool.create[T, R]` (§5.3) calls `schema.of[T]()` for the input shape and
+- `Tool.create[T, R]` ([Tool System](#tool-system)) calls `schema.of[T]()` for the input shape and
   `to_tool_input_schema()` for the on-the-wire descriptor LLMs consume.
-- `Agent.run_typed[T]` (§8) calls `schema.of[T]()` to produce the JSON Schema it
+- `Agent.run_typed[T]` ([Structured Output](#structured-output)) calls `schema.of[T]()` to produce the JSON Schema it
   injects into the system prompt.
-- The `` `tool `` annotation (§9.1) drives `schema.for_func[F]()` and registers each
+- The `` `tool `` annotation ([The tool Annotation](#the-tool-annotation)) drives `schema.for_func[F]()` and registers each
   annotated function in a per-module manifest.
 
 For the schema's design constraints, identity composition, project identity in
@@ -155,7 +155,7 @@ For the schema's design constraints, identity composition, project identity in
 
 ---
 
-## 4. `modules/auth` — Authentication Primitives
+## The auth module
 
 Handles API key management, token refresh, and credential storage for AI provider
 connections and MCP transport authentication.
@@ -205,7 +205,7 @@ type EnvToken is TokenProvider `public `doc("A bearer token loaded from an envir
 }
 ```
 
-### 4.1 Credential Store
+### Credential Store
 
 `~/.promise/credentials.toml` — a simple, user-managed credential file:
 
@@ -220,7 +220,7 @@ The `Credential.from_store("openai")` factory reads this file. Promise never sen
 credentials to any service other than the one they're configured for — the runtime
 enforces credential scoping.
 
-### 4.2 OAuth Support (Future)
+### OAuth Support
 
 ```promise
 type OAuthProvider is TokenProvider `public {
@@ -235,12 +235,12 @@ type OAuthProvider is TokenProvider `public {
 
 ---
 
-## 5. `modules/ai` — Agent Orchestration
+## The ai module
 
 The core AI module. Provides a provider-neutral interface for LLM interaction, tool use,
 multi-turn conversations, agent loops, session management, and multi-agent orchestration.
 
-### 5.1 Error Types
+### Agent Error Types
 
 All AI-specific errors inherit from a common base. This enables typed error handling
 (`? e is RateLimitError { ... }`) at every level of the stack.
@@ -268,7 +268,7 @@ type ProviderError is AiError `public {
 }
 ```
 
-### 5.2 Core Types
+### Core Types
 
 ```promise
 // ── Provider interface ─────────────────────────────────────────────────
@@ -396,11 +396,11 @@ enum ContentDelta `public {
 }
 ```
 
-### 5.3 Tool System
+### Tool System
 
 Tools are Promise functions that AI models can call. The `Tool` type wraps a function
 with its `Type` (a `Type.Object` variant describing the input), derived from the type via
-`schema.of[T]()` (§3) — which in turn requires `T` to be `` `serializable ``.
+`schema.of[T]()` ([The schema module](#the-schema-module)) — which in turn requires `T` to be `` `serializable ``.
 
 ```promise
 use schema;
@@ -479,7 +479,7 @@ main!() {
 }
 ```
 
-### 5.4 Agent Loop
+### Agent Loop
 
 The `Agent` type implements the standard agent loop: send messages, receive tool calls,
 execute tools, feed results back, repeat until the model stops.
@@ -604,7 +604,7 @@ enum TurnEvent `public {
 }
 ```
 
-### 5.5 One-Shot vs Interactive Mode
+### One Shot and Interactive Mode
 
 **One-shot** (`agent.run()`): Send a single prompt, get a complete result. The agent loop
 runs internally — tool calls are executed, results fed back, until the model produces a
@@ -649,7 +649,7 @@ main!() {
 }
 ```
 
-### 5.6 Streaming
+### Streaming
 
 Both modes support streaming via `Generator[T]` (the coroutine generator from
 `std/iter.pr`, which satisfies `Iterator[T]` and is therefore consumable with `for`):
@@ -672,7 +672,7 @@ for event in agent.turn_stream("Write a haiku") {
 }
 ```
 
-### 5.7 Parallel Tool Execution
+### Parallel Tool Execution
 
 When the model returns multiple tool calls in a single response and
 `config.parallel_tool_calls` is true, the agent executes them concurrently using `go`:
@@ -693,7 +693,7 @@ if config.parallel_tool_calls && tool_calls.len > 1 {
 
 This uses Promise's existing concurrency model (`std/task.pr`) — no new primitives needed.
 
-### 5.8 Tool Call Filtering
+### Tool Call Filtering
 
 The `tool_filter` callback in `AgentConfig` enables human-in-the-loop approval for
 sensitive operations:
@@ -709,9 +709,9 @@ agent.config.tool_filter = |ToolCallEvent evt| -> bool {
 };
 ```
 
-### 5.9 Providers
+### Providers
 
-The `ai` catalog module ships **only** the abstract `Provider` interface (§5.2) and a
+The `ai` catalog module ships **only** the abstract `Provider` interface ([Core Types](#core-types)) and a
 built-in `MockProvider` for testing. Concrete vendor providers live in **community
 modules** registered in `catalog.toml` and pinned per project. The split is deliberate:
 
@@ -725,7 +725,7 @@ modules** registered in `catalog.toml` and pinned per project. The split is deli
   works unchanged with any community implementation; swapping providers is a `use`
   statement and a constructor change.
 
-#### `MockProvider` (built into `ai`)
+#### The built in MockProvider
 
 ```promise
 type MockProvider is Provider `public `doc("Returns canned responses for tests. Never hits the network.") {
@@ -747,7 +747,7 @@ type MockProvider is Provider `public `doc("Returns canned responses for tests. 
 }
 ```
 
-#### Community provider modules (illustrative — not part of the standard set)
+#### Community provider modules
 
 | Module          | Source                          | Provides                                                |
 |-----------------|---------------------------------|---------------------------------------------------------|
@@ -792,11 +792,11 @@ main!() {
 }
 ```
 
-`Provider` is a nominal interface (§5.2), so a community module declaring
+`Provider` is a nominal interface ([Core Types](#core-types)), so a community module declaring
 `type Anthropic is ai.Provider` is a compile-time guarantee that the module
 implements every abstract method.
 
-### 5.10 Session Management
+### Session Management
 
 Sessions persist conversation state across multiple interactions, enabling long-running
 agent workflows, resumable tasks, and multi-user applications.
@@ -852,7 +852,7 @@ type Session `public {
 }
 ```
 
-### 5.11 Session Store
+### Session Store
 
 For applications that manage multiple users or conversations:
 
@@ -886,7 +886,7 @@ type MemorySessionStore is SessionStore `public {
 }
 ```
 
-### 5.12 Agent with Session
+### Agent with Session
 
 ```promise
 use ai;
@@ -923,7 +923,7 @@ main!() {
 }
 ```
 
-### 5.13 Observability
+### Observability
 
 #### Event Hooks
 
@@ -961,7 +961,7 @@ type UsageTracker `public {
 }
 ```
 
-### 5.14 Multi-Agent Orchestration
+### Multi Agent Orchestration
 
 #### Agent Pipelines
 
@@ -1051,13 +1051,13 @@ main!() {
 
 ---
 
-## 6. `modules/mcp` — Model Context Protocol
+## The mcp module
 
 MCP (Model Context Protocol) support for both server and client roles. Promise's type
 system makes MCP server creation nearly zero-boilerplate — tool schemas are derived from
 function signatures.
 
-### 6.1 Error Types
+### MCP Error Types
 
 ```promise
 type McpError is error `public {
@@ -1066,7 +1066,7 @@ type McpError is error `public {
 }
 ```
 
-### 6.2 Transport
+### Transport
 
 ```promise
 // Transport abstracts the communication channel for MCP protocol messages.
@@ -1097,7 +1097,7 @@ type HttpTransport is Transport `public {
 }
 ```
 
-### 6.3 MCP Server
+### MCP Server
 
 ```promise
 type Server `public {
@@ -1166,7 +1166,7 @@ type ServerConfig `public {
 }
 ```
 
-### 6.4 MCP Resources
+### MCP Resources
 
 ```promise
 type Resource `public {
@@ -1196,7 +1196,7 @@ type ResourceResponse `public {
 }
 ```
 
-### 6.5 MCP Prompts
+### MCP Prompts
 
 ```promise
 type Prompt `public {
@@ -1213,7 +1213,7 @@ type PromptArgument `public {
 }
 ```
 
-### 6.6 Complete MCP Server Example
+### Complete MCP Server Example
 
 ```promise
 use mcp;
@@ -1277,7 +1277,7 @@ main!() {
 }
 ```
 
-### 6.7 MCP Client
+### MCP Client
 
 ```promise
 type Client `public {
@@ -1323,7 +1323,7 @@ type Client `public {
 }
 ```
 
-### 6.8 Connecting MCP Tools to an Agent
+### Connecting MCP Tools to an Agent
 
 MCP tools discovered from a server can be directly plugged into an `ai.Agent`:
 
@@ -1355,12 +1355,12 @@ main!() {
 
 ---
 
-## 7. `modules/sandbox` — Sandboxed Execution
+## The sandbox module
 
 Provides capability-controlled execution of Promise code. AI-generated code runs in a
 restricted environment where system access is explicitly granted, not implicitly available.
 
-### 7.1 Error Types
+### Sandbox Error Types
 
 ```promise
 type SandboxError is error `public {
@@ -1370,7 +1370,7 @@ type SandboxError is error `public {
 }
 ```
 
-### 7.2 Capability Model
+### Capability Model
 
 ```promise
 enum Capability `public {
@@ -1404,7 +1404,7 @@ enum Capability `public {
 }
 ```
 
-### 7.3 Sandbox Type
+### Sandbox Type
 
 ```promise
 type Sandbox `public {
@@ -1478,7 +1478,7 @@ type ExecutionResult `public {
 }
 ```
 
-### 7.4 How the Sandbox Works
+### How the Sandbox Works
 
 The sandbox compiles (if needed) and executes Promise code in a restricted subprocess.
 **Capability enforcement is implemented at the PAL layer** — the same layer that
@@ -1513,7 +1513,7 @@ which statically verifies that the code does not use any module whose capabiliti
 the sandbox grants. This is a *compile-time check* — the program won't even build if it
 imports `io` without `FileRead`/`FileWrite` capability.
 
-### 7.5 Agent + Sandbox Integration
+### Agent and Sandbox Integration
 
 ```promise
 use ai;
@@ -1549,7 +1549,7 @@ main!() {
 
 ---
 
-## 8. Structured Output
+## Structured Output
 
 LLMs increasingly support structured output (JSON matching a schema). Promise's type
 system makes this natural — request a typed response and get back a deserialized value.
@@ -1585,7 +1585,7 @@ The `run_typed[T]` method:
 
 ---
 
-## 9. `promise ai` — CLI Integration
+## CLI Integration
 
 The `promise` binary includes AI-related subcommands for development workflows:
 
@@ -1598,11 +1598,11 @@ promise ai run file.pr              # Run an agent program
 promise ai sandbox file.pr          # Run file.pr in minimal sandbox
 ```
 
-### 9.1 The `` `tool `` Annotation — A Compiler Extension
+### The tool Annotation
 
 `` `tool `` is the single compiler change required to make MCP server creation
-zero-boilerplate. It joins the annotation set ([annotations.md](annotations.md) §6, registered
-in `compiler/internal/sema/meta.go` per that document's §17) as a function-and-method
+zero-boilerplate. It joins the annotation set ([annotations.md](annotations.md), under [Index](annotations.md#index), registered
+in `compiler/internal/sema/meta.go` per that document's [Adding an annotation](annotations.md#adding-an-annotation)) as a function-and-method
 annotation:
 
 | Meta | Applies To | Description |
@@ -1615,10 +1615,10 @@ annotation:
    with optional named parameters (e.g., `` `tool(name: "wire_name") ``). Reject on
    types, fields, or anything else.
 2. **Synthesize a `Type` descriptor** for each `` `tool ``-annotated declaration in
-   the same pass that handles `` `serializable `` schemas (see `docs/schema.md` §7). The descriptor
+   the same pass that handles `` `serializable `` schemas (see `docs/schema.md` [How Generation Works](schema.md#how-generation-works)). The descriptor
    captures parameter names, parameter `` `doc `` annotations, parameter defaults,
    parameter optionality (`T?`), return type, and failability — the function-declaration
-   information the compiler always has and never erases (see `docs/schema.md` §3).
+   information the compiler always has and never erases (see `docs/schema.md` [Functions and Function Types](schema.md#functions-and-function-types)).
 3. **Validate parameter types** are either primitive, `` `serializable ``, or
    primitive-of-`` `serializable ``-containers (`T[]`, `map[string, T]`, `T?`). Emit a
    precise diagnostic when not — `mcp tools cannot accept non-serializable parameter
@@ -1634,7 +1634,7 @@ annotation:
 
 - All the type information needed already exists — `` `tool `` does not introduce a
   new reflection facility, only a new label on top of facilities the compiler has.
-- The schema synthesis hook is the same one that powers `schema.of[T]()` (see `docs/schema.md` §7) and
+- The schema synthesis hook is the same one that powers `schema.of[T]()` (see `docs/schema.md` [How Generation Works](schema.md#how-generation-works)) and
   `` `serializable `` (`docs/serialization.md`); it does not need to be invented.
 - Free-function manifest enumeration is already a well-defined operation — every Go
   unit-test discovery, every embedded-resource registry uses the same shape.
@@ -1649,7 +1649,7 @@ annotation:
   metadata; it is exposed only when a `mcp.Server` (or the `promise ai serve` driver)
   reads the manifest and registers it.
 
-### 9.2 `promise ai serve`
+### Serving an agent
 
 Takes a `.pr` file that defines tools and runs it as an MCP server. The file can be a
 full MCP server program (with `main()` and explicit `mcp.Server` setup), or a simpler
@@ -1673,14 +1673,14 @@ read_file!(string path `doc("File path to read.")) string
 
 `promise ai serve tools.pr` wraps these in an MCP server automatically — no
 boilerplate. The tool schemas are derived from the function signatures and
-`` `doc `` annotations as described in §9.1.
+`` `doc `` annotations as described in [The tool Annotation](#the-tool-annotation).
 
 `` `tool `` is an explicit opt-in: only annotated functions are registered. This
 follows Promise's "explicit over implicit" philosophy — a function must declare its
 intent to be exposed as a tool. Functions without `` `tool `` are invisible to the
 manifest even if their signature would otherwise be valid.
 
-### 9.3 `promise ai schema`
+### Printing a tool schema
 
 Prints the JSON Schema for a type or function, useful for debugging tool definitions:
 
@@ -1714,9 +1714,9 @@ The CLI distinguishes types from functions automatically — types resolve via
 
 ---
 
-## 10. End-to-End Examples
+## End to End Examples
 
-### 10.1 CLI Chatbot with Session Persistence
+### CLI Chatbot with Session Persistence
 
 ```promise
 use ai;
@@ -1765,7 +1765,7 @@ main!() {
 }
 ```
 
-### 10.2 Code Generation Agent with Sandboxed Execution
+### Code Generation Agent with Sandboxed Execution
 
 ```promise
 use ai;
@@ -1800,7 +1800,7 @@ main!() {
 }
 ```
 
-### 10.3 MCP Server with Database Tools
+### MCP Server with Database Tools
 
 ```promise
 use mcp;
@@ -1846,7 +1846,7 @@ main!() {
 }
 ```
 
-### 10.4 Multi-MCP Agent with Tool Filtering
+### Multi MCP Agent with Tool Filtering
 
 ```promise
 use ai;
@@ -1898,7 +1898,7 @@ main!() {
 }
 ```
 
-### 10.5 Testing with MockProvider
+### Testing with MockProvider
 
 ```promise
 use ai;
@@ -1926,9 +1926,9 @@ test_agent_responds() `test {
 
 ---
 
-## 11. Implementation Order
+## Implementation Order
 
-### Phase 0 — Prerequisites (already covered or in progress)
+### Phase 0 Prerequisites
 
 1. **`modules/json`**: already implemented — `json.encode_string[T]()`,
    `json.decode_string[T]()`.
@@ -1945,14 +1945,14 @@ test_agent_responds() `test {
    - `Hash128`, `Origin`, the `` `id `` meta, and the `[executable]` table in
      `promise.toml`.
 4. **Compiler — `` `tool `` meta**: add to `builtinMetas` in
-   `compiler/internal/sema/meta.go`; emit per-module `_tool_manifest()` getter (§9.1).
+   `compiler/internal/sema/meta.go`; emit per-module `_tool_manifest()` getter ([The tool Annotation](#the-tool-annotation)).
 
-### Phase 1 — AI-specific foundation (auth)
+### Phase 1 Authentication foundation
 
 5. **`modules/auth`**: `AuthError`, `Credential`, `TokenProvider`, `StaticToken`,
    `EnvToken`. Credential store (`~/.promise/credentials.toml`) read.
 
-### Phase 2 — Core AI (provider interface + agent + MockProvider)
+### Phase 2 Core AI
 
 7. **`modules/ai` error types**: `AiError`, `RateLimitError`, `ContextLengthError`,
    `ApiError`, `ProviderError`.
@@ -1966,7 +1966,7 @@ test_agent_responds() `test {
 12. **`modules/ai` streaming**: `run_stream()`, `turn_stream()` returning
     `Generator[T]` (uses `std/iter.pr`'s coroutine generator).
 
-### Phase 3 — MCP
+### Phase 3 MCP
 
 13. **`modules/mcp` transport**: `Transport`, `StdioTransport`.
 14. **`modules/mcp` error types**: `McpError`.
@@ -1976,13 +1976,13 @@ test_agent_responds() `test {
 18. **`promise ai serve`**: CLI command for auto-serving `` `tool ``-annotated files —
     reads the per-module `_tool_manifest()` emitted in Phase 0 step 4.
 
-### Phase 4 — Sandbox
+### Phase 4 Sandbox
 
 19. **`modules/sandbox`**: `Sandbox`, `Capability`, `ExecutionResult`, `SandboxError`.
 20. **OS-level enforcement**: seccomp/landlock on Linux, sandbox-exec on macOS.
 21. **`promise ai sandbox`**: CLI command.
 
-### Phase 5 — Sessions + Advanced
+### Phase 5 Sessions and Advanced
 
 22. **`modules/ai` sessions**: `Session`, `SessionStore`, `FileSessionStore`,
     `MemorySessionStore`.
@@ -1990,12 +1990,12 @@ test_agent_responds() `test {
 24. **`modules/ai` multi-agent**: `Pipeline`, `PipelineStep`, `Tool.from_agent()`.
 25. **`modules/ai` observability**: `AgentHooks`, `UsageTracker`.
 
-### Phase 6 — CLI integration
+### Phase 6 CLI integration
 
 26. **`promise ai tools`**: list tools from a file.
 27. **`promise ai schema`**: print JSON Schema for a type or function.
 
-### Phase 7 — Community provider modules (out of catalog)
+### Phase 7 Community provider modules
 
 28. **`ai_anthropic`**: `Anthropic is ai.Provider` — claude-* models.
 29. **`ai_openai`**: `OpenAI`, `OpenAICompat is ai.Provider` — OpenAI + Ollama/vLLM/LiteLLM.
@@ -2004,7 +2004,7 @@ test_agent_responds() `test {
 
 ---
 
-## 12. Resolved Design Decisions
+## Resolved Design Decisions
 
 All eleven open questions are now resolved. They are kept here as a decision log so
 future readers can see *why* the platform looks the way it does, not only *what* it is.
@@ -2012,8 +2012,8 @@ future readers can see *why* the platform looks the way it does, not only *what*
 **Q1: Schema derivation — compile-time or runtime?**
 *Decision: compile-time, via monomorphization.* `schema.of[T]()` is a `` `mono `` free
 function whose body is synthesized in the same sema pass that generates encode/decode
-for `` `serializable `` types (see `docs/schema.md` §7). There is no runtime reflection facility to add
-or maintain. `serialization.md` §7.1 already rules out runtime reflection on cost
+for `` `serializable `` types (see `docs/schema.md` [How Generation Works](schema.md#how-generation-works)). There is no runtime reflection facility to add
+or maintain. `serialization.md` [Two interfaces or one](serialization.md#two-interfaces-or-one) already rules out runtime reflection on cost
 and philosophy grounds, and the schema mechanism reuses the hook the serializer already
 needs.
 
@@ -2022,7 +2022,7 @@ needs.
 consistently across Promise's four targets — Linux (seccomp/landlock), macOS
 (sandbox-exec), Windows (Job Objects / AppContainer), WASM (no syscalls at all, only
 host imports). The portable contract is the `Capability` enum and the sandbox config;
-the PAL is where `Capability[]` is checked against every gated call (§7.4). Specific
+the PAL is where `Capability[]` is checked against every gated call ([How the Sandbox Works](#how-the-sandbox-works)). Specific
 PAL implementations *may* additionally engage the platform's syscall sandbox as a
 defense-in-depth layer on platforms where one exists, but that is an implementation
 detail of that PAL, not part of the user-visible model.
@@ -2081,7 +2081,7 @@ schema.of[Foo]() requires Foo to be marked `serializable`
 ```
 
 This keeps "what I describe" and "what I encode" aligned via a single sema hook
-(see `docs/schema.md` §7). The rare type that should be visible to LLMs but intentionally never
+(see `docs/schema.md` [How Generation Works](schema.md#how-generation-works)). The rare type that should be visible to LLMs but intentionally never
 serialized is handled by manually constructing a `schema.Type` literal rather than by
 forking the synthesis machinery — that case is rare enough that the manual cost is
 preferable to a second annotation.

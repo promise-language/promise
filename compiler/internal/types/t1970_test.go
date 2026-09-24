@@ -166,7 +166,7 @@ func TestT1970_AllFieldTypesEmpty(t *testing.T) {
 
 // ContainsFailableTask shares the AllFields walk, so it shared the blind spot: an
 // inherited `failable_task` read as still-generic let the goroutine's error be
-// discarded, which language-design.md §17.2.1 forbids — the error must reach
+// discarded, which language-design.md#failable-goroutines forbids — the error must reach
 // exactly one receiver. These are the direct predicate tests; the end-to-end
 // must-use diagnostic is TestT1970_InheritedFailableTaskMustBeReceived in
 // ownership.

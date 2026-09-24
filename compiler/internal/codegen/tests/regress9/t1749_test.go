@@ -134,7 +134,7 @@ func TestT1749GlobalGetterAndSetterOnParentAreDirectCalls(t *testing.T) {
 	codegentest.AssertNotContains(t, body, "getelementptr i8*, i8**")
 }
 
-// `global members ARE inherited (§5.7 of docs/language-design.md), so a write or
+// `global members ARE inherited (language-design.md#constructors of docs/language-design.md), so a write or
 // read through the CHILD's type name must mangle to the OWNER's name. Resolving
 // it to the name written at the call site looks up an undeclared @Kid.gate$set.
 func TestT1749InheritedGlobalAccessorsResolveToOwner(t *testing.T) {

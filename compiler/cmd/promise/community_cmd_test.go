@@ -59,7 +59,7 @@ func makeCommunityCatalogRepo(t *testing.T, modulesTOML string, indexFiles map[s
 	return dir
 }
 
-// --- resolveCommunity (name-resolution, §9.9 step 4) ---
+// --- resolveCommunity (name-resolution, module-system.md#compatibility-and-the-community-catalog step 4) ---
 
 func TestResolveCommunityVerified(t *testing.T) {
 	setupGitTestEnv(t)
@@ -88,7 +88,7 @@ func TestResolveCommunityNoIndexForEpoch(t *testing.T) {
 	setupGitTestEnv(t)
 	t.Setenv("PROMISE_HOME", clitest.TempDir(t))
 	modulesTOML := "[modules.foo]\nurl = \"https://github.com/promise-community/foo\"\n"
-	// Only an older epoch is recorded; the project asks for 2026.3 → §9.10.
+	// Only an older epoch is recorded; the project asks for 2026.3 → module-system.md#when-a-module-has-no-compatible-version.
 	index := map[string]string{
 		"2026.1.json": `{"epoch":"2026.1","modules":{"foo":{"commit":"c1","tag":"epoch-2026.1"}}}`,
 	}
@@ -121,7 +121,7 @@ func TestResolveCommunityNotListed(t *testing.T) {
 }
 
 // TestPkgUpdateCommunityModule: a [require] entry whose URL is in the
-// promise-community org re-resolves through the FRESH community index (§9.9) — it
+// promise-community org re-resolves through the FRESH community index (module-system.md#compatibility-and-the-community-catalog) — it
 // is re-pinned to the index commit with no module fetch and no local test run (so
 // no compiler binary is needed). This exercises the TierCommunity routing in
 // runPkgUpdate.
@@ -160,7 +160,7 @@ func TestPkgUpdateCommunityModule(t *testing.T) {
 	}
 }
 
-// --- runAdd community integration (§9.9): pins the indexed commit, no local run ---
+// --- runAdd community integration (module-system.md#compatibility-and-the-community-catalog): pins the indexed commit, no local run ---
 
 func TestAddCommunityModule(t *testing.T) {
 	setupGitTestEnv(t)
@@ -245,7 +245,7 @@ func TestVerifyLocalModuleCompat(t *testing.T) {
 		t.Fatalf("bad module should fail: ok=%v reason=%q err=%v", ok, reason, err)
 	}
 
-	// A module with no `_test.pr` is accepted compile-only (§9.9 policy change):
+	// A module with no `_test.pr` is accepted compile-only (module-system.md#compatibility-and-the-community-catalog policy change):
 	// emit-ir verifies the source compiles; a warning is printed to stderr.
 	notests := t.TempDir()
 	os.WriteFile(filepath.Join(notests, "promise.toml"), []byte("[module]\nname = \"n\"\nepoch = \"2026.0\"\n"), 0644)
@@ -321,7 +321,7 @@ func TestTagForCommitNoMatch(t *testing.T) {
 // --- validation / usage error paths (exercised via subprocess, since they exit) ---
 
 // TestCheckEpochRejectsNext: `pkg check-epoch next` is rejected — "next" is a
-// toolchain channel, not an epoch (§4.3).
+// toolchain channel, not an epoch (module-system.md#epoch-channels).
 func TestCheckEpochRejectsNext(t *testing.T) {
 	if os.Getenv("TEST_CHECKEPOCH_NEXT") == "1" {
 		// A promise.toml must exist to reach the epoch validation.

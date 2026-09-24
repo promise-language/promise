@@ -14,9 +14,9 @@ Promise targets browser WebAssembly where download size directly impacts load ti
 
 **Regression prevention comes before optimization, and that ordering is a constraint rather than a preference.** Without canaries and a size gate in place, an optimization can be silently undone by a later change and nobody finds out — the win is unmeasurable and unprotected. Phase 1 is therefore a prerequisite for the optimization work in Phases 2–4, not merely the first thing on a list.
 
-## Phase 1: Regression Prevention
+## Phase 1 Regression Prevention
 
-### Step 1 — Size canary programs (`tests/size/`)
+### Step 1 Size canary programs
 
 Create a fixed set of `.pr` files under `tests/size/` that serve as size benchmarks. Each exercises a specific slice of the stdlib/runtime:
 
@@ -30,7 +30,7 @@ Create a fixed set of `.pr` files under `tests/size/` that serve as size benchma
 
 These files are checked in and must not change without updating the baseline. They are **not** test files (no `main` with `test` annotation) — they are plain programs compiled with `promise build`.
 
-### Step 2 — Size report script (`bin/size-report.sh`)
+### Step 2 Size report script
 
 A script that compiles each canary to `wasm32-wasi` and reports sizes:
 
@@ -52,7 +52,7 @@ canary_full	38000
 
 **Regression threshold:** fail if any canary exceeds baseline by more than **max(5%, 512 bytes)**. This allows minor fluctuations from LLVM version changes while catching real regressions.
 
-### Step 3 — Integrate into `bin/verify.sh --wasm`
+### Step 3 Integrate into verify
 
 After WASM tests pass, add:
 
@@ -68,7 +68,7 @@ fi
 
 This makes size regression a **commit blocker** — same as test failures.
 
-### Step 4 — Informational size stats in `promise test`
+### Step 4 Informational size stats
 
 When running `promise test -target wasm32-wasi`, after all tests pass, print aggregate size stats in the summary:
 
@@ -81,9 +81,9 @@ This is informational only (not a gate). Implementation: `stat` each compiled bi
 
 ---
 
-## Phase 2: Understand What's In The Binary
+## Phase 2 Understand What Is In The Binary
 
-### Step 5 — `promise size <file.wasm>` command
+### Step 5 The size command
 
 A built-in analysis command that parses the WASM binary format and reports:
 
@@ -111,7 +111,7 @@ Code size by origin (heuristic, from name section):
 
 Implementation: WASM binary format is simple (magic + version + typed sections with varuint length). Parse in Go, no external tools needed. The "origin" breakdown uses function name prefixes (`promise_`, `pal_`, user-defined names) as heuristics.
 
-### Step 6 — `promise size --compare <a.wasm> <b.wasm>`
+### Step 6 Comparing two binaries
 
 Section-by-section diff for A/B testing optimizations:
 
@@ -127,9 +127,9 @@ Total: 6,009 → 5,201 (-808 bytes, -13.4%)
 
 ---
 
-## Phase 3: Low-Hanging Optimizations
+## Phase 3 Low Hanging Optimizations
 
-### Step 7 — Strip WASM name section
+### Step 7 Strip WASM name section
 
 The WASM name section contains function/local names for debugging. It's typically 5-15% of binary size and serves no purpose in production.
 
@@ -144,7 +144,7 @@ Implementation options (in priority order):
 2. Post-link binary rewrite: truncate the last section if it's type 0 with name "name"
 3. Integrate `wasm-strip` from WABT if available
 
-### Step 8 — DCE audit: what survives LTO?
+### Step 8 DCE audit
 
 Using `promise size`, audit what dead code survives LTO in the minimal canary:
 
@@ -153,7 +153,7 @@ Using `promise size`, audit what dead code survives LTO in the minimal canary:
 - Does `use std as _` cause all 29 std files to be linked? If LTO doesn't strip unused std functions, consider: (a) marking std functions as `linkonce_odr`, (b) splitting std into finer-grained compilation units, or (c) making auto-import smarter (only import referenced declarations).
 - Are RTTI/vtable globals emitted for types never `is`-checked? If so, consider lazy emission.
 
-### Step 9 — Evaluate `wasm-opt -Oz` post-processing
+### Step 9 Evaluate wasm opt post processing
 
 [Binaryen](https://github.com/WebAssembly/binaryen)'s `wasm-opt -Oz` is the industry standard for WASM size optimization. It performs optimizations LLVM doesn't:
 - Stack IR compression
@@ -172,7 +172,7 @@ promise build -target wasm32-wasi -Os -o hello.wasm hello.pr
 
 Guard behind flag since it requires Binaryen installation. Consider embedding `wasm-opt` in release builds (like LLVM tools are embedded).
 
-### Step 10 — Evaluate `opt -Oz` for WASM target
+### Step 10 Evaluate opt for the WASM target
 
 Currently WASM uses `opt -O1` → `wasm-ld --lto-O2`. For WASM, `-Oz` (optimize for size) may be better than `-O1`:
 - Trades inlining aggressiveness for smaller code
@@ -183,9 +183,9 @@ Measure with canaries before/after. If size wins are >5% with <10% perf regressi
 
 ---
 
-## Phase 4: Structural Optimizations
+## Phase 4 Structural Optimizations
 
-### Step 11 — Lazy std import
+### Step 11 Lazy std import
 
 Currently `use std as _` is injected into every file, pulling in all 29 std files. If LTO doesn't fully eliminate unused code (determined in Step 8), make the auto-import smarter:
 
@@ -193,14 +193,14 @@ Currently `use std as _` is injected into every file, pulling in all 29 std file
 - Only include std compilation units that contain referenced declarations
 - This could dramatically reduce binary size for programs that use few std features
 
-### Step 12 — WASM-specific codegen tuning
+### Step 12 WASM specific codegen tuning
 
 - **Scheduler elimination**: For single-threaded WASM, don't emit scheduler infrastructure at all (not just stub it). Gate on target triple during codegen.
 - **String literal strategy**: Evaluate whether `.rodata` string literals are optimal for WASM data segments or whether a different encoding is better.
 - **Vector COW**: WASM is single-threaded, so COW machinery for vector literals may be simplifiable.
 - **`bulk-memory` usage**: Ensure `memcpy`/`memset` use WASM bulk memory operations (already enabled via `-mattr=+bulk-memory`).
 
-### Step 13 — Compression-aware optimization
+### Step 13 Compression aware optimization
 
 For web deployment, WASM files are typically served with gzip/brotli compression. Optimize for **compressed** size:
 - Measure compressed sizes in canaries alongside raw sizes

@@ -3,5 +3,5 @@
 package common
 
 // patchAndSignMachO is a no-op on non-darwin hosts: only fetched macOS LLVM
-// blobs require the install_name_tool + codesign dance (§5.1).
+// blobs require the install_name_tool + codesign dance (language-design.md#primitive-types-are-regular-types).
 func patchAndSignMachO(string) {}

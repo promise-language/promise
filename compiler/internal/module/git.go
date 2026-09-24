@@ -130,7 +130,7 @@ func ResolveRemoteModule(url, commitHash, subdir string) (string, error) {
 // holds no promise.toml — the repo root when Subdir is empty, otherwise Subdir.
 //
 // It is distinguished from an ordinary fetch failure because it is a property of
-// the commit, not of the network: the §9.9 compatibility gate records it as an
+// the commit, not of the network: the module-system.md#compatibility-and-the-community-catalog compatibility gate records it as an
 // incompatible verdict and keeps walking back through older epoch tags, rather
 // than aborting resolution (a module may have gained its manifest — or moved into
 // its subdirectory — in a later commit).

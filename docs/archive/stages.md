@@ -53,13 +53,13 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Operator dispatch | `[]`, `[]=`, `[:]`, `[:]=` as method-dispatched operators | Done | [subscript-slice-operators.md](subscript-slice-operators.md) |
 | Naming conventions | PascalCase canonical names for all non-scalar types; lowercase sugar | Done | [standard-library.md](../standard-library.md#naming-conventions) |
 | C binding | Extern ABI coercion (`extern.go`), C header generation (`headergen.go`) | Done (dormant — header gen implemented but not exposed via CLI; original use case obsolete after C runtime migration) | [binding-architecture.md](binding-architecture.md) |
-| Self-contained binary | Embed gzip-compressed LLVM tools via `go:embed` for release builds | Done (Phase 7f). Linux x86_64: fully static (musl). macOS arm64+amd64: embedded LLVM, requires Xcode CLT for SDK. | [runtime-architecture.md](../runtime-architecture.md), [distribution.md](../distribution.md#4-macos-notes) |
+| Self-contained binary | Embed gzip-compressed LLVM tools via `go:embed` for release builds | Done (Phase 7f). Linux x86_64: fully static (musl). macOS arm64+amd64: embedded LLVM, requires Xcode CLT for SDK. | [runtime-architecture.md](../runtime-architecture.md), [distribution.md](../distribution.md#macos) |
 | Distribution | Release binaries, install script, GitHub Actions CI/release workflows | Planned | [distribution.md](../distribution.md) |
 | Windows support | Native MSVC ABI, Win32 PAL threading, lld-link, Windows SDK discovery | Phase W1 done (code). W2 pending (testing on Windows). | [windows-support.md](../windows-support.md) |
 | Yield generators | `stream[T]` functions with `yield`, LLVM presplit coroutines, `for-in` consumption | Done | — |
 | Structural interfaces | Relaxed matching (extra optional/default params, non-failable→failable, T→T?), adapter thunks, abstract factory methods with implicit Self, generic factory patterns (`T.parse(data)`) | Done | [language-design.md](../language-design.md#structural-interface-satisfaction) |
 | Documentation system | `promise doc` command: extract `doc()` meta tags, emit markdown to stdout, `-signatures` compact mode, `-std` for stdlib reference | Phase 1 done (single-file doc, `-public`/`-all`/`-signatures`/`-o` flags, param/variant doc propagation, `DeclareAndDefine` early-exit sema) | [platform-documentation.md](../platform-documentation.md) |
-| Resource embedding | `` `embed(path) `` annotation on module-level getters: compile-time file/directory embedding as `string`, `u8[]`, or `EmbeddedFiles` | Done (T0012) — `modules/std/embed.pr`, `tests/embed/` | [language-design.md](../language-design.md#86-resource-embedding-embed) |
+| Resource embedding | `` `embed(path) `` annotation on module-level getters: compile-time file/directory embedding as `string`, `u8[]`, or `EmbeddedFiles` | Done (T0012) — `modules/std/embed.pr`, `tests/embed/` | [language-design.md](../language-design.md#resource-embedding) |
 
 ---
 

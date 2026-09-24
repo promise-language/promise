@@ -6,7 +6,7 @@ import (
 )
 
 // validateInvariantMethods is the declaration-site half of `_validate!`
-// (docs/language-design.md §5.7 → Validation, T1752). It runs after every type
+// (docs/language-design.md#constructors → Validation, T1752). It runs after every type
 // is defined, because "is this type validated?" walks the inheritance chain and
 // a child may be declared before its parent.
 //
@@ -86,7 +86,7 @@ func (c *Checker) rejectValidateNameReuse(owner string, decls []*ast.MethodDecl)
 }
 
 // requireFailableFactories reports every “ `factory “ on a validated type
-// that is not declared `!`. §5.7: this holds even when the factory's body
+// that is not declared `!`. language-design.md#constructors: this holds even when the factory's body
 // cannot itself fail — the value it yields may still be rejected, and a
 // signature that hid that would be lying to its caller. (T1752)
 func (c *Checker) requireFailableFactories(methods []*types.Method, owner, reason string, decls []*ast.MethodDecl, fallback ast.Pos) {
@@ -103,7 +103,7 @@ func (c *Checker) requireFailableFactories(methods []*types.Method, owner, reaso
 // markValidatedConstruction records that a construction expression yields a
 // value whose _validate! chain must run (T1752), and makes the expression
 // failable so the ordinary error-handling rules force ?/^/?! on every call
-// site. See docs/language-design.md §5.7 -> Validation.
+// site. See docs/language-design.md#constructors -> Validation.
 //
 // A Self built inside a `factory on the same type is ALSO recorded as a
 // deferral candidate, but is still marked here: only binding it to a local
@@ -116,7 +116,7 @@ func (c *Checker) markValidatedConstruction(e ast.Expr, typ types.Type) {
 	if named == nil {
 		return
 	}
-	// §5.7: clone() does not validate — a clone is an identical copy of an
+	// language-design.md#constructors: clone() does not validate — a clone is an identical copy of an
 	// instance that was already valid. Scoped to the clone's OWN type: building
 	// some other validated value inside a clone body still validates it.
 	if c.cloneBodyOwner == types.Type(named) {
@@ -138,7 +138,7 @@ func (c *Checker) markValidatedEnumConstruction(e ast.Expr, typ types.Type) {
 	if enum == nil || !enum.IsValidated() {
 		return
 	}
-	if c.cloneBodyOwner == types.Type(enum) { // §5.7: clone() does not validate
+	if c.cloneBodyOwner == types.Type(enum) { // language-design.md#constructors: clone() does not validate
 		return
 	}
 	c.info.FailableExprs[e] = true
@@ -149,7 +149,7 @@ func (c *Checker) markValidatedEnumConstruction(e ast.Expr, typ types.Type) {
 // when it is bound to a local (T1752).
 //
 // Binding to a local is exactly what opens the post-construction `final fixup
-// window §5.7 describes: only a named binding can be mutated after
+// window language-design.md#constructors describes: only a named binding can be mutated after
 // construction. A construction that is not bound has no such window — nothing
 // can reach it to change it — so it stays validated in place.
 //
@@ -164,7 +164,7 @@ func (c *Checker) trackDeferredValidateLocal(name string, value ast.Expr) {
 	// cannot mean what it says: the chain has not run yet at this point, so
 	// there is no failure for `?!` / `?^` to handle — and honouring the operator
 	// instead (validating here, then allowing the `final fixup below it) would
-	// leave the FIXED value unvalidated, the exact hole §5.7's deferral closes.
+	// leave the FIXED value unvalidated, the exact hole language-design.md#constructors's deferral closes.
 	if value != ctor {
 		c.errorf(value.Pos(), "remove the error operator: '%s' is a %s this factory is still constructing, "+
 			"so its %s! runs at the factory's 'return' — after the `final fields are fixed — not here",
@@ -200,7 +200,7 @@ func (c *Checker) markDeferredValidateReturn(s *ast.ReturnStmt) {
 // rejectDeferredSelfEscape reports a deferred Self named anywhere the instance
 // could escape the factory that built it. The permission is granted only by a
 // member-access target and a `return` value (see deferredSelfAllowed), so every
-// other position lands here. (T1752, docs/language-design.md §5.7 → Validation)
+// other position lands here. (T1752, docs/language-design.md#constructors → Validation)
 func (c *Checker) rejectDeferredSelfEscape(e *ast.IdentExpr) {
 	if !c.inFactoryBody || c.deferredSelfAllowed || !c.factoryDeferredLocals[e.Name] {
 		return

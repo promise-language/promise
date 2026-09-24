@@ -27,7 +27,7 @@ import (
 //	     missed shape is a use-after-free while the failure mode of an over-strict
 //	     rule is a compile error that `move` resolves.
 //
-// R5 is the closure-shaped slice of T1397 (§17.4, "a borrow may never cross a
+// R5 is the closure-shaped slice of T1397 (language-design.md#ownership-across-goroutines, "a borrow may never cross a
 // `go` spawn boundary"); it does not pre-empt it. When T1397 lands and requires
 // the inner-binding spelling `go { F h = handler; … }`, R4's move-marking and
 // codegen's transfer remain exactly what that spelling needs.

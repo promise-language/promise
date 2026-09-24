@@ -27,7 +27,7 @@ func (s StateMap) clone() StateMap {
 // T1381: for a must-use variable (one that transitively owns a `failable_task[T]`),
 // the merge is INVERTED. A must-use value is *discharged* (received or moved
 // onward) only when that happened on EVERY path — dropping it on any path
-// silently swallows its error (§17.2.1). So a must-use name is Moved after the
+// silently swallows its error (language-design.md#failable-goroutines). So a must-use name is Moved after the
 // merge only if BOTH branches have it Moved; otherwise it stays Owned
 // (undischarged on at least one path) and is reported at scope end. This is the
 // dual of the normal Moved-absorbing rule. Diverging branches are already

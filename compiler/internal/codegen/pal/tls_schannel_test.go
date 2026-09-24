@@ -840,7 +840,7 @@ func normalizeEOL(b []byte) string {
 // of TLS sessions created from it — and for a client that is simply let go
 // rather than closed, the only thing ordering their teardown is that
 // _tls_config is declared *before* _pool: fields drop in reverse declaration
-// order (docs/language-design.md §16.3), so the sessions go first.
+// order (docs/language-design.md#the-drop-method), so the sessions go first.
 //
 // No test on a CI platform can catch the wrong order. OpenSSL reference-counts
 // the SSL_CTX and Secure Transport retains its identity, so on Linux and macOS

@@ -1,5 +1,5 @@
 // Package blobstore implements the runtime consumption side of Promise's
-// content-addressed dependency store (docs/distribution.md §1–§4). Heavy
+// content-addressed dependency store (docs/distribution.md#design–distribution.md#the-dependency-store). Heavy
 // dependencies (LLVM opt/llc/lld/libLLVM, musl CRT, target sysroots) are
 // delivered as content-addressed blobs fetched on demand into
 // <PromiseHome>/cache/blobs/sha256/<hash> and verified against an embedded
@@ -23,7 +23,7 @@ const ManifestSchema = 1
 
 // Manifest is the embedded dependency manifest (always present, thin and full).
 // One Entry per heavy dependency, separating content identity (Name/SHA256/Size)
-// from acquisition (a ranked Sources list). See docs/distribution.md §4.1.
+// from acquisition (a ranked Sources list). See docs/distribution.md#manifest-entry-content-identity-and-acquisition.
 type Manifest struct {
 	Schema  int             `json:"schema"`
 	Epoch   string          `json:"epoch"`
@@ -38,7 +38,7 @@ type Manifest struct {
 type ManifestEntry struct {
 	Name    string   `json:"name"`    // logical name codegen asks for: "llvm-opt", "musl-crt1.o", ...
 	SHA256  string   `json:"sha256"`  // content address of the extracted blob (cache key + integrity)
-	Size    int64    `json:"size"`    // extracted size in bytes (cheap overshoot defense, §4.3)
+	Size    int64    `json:"size"`    // extracted size in bytes (cheap overshoot defense, distribution.md#content-mismatch-is-loud-and-never-silent)
 	Kind    string   `json:"kind"`    // KindMachOLLVM (macOS patch/sign on materialize) or KindBlob
 	Sources []Source `json:"sources"` // ranked; first source whose bytes verify wins
 }
@@ -47,7 +47,7 @@ type ManifestEntry struct {
 const (
 	// KindMachOLLVM marks an LLVM Mach-O blob: on macOS the per-target view
 	// copy is patched (install_name_tool) + ad-hoc re-signed (codesign) so it
-	// can load libLLVM.dylib (§5.1). A no-op on other platforms.
+	// can load libLLVM.dylib (distribution.md#macos). A no-op on other platforms.
 	KindMachOLLVM = "macho-llvm"
 	// KindBlob is an opaque blob materialized verbatim (musl CRT objects, etc.).
 	KindBlob = "blob"
@@ -57,7 +57,7 @@ const (
 // (ArchivePath) inside a compressed Archive. Several blobs may share one
 // archive (one LLVM tarball yields opt/llc/lld/libLLVM); the resolver fetches
 // such an archive once. ArchiveSHA256, when given, makes the archive safe to
-// persistently cache across runs (§4.2 Archive reuse).
+// persistently cache across runs (distribution.md#fetch-flow Archive reuse).
 type Source struct {
 	Blob           string `json:"blob,omitempty"`
 	Compression    string `json:"compression,omitempty"`     // transport codec of the Blob asset ("" / "brotli")
@@ -68,7 +68,7 @@ type Source struct {
 }
 
 // compressionBrotli is the only transport codec understood today (brotli-11 per
-// blob; docs/release-automation.md §3). The content sha256 is always over the
+// blob; docs/release-automation.md#prebuilt-blobs). The content sha256 is always over the
 // UNCOMPRESSED bytes — compression is purely a transport layer the resolver
 // decodes before verifying. Kept in lockstep with common.compressionBrotli in
 // the build tools (separate Go module).

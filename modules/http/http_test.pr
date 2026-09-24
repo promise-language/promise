@@ -1619,7 +1619,7 @@ test_write_all_resumes_after_partial_write() `test(exclude: wasm, timeout: "20s"
 
 client_satisfies_closer_boxed() `test(exclude: wasm) {
   // T1952: Client.close(~this) is non-failable where Closer requires
-  // close!(~this) — a documented relaxed match (§5.3). `is Closer` is declared,
+  // close!(~this) — a documented relaxed match (language-design.md#variable-declarations). `is Closer` is declared,
   // so the crossing must install a view vtable whose slot adapts the void result
   // into the failable struct Closer's call site reads. Before the fix the caller
   // read an error flag out of a register the callee never wrote.

@@ -241,7 +241,7 @@ func TestT1640ClosureCapturedInLoopRejected(t *testing.T) {
 }
 
 // T1397 (shape 3): a non-closure bare capture of a droppable local in a go block
-// is now rejected — the §17.4 rule forbids any borrow crossing the spawn boundary.
+// is now rejected — the language-design.md#ownership-across-goroutines rule forbids any borrow crossing the spawn boundary.
 func TestT1640NonClosureCaptureRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		test() {

@@ -173,7 +173,7 @@ func TestImportScope_SameAliasDifferentModules(t *testing.T) {
 	expectNoErrorContaining(t, errs, "redeclared")
 }
 
-// §6.5: a duplicate alias within one file is an error with the specified text.
+// language-design.md#sendable-and-sharable: a duplicate alias within one file is an error with the specified text.
 func TestImportScope_DuplicateAliasWithinFile(t *testing.T) {
 	errs := checkUnit(t, []unitFile{
 		{"a.pr", "use path;\nuse path;\npa() string `public { return path.join(\"/a\", \"b\"); }\n"},
@@ -182,7 +182,7 @@ func TestImportScope_DuplicateAliasWithinFile(t *testing.T) {
 	expectError(t, errs, "use `as` to rename one")
 }
 
-// §5.2 rule 3: an import alias may not collide with a module-wide declaration.
+// module-system.md#import-scope rule 3: an import alias may not collide with a module-wide declaration.
 func TestImportScope_ImportVersusDeclarationCollision(t *testing.T) {
 	errs := checkUnit(t, []unitFile{
 		{"a.pr", "use path as wire;\npa() string `public { return wire.join(\"/a\", \"b\"); }\n"},
@@ -192,7 +192,7 @@ func TestImportScope_ImportVersusDeclarationCollision(t *testing.T) {
 	expectError(t, errs, "alias the import")
 }
 
-// §5.2 rule 4: a named import its own file never references warns (non-fatally).
+// module-system.md#import-scope rule 4: a named import its own file never references warns (non-fatally).
 func TestImportScope_UnusedNamedImportWarns(t *testing.T) {
 	errs := checkUnit(t, []unitFile{
 		{"a.pr", "use path;\nmain() { print_line(\"hi\"); }\n"},
@@ -211,7 +211,7 @@ func TestImportScope_UsedNamedImportNoWarn(t *testing.T) {
 	expectNoErrorContaining(t, errs, "unused import")
 }
 
-// §5.3: an anonymous import its file never references warns; a used one does not.
+// language-design.md#variable-declarations: an anonymous import its file never references warns; a used one does not.
 func TestImportScope_UnusedAnonymousImportWarns(t *testing.T) {
 	errs := checkUnit(t, []unitFile{
 		{"a.pr", "use path as _;\nmain() { print_line(\"hi\"); }\n"},
@@ -227,7 +227,7 @@ func TestImportScope_UnusedAnonymousImportWarns(t *testing.T) {
 	expectNoErrorContaining(t, errs2, "unused import")
 }
 
-// §5.3: two anonymous imports in one file that export the same name conflict.
+// language-design.md#variable-declarations: two anonymous imports in one file that export the same name conflict.
 func TestImportScope_TwoAnonymousImportsSameNameConflict(t *testing.T) {
 	errs := checkUnit(t, []unitFile{
 		{"a.pr", "use path as _;\nuse strings as _;\nmain() { print_line(join(\"/a\", \"b\")); }\n"},
@@ -235,7 +235,7 @@ func TestImportScope_TwoAnonymousImportsSameNameConflict(t *testing.T) {
 	expectError(t, errs, "conflicts with existing symbol 'join'")
 }
 
-// §5.3: a module-wide declaration wins over a name a file-local anonymous import
+// language-design.md#variable-declarations: a module-wide declaration wins over a name a file-local anonymous import
 // would inject — the glob name is silently skipped (no "conflicts with existing
 // symbol" error), so the declaration stays in force. Exercises the parent-chain
 // skip branch of mergeGlobImport.
@@ -249,7 +249,7 @@ func TestImportScope_DeclarationWinsOverGlobImport(t *testing.T) {
 	expectNoErrorContaining(t, errs, "redeclared")
 }
 
-// §5.2 rule 3: the import-vs-declaration collision names the declaration's kind.
+// module-system.md#import-scope rule 3: the import-vs-declaration collision names the declaration's kind.
 // A collision with an enum reports "enum 'X'" (describeObjectKind enum branch).
 func TestImportScope_ImportVersusEnumCollision(t *testing.T) {
 	errs := checkUnit(t, []unitFile{
@@ -260,7 +260,7 @@ func TestImportScope_ImportVersusEnumCollision(t *testing.T) {
 	expectError(t, errs, "alias the import")
 }
 
-// §5.2 rule 3: a collision with a function reports "function 'X'"
+// module-system.md#import-scope rule 3: a collision with a function reports "function 'X'"
 // (describeObjectKind func branch).
 func TestImportScope_ImportVersusFunctionCollision(t *testing.T) {
 	errs := checkUnit(t, []unitFile{

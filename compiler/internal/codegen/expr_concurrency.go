@@ -226,7 +226,7 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr, failable bool) value.Va
 	var argTypes []types.Type
 	var argBorrowDrops []goArgBorrowDrop
 	// T2163: per-argument "this is a borrow, not a transfer" — set by the loop
-	// below and consumed by the §17.4 handle-duplication loop after it.
+	// below and consumed by the language-design.md#ownership-across-goroutines handle-duplication loop after it.
 	argIsBorrowed := make([]bool, len(callExpr.Args))
 	// T1108/T1154: snapshot enum-ctor temps so we can drop them from the
 	// caller's statement-end cleanup after the loop — a synchronous statement-end
@@ -375,7 +375,7 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr, failable bool) value.Va
 					capType = types.Substitute(capType, c.typeSubst) // monomorphization
 				}
 				// Refcounted `sharable handles (channel/Ref/Weak) are retained by the
-				// §17.4 loop below instead — a deep copy of one would be wrong, not
+				// language-design.md#ownership-across-goroutines loop below instead — a deep copy of one would be wrong, not
 				// merely redundant. Stated here rather than left to
 				// goElemNeedsBorrowedCaptureDup happening to refuse a `native handle.
 				// Copy/Task/value types embed data and never alias caller heap.
@@ -400,7 +400,7 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr, failable bool) value.Va
 			// transfer and was not dup'd above — it is a plain BORROW (a named
 			// local, a parameter, a for-in binding, a field read, a literal…) whose
 			// owner stays behind while the goroutine reads it. That is exactly the
-			// set §17.4 requires a refcounted `sharable handle to be duplicated
+			// set language-design.md#ownership-across-goroutines requires a refcounted `sharable handle to be duplicated
 			// across, and it is decided here rather than re-derived below because
 			// only this loop knows whether ownership was transferred. A `move` is
 			// excluded: it transfers instead of duplicating.
@@ -428,7 +428,7 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr, failable bool) value.Va
 	// synchronous statement-end drop that could race the goroutine's read.
 	c.enumCtorTemps = c.enumCtorTemps[:savedGoEnumTemps]
 
-	// B0163/T1158/T2162/T2163: §17.4 — a refcounted `sharable handle crossing a
+	// B0163/T1158/T2162/T2163: language-design.md#ownership-across-goroutines — a refcounted `sharable handle crossing a
 	// `go` boundary is DUPLICATED, not borrowed: "the referent cannot be freed
 	// while any handle survives, and the goroutine's handle is created before the
 	// spawner's can drop". The spawner keeps its own handle and still drops it;
@@ -438,7 +438,7 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr, failable bool) value.Va
 	// The condition is exactly "this argument is a BORROW" — argIsBorrowed, set by
 	// the loop above, which is the only place that knows whether the argument
 	// yielded an owned root the goroutine now owns. Duplication and transfer are
-	// the two distinct answers §17.4 gives, so an argument whose ownership already
+	// the two distinct answers language-design.md#ownership-across-goroutines gives, so an argument whose ownership already
 	// transferred (a temporary, a `move`) is not duplicated on top: that would put
 	// two mechanisms in charge of one value, including the runtime-dispatched
 	// structural drop a polymorphic temp uses. The overlap is refcount-NEUTRAL, so
@@ -759,7 +759,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 		captureLLVMTypes = append(captureLLVMTypes, elemType)
 	}
 
-	// B0163/T2162/T2171: §17.4 — duplicate every refcounted sharable handle this
+	// B0163/T2162/T2171: language-design.md#ownership-across-goroutines — duplicate every refcounted sharable handle this
 	// spawn captures, whatever kind of binding carries it. Shared with genGoBlock.
 	capturedChanTypesVB := c.retainCapturedSpawnHandles(captureNames, captureTypes, captureVals)
 
@@ -1239,7 +1239,7 @@ func (c *Compiler) genGoExternWrapper(ext *ExternFunc, argLLVMTypes []irtypes.Ty
 // collectBlockIdents walks an AST block and collects all IdentExpr names referenced.
 // Returns a sorted, deduplicated list of names that exist in outerLocals, plus each
 // capture's sema TYPE — which is what every caller needs (T0731's spawn-side
-// borrowed-heap-param dup, T2171's §17.4 handle duplication).
+// borrowed-heap-param dup, T2171's language-design.md#ownership-across-goroutines handle duplication).
 //
 // The type, rather than a representative *ast.IdentExpr the caller then resolves
 // through c.info.Types, is the only form that can describe a capture discovered
@@ -1568,7 +1568,7 @@ func (c *Compiler) borrowedValueParamType(name string) (types.Type, bool) {
 	return typ, true
 }
 
-// retainCapturedSpawnHandles emits the §17.4 spawn-site duplication for every
+// retainCapturedSpawnHandles emits the language-design.md#ownership-across-goroutines spawn-site duplication for every
 // capture of a `go` block that carries a refcounted `sharable handle. It retains
 // captureVals IN PLACE and returns name → handle type, which is what registers the
 // balancing goroutine-side release (maybeRegisterDrop) and keeps the name out of
@@ -1608,7 +1608,7 @@ func (c *Compiler) retainCapturedSpawnHandles(captureNames []string, captureType
 			// that ALIASES storage it does not own — a for-in binding over a vector, a
 			// fixed-size array or a map (T0971/T0978). The container's owner stays
 			// behind and drops it, elements and all, while the goroutine still holds
-			// the pointer; that is exactly the set §17.4 requires a refcounted handle
+			// the pointer; that is exactly the set language-design.md#ownership-across-goroutines requires a refcounted handle
 			// to be duplicated across. Keying off the binding KIND instead is what
 			// missed them — the same mistake T2163 corrected on the fast `go f(…)` path
 			// by asking whether the argument is a BORROW. An OWNED binding (a match
@@ -1691,13 +1691,13 @@ func (c *Compiler) refcountedHandleElem(typ types.Type) (*types.Named, types.Typ
 	return origin, elem, true
 }
 
-// retainSpawnHandle emits the §17.4 spawn-site duplication of a refcounted
+// retainSpawnHandle emits the language-design.md#ownership-across-goroutines spawn-site duplication of a refcounted
 // sharable handle — `channel[T]`, `Ref[T]` or `Weak[T]` — and returns the
 // retained value together with the drop function that balances it. It reports
 // false and emits nothing for anything else, so a caller can offer it any type
 // and act on the answer.
 //
-// §17.4 of docs/language-design.md requires the duplication: "the referent
+// language-design.md#ownership-across-goroutines of docs/language-design.md requires the duplication: "the referent
 // cannot be freed while any handle survives, and the goroutine's handle is
 // created before the spawner's can drop". The spawn sites used to do it only for
 // a named local carrying a `channel[T]`; a borrowed parameter has no drop
@@ -1863,7 +1863,7 @@ func (c *Compiler) snapshotThisForGoBlock() (value.Value, irtypes.Type, *goThisS
 // `agg` through it — the failable {ok,value,err} aggregate for a `go! {}` block,
 // or the raw success value for a plain `go {}` one. The single store lowering
 // shared by every producer of a goroutine result: the trailing-expression value,
-// the §17.2 explicit-return value (T1385), the escaping-error path, and the
+// the language-design.md#explicit-concurrency explicit-return value (T1385), the escaping-error path, and the
 // bare-return zero (T1392). T1384. Must be called on a live (non-terminated) block.
 func (c *Compiler) storeGoResultAgg(agg value.Value) {
 	// The buffer is `pal_alloc(typeSize(bufTy))`, and the store below types its
@@ -2005,7 +2005,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		captureLLVMTypes = append(captureLLVMTypes, elemType)
 	}
 
-	// B0163/T2162/T2171: §17.4 — duplicate every refcounted sharable handle this
+	// B0163/T2162/T2171: language-design.md#ownership-across-goroutines — duplicate every refcounted sharable handle this
 	// spawn captures, whatever kind of binding carries it. name → sema type; shared
 	// with genGoCallExprViaBlock.
 	capturedChanTypes := c.retainCapturedSpawnHandles(captureNames, captureTypes, captureVals)
@@ -2149,7 +2149,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.localNameCount = make(map[string]int)
 	c.blockCounter = 0
 	c.canError = false
-	// T1385: §17.2 explicit-return style — a `return <expr>` inside the body
+	// T1385: language-design.md#explicit-concurrency explicit-return style — a `return <expr>` inside the body
 	// yields the GOROUTINE's result, so the shared return machinery's retType
 	// (Optional wrap, view coercion, field/index dup decisions, `none`
 	// resolution) must be the block's success type T, not void. A block with no
@@ -2607,7 +2607,7 @@ func (c *Compiler) genReceiveExpr(e *ast.UnaryExpr) value.Value {
 }
 
 // genDrainTasks generates code for `<-tasks` where tasks : failable_task[T][]
-// (§17.2.1). It consumes the vector, awaits every task in index order, and
+// (language-design.md#failable-goroutines). It consumes the vector, awaits every task in index order, and
 // collects the successes into a fresh Vector[T]. It returns the failable
 // aggregate `{ i1 is_error, i8* vec, i8* err }` — succeeding (is_error=0, vec)
 // only if every task succeeded, else failing (is_error=1, err) with the FIRST

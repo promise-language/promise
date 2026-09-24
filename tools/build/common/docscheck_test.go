@@ -436,7 +436,7 @@ func TestCheckDocsReportsAllFourChecksNotJustTheFirst(t *testing.T) {
 		"docs/standard-library.md": "no module inventory here\n",
 		"docs/orphan.md":           "# Orphan\n",
 		"docs/annotations.md":      coherentDocument(),
-		// `mono is registered but has no §6 row.
+		// `mono is registered but has no annotations.md#index row.
 		builtinMetasGo: "package sema\n\nvar builtinMetas = map[string][]MetaTarget{\n" +
 			copyMetas + embedMetas + "\t\"mono\": {TargetMethod},\n}\n",
 		metaParamSpecGo: "package sema\n\nvar noParams = metaParamSpec{}\n\n" +

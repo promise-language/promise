@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// TestResolveRemoteModuleSurvivesUpstreamDeletion is the §9.10 / §6.2
+// TestResolveRemoteModuleSurvivesUpstreamDeletion is the module-system.md#when-a-module-has-no-compatible-version / module-system.md#remote-module-pinning
 // reproducibility guarantee: once a commit is fetched into the local cache, the
 // module keeps resolving even if the upstream repo is later deleted. A project
 // that already builds keeps building forever, independent of ecosystem churn.

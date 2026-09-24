@@ -121,8 +121,8 @@ func (s *Signature) String() string {
 	var b strings.Builder
 	if s.canError {
 		// T1445: the failability marker sits on the producer, not on the result —
-		// §9.6 spells it `!(int) -> int`, never `(int) -> int!` (there is no `int!`
-		// value type, §17.2.1).
+		// language-design.md#function-types spells it `!(int) -> int`, never `(int) -> int!` (there is no `int!`
+		// value type, language-design.md#failable-goroutines).
 		b.WriteByte('!')
 	}
 	b.WriteByte('(')

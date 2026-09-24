@@ -49,12 +49,12 @@ type slimPlanFile struct {
 // lock-free for cache hits.
 //
 // On darwin, fetched Mach-O binaries get install_name_tool + codesign applied
-// in-place (§5.1): the CAS stays raw upstream bytes (deterministic hash), the
+// in-place (language-design.md#primitive-types-are-regular-types): the CAS stays raw upstream bytes (deterministic hash), the
 // loadable copy in the cache is patched.
 func EnsureLLVMBlobs(root, target string) (string, error) {
 	return ensureSlimBlobs(root, "llvm", target, "~700 MB", func(outPath string) {
 		// The CAS keeps raw upstream bytes (deterministic hash); only the
-		// loadable copy in the cache is patched + ad-hoc re-signed (§5.1).
+		// loadable copy in the cache is patched + ad-hoc re-signed (language-design.md#primitive-types-are-regular-types).
 		if runtime.GOOS == "darwin" && strings.HasPrefix(target, "darwin-") {
 			patchAndSignMachO(outPath)
 		}

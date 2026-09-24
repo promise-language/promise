@@ -20,7 +20,7 @@ reflection mechanism.
 
 ---
 
-## 1. Design Constraints
+## Design Constraints
 
 The schema descriptor must faithfully model what Promise actually expresses, not what
 a generic JSON-Schema library expresses. Concretely:
@@ -46,7 +46,7 @@ a generic JSON-Schema library expresses. Concretely:
 
 2. **Names and docs come from `` `doc ``, not from heuristics.** The compiler already
    stores `` `doc `` text on every type, field, method, function, parameter, and enum
-   variant (language-design §8.4). The schema must wire those through verbatim.
+   variant (language-design [Documentation Annotations](language-design.md#documentation-annotations)). The schema must wire those through verbatim.
 
 3. **Field-level serialization metas must be honored.** A field marked `` `key("foo") ``
    serializes as `"foo"`, not as the Promise field name. A field marked `` `skip ``
@@ -63,15 +63,15 @@ a generic JSON-Schema library expresses. Concretely:
 5. **Identity must be wire-stable and content-addressed.** Renaming a field, adding a
    parameter, or changing a generic argument produces a different identity unless the
    author explicitly pins the old one. Identity is a 128-bit hash with deterministic
-   inputs (§4) so two compilers, two compiler versions, or two languages reading the
+   inputs ([Identity and Hash128](#identity-and-hash128)) so two compilers, two compiler versions, or two languages reading the
    same Promise source agree on what `Foo.bar` is.
 
 6. **Generation must be available in any module, not just `std`.** Catalog modules,
-   community modules, and user projects all produce schemas the same way (§7).
+   community modules, and user projects all produce schemas the same way ([How Generation Works](#how-generation-works)).
 
 ---
 
-## 2. The `Type` Tagged Enum
+## The Type Tagged Enum
 
 The descriptor for one Promise declaration is a tagged enum named `schema.Type`.
 "Type" is the schema-language convention (Object / Array / Function / … are the
@@ -97,7 +97,7 @@ enum ScalarKind `public {
     F32, F64,
 }
 
-// 128-bit content-addressed identity. See §4.
+// 128-bit content-addressed identity. See [Identity and Hash128](#identity-and-hash128).
 // Wraps a single native u128 (see docs/large-integers.md); the wrapper carries
 // the semantic name and the `value/`clone placement so it stays distinct from
 // a plain numeric u128 at the type system level.
@@ -105,11 +105,11 @@ type Hash128 `public `value `clone {
     u128 value;
 }
 
-// Where a type is defined. Determines the project-level inputs to the hash. See §5.
+// Where a type is defined. Determines the project-level inputs to the hash. See [The Origin Enum](#the-origin-enum).
 enum Origin `public `clone {
     Embedded(string module),                    // catalog: "std", "json", "ai" — name pinned in catalog.toml
     External(string url),                       // community module: identified by url alone (commit is a catalog.toml pin, not identity)
-    Project(Hash128 project_id),                // current project — id from promise.toml (§6)
+    Project(Hash128 project_id),                // current project — id from promise.toml ([Project Identity](#project-identity))
 }
 
 // The schema descriptor for one Promise declaration. One enum, one match expression
@@ -120,8 +120,8 @@ enum Type `public `clone `serializable
     // Heap user types marked `serializable. Includes inherited and flattened fields,
     // excludes `skip-ed fields. `definitions` carries sub-schemas for cycles and shared types.
     Object(
-        Hash128 id,                              // see §4
-        Origin origin,                           // see §5
+        Hash128 id,                              // see [Identity and Hash128](#identity-and-hash128)
+        Origin origin,                           // see [The Origin Enum](#the-origin-enum)
         string name,                             // source name, used for diagnostics + JSON Schema title
         Type[] type_args,                        // generic instantiation, in declaration order; empty for non-generic
         string? description,                     // from `doc on the declaration
@@ -151,7 +151,7 @@ enum Type `public `clone `serializable
     ),
 
     // Free function or method declaration. Captures parameter names and per-parameter `doc,
-    // which only declarations carry — function-typed values erase both (see §3).
+    // which only declarations carry — function-typed values erase both (see [Functions and Function Types](#functions-and-function-types)).
     Function(
         Hash128 id,
         Origin origin,
@@ -172,13 +172,13 @@ enum Type `public `clone `serializable
 }
 
 type Field `public `clone `serializable {
-    Hash128 id;                              // h(parent_type.id, name) by default; see §4
+    Hash128 id;                              // h(parent_type.id, name) by default; see [Identity and Hash128](#identity-and-hash128)
     string name `doc("Wire name — already adjusted for `key annotations.");
     string source_name `doc("Original Promise field name (for diagnostics).");
     Type field_type;
     string? description;
 
-    // Presence semantics — see §1 table. Exactly one of these three is true for any field.
+    // Presence semantics — see [Design Constraints](#design-constraints) table. Exactly one of these three is true for any field.
     bool required `doc("Field must be present during decode.");
     bool optional `doc("Field type is T?. None is the implicit value when missing.");
     bool has_default `doc("Field declares an `= expr default.");
@@ -207,9 +207,9 @@ type Param `public `clone `serializable {
 }
 ```
 
-### Construction — free functions
+### Construction free functions
 
-Promise enum methods cannot be `` `mono `` or `` `factory `` (language-design §5.6).
+Promise enum methods cannot be `` `mono `` or `` `factory `` (language-design [Enums](language-design.md#enums)).
 Both constructors are therefore plain module-level functions in `schema`:
 
 ```promise
@@ -229,7 +229,7 @@ schema.Type t  = schema.of[CreateUserRequest]();
 schema.Type fn = schema.for_func[read_text]();
 ```
 
-### Rendering — methods on `Type`
+### Rendering methods on Type
 
 Renderers are normal methods on the enum. A consumer that adds a new render target
 gets a compile error from sema if it forgets a variant — no quiet fallthrough.
@@ -256,33 +256,33 @@ type Type {
 
 ---
 
-## 3. Functions vs Function Types
+## Functions and Function Types
 
 A subtle but load-bearing distinction:
 
 - **Function-typed values** — e.g., a parameter of type `(string, int) -> bool`. The
   type erases parameter names, per-parameter `` `doc ``, and defaults (language-design
-  §9.5). Only positional types and the return type survive. `schema.for_func` does
+  [Lambdas and Closures](language-design.md#lambdas-and-closures)). Only positional types and the return type survive. `schema.for_func` does
   **not** accept these.
 - **Function declarations** — e.g., a free function `add(int a, int b) int`. The
   declaration carries names, parameter `` `doc ``, defaults, return type, and
   failability. `schema.for_func[add]()` resolves to the declaration (the identifier
   path), not a function value, and recovers all of it.
 
-This is why MCP server authoring (`docs/ai-platform.md` §6) and `promise ai serve`
+This is why MCP server authoring (`docs/ai-platform.md` [The mcp module](ai-platform.md#the-mcp-module)) and `promise ai serve`
 work: both register free functions or methods, so the declaration is in scope and the
 names/docs are available. They never derive schemas from anonymous closures.
 
 ---
 
-## 4. Identity — `Hash128`
+## Identity and Hash128
 
 Identity is the part of the schema that other systems pin to. JSON renderers can
 ignore it; cloud persistence and cross-version wire formats cannot. The hash inputs
 are fully specified so two compilers, two compiler versions, or two languages reading
 the same Promise source produce the same `Hash128`.
 
-### 4.1 Composition
+### Composition
 
 Identity is composed bottom-up:
 
@@ -293,12 +293,12 @@ Identity is composed bottom-up:
 | `Reference(id)`                        | the referenced construct's id verbatim |
 | `Optional`, `Array`, `Map`             | no identity of their own — identity flows through the inner element(s) |
 
-`origin` serializes deterministically (see §5). The hash function is a 128-bit
+`origin` serializes deterministically (see [The Origin Enum](#the-origin-enum)). The hash function is a 128-bit
 content hash; the exact algorithm is implementation-defined but must be stable across
 compiler versions once chosen — changing it is a hard schema break.
 
 On the wire, a `Hash128` serializes as its 32-character lowercase hex string (`to_hex()`),
-matching the `$ref` targets in §2. "Raw 128 bits" describes only a future binary transport;
+matching the `$ref` targets in [The Type Tagged Enum](#the-type-tagged-enum). "Raw 128 bits" describes only a future binary transport;
 over JSON a `Hash128` is always a lossless hex string, never a JSON number.
 
 `type_args` is the recursive component: `Vector[int]` and `Vector[string]` get
@@ -308,7 +308,7 @@ to two argument hashes (`string`, `Vector[int]`), in that order.
 Renames change the default hash. That is the correct default — most renames *are*
 breaking changes — and the override below handles the cases where they aren't.
 
-### 4.2 The `` `id `` Override
+### The id Override
 
 A new built-in meta annotation pins the identity of a declaration, allowing the
 source name to change while the wire identity stays put.
@@ -341,14 +341,14 @@ persistence, MCP wire format, schema evolution, and any future content-addressed
 import system; naming the meta `` `cloud_id `` would falsely tie one consumer to the
 mechanism.
 
-### 4.3 Rename and Deprecation
+### Rename and Deprecation
 
 Pinning carries forward, never backward. If a field is **deleted**, its `Hash128`
 goes with it; data already-in-the-cloud under that hash becomes orphaned. That is a
 server-side migration concern, not a language feature — see
-`docs/cloud-persistence.md` §9 for the recommended deprecation flow.
+`docs/cloud-persistence.md` [Server Architecture](cloud-persistence.md#server-architecture) for the recommended deprecation flow.
 
-### 4.4 The `` `entity `` Annotation
+### The entity Annotation
 
 A second built-in meta extends the schema model from "describable values" to
 "separately-stored entities":
@@ -383,7 +383,7 @@ Rules:
   it can be pinned with `` `id `` if the type is renamed without breaking storage.
 - Construction normally omits the id (`Item(title: "x", ...)`), letting the cloud
   module assign one on first `Put`. Client-id workflows pass it explicitly:
-  `Item(id: my_uuid, title: "x", ...)`. See `docs/cloud-persistence.md` §4.2.
+  `Item(id: my_uuid, title: "x", ...)`. See `docs/cloud-persistence.md` [Put](cloud-persistence.md#put).
 - Schema-side, an `` `entity ``-typed field of another type is encoded as
   `Type.Reference(target_entity_type_id)` — distinguishing it from an inlined
   `` `serializable `` value type which encodes as a full `Type.Object`.
@@ -392,11 +392,11 @@ Rules:
 emitted by the compiler), which is why the annotation lives in this doc. Its
 runtime semantics — what `Ref[T]` does, how lazy fetching works, how inverse
 relations are maintained — belong to the cloud-persistence module
-(`docs/cloud-persistence.md` §6).
+(`docs/cloud-persistence.md` [The Preemption Pattern](cloud-persistence.md#the-preemption-pattern)).
 
 ---
 
-## 5. The `Origin` Enum
+## The Origin Enum
 
 `Origin` identifies the project a declaration was defined in. It is one of the
 inputs to a type's `Hash128`, so its wire form must be deterministic.
@@ -405,7 +405,7 @@ inputs to a type's `Hash128`, so its wire form must be deterministic.
 enum Origin `public `clone `serializable {
     Embedded(string module),                    // "std", "json", "ai" — catalog name
     External(string url),                       // community module — url alone (commit is a catalog.toml pin, not identity)
-    Project(Hash128 project_id),                // user's own project — see §6
+    Project(Hash128 project_id),                // user's own project — see [Project Identity](#project-identity)
 }
 ```
 
@@ -416,19 +416,19 @@ enum Origin `public `clone `serializable {
 | `Project(project_id)`       | `project_id` directly (already a 128-bit value) |
 
 `Project` collapses local-project identity into a single `Hash128`, regardless of
-whether the user pinned it via `id =` or it was derived from `url =` (§6). Downstream
+whether the user pinned it via `id =` or it was derived from `url =` ([Project Identity](#project-identity)). Downstream
 consumers see one shape.
 
 ---
 
-## 6. Project Identity — `promise.toml`
+## Project Identity
 
 A project's hash is the leaf input for every `Hash128` of every type defined in that
 project. The project must therefore have a stable identity *if* anything in it
 produces or consumes a hash. Most executables don't — and they shouldn't pay any
 cost.
 
-### 6.1 The `[executable]` Table
+### The executable Table
 
 Catalog modules already use `[module]` in `promise.toml`. Executables get a parallel
 `[executable]` table:
@@ -441,7 +441,7 @@ name = "json"
 # executable — new
 [executable]
 name = "my_app"
-# id / url optional — only consulted when a hash is actually needed (§6.2)
+# id / url optional — only consulted when a hash is actually needed ([Lazy Resolution of Project Identity](#lazy-resolution-of-project-identity))
 ```
 
 `[module]` and `[executable]` are mutually exclusive. One toml = one role; carrying a
@@ -449,7 +449,7 @@ discriminator inside `[module]` would just push the same distinction into a diff
 field while losing the typed split. Future per-role fields (entry point, sandbox
 defaults, deploy target) can land in `[executable]` without overloading `[module]`.
 
-### 6.2 Lazy Resolution of Project Identity
+### Lazy Resolution of Project Identity
 
 The compiler computes a project hash **only when something actually needs one**.
 "Something" means: a `` `serializable `` type is defined in the project, OR
@@ -483,7 +483,7 @@ This means:
 `promise init` does **not** auto-generate `id` by default — the warning is the prompt
 to set one when the user actually needs stability.
 
-### 6.3 Module Identity
+### Module Identity
 
 Library modules in `[module]` already have a stable identity by virtue of how they
 are loaded:
@@ -500,7 +500,7 @@ pinned. Including `commit` in identity would invalidate every type's hash on eve
 upstream commit — the opposite of what schema evolution needs.
 
 The same logic that lets a project rename a field without breaking storage (via
-`` `id `` in §4.2) lets a community module evolve its source without breaking
+`` `id `` in [The id Override](#the-id-override)) lets a community module evolve its source without breaking
 consumers: as long as the `url` is stable and the field-level `Hash128`s are
 preserved through pinning where needed, the whole module's identity persists across
 commits.
@@ -511,7 +511,7 @@ being importable, and importability already requires either a catalog name or a
 
 ---
 
-## 7. Compiler Extension — How Generation Works
+## How Generation Works
 
 `schema.of[T]()` and `schema.for_func[F]()` are `` `mono `` free functions: each
 instantiation triggers the compiler's monomorphization pipeline (CLAUDE.md
@@ -530,7 +530,7 @@ Two ordering rules the generator must obey:
   never run per-module in isolation, or a descriptor could miss a type a later unit
   registers.
 
-### 7.1 What the Compiler Must Do
+### What the Compiler Must Do
 
 For every `` `serializable `` type (whether its `encode`/`decode` are
 compiler-synthesized or hand-written):
@@ -539,13 +539,13 @@ compiler-synthesized or hand-written):
    `` `internal ``` that returns the runtime `Type` value. The method is private (uses
    `_` prefix); only the `schema` module accesses it via a compiler-recognized
    intrinsic.
-2. **Compute the type's `Hash128`** using §4.1 inputs. If the declaration carries
+2. **Compute the type's `Hash128`** using [Composition](#composition) inputs. If the declaration carries
    `` `id("...") ``, use the pinned value instead.
-3. **Compute every field's `Hash128`** using §4.1 (`h(parent.id, field.source_name)`)
+3. **Compute every field's `Hash128`** using [Composition](#composition) (`h(parent.id, field.source_name)`)
    or honoring per-field `` `id `` overrides.
 4. **Capture the Origin** — `Embedded(name)` for catalog modules, `External(url)`
    for community modules, `Project(project_id)` for the current project. The
-   project_id is the value resolved per §6.2 (and the one-shot warning fires here on
+   project_id is the value resolved per [Lazy Resolution of Project Identity](#lazy-resolution-of-project-identity) (and the one-shot warning fires here on
    first use within the build).
 5. **Recurse into field types** — for `Object` and `Enum` field types that are also
    `` `serializable ``, emit an inline `Type.Object`/`Type.Enum` value or, on cycles,
@@ -556,7 +556,7 @@ schema-relevant annotation that becomes recognized later), the compiler also emi
 parallel `_func_schema_descriptor()` factory that captures parameter names,
 per-parameter `` `doc ``, defaults, return type, and failability.
 
-### 7.2 Scope
+### Scope
 
 The hook runs for any `` `serializable `` type in any module (std, catalog,
 community, project). This is required so:
@@ -565,7 +565,7 @@ community, project). This is required so:
   `schema.of[Request]()` to drive an MCP server or a cloud-persisted store.
 - A community module can define types whose schemas are visible to consumers.
 
-### 7.3 Why Not a Separate `` `schemable `` Annotation?
+### Why Not a Separate schemable Annotation
 
 Two annotations meaning "describe my fields" is bad ergonomics. A type that wants to
 be described to an LLM almost always also wants to round-trip JSON. The few cases
@@ -575,9 +575,9 @@ handled by `schema.for_func` over a constructor, or by a manually-built
 
 ---
 
-## 8. Worked Examples
+## Worked Examples
 
-### 8.1 Type Schema with Default Identity
+### Type Schema with Default Identity
 
 ```promise
 use schema;
@@ -604,7 +604,7 @@ default (`role` has `default`, not required), and `` `required `` (`version` has
 `default` *and* is required). Identity is auto-derived from the project origin and
 type name.
 
-### 8.2 Pinned Identity Across a Rename
+### Pinned Identity Across a Rename
 
 ```promise
 type CreateUserRequest `serializable `id("a3f1b27c4d8e91035e2b8c7d4f1a09e60") {
@@ -620,7 +620,7 @@ Source-side: `display_name` is the new identifier. Wire-side: the JSON key stays
 `"name"` (via `` `key ``) and the persistence/MCP identity stays the same 32-hex
 string (via `` `id ``). No data migration needed.
 
-### 8.3 Function Schema
+### Function Schema
 
 ```promise
 use schema;
@@ -651,11 +651,11 @@ main!() {
 
 ---
 
-## 9. Limitations and Boundaries
+## Limitations and Boundaries
 
 - **No runtime reflection.** Schemas are built at compile time. `schema.of(some_value)`
   taking a runtime value does not exist — the type must be known statically.
-- **No anonymous closures.** Per §3, function values lose names. Code that wants to
+- **No anonymous closures.** Per [Functions and Function Types](#functions-and-function-types), function values lose names. Code that wants to
   expose a closure as a tool must wrap it in a named function declaration.
 - **No cross-module private fields.** A `` `serializable `` type with `_`-prefixed
   fields excludes them from both encode/decode and the schema, regardless of caller.
@@ -669,7 +669,7 @@ main!() {
 
 ---
 
-## 10. Related Docs
+## Related Docs
 
 - `docs/serialization.md` — `` `serializable `` annotation, encode/decode
   synthesis, the field metas (`` `key ``, `` `skip ``, `` `flatten ``,
@@ -678,7 +678,7 @@ main!() {
   output, and MCP server registration.
 - `docs/cloud-persistence.md` — consumes `schema.Type` and `Hash128` as the wire
   identity of types, fields, and references in durable storage.
-- `docs/language-design.md` §8 — meta annotation system (`` `doc ``, `` `serializable ``,
+- `docs/language-design.md` [Meta Annotations](language-design.md#meta-annotations) — meta annotation system (`` `doc ``, `` `serializable ``,
   `` `id ``, etc.).
 - `docs/creating-modules.md` — `promise.toml`, `[module]` and `[executable]` tables,
   catalog vs community vs project modules.

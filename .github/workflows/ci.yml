@@ -1,4 +1,4 @@
-# Build + test CI (docs/release-automation.md §4) — MANUAL DISPATCH ONLY.
+# Build + test CI (docs/release-automation.md#build-and-test-ci) — MANUAL DISPATCH ONLY.
 #
 # This does NOT run on every push/PR. The project's internal gates already cover
 # correctness: `bin/verify` is mandatory before every push, and periodic gates run
@@ -68,7 +68,7 @@ jobs:
           # does on amd64. NOTE: ubuntu-24.04-arm is free for public repos but
           # metered on private ones — if a run fails to pick up a runner, that
           # billing plan is why, not the workflow.
-          # Deferred (docs/release-automation.md §7): darwin-amd64 (macos-13, no
+          # Deferred (docs/release-automation.md#open-items): darwin-amd64 (macos-13, no
           # working Xcode CLT).
           if [ "$PLATFORM" = "all" ]; then
             inc=$(echo "$all" | jq -c .)

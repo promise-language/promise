@@ -165,7 +165,7 @@ func parseUpdateFlags(args []string) (force bool, rest []string, err error) {
 }
 
 // runUpdate implements `promise update` and its subverbs (T0825) — self-update
-// of the toolchain (§2.6). The update channel (what `update` follows) is
+// of the toolchain (distribution.md#updating). The update channel (what `update` follows) is
 // orthogonal to the active epoch (which compiler runs builds): the channel is
 // persisted in <PromiseHome>/channel and selected with `update channel`, while
 // the active epoch is selected with `promise use`. Dependency `[require]` pin

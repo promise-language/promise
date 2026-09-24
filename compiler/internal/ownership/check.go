@@ -20,7 +20,7 @@ type Checker struct {
 	pinned  map[string]bool  // use-bound variables that cannot be moved
 
 	// T1385: inside a `go {}` / `go! {}` block body, `return <expr>` yields the
-	// GOROUTINE's result (§17.2 explicit-return style), not the enclosing
+	// GOROUTINE's result (language-design.md#explicit-concurrency explicit-return style), not the enclosing
 	// function's — so the return checks must be run against the task's element
 	// type, not curSig.Result(). One field, three states, so there is nothing to
 	// keep in sync: the element type inside a value-producing block body,
@@ -174,7 +174,7 @@ type Checker struct {
 	closureOwnedLocals map[string]bool
 
 	// mustUse (T1381) maps an owned local's name to its declaration position when
-	// its type transitively owns a `failable_task[T]` (§17.2.1). Such a value is
+	// its type transitively owns a `failable_task[T]` (language-design.md#failable-goroutines). Such a value is
 	// LINEAR (must-use): it must be *discharged* — received (`<-t` / `<-tasks`) or
 	// moved onward (field/collection/argument/return) — before its owner's scope
 	// ends; letting one reach scope end undischarged silently swallows its error.
@@ -578,7 +578,7 @@ func (c *Checker) recordMustUse(name string, typ types.Type, pos ast.Pos) {
 // frame boundary (function / method / lambda end) before the frame's state is
 // restored; each frame is given a fresh c.mustUse map, so the whole map is that
 // frame's set. Names are reported in declaration order for deterministic output.
-// (§17.2.1)
+// (language-design.md#failable-goroutines)
 func (c *Checker) reportUndischargedMustUse() {
 	if len(c.mustUse) == 0 {
 		return

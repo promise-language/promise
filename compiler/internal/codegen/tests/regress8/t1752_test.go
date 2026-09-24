@@ -8,7 +8,7 @@ import (
 )
 
 // T1752 — `_validate!`, a type invariant every construction path must satisfy
-// (docs/language-design.md §5.7 → Validation).
+// (docs/language-design.md#constructors → Validation).
 //
 // The chain is emitted at the construction expression, where the concrete type
 // is exactly known, so every call is static — nothing dispatches through a
@@ -128,7 +128,7 @@ func TestT1752InheritedChainIsParentFirst(t *testing.T) {
 	}
 }
 
-// §5.7: clone() does not validate — a clone is an identical copy of an instance
+// language-design.md#constructors: clone() does not validate — a clone is an identical copy of an instance
 // that was already valid.
 func TestT1752CloneDoesNotValidate(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
@@ -245,7 +245,7 @@ func TestT1752FieldlessVariantEmitsNoChain(t *testing.T) {
 	}
 }
 
-// §5.7 grants no value-type exemption. A value type has no instance pointer, so
+// language-design.md#constructors grants no value-type exemption. A value type has no instance pointer, so
 // the receiver is a pointer to its value struct (valueStructRecvPtr).
 func TestT1752ValueTypeConstructionEmitsTheChain(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `

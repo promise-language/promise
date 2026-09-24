@@ -2484,7 +2484,7 @@ func TestFileRenameAllPlatforms(t *testing.T) {
 
 // MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH = 0x1|0x8 = 9. REPLACE_EXISTING
 // is what makes the rename match POSIX semantics; WRITE_THROUGH is what lets
-// pal_dir_sync be a no-op on Windows (docs/io.md §3.2). Dropping either silently
+// pal_dir_sync be a no-op on Windows (docs/io.md#why-the-final-sync-is-not-optional). Dropping either silently
 // breaks a different half of the contract, so the literal is pinned.
 func TestFileRenameWindowsFlags(t *testing.T) {
 	module := ir.NewModule()
@@ -2496,7 +2496,7 @@ func TestFileRenameWindowsFlags(t *testing.T) {
 // T1930: MoveFileEx cannot replace a destination anyone still holds open — its
 // replace step is a classic FileRenameInformation, which returns
 // ERROR_ACCESS_DENIED while a handle to the target lives, whatever the share
-// mode. docs/io.md §3 is built on renaming over a file a reader has open, so
+// mode. docs/io.md#atomic-replace is built on renaming over a file a reader has open, so
 // ERROR_ACCESS_DENIED (5) and ERROR_SHARING_VIOLATION (32) must retry through the
 // POSIX-semantics rename. Each constant below is load-bearing and invisible in
 // the failure it prevents (a link error, or a rename that silently stops
@@ -2527,9 +2527,9 @@ func TestFileRenameWindowsPosixFallback(t *testing.T) {
 
 	// DELETE|GENERIC_WRITE: DELETE is what the rename needs, GENERIC_WRITE is what
 	// FlushFileBuffers needs — with DELETE alone the flush fails with
-	// ERROR_ACCESS_DENIED and §3.2's durability quietly goes missing.
+	// ERROR_ACCESS_DENIED and io.md#why-the-final-sync-is-not-optional's durability quietly goes missing.
 	assertContains(t, out, "@CreateFileA(i8* %from, i32 u0x40010000,", "DELETE|GENERIC_WRITE")
-	assertContains(t, out, "@FlushFileBuffers(", "renamed handle is flushed for §3.2")
+	assertContains(t, out, "@FlushFileBuffers(", "renamed handle is flushed for io.md#why-the-final-sync-is-not-optional")
 
 	// The handle must be closed on both outcomes, so the call appears twice.
 	if n := strings.Count(out, "call i32 @CloseHandle("); n != 2 {
@@ -2577,7 +2577,7 @@ func TestFileSyncAllPlatforms(t *testing.T) {
 	}
 }
 
-// docs/io.md §4 makes the macOS divergence the whole point of File.sync: fsync
+// docs/io.md#forcing-data-to-stable-storage makes the macOS divergence the whole point of File.sync: fsync
 // there returns while the data may still sit in the drive's volatile cache, so
 // only F_FULLFSYNC (51) is actually durable. A wrong constant would still compile
 // and still return 0 — it would just quietly stop being a durability primitive —
@@ -2588,7 +2588,7 @@ func TestFileSyncMacOSUsesFullFsync(t *testing.T) {
 	out := module.String()
 	assertContains(t, out, "@fcntl(i32 %fd, i32 51, i32 0)", "F_FULLFSYNC = 51")
 	if strings.Contains(out, "@fsync(") {
-		t.Error("macOS pal_file_sync calls fsync — F_FULLFSYNC is required (docs/io.md §4)")
+		t.Error("macOS pal_file_sync calls fsync — F_FULLFSYNC is required (docs/io.md#forcing-data-to-stable-storage)")
 	}
 }
 
@@ -2625,8 +2625,8 @@ func TestDirSyncAllPlatforms(t *testing.T) {
 }
 
 // POSIX syncs a directory by opening it read-only and fsync'ing the descriptor.
-// Plain fsync on both platforms, including macOS: §3.2 specifies fsync for the
-// directory entry, and §4's F_FULLFSYNC rule is about file *contents*.
+// Plain fsync on both platforms, including macOS: io.md#why-the-final-sync-is-not-optional specifies fsync for the
+// directory entry, and io.md#forcing-data-to-stable-storage's F_FULLFSYNC rule is about file *contents*.
 func TestDirSyncPosixOpensAndFsyncs(t *testing.T) {
 	for _, target := range []string{"x86_64-unknown-linux-gnu", "arm64-apple-darwin23.0.0"} {
 		t.Run(target, func(t *testing.T) {
@@ -2638,14 +2638,14 @@ func TestDirSyncPosixOpensAndFsyncs(t *testing.T) {
 			assertContains(t, out, "@fsync(", "fsyncs the directory descriptor")
 			assertContains(t, out, "@close(", "closes the descriptor")
 			if strings.Contains(out, "i32 51") {
-				t.Error("pal_dir_sync uses F_FULLFSYNC — §3.2 specifies plain fsync for directories")
+				t.Error("pal_dir_sync uses F_FULLFSYNC — io.md#why-the-final-sync-is-not-optional specifies plain fsync for directories")
 			}
 		})
 	}
 }
 
 // Windows cannot flush a directory handle, so pal_dir_sync is a no-op there and
-// MOVEFILE_WRITE_THROUGH carries the guarantee instead (docs/io.md §6.3).
+// MOVEFILE_WRITE_THROUGH carries the guarantee instead (docs/io.md#platform-differences-a-caller-can-observe).
 func TestDirSyncWindowsIsNoOp(t *testing.T) {
 	module := ir.NewModule()
 	(&WindowsPAL{}).EmitDirSync(module)
@@ -2726,7 +2726,7 @@ func TestFileUnlockWindowsMechanism(t *testing.T) {
 
 // ERROR_LOCK_VIOLATION (33) must reach the Promise layer as EWOULDBLOCK, not as
 // the EINVAL that the shared emitWinErrToErrno maps it to — otherwise try_lock
-// raises where docs/io.md §7 says it returns false. 11 is used on all three
+// raises where docs/io.md#errors says it returns false. 11 is used on all three
 // platforms because modules/io speaks POSIX errno throughout.
 func TestFileLockWindowsNormalizesContentionErrno(t *testing.T) {
 	module := ir.NewModule()
@@ -2777,7 +2777,7 @@ func TestFileTruncateWindowsNegatesErrnoDirectly(t *testing.T) {
 	}
 }
 
-// docs/io.md §6.4: WASM supports none of this, and §7 names ENOSYS as the code
+// docs/io.md#platform-differences-a-caller-can-observe: WASM supports none of this, and io.md#errors names ENOSYS as the code
 // for "unsupported on this target". -1 would surface as EPERM, which is a lie.
 // pal_dir_sync is included deliberately: the Windows 0 return is a statement that
 // the rename already carried durability, which WASM cannot make.
@@ -2805,7 +2805,7 @@ func TestT1520WasmStubsReturnENOSYS(t *testing.T) {
 }
 
 // Mode 7 (O_RDWR|O_CREAT, no truncate, no append) backs the temporary-slot
-// protocol in docs/io.md §3.4: the slot is opened before the lock has decided
+// protocol in docs/io.md#orphan-reclamation: the slot is opened before the lock has decided
 // whether its contents are stale. O_TRUNC would destroy a live writer's data
 // before the lock could refuse; O_APPEND would defeat the write offsets that
 // follow the explicit truncate.

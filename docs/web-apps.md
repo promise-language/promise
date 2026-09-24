@@ -18,7 +18,7 @@
 > the `promise bind` pipeline; [runtime-architecture.md](runtime-architecture.md)
 > owns the PAL and the M:N scheduler this builds on.
 
-## 1. Problem
+## Problem
 
 Every WASM export the compiler emits today goes one direction: Promise calling
 out to the host. There is no way for the host to call in.
@@ -42,7 +42,7 @@ WASM on the browser's call stack with no G, no P, no scope-cleanup context, and
 no ability to park. It cannot behave like Promise code because it is not running
 as Promise code. The real work is in the execution model.
 
-## 2. What already works
+## What already works
 
 Two things are already in place and are not the problem.
 
@@ -78,7 +78,7 @@ Only the M layer differs:
 - Atomic RMWs degrade to plain load/store; the G/P/M globals are not
   thread-local.
 - Work stealing is compiled but always returns null with a single P.
-- **Nothing sets `G.preempt`**, so there is no preemption in practice — see §6,
+- **Nothing sets `G.preempt`**, so there is no preemption in practice — see [Preemption on WASM](#preemption-on-wasm),
   where this turns out to be a missing flag-setter rather than a missing
   mechanism.
 
@@ -86,7 +86,7 @@ The substrate to *run* handlers therefore exists. What is missing is a way for
 the host to hand work to it, and a top level that can survive being called more
 than once.
 
-## 3. The constraint: the browser owns the thread
+## The browser owns the thread
 
 In a page, WASM is never in charge of the thread. The browser calls in on its
 main thread, and that call must return promptly; if it does not, rendering and
@@ -125,7 +125,7 @@ A browser event is not a second thread and never will be: it is a fresh
 synchronous entry into a single-threaded instance. **The hazard to design
 against is re-entrancy, not data races.**
 
-## 4. Execution model: a reactor driven by bounded pumps
+## Execution model a reactor driven by bounded pumps
 
 `wasm32-web` builds as a reactor. The module exposes a small fixed set of entry
 points; the host calls them; each does a bounded amount of work and returns.
@@ -135,17 +135,17 @@ points; the host calls them; each does a bounded amount of work and returns.
   pumps until nothing is runnable.
 - **`promise_web_pump`** is what every JS callback calls after delivering an
   event. It pumps and returns.
-- **The pump is bounded** (§4.2). If work remains when the budget is spent, it
+- **The pump is bounded** ([Budget and continuation](#budget-and-continuation)). If work remains when the budget is spent, it
   asks the host to schedule another pump before returning.
 - **"Nothing runnable" is the idle state**, not a deadlock — but only for
-  programs that are actually reactors (§4.1). The instance stays alive with its
+  programs that are actually reactors ([The liveness rule](#the-liveness-rule)). The instance stays alive with its
   heap, registrations, and parked goroutines intact.
 - **`main` returning does not end the program.** Termination becomes explicit.
 
 `wasm32-wasi` is unaffected: it keeps `_start`, run-to-completion, and the
 deadlock abort exactly as today. This document is `wasm32-web` only.
 
-### 4.1 The liveness rule (and why there is no flag day)
+### The liveness rule
 
 The one decision that keeps this from being a breaking change:
 
@@ -188,7 +188,7 @@ goroutines parked can be reported (behind a debug flag) as "idle: N goroutines
 parked, M live registrations", which is the information a developer actually
 needs.
 
-### 4.2 Budget and continuation
+### Budget and continuation
 
 The pump runs `promise_sched_coop_step` until one of:
 
@@ -221,14 +221,14 @@ Default is kind 0. `requestAnimationFrame` is not the default: it ties progress
 to paint, so a background computation would be throttled to 60 Hz and stop
 entirely in a hidden tab.
 
-### 4.3 Idle is not deadlock
+### Idle is not deadlock
 
 When the pump drains to nothing-runnable and live registrations exist, it
 returns "idle" and the instance simply sits there. No abort, no exit, no
 message. The heap, the registered subscriptions, the parked goroutines and the
 event queues all persist to the next host entry.
 
-## 5. Re-entrancy
+## Re entrancy
 
 The browser can dispatch an event synchronously from inside a handler —
 `element.click()` called from within a click handler is the canonical case.
@@ -242,14 +242,14 @@ still running, will observe the newly queued event on a subsequent iteration.
 
 This makes nesting unrepresentable rather than merely discouraged, costs one
 load and one branch, and needs no re-entrancy reasoning anywhere else in the
-design. It is also why delivery and pumping are two separate exports (§9):
+design. It is also why delivery and pumping are two separate exports ([Dispatch policy](#dispatch-policy)):
 enqueueing must remain callable in any context, including from inside a
 Promise→JS call that is itself nested inside a pump.
 
 `coop_step`'s existing re-entrancy handling stays as it is — it serves the
 legacy `Task[T].drop` spin path, which is a different caller and unaffected.
 
-## 6. Preemption on WASM
+## Preemption on WASM
 
 The review of #25 states that with no sysmon a long handler freezes the page and
 "nothing in the runtime can stop it". That is true today but overstates the
@@ -278,9 +278,9 @@ remain a documented contract, not an enforced one.
 all WASM programs and deserves its own benchmark and its own review. The v1
 contract is "a single handler that runs long freezes the page"; this is the
 designed path to lifting it, recorded here so that v1 does not foreclose it.
-Nothing in §4 depends on which choice is made.
+Nothing in [Execution model a reactor driven by bounded pumps](#execution-model-a-reactor-driven-by-bounded-pumps) depends on which choice is made.
 
-## 7. Delivery: JS enqueues, Promise code consumes
+## Delivery JS enqueues and Promise code consumes
 
 Signal handling is the precedent, and it already solves the same shape of
 problem — an event arriving in a foreign context that must be handled by
@@ -302,13 +302,13 @@ closure directly.
 This is what keeps the export surface to two fixed-signature entries instead of
 a generated trampoline per callback signature — and therefore removes almost all
 of the generated naming that #25's Bug-1 lesson warns about. There is very
-little left that *can* drift (§9).
+little left that *can* drift ([Dispatch policy](#dispatch-policy)).
 
 `net`'s reactor is not a reusable precedent here: it is explicitly skipped on
 WASM because it needs a dedicated poller thread. In the browser the host *is*
 the poller, which is why the signal shape fits and the netpoll shape does not.
 
-## 8. The delivery surface: event channels
+## The delivery surface event channels
 
 This is the highest-leverage API decision in the design. Two candidates:
 
@@ -377,9 +377,9 @@ T1640 is what makes that spelling *compile*; it is not by itself enough to make
 `web.on` writable. The remaining prerequisite is **T1634-A/B** — a
 void-returning lambda (`|Event e| -> handle(e)`, the natural shape of an event
 handler) still emits malformed IR, with no `go` involved. Both are needed before
-§8's sugar and §14's WebIDL `callback` lowering can be implemented.
+[The delivery surface event channels](#the-delivery-surface-event-channels)'s sugar and [Layer 1 the exported surface](#layer-1-the-exported-surface)'s WebIDL `callback` lowering can be implemented.
 
-### 8.1 Queue semantics and overflow
+### Queue semantics and overflow
 
 The host push happens outside any G and must never block, so "channel full"
 needs a defined behaviour. Growing without bound is not acceptable: a
@@ -403,7 +403,7 @@ the runtime cannot infer which.
 Ordering is FIFO per subscription. There is no global ordering guarantee across
 subscriptions, and the design does not pretend to offer one.
 
-## 9. Dispatch policy
+## Dispatch policy
 
 Within the loop, the remaining choice is how each event is handled:
 
@@ -434,7 +434,7 @@ after the loop has moved on, so "unsubscribed" means "no new events will be
 delivered", not "no handler is running". Callers that need the stronger property
 join their consumers.
 
-## 10. Failure inside a handler
+## Failure inside a handler
 
 There is no enclosing Promise frame to propagate to — the logical caller is the
 browser.
@@ -452,7 +452,7 @@ browser.
 Subsequent host entries into a faulted instance return immediately without
 pumping.
 
-## 11. Blocking that the host must resolve
+## Blocking that the host must resolve
 
 Any wait a handler performs must be satisfiable by some *future host entry* — an
 event, a timer, a resolved fetch. A wait that could only be satisfied by
@@ -465,10 +465,10 @@ the same operations are involved. The channel surface makes the legitimate cases
 natural (`select` across events, timers, and network) and gives the illegitimate
 ones nowhere to hide, since there is no synchronous host call to reach for.
 
-Per §4.1, a wait that no host entry will ever satisfy is a silent idle rather
+Per [The liveness rule](#the-liveness-rule), a wait that no host entry will ever satisfy is a silent idle rather
 than a reported deadlock, with the debug-flag diagnostic as the mitigation.
 
-## 12. Resource lifetime across the boundary
+## Resource lifetime across the boundary
 
 Event objects are resources and reuse the existing machinery unchanged: the JS
 listener calls `_refStore(event)` to get a handle, and the handle travels in the
@@ -486,14 +486,14 @@ Two cases follow from that and need no new mechanism:
   behaviour — the handler sees the event it was sent, and the object becomes
   collectable afterwards.
 
-## 13. Program lifetime and termination
+## Program lifetime and termination
 
 - **`main` returning does not terminate a reactor program.** It means setup is
   finished.
 - **Termination is explicit:** `web.terminate(code)` closes all subscriptions,
   runs the normal drop paths, and calls `pal_exit(code)`.
 - **A program with no live registrations terminates on drain**, exactly as today
-  (§4.1).
+  ([The liveness rule](#the-liveness-rule)).
 
 **Leak accounting** is evaluated at termination, which is where it is evaluated
 today — `pal_exit` is reached in both the command-style and the explicit-
@@ -503,7 +503,7 @@ queued events are live data, not leaks. Browser integration tests therefore
 drive their scenario and then call `web.terminate(0)`, which is what makes the
 zero-leak policy enforceable for this feature rather than merely aspirational.
 
-## 14. Layer 1: the exported surface
+## Layer 1 the exported surface
 
 Two exports, one import. Nothing per-callback, nothing per-signature.
 
@@ -511,9 +511,9 @@ Two exports, one import. Nothing per-callback, nothing per-signature.
 
 | Name | Signature | Contract |
 |---|---|---|
-| `_initialize` | `() -> void` | Existing. Init, run `main`, drain, then exit-or-return per §4.1. |
+| `_initialize` | `() -> void` | Existing. Init, run `main`, drain, then exit-or-return per [The liveness rule](#the-liveness-rule). |
 | `promise_web_enqueue` | `(sub_id: i32, handle: i32) -> i32` | Push one event. Never runs Promise code, never allocates on the Promise heap, safe in any context including inside a pump. Returns 0 = queued, 1 = dropped per policy. |
-| `promise_web_pump` | `() -> i32` | Drain within budget. Returns 0 = idle, 1 = work remains (a continuation has been scheduled), 2 = terminated. No-op returning immediately if already pumping (§5) or faulted (§10). |
+| `promise_web_pump` | `() -> i32` | Drain within budget. Returns 0 = idle, 1 = work remains (a continuation has been scheduled), 2 = terminated. No-op returning immediately if already pumping ([Re entrancy](#re-entrancy)) or faulted ([Failure inside a handler](#failure-inside-a-handler)). |
 
 **Import (guest → host):**
 
@@ -521,7 +521,7 @@ Two exports, one import. Nothing per-callback, nothing per-signature.
 |---|---|
 | `promise_env.schedule_pump` | `(kind: i32, delay_ms: i32) -> void` |
 
-### 14.1 One name, one definition
+### One name one definition
 
 #25's Bug 1 was caused by two generators independently inventing names for the
 same logical thing and drifting apart. The structural fix here is that there is
@@ -538,7 +538,7 @@ these names appears anywhere else, and a test asserts that.
 The package is deliberately tiny and dependency-free so that both the compiler
 backend and the binding generators can depend on it without a cycle.
 
-### 14.2 It must be usable without bindgen
+### It must be usable without bindgen
 
 Layer 1 is a language capability, not bindgen plumbing that happens to be
 reachable. The acceptance test is a hand-written program with no generated
@@ -557,14 +557,14 @@ main() {
 }
 ```
 
-This program registers one subscription, so by §4.1 it is a reactor: `main`'s
+This program registers one subscription, so by [The liveness rule](#the-liveness-rule) it is a reactor: `main`'s
 goroutine parks on an empty channel, `_initialize` returns, and each browser
 click enqueues, pumps, advances the loop by one iteration, and returns.
 
-## 15. Layer 2: WebIDL `callback` lowering
+## Layer 2 WebIDL callback lowering
 
 With Layer 1 in place, the WebIDL side needs **no new export at all** — which is
-the payoff of §7 and the main reason the export surface is safe from drift.
+the payoff of [Delivery JS enqueues and Promise code consumes](#delivery-js-enqueues-and-promise-code-consumes) and the main reason the export surface is safe from drift.
 
 - `bindgen/ir.go`: add a function-type case to `TypeRefKind`, which currently has
   no way to represent "this parameter is a callback".
@@ -573,9 +573,9 @@ the payoff of §7 and the main reason the export surface is safe from drift.
   — the WebIDL parser is complete and needs no changes.
 - `codegen.go`: emit the parameter as a Promise `FunctionTypeRef`, and implement
   the method in terms of Layer 1 — subscribe, spawn a consumer goroutine that
-  invokes the closure per event. This is precisely the `web.on` sugar of §8.
+  invokes the closure per event. This is precisely the `web.on` sugar of [The delivery surface event channels](#the-delivery-surface-event-channels).
 - `jsglue.go`: emit the listener that stores the event handle and calls
-  `promise_web_enqueue` + `promise_web_pump`, using the shared names from §14.1.
+  `promise_web_enqueue` + `promise_web_pump`, using the shared names from [One name one definition](#one-name-one-definition).
 
 `Element.addEventListener(DOMString, EventListener)` then works end-to-end with
 no callback-specific machinery below the bindgen layer.
@@ -584,7 +584,7 @@ WIT gets this close to free: `wit_to_ir.go` shares the same IR, so once the
 function-type case exists, mapping an equivalent WIT construct is a small
 isolated change. Worth checking after Layer 2 lands; not a requirement.
 
-## 16. Bind-time self-check
+## Bind time self check
 
 `promise bind webidl` currently exits 0 on output that cannot compile — the
 `undefined type: EventListener` failure in #25 surfaces one command later, at
@@ -615,7 +615,7 @@ Two scoping decisions:
   standalone file as a file. The bind self-check is the same shared entry point
   called in-process.
 
-## 17. Testing
+## Testing the execution model
 
 The Node harness cannot validate this. It stubs every unrecognized `promise_env`
 import as a no-op, so it would happily pass a build whose JS→WASM direction is
@@ -643,7 +643,7 @@ with its own version-pinning question (`bin/verify` runs only `tests/ modules/
 examples/ tools/stub/`, so nothing consumed by reference is exercised); it is
 tracked separately and this work neither carries it nor waits on it.
 
-## 18. Build output and hosting
+## Build output and hosting
 
 A `wasm32-web` build produces two files: the WebAssembly module, and a
 JavaScript loader beside it taking its name from the output. The loader is what
@@ -670,7 +670,7 @@ not `application/wasm`. Any static file server that sets that type satisfies
 both; Promise ships no server component for this, and a page needs no build step
 beyond `promise build`.
 
-A minimal page for an application that uses the `web` module (§19):
+A minimal page for an application that uses the `web` module ([The web module](#the-web-module)):
 
 ```html
 <!DOCTYPE html>
@@ -685,14 +685,14 @@ A minimal page for an application that uses the `web` module (§19):
 For a program with no bindings the bootstrap loader is the equivalent entry
 point — see [wasm-bindings.md](wasm-bindings.md) §"Usage" for its form.
 
-Loading the page is `_initialize` (§4). A reactor program's life continues
+Loading the page is `_initialize` ([Execution model a reactor driven by bounded pumps](#execution-model-a-reactor-driven-by-bounded-pumps)). A reactor program's life continues
 across every later host entry, so the `await` above resolving means setup
-finished, not that the program ended; §13 owns termination.
+finished, not that the program ended; [Program lifetime and termination](#program-lifetime-and-termination) owns termination.
 
-## 19. The `web` module
+## The web module
 
 `web.events`, `web.on`, the subscription type and `web.terminate` — the surface
-§8, §8.1 and §13 specify — are the public API of a module named `web`, which an
+[The delivery surface event channels](#the-delivery-surface-event-channels), [Queue semantics and overflow](#queue-semantics-and-overflow) and [Program lifetime and termination](#program-lifetime-and-termination) specify — are the public API of a module named `web`, which an
 application reaches with `use web;`.
 
 **That module is external.** It is not embedded in the compiler and does not
@@ -706,18 +706,18 @@ The module has two halves, produced differently:
 
 | Half | Origin | Specified by |
 |---|---|---|
-| Web API types — `web.document`, `web.console`, elements, events | generated from WebIDL (§20) | the IDL |
-| `web.events`, `web.on`, the subscription type and its `dropped` count, `web.terminate` | hand-written over the Layer 1 surface of §14 | §8, §8.1, §13 |
+| Web API types — `web.document`, `web.console`, elements, events | generated from WebIDL ([Reaching the DOM](#reaching-the-dom)) | the IDL |
+| `web.events`, `web.on`, the subscription type and its `dropped` count, `web.terminate` | hand-written over the Layer 1 surface of [Layer 1 the exported surface](#layer-1-the-exported-surface) | [The delivery surface event channels](#the-delivery-surface-event-channels), [Queue semantics and overflow](#queue-semantics-and-overflow), [Program lifetime and termination](#program-lifetime-and-termination) |
 
 The second row is the load-bearing one: **no IDL describes the reactor
 surface.** It is ordinary Promise code written against the two exports and one
-import of §14, it ships in the same module as the generated half so that an
+import of [Layer 1 the exported surface](#layer-1-the-exported-surface), it ships in the same module as the generated half so that an
 application needs one `use`, and this document is what specifies it.
 
-## 20. Reaching the DOM
+## Reaching the DOM
 
 An application reaches the DOM through the generated half of the `web` module
-(§19). Each Web API interface becomes a `` `target(web) `` type wrapping an
+([The web module](#the-web-module)). Each Web API interface becomes a `` `target(web) `` type wrapping an
 opaque handle into the loader's JS object table; attributes become `get`/`set`
 properties and operations become methods.
 [wasm-bindings.md](wasm-bindings.md) §"WebIDL Parser", §"Type Mapping" and
@@ -736,14 +736,14 @@ directly, as `examples/11_wasm/web_console.pr` does with a hand-declared
 `wasm_import`.
 
 **Host objects are named roots on the module.** `web.document` and `web.console`
-are what a program writes (§14.2); a handle is an implementation detail of the
+are what a program writes ([It must be usable without bindgen](#it-must-be-usable-without-bindgen)); a handle is an implementation detail of the
 binding, never something an application constructs.
 
 Handles are owned: a wrapper releases its handle when it drops, so exactly one
-wrapper exists per handle. Events are the same machinery, and §12 specifies how
+wrapper exists per handle. Events are the same machinery, and [Resource lifetime across the boundary](#resource-lifetime-across-the-boundary) specifies how
 that interacts with the queue and with subscription close.
 
-## 21. Size and startup
+## Size and startup
 
 On this target the binary is a download, and its size is a cost the user pays
 before the first line of Promise code runs.
@@ -760,7 +760,7 @@ fetch → compile (streaming, during download) → instantiate → _initialize �
 
 Because `WebAssembly.instantiateStreaming` compiles the module *as it arrives*,
 compilation overlaps the download instead of following it — which is the second
-reason the `application/wasm` response type of §18 matters. A response the
+reason the `application/wasm` response type of [Build output and hosting](#build-output-and-hosting) matters. A response the
 browser will not stream is not only a correctness problem: it serializes two
 phases that are meant to overlap.
 
@@ -768,9 +768,9 @@ A page ships a release build (`--release`), where link-time optimization across
 every module is what keeps the download to the code the program actually
 reaches.
 
-## 22. Testing a web application
+## Testing a web application
 
-§17 specifies how the Layer 1 primitive is tested. An application is tested the
+[Testing the execution model](#testing-the-execution-model) specifies how the Layer 1 primitive is tested. An application is tested the
 way every other Promise program is — `bin/test --wasm-web` and
 `bin/verify --wasm-web` run the suite for `wasm32-web`, and a single file is
 `bin/promise test -target wasm32-web <file>` — with one difference that decides
@@ -790,10 +790,10 @@ drop accounting, goroutines, channels and `select`, formatting, and the fact
 that a binding declaration *links* — `examples/11_wasm/web_console.pr` is the
 worked example of a test that asserts only that last property and says so. It
 covers none of DOM behaviour, real events, or the JS→WASM direction: those need
-a browser, which is §17's third layer and lives with the `web` module rather
+a browser, which is [Testing the execution model](#testing-the-execution-model)'s third layer and lives with the `web` module rather
 than in this repository.
 
-## 23. Non-goals
+## Non goals
 
 - **`wasm32-wasi`.** Unchanged: `_start`, run-to-completion, deadlock abort.
 - **Multi-argument and non-void-return callbacks.** The queue entry is
@@ -803,7 +803,7 @@ than in this repository.
   regular interface and discarded. Separate concern.
 - **Threads.** `wasm32-web` remains single-threaded. No SharedArrayBuffer, no
   cross-origin isolation requirement.
-- **Software preemption on `wasm32-web`.** See §6 for why the browser's ownership
+- **Software preemption on `wasm32-web`.** See [Preemption on WASM](#preemption-on-wasm) for why the browser's ownership
   of the thread makes this a separate problem; nothing here forecloses it.
-- **Out-of-repo CI plumbing.** §17 covers testing the primitive in this repo; the
+- **Out-of-repo CI plumbing.** [Testing the execution model](#testing-the-execution-model) covers testing the primitive in this repo; the
   browser-integration pipeline itself lives elsewhere.

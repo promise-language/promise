@@ -149,7 +149,7 @@ test_global_getter_heap_result() `test {
 // the direct path anyway and prove nothing.
 //
 // Note what is deliberately NOT asserted: calling a `factory or `mono member
-// THROUGH the subtype (`Kid.make(...)`). §5.7 of docs/language-design.md says
+// THROUGH the subtype (`Kid.make(...)`). language-design.md#constructors of docs/language-design.md says
 // those are not inherited — `Self` binds to the declaring type, so `Kid.make`
 // would name Kid while producing a Base — and rejecting it is T1753. Only the
 // `global members, which the same section says ARE inherited, are exercised
@@ -286,7 +286,7 @@ test_t1749_global_setter_on_parent() `test {
 
 test_t1749_global_setter_through_child() `test {
   // The setter's mangled name must resolve to the OWNER (Base), not to the type
-  // name written at the call site: `global members ARE inherited (§5.7), so
+  // name written at the call site: `global members ARE inherited (language-design.md#constructors), so
   // writing through the child used to look up an undeclared `Kid.tag$set`.
   Kid.tag = "abc";
 }
@@ -429,7 +429,7 @@ test_t1749_global_on_structural_interface() `test {
 }
 
 // --- T1749: abstract `factory on a structural interface, concrete has a subtype ---
-// The generic-factory pattern of §5.4: `T.parse(data)` is monomorphized to a
+// The generic-factory pattern of language-design.md#inheritance: `T.parse(data)` is monomorphized to a
 // direct call, and the interface's abstract factory no longer holds a view-vtable
 // slot ahead of the real virtual methods.
 

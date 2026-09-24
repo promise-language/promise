@@ -16,7 +16,7 @@
 // to catch is precisely children choosing their own PROMISE_HOME. A ledger
 // inside a home therefore cannot see it: three private homes write three
 // ledgers nobody reads. The only anchor every one of those processes shares,
-// without an environment variable (docs/org/cli-guide.md §2: a tool reads no
+// without an environment variable (docs/org/cli-guide.md#every-input-is-an-explicit-argument: a tool reads no
 // environment variable to decide what it does), is the compiler binary they all
 // are — so the ledger sits beside it, next to the bin/.promise.hash sidecar
 // bin/build already writes. In a worktree that is bin/.promise-cas.jsonl, which

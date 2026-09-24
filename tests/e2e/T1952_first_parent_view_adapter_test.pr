@@ -3,7 +3,7 @@
 // vtable.
 //
 // `std.Closer` requires `close!(~this)`. A non-failable `close(~this)` is a
-// documented relaxed match (docs/language-design.md §5.3), so the concrete's own
+// documented relaxed match (docs/language-design.md#variable-declarations), so the concrete's own
 // vtable slot holds a `void (i8*)*` while the Closer call site bitcasts to
 // `{ i1, i8* } (i8*)*` and reads an error flag the callee never wrote. Whether
 // that crashed depended on what happened to be in the result register, which is

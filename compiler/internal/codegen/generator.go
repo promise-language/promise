@@ -92,7 +92,7 @@ func (c *Compiler) promoteGeneratorToFailable(genVal value.Value) value.Value {
 // isGeneratorFactoryCallExpr first.
 //
 // The premise expires the day a function may return a structural `Stream[T]`
-// VIEW — which docs/language-design.md §12 arguably already asks for and sema
+// VIEW — which docs/language-design.md#streams-ranges-and-generators arguably already asks for and sema
 // today rejects (T1992). At that point this must stop testing the type and start
 // asking whether the callee is a generator (sema's Info.GeneratorFuncs); leaving
 // it as a type test would silently stop tracking such a view and leak it.

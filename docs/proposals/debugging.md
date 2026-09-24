@@ -1,6 +1,6 @@
 # Source-Level Debugging — Design Proposal
 
-## 1. Problem
+## Problem
 
 Promise currently emits LLVM IR with no debug metadata. When a compiled binary is loaded in `lldb` or `gdb`, the debugger sees only raw assembly — no source file names, no line numbers, no variable names, no type information. This makes interactive debugging impossible: you cannot set breakpoints by line, inspect local variables by name, or step through Promise source code.
 
@@ -8,7 +8,7 @@ The infrastructure for source positions already exists — every AST node carrie
 
 ---
 
-## 2. Background: How LLVM Debug Info Works
+## How LLVM Debug Info Works
 
 LLVM uses metadata nodes to carry debug information through the optimization pipeline. The key constructs:
 
@@ -24,7 +24,7 @@ When `opt` runs with debug info present, it preserves `!dbg` attachments through
 
 ---
 
-## 3. Constraint: `llir/llvm` Library
+## The library constraint
 
 The compiler uses `github.com/llir/llvm v0.3.6`, a pure-Go LLVM IR library. This library:
 
@@ -38,9 +38,9 @@ However, it does **not** have high-level debug info builder APIs (no `DIBuilder`
 
 ---
 
-## 4. Phased Implementation Plan
+## Phased Implementation Plan
 
-### Phase 1 — Line-Level Debug Info (High Impact, Medium Effort)
+### Phase 1 Line Level Debug Info
 
 **Goal**: Breakpoints by file:line work in lldb/gdb. Stack traces show Promise source locations.
 
@@ -92,7 +92,7 @@ lldb main
 (lldb) bt   # shows Promise source locations in backtrace
 ```
 
-### Phase 2 — Variable Debug Info (Medium Impact, Medium Effort)
+### Phase 2 Variable Debug Info
 
 **Goal**: `lldb` shows local variable names and values when stopped at a breakpoint.
 
@@ -126,7 +126,7 @@ lldb main
 (f64) pi = 3.14159
 ```
 
-### Phase 3 — Rich Type Descriptions (Lower Impact, Higher Effort)
+### Phase 3 Rich Type Descriptions
 
 **Goal**: Debugger understands Promise's composite types — structs, enums, arrays.
 
@@ -165,7 +165,7 @@ lldb main
 (int) 100
 ```
 
-### Phase 4 — Debugger Integration (Lower Priority)
+### Phase 4 Debugger Integration
 
 **Goal**: Quality-of-life improvements for the debugging experience.
 
@@ -191,9 +191,9 @@ lldb main
 
 ---
 
-## 5. Implementation Details
+## Implementation Details
 
-### 5.1 Compiler Context Additions
+### Compiler Context Additions
 
 ```go
 // In compiler struct (codegen/compiler.go)
@@ -215,7 +215,7 @@ type debugInfoBuilder struct {
 }
 ```
 
-### 5.2 Location Tracking in Codegen
+### Location Tracking in Codegen
 
 The key change is threading source positions through code generation:
 
@@ -242,7 +242,7 @@ if c.debugInfo != nil {
 }
 ```
 
-### 5.3 IR Post-Processing Approach
+### IR Post Processing Approach
 
 If direct metadata attachment via `llir/llvm` is too complex, the fallback is text-based injection:
 
@@ -256,7 +256,7 @@ If direct metadata attachment via `llir/llvm` is too complex, the fallback is te
 
 This approach has the advantage of being entirely decoupled from the IR library — it's a pure text transformation that can be tested independently.
 
-### 5.4 Build Flag Integration
+### Build Flag Integration
 
 ```
 promise build --debug main.pr          # debug build
@@ -271,14 +271,14 @@ The `--debug` flag:
 - Skips any stripping in the link step
 - Sets `DWARF_VERSION=5` metadata in the compile unit (DWARF5 is well-supported by modern lldb/gdb)
 
-### 5.5 Impact on Caching
+### Impact on Caching
 
 Debug builds should use a separate cache partition:
 - Cache key includes whether `--debug` is set
 - Debug `.bc` files are not mixed with release `.bc` files
 - This is a simple boolean addition to `BuildCacheKey()`
 
-### 5.6 Impact on Binary Size
+### Impact on Binary Size
 
 Debug info significantly increases binary size (typically 2-5x). This is expected and acceptable:
 - Debug builds are for development, not distribution
@@ -287,9 +287,9 @@ Debug info significantly increases binary size (typically 2-5x). This is expecte
 
 ---
 
-## 6. Testing Strategy
+## Testing Strategy
 
-### Unit Tests (Go)
+### Unit Tests
 
 - **IR shape tests**: Verify that `--debug` mode emits `!dbg` metadata on instructions, `!DISubprogram` for functions, `!DICompileUnit` at module level
 - **Location accuracy**: Verify that function declaration lines match AST positions
@@ -308,7 +308,7 @@ Debug info significantly increases binary size (typically 2-5x). This is expecte
 
 ---
 
-## 7. Priorities and Dependencies
+## Priorities and Dependencies
 
 | Phase | Effort | Impact | Dependencies |
 |-------|--------|--------|-------------|
@@ -321,7 +321,7 @@ Debug info significantly increases binary size (typically 2-5x). This is expecte
 
 ---
 
-## 8. Open Questions
+## Open Questions
 
 1. **Language ID**: Should Promise register a custom DWARF language ID (`DW_LANG_lo_user + N`), or reuse `DW_LANG_C99`? The latter works out of the box with all debuggers; the former is more correct but requires debugger configuration.
 

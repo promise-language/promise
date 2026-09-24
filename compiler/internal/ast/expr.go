@@ -33,7 +33,7 @@ type Arg struct {
 	nodeBase
 	Name  string // "" for positional
 	Value Expr
-	Move  bool // true if written `move <expr>` — consumes a named binding (§6.2)
+	Move  bool // true if written `move <expr>` — consumes a named binding (language-design.md#borrowing-and-moving)
 }
 
 // IndexExpr represents an index expression: target[index] or
@@ -196,7 +196,7 @@ type MatchArm struct {
 }
 
 // GoExpr represents a go expression: go expr or go { block }.
-// Failable is true for the `go!` form (§17.2.1): the spawned goroutine is a
+// Failable is true for the `go!` form (language-design.md#failable-goroutines): the spawned goroutine is a
 // failable scope whose escaping error is captured into a failable_task[T].
 type GoExpr struct {
 	nodeBase

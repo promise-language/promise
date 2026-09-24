@@ -16,7 +16,7 @@ An AI agent working with a Promise codebase needs to answer: *"What does this mo
 4. **No duplication** — doc strings live in source only; tooling extracts, never copies
 5. **Structured enough to parse, readable enough for humans** — markdown with consistent heading hierarchy
 
-## The `promise doc` Command
+## The doc Command
 
 ### Basic Usage
 
@@ -258,24 +258,26 @@ The output of `promise doc -public server.pr`:
 21. **Inherited `drop` shown on child types** — a child of a droppable parent lists the inherited `drop` even though it does not declare one. Droppability is what an agent reasons about ownership with, and it is not visible from the child's own declaration.
 22. **Structural interface methods ignore the `public` filter** — the methods a structural interface requires are always shown, in `-public` mode too, because they *are* the contract a type must satisfy. Hiding them would leave an agent unable to tell what implementing the interface requires.
 
-### Directory/Module Output
+### Directory and Module Output
 
-When documenting a directory, each file becomes a top-level section. Files are sorted alphabetically. An index appears at the top listing every exported type, enum, and function — so an agent can scan the index and jump to what it needs:
+When documenting a directory, each file becomes a top-level section. Files are sorted alphabetically. An index appears at the top listing every exported type, enum, and function, each entry linking to that file's section — so an agent can scan the index and jump to what it needs:
 
-    # networking
+```markdown
+# networking
 
-    ## Index
+## Index
 
-    - [client.pr](#clientpr) — HttpClient, Response
-    - [server.pr](#serverpr) — HttpServer, Router, Middleware
-    - [types.pr](#typespr) — HttpMethod, StatusCode, Header
+- client.pr — HttpClient, Response
+- server.pr — HttpServer, Router, Middleware
+- types.pr — HttpMethod, StatusCode, Header
 
-    ---
+---
 
-    ## client.pr
+## client.pr
 
-    ### HttpClient is Resource
-    ...
+### HttpClient is Resource
+...
+```
 
 ### Flags
 
@@ -289,7 +291,7 @@ When documenting a directory, each file becomes a top-level section. Files are s
 
 ## Compiler Support
 
-### 1. Parameter Documentation
+### Parameter Documentation
 
 The grammar already allows `doc()` on parameters in the AST. The semantic layer needs to propagate this.
 
@@ -312,11 +314,11 @@ func (p *Param) SetDoc(s string)   { p.doc = s }
 
 This is a small change — `ast.Param` already supports annotations and `extractDoc()` already exists.
 
-### 2. Default Value Expressions
+### Default Value Expressions
 
 The doc tool reads defaults from `sema.Info.ParamDefaults` and `sema.Info.FieldDefaults`, formatting the `ast.Expr` via an `exprToString()` helper that covers literals, identifiers, and unary expressions.
 
-### 3. Enum Variant Documentation
+### Enum Variant Documentation
 
 Previously `enumVariant` in the grammar did not support meta annotations:
 
@@ -345,7 +347,7 @@ func (v *Variant) SetDoc(s string) { v.doc = s }
 
 **Propagate in sema** (`sema/decl.go`): during `defineEnum`, extract `doc()` from variant annotations.
 
-### 4. The `doc` Subcommand
+### The doc Subcommand
 
 Implemented in `cmd/promise/doc.go`. Also added `sema.DeclareAndDefine()` / `sema.DeclareAndDefineWithModules()` in `sema/check.go` — runs passes 1+2 only (Declare + Define + validateConstructors), skipping Check/Verify/Ownership.
 
@@ -399,7 +401,7 @@ Documenting `std/*.pr` with `doc()` is the **highest-impact item** in this propo
 8. **Numeric types** (`int.pr`, `uint.pr`, `float.pr`) — operators, range (`..`, `..=`), `hash`
 9. **Other** — `iter.pr` (Iterator, Stream), `range.pr`, `task.pr`, `math.pr`, `format.pr`, `bool.pr`, `char.pr`
 
-### Example: What `promise doc -std` Would Show for Vector
+### Example output for Vector
 
     ### Vector[T]
 
@@ -435,9 +437,9 @@ Documenting `std/*.pr` with `doc()` is the **highest-impact item** in this propo
 
     ...
 
-## Agent-Optimized Features
+## Agent Optimized Features
 
-### 1. Signature-Only Mode (`-signatures`)
+### Signature Only Mode
 
 For agents that already understand Promise and just need to know what's available:
 
@@ -464,7 +466,7 @@ Output:
 
 Minimal tokens. Maximum information density. An agent can consume this, understand the API surface, and start generating code immediately.
 
-### 2. Inline Type Expansion (`-expand`)
+### Inline Type Expansion
 
 When documenting a symbol, expand the types it references within the same module so the agent gets the full picture without follow-up lookups:
 
@@ -474,7 +476,7 @@ promise doc -expand HttpClient.get server.pr
 
 Shows the `get` method signature AND the `Response` type it returns. The symbol must be qualified (`Type.method` or `functionName`) to avoid ambiguity.
 
-### 3. Structured Query (`-query`)
+### Structured Query
 
 Beyond text search, agents benefit from querying the type system:
 
@@ -494,7 +496,7 @@ promise doc -query "retry" ./...
 
 This is more useful than raw `grep` because it searches structured semantic data, not source text. An agent asking "which types do I need to be careful with ownership?" can query `has:drop` instead of grepping for `drop(~this)` and hoping the formatting matches.
 
-### 4. Lint Integration
+### Lint Integration
 
 ```bash
 promise doc -lint ./...
@@ -510,7 +512,7 @@ This helps maintain documentation quality. Output is one-line-per-issue, grep-fr
     server.pr:12: HttpClient.post: public method missing `doc()
     server.pr:45: retryWithBackoff: doc mentions "timeout" but no such parameter exists
 
-## Non-Goals
+## Non Goals
 
 - **Doc comments (`///` or `/** */`)** — Promise uses meta annotations, not comments. Comments are for humans reading source; `doc()` is for tooling. Annotations are part of the AST, guaranteed to be preserved, and visible to the compiler. Comments are stripped during lexing.
 - **Doc tests** — Promise already has `` `test `` and `` `test(expected: ...) ``. Mixing test code into doc strings adds complexity without clear benefit.

@@ -21,7 +21,7 @@ type cmdNode struct {
 }
 
 // groupOrder is the deterministic order groups are rendered in the index. It
-// mirrors docs/language-design.md §2.
+// mirrors docs/language-design.md#toolchain-architecture.
 var groupOrder = []string{
 	"Compile & run",
 	"Documentation & discovery",
@@ -32,10 +32,10 @@ var groupOrder = []string{
 }
 
 // commandTree is the registry of every top-level command (and its
-// subcommands). Order within a group follows docs/language-design.md §2.
+// subcommands). Order within a group follows docs/language-design.md#toolchain-architecture.
 // Removed verbs (fetch/warm/gc) and deprecated aliases are registered as
 // `hidden` so routing and the coverage test still see them, but the index does
-// not advertise them (§5).
+// not advertise them (language-design.md#type-system).
 var commandTree = []*cmdNode{
 	// Compile & run
 	{name: "build", group: "Compile & run", summary: "Compile a Promise source file or project to an executable"},
@@ -91,7 +91,7 @@ var commandTree = []*cmdNode{
 	// Hidden — registered for routing/coverage but omitted from the index.
 	// fetch/warm now dispatch a removal notice (folded into install; T1008) and
 	// gc likewise (removed; T1009) — both stay routable for muscle-memory
-	// redirects (§5).
+	// redirects (language-design.md#type-system).
 	{name: "fetch", hidden: true, summary: "(removed — folded into install; T1008)"},
 	{name: "warm", hidden: true, summary: "(removed — folded into install; T1008)"},
 	{name: "gc", hidden: true, summary: "(removed — cache reclamation is automatic; see doctor --repair; T1009)"},
@@ -116,7 +116,7 @@ func indexNameWidth() int {
 }
 
 // printIndex writes the concise, grouped command index to w (the naked-`promise`
-// and root-`--help` output). Hidden nodes are omitted (§5).
+// and root-`--help` output). Hidden nodes are omitted (language-design.md#type-system).
 func printIndex(w io.Writer) {
 	fmt.Fprintln(w, "Promise — statically-typed language with Go-like concurrency and Rust-like ownership.")
 	fmt.Fprintln(w)

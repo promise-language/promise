@@ -10,7 +10,7 @@ import (
 // CompatVerdict records the outcome of verifying one (url, commit, epoch) tuple:
 // whether that commit compiled and passed 100% of its " `test " functions under
 // the given epoch. It is the local, ad-hoc analog of the community catalog's
-// per-epoch compatibility index (§9.9) — never published anywhere central.
+// per-epoch compatibility index (module-system.md#compatibility-and-the-community-catalog) — never published anywhere central.
 type CompatVerdict struct {
 	URL          string `json:"url"`
 	Subdir       string `json:"subdir,omitempty"` // module subdirectory within the repo, if any

@@ -855,7 +855,7 @@ func detailsContain(details []string, sub string) bool {
 	return false
 }
 
-// The §4.4 over-deletion fail-safe must survive the move under doctor --repair
+// The language-design.md#visibility over-deletion fail-safe must survive the move under doctor --repair
 // (T1009): when an installed epoch's blobs.refs is unreadable, LiveSet reports
 // allRefsReadable=false and the sweep must keep EVERY blob — including one that
 // no readable epoch references — rather than wedge that epoch's offline build.

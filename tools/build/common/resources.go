@@ -201,7 +201,7 @@ const openSSLPlaceholderName = "PLACEHOLDER"
 // directive still resolves and moves on. TLS links, once they exist, resolve
 // OpenSSL from the content-addressed store / on-demand fetch instead.
 //
-// When the thin/full release split lands (docs/distribution.md §1, §4) the embed
+// When the thin/full release split lands (docs/distribution.md#design, distribution.md#the-dependency-store) the embed
 // decision becomes a release-flavour knob (full = embed, thin = fetch-on-demand)
 // rather than always-embed; until then this defaults to embedding, matching
 // today's `--release` == "full".

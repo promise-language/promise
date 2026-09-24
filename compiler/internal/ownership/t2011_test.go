@@ -205,7 +205,7 @@ func TestT2011BorrowedRefLocalCaptureStillRejected(t *testing.T) {
 
 // === Accepted ===
 
-// A Copy capture is a copy (language-design §6.2): capturing it into two
+// A Copy capture is a copy (language-design language-design.md#borrowing-and-moving): capturing it into two
 // `move` lambdas and reading it afterwards are all fine.
 func TestT2011CopyCapturedTwiceThenReadOK(t *testing.T) {
 	ownerOK(t, `

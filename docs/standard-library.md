@@ -13,16 +13,16 @@ Promise's standard library design: module inventory, implementation phases, PAL 
 
 ## Table of Contents
 
-1. [Module Inventory](#1-module-inventory)
-2. [Language Features the Stdlib Depends On](#2-language-features-the-stdlib-depends-on)
-3. [PAL Extensions](#3-pal-extensions)
-4. [Module Design by Phase](#4-module-design-by-phase)
-5. [Implementation Details](#5-implementation-details)
-6. [Testing Strategy](#6-testing-strategy)
+1. [Module Inventory](#module-inventory)
+2. [Language Features the Stdlib Depends On](#language-features-the-stdlib-depends-on)
+3. [PAL Extensions](#pal-extensions)
+4. [Module Design by Phase](#module-design-by-phase)
+5. [Implementation Details](#implementation-details)
+6. [Testing Strategy](#testing-strategy)
 
 ---
 
-## 1. Module Inventory
+## Module Inventory
 
 The stdlib provides:
 
@@ -66,9 +66,9 @@ The stdlib provides:
 | `encoding` | `modules/encoding/hex.pr`, `error.pr` | 53 | hex — `hex_encode(u8[]) string`, `hex_decode!(string) u8[]` (upper/lower case, raises on odd length or non-hex digit), `EncodingError` with `at_index`. base64/base64url tracked as T1569. 17 tests. |
 | `gzip` | `modules/gzip/` | 956 | RFC 1951 (DEFLATE) and RFC 1952 (gzip) in pure Promise: `gzip_encode`, `gunzip!`, `gunzip_from!(Reader)`, `deflate`, `inflate!`, `crc32`, `GzipWriter` (satisfies `Writer`), `GunzipReader` (satisfies `Reader`), `DecompressError`. 90 tests. |
 | `crypto` | `modules/crypto/` | 258 | SHA-256 — `sha256.pr`: `Sha256` streaming context (`update`/`finalize`), `Digest256` (`to_string` hex, `to_bytes`, `^`, `==`, `hash`), one-shot `sha256(u8[]) Digest256`; `constant_time.pr`: `constant_time_equal(u8[], u8[]) bool`; `random.pr`: `random_bytes!(int) u8[]` (CSPRNG via OS syscall — T1571), `CryptoError`. HMAC-SHA-256 (T1567) and PBKDF2 (T1568) remain to be built. 32 tests. |
-### Protocol Conformance Is Declared, Not Inferred
+### Protocol Conformance Is Declared and Not Inferred
 
-The structural interfaces the platform publishes — `Format`, `Parse`, `Reader`, `Writer`, `Closer`, `Encodable`, `Decodable`, `Cloneable`, `Hashable`, `Equal`, `Ordered`, `Iterator` — carry `` `structural(protocol: true) ``, which reserves their requirement names (see §5.4 of `docs/language-design.md`). Two rules follow for every type in `modules/std/` and the catalog:
+The structural interfaces the platform publishes — `Format`, `Parse`, `Reader`, `Writer`, `Closer`, `Encodable`, `Decodable`, `Cloneable`, `Hashable`, `Equal`, `Ordered`, `Iterator` — carry `` `structural(protocol: true) ``, which reserves their requirement names (see [Inheritance](language-design.md#inheritance) of `docs/language-design.md`). Two rules follow for every type in `modules/std/` and the catalog:
 
 1. **Every implementation declares `is` explicitly.** `type Duration is Format, Parse { ... }`, never a silent structural match. The `is` clause costs nothing at runtime — for a value type it does not even change the layout — and it converts a signature that drifts from a type that quietly stops satisfying anything into an error naming the exact method.
 2. **A method that borrows a reserved name without implementing the protocol says so.** `` `structural(protocol: false) `` on that method, with a comment explaining why the name means something else here. `Channel.close()` is the worked example: channels are refcounted, so closing one is not a consuming operation and `Channel` is deliberately not a `Closer`.
@@ -77,7 +77,7 @@ Relying on structural satisfaction is still correct for user code composing with
 
 **Exceptions.** Three sets of platform types satisfy a protocol but cannot say so yet. The first is a language rule; the other two are compiler limitations with tracker items, not a judgement that the conformance is unwanted — when an item closes, the clause goes in and its bullet comes out.
 
-- **Enums cannot declare `is` at all** (grammar). `json.JsonValue` therefore conforms to `Format` by signature only; the near-miss check accepts it via the explained-name gate. This is the one exception that is a language rule rather than a defect — see §5.4 of `docs/language-design.md`.
+- **Enums cannot declare `is` at all** (grammar). `json.JsonValue` therefore conforms to `Format` by signature only; the near-miss check accepts it via the explained-name gate. This is the one exception that is a language rule rather than a defect — see [Inheritance](language-design.md#inheritance) of `docs/language-design.md`.
 - **`Reader` / `Writer` on non-generic heap I/O types** — `io.File`, `io.BufferedReader`, `io.BufferedWriter`, `gzip.GunzipReader`, `gzip.GzipWriter`, `net.TcpStream`, `tls.TlsStream`, `os.ProcessInput`, `os.ProcessOutput`, `http._PlainTransport`, `http._TlsTransport` — is **T1882**.
 - **`Builder` cannot declare `is Writer` and `Scanner` cannot declare `is Reader`** — both implement the requirement non-failably, which an explicit `is` rejects on an interface carrying default methods — **T1933**.
 
@@ -120,9 +120,9 @@ Types without sugar are always PascalCase: `Iterator[T]`, `Stream[T]`, `Writer`,
 
 ---
 
-## 2. Language Features the Stdlib Depends On
+## Language Features the Stdlib Depends On
 
-### 2.1 Error Type System
+### Error Type System
 
 Fully implemented with inheritance-based error types, typed handlers, and exhaustiveness checking.
 
@@ -158,7 +158,7 @@ type TimeoutError is DbError is AppError is error { }
 - Error types cannot have `drop` methods (enforced in decl.go)
 - 22+ Go unit tests in `sema_test.go`, 5 e2e test files covering construction, inheritance chains, typed handlers, nested handlers, and generic errors
 
-### 2.2 Stream/Iterator Combinators
+### Stream and Iterator Combinators
 
 Fully implemented with structural interfaces, duck-typed for-in, all combinators (lazy intermediate + eager terminal), and generic combinators (map[R], fold[R], zip[U], enumerate, flat_map[R]).
 
@@ -173,7 +173,7 @@ Fully implemented with structural interfaces, duck-typed for-in, all combinators
 - All combinators: `filter`, `take`, `skip`, `take_while`, `skip_while`, `chain`, `map[R]`, `zip[U]`, `enumerate`, `flat_map[R]` (lazy), `collect`, `count`, `fold[R]`, `reduce`, `any`, `every`, `first`, `last`, `find`, `for_each` (eager)
 - Tests: 104 e2e tests in `tests/std/iter_test.pr`, 9 sema tests, 6 codegen tests
 
-### 2.3 Numeric Type Conversions
+### Numeric Type Conversions
 
 | Aspect | Detail |
 |--------|--------|
@@ -188,7 +188,7 @@ Fully implemented with structural interfaces, duck-typed for-in, all combinators
 
 **Key codegen detail**: `int → bool` uses `icmp ne val, 0` (not `trunc`, which would give wrong result for even numbers like 2). `float → bool` uses `fcmp one val, 0.0`. Tests: 32 e2e tests in `tests/e2e/scalar_casts_test.pr`, 9 sema tests, 6 codegen tests.
 
-### 2.4 Format & Writer for String Interpolation
+### Format and Writer for String Interpolation
 
 | Aspect | Detail |
 |--------|--------|
@@ -259,7 +259,7 @@ p := Point(x: 3, y: 4);
 print_line("point: {p}");   // point: (3, 4)
 ```
 
-### 2.5 Parse & Reader — Structural Interface on Factory Methods
+### Parse and Reader on Factory Methods
 
 | Aspect | Details |
 |--------|---------|
@@ -421,11 +421,11 @@ x := s.next![int]();
 
 ---
 
-## 3. PAL Extensions
+## PAL Extensions
 
 The PAL (Platform Abstraction Layer) isolates all OS interaction. Currently 47 methods covering memory (5), threads/sync (11), CPU count (1), file I/O (12), OS/environment (5), process execution (5: spawn, read_pipe, wait_pid, spawn_streaming, kill), OS info (3: get_environ, get_user_info, get_hostname), signal handling (2: signal_init, signal_register), and directory listing (3). New methods needed:
 
-### 3.1 File I/O
+### PAL File IO
 
 12 PAL methods implemented in `codegen/pal/` across POSIX, Windows, and WASM:
 
@@ -446,7 +446,7 @@ EmitErrno(module *ir.Module) *ir.Func         // → i32 (thread-local errno)
 
 `EmitFileOpen` takes a mode enum (0=rw, 1=ro, 2=create-trunc, 3=append) mapped to platform O_* flags internally. `EmitFileStatSize` uses open+lseek(SEEK_END)+close to avoid `struct stat` layout portability issues. POSIX uses libc wrappers; Windows uses UCRT (`_open`, `_read`, etc.) with `_O_BINARY`; WASM stubs return error.
 
-### 3.2 OS / Environment
+### PAL OS and Environment
 
 5 PAL methods:
 
@@ -460,9 +460,9 @@ EmitChdir(module *ir.Module) *ir.Func       // i8* path → i32 (0 or -1)
 
 Command-line arguments: captured in `main()` prologue from `argc`/`argv` and stored in a global `string[]`. Exposed via `os.args` (module-level getter).
 
-Source directory: no PAL extension needed. `os.src_dir` is a compile-time constant baked into the binary by codegen (the directory `` `embed `` paths resolve against), so it costs no syscall and is `none` for a program with no source directory — see [platform-modules.md](platform-modules.md) §8.
+Source directory: no PAL extension needed. `os.src_dir` is a compile-time constant baked into the binary by codegen (the directory `` `embed `` paths resolve against), so it costs no syscall and is `none` for a program with no source directory — see [platform-modules.md](platform-modules.md), under [Operating System Interface](platform-modules.md#operating-system-interface).
 
-### 3.3 Time
+### PAL Time
 
 ```go
 EmitNanotime(module *ir.Module) *ir.Func    // void → i64 (monotonic nanoseconds)
@@ -472,7 +472,7 @@ EmitSleep(module *ir.Module) *ir.Func       // i64 nanoseconds → void
 
 Note: `promise_nanotime` already exists as a hardcoded function in `io.go:defineNanotimeFunc()` using `clock_gettime(CLOCK_MONOTONIC)`. This should be migrated to a proper PAL method for portability. `EmitWallClock` uses `CLOCK_REALTIME`. `EmitSleep` uses `nanosleep(2)`.
 
-### 3.4 Process Execution
+### PAL Process Execution
 
 5 PAL methods (3 original for one-shot execute, 2 new for streaming):
 
@@ -493,7 +493,7 @@ EmitKill(module *ir.Module) *ir.Func          // i32 pid, i32 signal → i32 (0 
 
 `Process.spawn()` creates stdin+stdout+stderr pipes. Pipe handles are obtained via `take_stdin()` (returns `ProcessInput`, satisfies `Writer`), `take_stdout()`/`take_stderr()` (returns `ProcessOutput`, satisfies `Reader`). The streaming pipe read/write/close bridges reuse existing `pal_file_read`/`pal_file_write`/`pal_file_close` PAL functions (pipes are just fds).
 
-### 3.5 Math (No PAL Needed)
+### Math needs no PAL
 
 Math functions use LLVM intrinsics directly — no PAL extension required:
 
@@ -515,14 +515,14 @@ declare double @llvm.maxnum.f64(double, double)
 
 These are pure computational intrinsics that map directly to hardware instructions. Declared in codegen, wrapped by Promise functions in `modules/std/math.pr`.
 
-### 3.6 String Utilities
+### PAL String Utilities
 
 ```go
 EmitMemcmp(module *ir.Module) *ir.Func      // Already available via libc
 EmitMemcpy(module *ir.Module) *ir.Func      // i8* dst, i8* src, i64 len → void
 ```
 
-### 3.7 PAL Summary
+### PAL Summary
 
 | Category | New Methods | POSIX Backing |
 |----------|-------------|---------------|
@@ -539,9 +539,9 @@ EmitMemcpy(module *ir.Module) *ir.Func      // i8* dst, i8* src, i64 len → voi
 
 ---
 
-## 4. Module Design by Phase
+## Module Design by Phase
 
-### Phase 0: Language Prerequisites
+### Phase 0 Language Prerequisites
 
 Complete the features from Section 2 before building stdlib modules.
 
@@ -581,11 +581,11 @@ Complete the features from Section 2 before building stdlib modules.
 
 ---
 
-### Phase 1: Pure Promise Modules (No New PAL)
+### Phase 1 Pure Promise Modules
 
 These modules are implemented entirely in Promise, using only existing native operations.
 
-#### 1a. `modules/std/set.pr` — Set[T]
+#### Phase 1a the set module
 
 ```promise
 type Set[T: Hashable + Equal] {
@@ -618,7 +618,7 @@ type Set[T: Hashable + Equal] {
 - **Implementation**: Wrapper around `map[T, bool]`
 - **Test**: `tests/std/set_test.pr` (13 tests)
 
-#### 1b. `modules/std/sort.pr` — Sorting
+#### Phase 1b the sort module
 
 ```promise
 // Sort a vector in place and return it (consumes its argument): v = sort(move v)
@@ -642,14 +642,14 @@ binary_search[T: Ordered](T[] &vec, T target) int?;
 - **Implementation**: Introsort (quicksort + heapsort fallback + insertion sort for small partitions). Pure Promise.
 - **Test**: `tests/std/sort_test.pr` (10 tests)
 
-#### 1c. String Utilities (split across `std/string.pr` + `modules/strings/`)
+#### Phase 1c String Utilities
 
 String methods (`to_upper`, `to_lower`, `repeat`, `replace`, `count`, `chars`) were added directly to `modules/std/string.pr` rather than creating a separate `string_util.pr` file. Free functions (`join`, `spaces`, `reverse`, `is_blank`, `repeat_join`) live in the `strings` catalog module (`modules/strings/strings.pr`).
 
 - **Files**: `modules/std/string.pr` (methods), `modules/strings/strings.pr` (free functions)
 - **Test**: `tests/std/string_test.pr`, `modules/strings/strings_test.pr`
 
-#### 1d. `modules/std/result.pr` — Result Utilities — DEFERRED
+#### Phase 1d Result Utilities
 
 Failable types (`T!`) in Promise are a function-level concept — they cannot be used as parameter or variable types. The planned `unwrap_or[T](T! value, T default_val)` and `is_error[T](T! value)` are not expressible. Promise's built-in error handling syntax already covers these use cases concisely:
 - `unwrap_or` → `failable_call() ? e { default_val }`
@@ -659,9 +659,9 @@ No `modules/std/result.pr` is needed.
 
 ---
 
-### Phase 2: Conversion & Formatting
+### Phase 2 Conversion and Formatting
 
-#### 2a. Numeric Formatting & Parsing
+#### Phase 2a Numeric Formatting and Parsing
 
 - `to_string()` on all primitives (int, i8-i64, uint, u8-u64, f32, f64, bool, char, string) — uses `"{this}"` string interpolation, zero native codegen needed
 - `format!(Writer ~w) ` on all primitives — delegates to `w.write_string(this.to_string())` (string uses `w.write_string(this)`)
@@ -678,7 +678,7 @@ No `modules/std/result.pr` is needed.
 - **Files**: `modules/std/int.pr`, `modules/std/uint.pr`, `modules/std/float.pr`, `modules/std/bool.pr`, `modules/std/char.pr`, `modules/std/string.pr`
 - **Test**: `tests/std/to_string_test.pr`, `tests/std/parse_test.pr`, `tests/std/format_test.pr`
 
-#### 2b. `modules/std/builder.pr` — Builder
+#### Phase 2b the builder module
 
 ```promise
 type Builder `public {
@@ -697,15 +697,15 @@ type Builder `public {
 - **Implementation**: Wraps a `Vector[u8]`. `write()` and `write_string()` push bytes individually. `to_string()` calls `string.from_bytes()` which reads Vector[u8] data+count and calls `promise_string_new`. `write_char` not yet implemented.
 - **Test**: `tests/std/builder_test.pr` (9 tests)
 
-#### 2c. `modules/std/fmt.pr` — Runtime Template Formatting — DEFERRED
+#### Phase 2c Runtime Template Formatting
 
 Runtime template formatting (`fmt1`-`fmt6`) is deferred. String interpolation (`"{x} is {age} years old"`) covers the vast majority of formatting needs at compile time. Runtime template formatting, if needed, belongs in a catalog module (`modules/templates/`) rather than `modules/std/`, since it is not a core primitive.
 
 ---
 
-### Phase 3: Math & Time
+### Phase 3 Math and Time
 
-#### 3a. `modules/std/math.pr` — Extended Math (LLVM Intrinsics)
+#### Phase 3a the math module
 
 ```promise
 // Extend existing std/math.pr which has: min, max, abs, clamp (int only)
@@ -760,7 +760,7 @@ is_finite(f64 x) bool;
 
 Additionally, the `math` catalog module (`modules/math/math.pr`, 67 lines) provides higher-level pure-Promise helpers: `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. Tests: `modules/math/math_test.pr` (26 tests).
 
-#### 3b. `modules/std/random.pr` — Pseudorandom Numbers
+#### Phase 3b the random module
 
 ```promise
 type Random {
@@ -788,7 +788,7 @@ type Random {
 - **Implementation**: Pure Promise. xoshiro256** state is 4 `uint` fields. Seed expansion via splitmix64. Float conversion: mask top bits, OR into exponent, subtract 1.0.
 - **Test**: `tests/std/random_test.pr` (7 tests)
 
-#### 3c. `modules/std/time.pr` — Duration & Instant
+#### Phase 3c the time module
 
 - `Duration` — pure value type (`int nanos `value`). Factory constructors: `from_nanos`, `from_micros`, `from_millis`, `from_secs`, `zero`. Getters: `as_nanos`, `as_micros`, `as_millis`, `as_secs`. Arithmetic: `+`, `-`, `*`. Full comparison operators. `to_string()` with adaptive units (ns/us/ms/s). `format!(Writer ~w) `.
 - `Instant` — pure value type. `now()` factory (calls `_nanotime` extern). `elapsed()`, `duration_since()`. Comparison operators.
@@ -799,9 +799,9 @@ type Random {
 
 ---
 
-### Phase 4: System I/O
+### Phase 4 System IO
 
-#### 4a. `modules/std/io.pr` — Extended I/O (Closer Interface, Utilities)
+#### Phase 4a the std io module
 
 - `Closer` — structural interface with `close!(~this) ` abstract method. Any type with a matching `close` method satisfies it.
 - `write_line!(Writer ~w, string s) ` — convenience function, writes string + newline.
@@ -809,7 +809,7 @@ type Random {
 - **File**: `modules/std/io.pr` (extended)
 - **Test**: `tests/std/test_io.pr` (4 tests)
 
-#### 4b. `modules/io/io.pr` — File System Access
+#### Phase 4b the io module
 
 ```promise
 type File {
@@ -875,7 +875,7 @@ type BufferedWriter {
 - **Implementation**: Thin wrapper around PAL calls. `File.read(~this, u8[] ~buf) int!` and `File.write(~this, u8[] ~buf) int!` satisfy the `Reader`/`Writer` structural interfaces. `read_line` is a File instance method (not a free function). `BufferedReader`/`BufferedWriter` are pure Promise wrappers around `File` that reduce syscalls by chunked I/O; both also satisfy `Reader`/`Writer` via their `read`/`write` methods.
 - **Test**: `modules/io/io_test.pr` (69 tests)
 
-#### 4c. `modules/path/path.pr` — Path Manipulation
+#### Phase 4c the path module
 
 ```promise
 // Pure string-based path operations (no filesystem access)
@@ -893,7 +893,7 @@ normalize(string path) string;
 - **Implementation**: Pure Promise string manipulation. Uses `/` as separator (POSIX-first; Windows support deferred).
 - **Test**: `modules/path/path_test.pr` (13 tests), `tests/catalog/path_test.pr`
 
-#### 4d. `modules/os/os.pr` — OS Interaction
+#### Phase 4d the os module
 
 ```promise
 type OsError is error `public { int code; }
@@ -961,7 +961,7 @@ receive_signal!() Signal ; // block until signal arrives
 - **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern. Streaming process uses six externs. Process supervision uses four externs (T1529). OS info uses six externs. Signal handling uses pipe-based async-signal-safe delivery: `pal_signal_init` creates pipe + defines handler, `pal_signal_register` calls `signal(2)`. The `env` getter builds `map[string, string]` in pure Promise from the string[] of "KEY=VALUE" entries.
 - **Test**: `modules/os/os_test.pr` (135 tests, excluded on WASM)
 
-#### 4e. Standard Input (merged into `modules/io/io.pr`)
+#### Phase 4e Standard Input
 
 ```promise
 // Read a line from stdin (blocking) — free function in io module
@@ -981,11 +981,11 @@ read_stdin!() string ;
 
 ---
 
-### Phase 5: Future Modules (Design Only)
+### Phase 5 Future Modules
 
 These modules are lower priority. Full API design to be done when dependencies are ready.
 
-#### 5a. `modules/json/json.pr` — JSON Parsing/Serialization
+#### Phase 5a the json module
 
 ```promise
 enum JsonValue {
@@ -1004,7 +1004,7 @@ to_json(JsonValue value) string;
 - **Dependencies**: Phase 2 (string operations), Phase 0a (error types)
 - **Implementation**: Recursive descent parser in pure Promise
 
-#### 5b. `modules/regex/regex.pr` — Regular Expressions
+#### Phase 5b the regex module
 
 ```promise
 type Regex {
@@ -1025,7 +1025,7 @@ type Match {
 - **Dependencies**: Phase 1 (string utilities)
 - **Implementation**: Thompson NFA in pure Promise (no PCRE dependency)
 
-#### 5c. `modules/net/net.pr` — TCP Networking
+#### Phase 5c the net module
 
 ```promise
 type TcpListener {
@@ -1144,7 +1144,7 @@ cross-module RTTI gaps, not specific to this module.
 - **Dependencies**: PAL socket extensions, IO reactor (epoll/kqueue), PAL
   `getaddrinfo`/`inet_ntop`
 
-#### 5d. `modules/http/http.pr` — HTTP Client & Server
+#### Phase 5d the http module
 
 HTTP/1.1 over the `net` module, with https:// carried over the `tls` module
 (T0079). Convenience functions plus a reusable `Client` and a `Server`:
@@ -1257,7 +1257,7 @@ supported here" action-at-a-distance the language design forbids.
 
 - **Dependencies**: `modules/net/net.pr`, `modules/json/json.pr`, `modules/gzip/gzip.pr`
 
-#### 5e. `modules/crypto/` — Cryptographic Primitives
+#### Phase 5e the crypto module
 
 Shipped as three files: `sha256.pr`, `constant_time.pr`, and `random.pr`.
 
@@ -1288,9 +1288,9 @@ random_bytes!(int count) u8[] `doc("Returns count cryptographically-secure rando
 - **Implementation**: SHA-256 and constant-time comparison are pure Promise, built on the `u256` wide integer in `modules/std/wide_int.pr`. `random_bytes` is the one sanctioned PAL fallback — a syscall (`getentropy` on POSIX, `BCryptGenRandom` on Windows, `random_get` on WASI), not an external library.
 - **Remaining**: HMAC-SHA-256 (T1567) and PBKDF2 (T1568) are not yet built.
 
-#### 5f. `modules/std/embed.pr` — Resource Embedding Types
+#### Phase 5f Resource Embedding Types
 
-Types supporting the `` `embed(path) `` compile-time annotation (see [language-design.md](language-design.md#86-resource-embedding-embed)). Single-file embeds use `string` or `u8[]` directly; directory tree embeds use `EmbeddedFiles`.
+Types supporting the `` `embed(path) `` compile-time annotation (see [language-design.md](language-design.md#resource-embedding)). Single-file embeds use `string` or `u8[]` directly; directory tree embeds use `EmbeddedFiles`.
 
 ```promise
 type EmbeddedFiles `doc("Virtual read-only filesystem for compile-time embedded directory trees.") {
@@ -1322,9 +1322,9 @@ type EmbeddedFile `value `doc("Metadata for a single entry in an EmbeddedFiles t
 
 ---
 
-## 5. Implementation Details
+## Implementation Details
 
-### 5.1 Extern Function Pattern
+### Extern Function Pattern
 
 For each PAL-backed function, the implementation follows this pattern:
 
@@ -1375,7 +1375,7 @@ type File {
 }
 ```
 
-### 5.2 LLVM Intrinsics Pattern (Math)
+### LLVM Intrinsics Pattern
 
 For LLVM intrinsic-backed functions:
 
@@ -1399,7 +1399,7 @@ case "sqrt":
     // wrap back into f64 value struct
 ```
 
-### 5.3 Testing Pattern
+### Testing Pattern
 
 Each stdlib module gets a corresponding test file:
 
@@ -1432,7 +1432,7 @@ promise test tests/std/                     # all std tests
 bin/test.sh                                  # full e2e suite
 ```
 
-### 5.4 Embedding Updated Stdlib
+### Embedding Updated Stdlib
 
 When adding new types or functions to `modules/std/*.pr`, run `./build` from the repo root — it automatically embeds the updated stdlib before compiling.
 
@@ -1440,7 +1440,7 @@ The `stdAll` mini-stdlib used in Go unit tests (`codegen_test.go`, `sema_test.go
 
 ---
 
-## 6. Testing Strategy
+## Testing Strategy
 
 ### Test Categories
 
@@ -1480,7 +1480,7 @@ bin/test.sh                            # rebuild + all tests pass (including new
 
 ---
 
-## Appendix: Complete Module Inventory
+## Appendix Complete Module Inventory
 
 | Phase | File | Type | New PAL | Lines | Notes |
 |-------|------|------|---------|-------|-------|
@@ -1492,10 +1492,10 @@ bin/test.sh                            # rebuild + all tests pass (including new
 | 1a | `modules/std/set.pr` | Promise | No | 107 | |
 | 1b | `modules/std/sort.pr` | Promise | No | 91 | |
 | 1c | `modules/std/string.pr` + `modules/strings/` | Promise | No | 199+65 | |
-| 1d | `modules/std/result.pr` | ~~Promise~~ | No | — | Not planned — `T!` is function-level, so the helpers are inexpressible (§4) |
+| 1d | `modules/std/result.pr` | ~~Promise~~ | No | — | Not planned — `T!` is function-level, so the helpers are inexpressible ([Module Design by Phase](#module-design-by-phase)) |
 | 2a | (merged into 0c) | — | — | — | |
 | 2b | `modules/std/builder.pr` | Promise | No | 38 | |
-| 2c | `modules/std/fmt.pr` | ~~Promise~~ | No | — | Not planned — interpolation covers it; belongs in a catalog module (§4) |
+| 2c | `modules/std/fmt.pr` | ~~Promise~~ | No | — | Not planned — interpolation covers it; belongs in a catalog module ([Module Design by Phase](#module-design-by-phase)) |
 | 3a | `modules/std/math.pr` + `modules/math/` | Native + Promise | No | 111+67 | |
 | 3b | `modules/std/random.pr` | Promise | No | 165 | |
 | 3c | `modules/std/time.pr` | Promise + Native | 3 | 96 | |

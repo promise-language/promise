@@ -21,7 +21,7 @@ import (
 //
 // The rule, stated once: every toolchain binary comes from the pinned
 // prebuilts, an explicit PROMISE_* override, or a test's own stub. Never from
-// PATH, Homebrew or Program Files — see docs/build-tools.md §4 and
+// PATH, Homebrew or Program Files — see docs/build-tools.md#llvm-staging and
 // docs/runtime-architecture.md §"LLVM Tool Sources". Tests are bound by it too:
 // a test that cannot get a tool from those sources skips for *that* reason, not
 // because of what happens to be installed.

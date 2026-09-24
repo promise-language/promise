@@ -16,7 +16,7 @@ func newTestChannel(elem types.Type) *types.Instance {
 	return types.NewInstance(types.TypChannel, []types.Type{elem})
 }
 
-// T2163: refcountedHandleElem is the single classifier behind the §17.4
+// T2163: refcountedHandleElem is the single classifier behind the language-design.md#ownership-across-goroutines
 // spawn-site duplication — it decides whether a value crossing a `go` boundary
 // is a refcounted `sharable handle, and resolves the element type that selects
 // the dup/drop PAIR. Getting it wrong is silent: a refusal means no retain, and
@@ -184,7 +184,7 @@ func TestT2163_RefcountedHandleElem(t *testing.T) {
 
 // T2163: the classifier's accepted set must stay equal to
 // ownership.isRefcountedHandle (internal/ownership/expr.go). That equality is
-// the load-bearing invariant of §17.4's "`sharable types are the exception"
+// the load-bearing invariant of language-design.md#ownership-across-goroutines's "`sharable types are the exception"
 // rule: the ownership checker ACCEPTS a spawn that borrows one of these handles
 // precisely because codegen promises to duplicate it. Let the two drift and the
 // failure is silent in the worst direction — ownership admits a spawn codegen

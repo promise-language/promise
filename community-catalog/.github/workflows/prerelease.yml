@@ -1,4 +1,4 @@
-# Pre-release nudge (§9.10) — run the matrix against the upcoming epoch before it
+# Pre-release nudge (module-system.md#when-a-module-has-no-compatible-version) — run the matrix against the upcoming epoch before it
 # ships, so module authors are warned that their module doesn't support it yet.
 #
 # Uses `-report`: it never fails the run (it cannot force an unmaintained module to

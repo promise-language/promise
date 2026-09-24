@@ -37,7 +37,7 @@ func lastLines(s string, n int) string {
 }
 
 // moduleHasTests reports whether modDir carries any `_test.pr` files — the
-// empirical compatibility gate (§9.9) is run via `promise test`, which discovers
+// empirical compatibility gate (module-system.md#compatibility-and-the-community-catalog) is run via `promise test`, which discovers
 // " `test " functions in `_test.pr` files.
 func moduleHasTests(modDir string) (bool, error) {
 	files, err := module.CollectModuleSources(modDir, true)
@@ -53,19 +53,19 @@ func moduleHasTests(modDir string) (bool, error) {
 }
 
 // verifyModuleCompat establishes whether the module at (url, commit) is compatible
-// with `epoch` per §9.9: built with the epoch's compiler it compiles and 100% of
+// with `epoch` per module-system.md#compatibility-and-the-community-catalog: built with the epoch's compiler it compiles and 100% of
 // its " `test " functions pass (a parse/type error is a compile failure →
 // incompatible). compilerBin is the epoch-E compiler used to run the tests.
 //
-// Modules with no `*_test.pr` files are verified by compilation only (§9.9 ad-hoc
+// Modules with no `*_test.pr` files are verified by compilation only (module-system.md#compatibility-and-the-community-catalog ad-hoc
 // tier policy): `promise emit-ir` is run on the source; if it exits 0 the module
 // is marked compatible (compile-only) and warn is called with an advisory message.
-// A module whose source fails to compile is still incompatible (§9.10).
+// A module whose source fails to compile is still incompatible (module-system.md#when-a-module-has-no-compatible-version).
 //
-// The verdict is cached locally (§9.9, ad-hoc tier) keyed by url@commit#epoch and
+// The verdict is cached locally (module-system.md#compatibility-and-the-community-catalog, ad-hoc tier) keyed by url@commit#epoch and
 // invalidated on a compiler-build change, so repeat adds and the diamond-dedup
 // common case do not re-run tests. A module's pinned transitive deps are verified
-// against the SAME project epoch first (§9.8/§9.10 apply transitively), so a
+// against the SAME project epoch first (module-system.md#cross-epoch-module-versioning/module-system.md#when-a-module-has-no-compatible-version apply transitively), so a
 // failing dep surfaces as a clean gate rather than a raw compiler error buried in
 // the dependency's source.
 func verifyModuleCompat(compilerBin, url, subdir, commit, epoch string, visiting map[string]bool, warn func(string)) (ok bool, reason string, err error) {
@@ -85,7 +85,7 @@ func verifyModuleCompat(compilerBin, url, subdir, commit, epoch string, visiting
 	defer delete(visiting, key)
 
 	// modDir is the addressed module directory (the subdir when there is one), so
-	// the §9.9 gate below compiles and tests exactly that module, not its whole repo.
+	// the module-system.md#compatibility-and-the-community-catalog gate below compiles and tests exactly that module, not its whole repo.
 	modDir, err := module.ResolveRemoteModule(url, commit, subdir)
 	if err != nil {
 		// A commit whose checkout has no manifest at the addressed directory is a
@@ -100,9 +100,9 @@ func verifyModuleCompat(compilerBin, url, subdir, commit, epoch string, visiting
 		return false, "", fmt.Errorf("fetching %s@%s: %w", url, shortCommit(commit), err)
 	}
 
-	// Pre-verify pinned transitive deps against the project's epoch (§9.8). The
-	// build uses these pins (§9.5); a dep with no compatible version makes this
-	// module incompatible too (§9.10 applies transitively).
+	// Pre-verify pinned transitive deps against the project's epoch (module-system.md#cross-epoch-module-versioning). The
+	// build uses these pins (module-system.md#transitive-dependencies); a dep with no compatible version makes this
+	// module incompatible too (module-system.md#when-a-module-has-no-compatible-version applies transitively).
 	cfg, perr := module.ParseConfig(filepath.Join(modDir, "promise.toml"))
 	if perr != nil {
 		reason = fmt.Sprintf("invalid promise.toml: %v", perr)
@@ -148,7 +148,7 @@ func verifyModuleCompatCompileOnly(compilerBin, url, subdir, commit, epoch, modD
 	}
 	if len(srcFiles) == 0 {
 		// No .pr source files at all — accept vacuously (emit-ir would error on empty project).
-		warnMsg := fmt.Sprintf("module %q has no .pr files — treating as compatible (§9.9 vacuous pass)", url)
+		warnMsg := fmt.Sprintf("module %q has no .pr files — treating as compatible (module-system.md#compatibility-and-the-community-catalog vacuous pass)", url)
 		warn(warnMsg)
 		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Subdir: subdir, Commit: commit, Epoch: epoch, Compatible: true, CompileOnly: true, FailReason: warnMsg})
 		return true, "", nil
@@ -163,14 +163,14 @@ func verifyModuleCompatCompileOnly(compilerBin, url, subdir, commit, epoch, modD
 		_ = module.SaveCompat(&module.CompatVerdict{URL: url, Subdir: subdir, Commit: commit, Epoch: epoch, Compatible: false, FailReason: reason})
 		return false, reason, nil
 	}
-	warnMsg := fmt.Sprintf("module %q has no `*_test.pr` files — verified by compilation only; add tests for full empirical compatibility (§9.9)", url)
+	warnMsg := fmt.Sprintf("module %q has no `*_test.pr` files — verified by compilation only; add tests for full empirical compatibility (module-system.md#compatibility-and-the-community-catalog)", url)
 	warn(warnMsg)
 	_ = module.SaveCompat(&module.CompatVerdict{URL: url, Subdir: subdir, Commit: commit, Epoch: epoch, Compatible: true, CompileOnly: true, FailReason: warnMsg})
 	return true, "", nil
 }
 
 // verifyDeps verifies every pinned transitive git dependency in cfg against
-// epoch (§9.8/§9.10 apply transitively). It returns (false, reason) for the first
+// epoch (module-system.md#cross-epoch-module-versioning/module-system.md#when-a-module-has-no-compatible-version apply transitively). It returns (false, reason) for the first
 // incompatible dependency; non-git (sha256) and incomplete named entries are
 // skipped. Shared by verifyModuleCompat (remote modules) and
 // verifyLocalModuleCompat (the cwd module on `package check-epoch`) so the
@@ -204,11 +204,11 @@ func verifyDeps(compilerBin string, cfg *module.Config, epoch string, visiting m
 }
 
 // verifyLocalModuleCompat establishes whether the module in the local directory
-// modDir is compatible with epoch (§9.9), the same gate as verifyModuleCompat but
+// modDir is compatible with epoch (module-system.md#compatibility-and-the-community-catalog), the same gate as verifyModuleCompat but
 // for an on-disk module (the owner's cwd) rather than a fetched remote: its pinned
 // transitive deps are verified first, then `compilerBin test modDir` must pass
 // 100% of the module's `test` functions. Modules with no test files are verified by
-// compilation only (§9.9 ad-hoc tier policy). Used by `promise package check-epoch`.
+// compilation only (module-system.md#compatibility-and-the-community-catalog ad-hoc tier policy). Used by `promise package check-epoch`.
 func verifyLocalModuleCompat(compilerBin, modDir, epoch string) (ok bool, reason string, err error) {
 	cfg, perr := module.ParseConfig(filepath.Join(modDir, "promise.toml"))
 	if perr != nil {
@@ -233,7 +233,7 @@ func verifyLocalModuleCompat(compilerBin, modDir, epoch string) (ok bool, reason
 			return false, "", serr
 		}
 		if len(srcFiles) == 0 {
-			warn(fmt.Sprintf("module %q has no .pr files — treating as compatible (§9.9 vacuous pass)", cfg.Name))
+			warn(fmt.Sprintf("module %q has no .pr files — treating as compatible (module-system.md#compatibility-and-the-community-catalog vacuous pass)", cfg.Name))
 			return true, "", nil
 		}
 		emitCmd := exec.Command(compilerBin, "emit-ir", modDir)
@@ -242,7 +242,7 @@ func verifyLocalModuleCompat(compilerBin, modDir, epoch string) (ok bool, reason
 		if runErr != nil {
 			return false, lastLines(string(out), 20), nil
 		}
-		warn(fmt.Sprintf("module %q has no `*_test.pr` files — verified by compilation only; add tests for full empirical compatibility (§9.9)", cfg.Name))
+		warn(fmt.Sprintf("module %q has no `*_test.pr` files — verified by compilation only; add tests for full empirical compatibility (module-system.md#compatibility-and-the-community-catalog)", cfg.Name))
 		return true, "", nil
 	}
 
@@ -256,7 +256,7 @@ func verifyLocalModuleCompat(compilerBin, modDir, epoch string) (ok bool, reason
 }
 
 // fetchCommunityCatalog refreshes + parses the community catalog's name→URL map
-// (§9.9). Returns the checkout directory (root of index/<epoch>.json) and the
+// (module-system.md#compatibility-and-the-community-catalog). Returns the checkout directory (root of index/<epoch>.json) and the
 // parsed modules.toml. A catalog with no modules.toml yet yields an empty catalog
 // (not an error) so resolution cleanly falls through to the ad-hoc path.
 func fetchCommunityCatalog() (dir string, cc *module.CommunityCatalog, err error) {
@@ -280,8 +280,8 @@ func fetchCommunityCatalog() (dir string, cc *module.CommunityCatalog, err error
 
 // communityIndexPin returns the verified commit recorded for module name under
 // epoch in the fetched community catalog at dir — the CI index IS the verdict for
-// community modules (§9.9, no local test run). When the module has no verified
-// entry for the epoch it returns a *module.NoCompatibleVersionError (§9.10),
+// community modules (module-system.md#compatibility-and-the-community-catalog, no local test run). When the module has no verified
+// entry for the epoch it returns a *module.NoCompatibleVersionError (module-system.md#when-a-module-has-no-compatible-version),
 // populated with the highest epoch the module IS recorded for.
 func communityIndexPin(dir, name, epoch string) (commit string, err error) {
 	idx, ierr := module.LoadCompatIndex(dir, epoch)
@@ -296,9 +296,9 @@ func communityIndexPin(dir, name, epoch string) (commit string, err error) {
 }
 
 // resolveCommunity resolves a bare module NAME through the community catalog
-// (§9.9 step 4). found is false when name is not listed (caller falls through to
+// (module-system.md#compatibility-and-the-community-catalog step 4). found is false when name is not listed (caller falls through to
 // the ad-hoc URL path); when listed, it returns the entry's URL and the
-// index-verified commit, or a *module.NoCompatibleVersionError (§9.10).
+// index-verified commit, or a *module.NoCompatibleVersionError (module-system.md#when-a-module-has-no-compatible-version).
 func resolveCommunity(name, epoch string) (url, commit string, found bool, err error) {
 	dir, cc, ferr := fetchCommunityCatalog()
 	if ferr != nil {
@@ -336,15 +336,15 @@ func resolveCommunityByURL(url, epoch string) (commit string, found bool, err er
 }
 
 // resolveEpochAware picks an epoch-appropriate commit for a module and verifies it
-// under the project's epoch before returning it (§9.8/§9.9). With an explicit ref
+// under the project's epoch before returning it (module-system.md#cross-epoch-module-versioning/module-system.md#compatibility-and-the-community-catalog). With an explicit ref
 // the user's choice is resolved and verified with no walk-back; without one, the
 // largest `epoch-X ≤ E` tag is tried, stepping back through older tags on
 // verification failure, with a `stable`/HEAD fallback only when there are no
 // `epoch-*` tags at all. A module that carries `epoch-*` tags but whose tags are
 // all newer than the project epoch is versioned (just not for this epoch) — it
-// hits the §9.10 gate (OnlyNewerEpochs), not the unversioned `stable`/HEAD
+// hits the module-system.md#when-a-module-has-no-compatible-version gate (OnlyNewerEpochs), not the unversioned `stable`/HEAD
 // fallback. When nothing verifies it returns a *module.NoCompatibleVersionError
-// (§9.10) — raised here, at resolve time, so raw dependency compiler errors never
+// (module-system.md#when-a-module-has-no-compatible-version) — raised here, at resolve time, so raw dependency compiler errors never
 // reach the project build.
 //
 // Tags are repo-scoped (a repo has one tag namespace) but verification is scoped
@@ -385,7 +385,7 @@ func resolveEpochAware(compilerBin, projectEpoch, label, url, subdir, explicitRe
 	if len(candidates) == 0 && len(epochTags) > 0 {
 		// The module IS versioned (carries epoch-* tags) but every tag targets a
 		// newer epoch than the project's — it does not support this epoch. This is
-		// the §9.10 gate, not the §9.8 unversioned fallback: pinning HEAD here would
+		// the module-system.md#when-a-module-has-no-compatible-version gate, not the module-system.md#cross-epoch-module-versioning unversioned fallback: pinning HEAD here would
 		// mislabel a versioned module as "unversioned".
 		lo, loTag := module.LowestEpoch(epochTags)
 		return "", &module.NoCompatibleVersionError{
@@ -395,7 +395,7 @@ func resolveEpochAware(compilerBin, projectEpoch, label, url, subdir, explicitRe
 	}
 
 	if len(candidates) == 0 {
-		// Truly unversioned — no epoch-* tags at all (§9.8 step 1 fallback): stable
+		// Truly unversioned — no epoch-* tags at all (module-system.md#cross-epoch-module-versioning step 1 fallback): stable
 		// tag, else HEAD with an "unversioned" warning.
 		var fallback string
 		if stableCommit != "" {
@@ -511,8 +511,8 @@ func epochCompilerBin(epoch string) (string, error) {
 
 // runPackageCheckUpgrade implements `promise package check-upgrade <E'>`: resolve
 // every dependency against target epoch E′ and report — before any change — which
-// deps have a verified E′-compatible version and which would hit the §9.10 gate
-// (§9.10). Exits non-zero if any dependency would be blocked.
+// deps have a verified E′-compatible version and which would hit the module-system.md#when-a-module-has-no-compatible-version gate
+// (module-system.md#when-a-module-has-no-compatible-version). Exits non-zero if any dependency would be blocked.
 func runPackageCheckUpgrade(args []string) {
 	if len(args) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: promise package check-upgrade <epoch>")
@@ -591,7 +591,7 @@ func runPackageCheckUpgrade(args []string) {
 	fmt.Println()
 	if blocked > 0 {
 		fmt.Printf("%d of %d dependencies have no version compatible with epoch %s.\n", blocked, len(deps), targetEpoch)
-		fmt.Printf("Upgrading to %s would hit the §9.10 gate for those deps — resolve them before changing [module] epoch.\n", targetEpoch)
+		fmt.Printf("Upgrading to %s would hit the module-system.md#when-a-module-has-no-compatible-version gate for those deps — resolve them before changing [module] epoch.\n", targetEpoch)
 		os.Exit(1)
 	}
 	fmt.Printf("All %d dependencies have a verified version compatible with epoch %s.\n", len(deps), targetEpoch)

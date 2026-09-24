@@ -5,7 +5,7 @@ import "testing"
 // T1428: `yield` / `yield*` inside a `go { … }` block that is lexically nested in
 // a generator body used to pass sema and then crash the backend with
 // `use of undefined value '%yield_slot.addr'` — the go block's body is compiled
-// into its OWN coroutine, which has no yield slot. §12.4 already requires `yield`
+// into its OWN coroutine, which has no yield slot. language-design.md#generator-functions already requires `yield`
 // to appear directly in the generator body, so the fix is a sema rejection.
 //
 // These tests are load-bearing beyond the diagnostic they assert: because the
@@ -187,7 +187,7 @@ func TestT1428YieldDelegateInGoBlockOutsideGeneratorUnchanged(t *testing.T) {
 }
 
 // Both diagnostics carry the hint naming the replacement idiom (the channel
-// handoff in §12.4, exercised at runtime by
+// handoff in language-design.md#generator-functions, exercised at runtime by
 // tests/concurrency/t1428_generator_go_block_test.pr). The hint is the whole
 // value of the rejection to the user — "not allowed" alone leaves them guessing
 // — so it is asserted rather than left to drift.

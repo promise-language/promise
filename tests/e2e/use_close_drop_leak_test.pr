@@ -1,6 +1,6 @@
 // T0967: zero-leak guarantees for the `use` + close()/drop() suppression fix.
 //
-// When a `use`-bound type also defines drop(), §16.4 suppresses the user drop()
+// When a `use`-bound type also defines drop(), language-design.md#interaction-between-use-and-drop suppresses the user drop()
 // body — but the instance's droppable fields and heap memory MUST still be
 // reclaimed exactly once. The alloc-balance leak checker fails on EITHER a
 // double-free (the old bug ran both close() and drop()) OR a leaked field (a
@@ -14,7 +14,7 @@ type Resource {
     // with the instance. The user drop() below is suppressed for `use` bindings.
   }
   drop(~this) {
-    // Suppressed when the value is `use`-bound (§16.4). If this ran in addition to
+    // Suppressed when the value is `use`-bound (language-design.md#interaction-between-use-and-drop). If this ran in addition to
     // close(), the string field would be double-freed.
   }
 }
@@ -60,7 +60,7 @@ type Heap {
 }
 
 // Criterion 7: generic use-bound type with a user drop() and a type-param field.
-// The suppression path (§16.4) must drop the (now concrete) field exactly once.
+// The suppression path (language-design.md#interaction-between-use-and-drop) must drop the (now concrete) field exactly once.
 // For a generic origin, the field's droppability is only visible after type
 // substitution — the cleanup path must reconstruct the mono context, else the
 // concrete field is silently skipped and leaks.
@@ -78,7 +78,7 @@ test_use_close_drop_generic_no_leak() `test {
 }
 
 // Generic suppression path with a genuinely heap-allocating type-arg field
-// (nested heap user type that itself owns a string). Proves the §16.4 suppression
+// (nested heap user type that itself owns a string). Proves the language-design.md#interaction-between-use-and-drop suppression
 // path reclaims the concrete field once — no leak, no double-free.
 test_use_close_drop_generic_heap_field_no_leak() `test {
   use b := Box[Heap](item: Heap(payload: "deep-resource"));
@@ -142,7 +142,7 @@ test_use_close_drop_nonfailable_no_leak() `test {
 }
 
 // Virtual-dispatch path: a base type WITH children gets a vtable, so close() is
-// dispatched virtually (b.closeFunc == nil) rather than directly. The §16.4
+// dispatched virtually (b.closeFunc == nil) rather than directly. The language-design.md#interaction-between-use-and-drop
 // suppression + field reclaim must hold on that path too. A Sub child forces the
 // vtable; the use binding is on the base.
 type VBase {
@@ -179,7 +179,7 @@ test_use_close_drop_inherited_field_no_leak() `test {
 }
 
 // Criterion 3: a type whose drop() delegates to close()-style cleanup. Because
-// `use` suppresses drop() entirely (§16.4), the delegation never fires a second
+// `use` suppresses drop() entirely (language-design.md#interaction-between-use-and-drop), the delegation never fires a second
 // time — close() performs the single cleanup. A droppable string field makes a
 // double-run observable as a double-free.
 type Delegating {

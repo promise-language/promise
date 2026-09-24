@@ -33,7 +33,7 @@ func (c *Compiler) lookupLayout(typ types.Type) *TypeDeclLayout {
 //
 // Which ABI a symbol carries is a property of the *symbol*, not of the
 // declaration, so it is registered here rather than marked up in generated
-// binding source — annotations.md §13: the set of bindable symbols is closed and
+// binding source — annotations.md#foreign-interfaces: the set of bindable symbols is closed and
 // "registered in one place". Recording it here also means bindings already
 // published against an older compiler (the wasi_preview_2 catalog module) become
 // correct without regeneration (T1660).

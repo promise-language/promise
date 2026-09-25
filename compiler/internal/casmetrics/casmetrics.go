@@ -18,9 +18,24 @@
 // ledgers nobody reads. The only anchor every one of those processes shares,
 // without an environment variable (docs/org/cli-guide.md#every-input-is-an-explicit-argument: a tool reads no
 // environment variable to decide what it does), is the compiler binary they all
-// are — so the ledger sits beside it, next to the bin/.promise.hash sidecar
-// bin/build already writes. In a worktree that is bin/.promise-cas.jsonl, which
-// is gitignored and therefore outside common.WorktreeHash.
+// are — so the ledger is anchored to that binary's own path.
+//
+// It is not written INTO that binary's directory, though, because in a worktree
+// that directory is bin/, which only ./make and `workspace setup/update` may
+// write (docs/build-tools.md): bin/ holds what a build put there, so that it can
+// be deleted and rebuilt without losing state. The worktree's scratch root
+// stands in for it — .home/tmp/.promise-cas.jsonl, resolved from the binary at
+// <root>/bin/<exe> — and a binary that is not in a worktree (an installed
+// compiler, a go test binary) keeps its ledger beside itself, where there is no
+// bin/ to protect. Either way the path is a pure function of the binary, so
+// every process in a fan-out agrees on one file without being told.
+//
+// The worktree spelling is gitignored and therefore outside
+// common.WorktreeHash, which is the point of choosing a scratch directory over
+// any tracked one: a run's own accounting must never change the tree identity
+// that run is measuring. It is scratch in the full sense — anything that wipes
+// .home/tmp between runs costs nothing, because a runner empties the ledger
+// whenever it opens a window anyway.
 //
 // WHO OPENS A WINDOW. Nothing here does. The compiler only ever appends; a
 // measurement window is a property of a RUN, so it is the runner that empties
@@ -53,11 +68,19 @@ import (
 	"sync"
 )
 
-// LedgerName is the ledger's file name. It sits in the directory holding the
-// running compiler binary; the same rule is spelled in tools/build/common
-// (casLedgerPath) because the tools are a separate Go module, and both
-// spellings are pinned by golden tests.
+// LedgerName is the ledger's file name.
 const LedgerName = ".promise-cas.jsonl"
+
+// rootMarker identifies a worktree root — the same file common.FindRoot and
+// clitest use to answer "is this the Promise repo".
+const rootMarker = "catalog.toml"
+
+// LedgerRelPath is the ledger's path relative to a worktree root. The same rule
+// is spelled a second time in tools/build/common (casLedgerPath) because the
+// tools are a separate Go module and cannot import this package; both spellings
+// are pinned by golden tests, so a change to one that is not made to the other
+// fails immediately rather than leaving every gate reporting zeros.
+func LedgerRelPath() string { return filepath.Join(".home", "tmp", LedgerName) }
 
 // Event kinds. The spelling is part of the on-disk format both readers parse.
 const (
@@ -109,15 +132,48 @@ type ledger struct{ path string }
 // at returns the ledger in a directory.
 func at(dir string) ledger { return ledger{path: filepath.Join(dir, LedgerName)} }
 
-// beside returns the ledger next to the running binary, and whether the binary
-// could be located at all (there is nothing to anchor one to otherwise).
-func beside() (ledger, bool) {
-	exe, err := os.Executable()
+// worktreeRoot returns the Promise worktree a binary at exe belongs to, and
+// whether it is in one at all. The rule is the executable's grandparent
+// (<root>/bin/<exe> → <root>) carrying the root marker — the same answer
+// common.FindRoot derives for an unstamped tool, and deliberately never the
+// working directory, which is whoever happened to cd last.
+func worktreeRoot(exe string) (string, bool) {
+	root := filepath.Dir(filepath.Dir(exe))
+	if _, err := os.Stat(filepath.Join(root, rootMarker)); err != nil {
+		return "", false
+	}
+	return root, true
+}
+
+// forBinary returns the ledger a compiler at the located path writes to: the
+// worktree's scratch dir when the binary is inside a worktree, otherwise the
+// directory holding the binary. The locator is a parameter so a test drives the
+// resolution without a package variable every parallel test would race.
+//
+// It reports false only when the binary cannot be located at all — there is
+// nothing to anchor a ledger to then.
+func forBinary(locate func() (string, error)) (ledger, bool) {
+	exe, err := locate()
 	if err != nil {
 		return ledger{}, false
 	}
+	// Symlinks are resolved once, before either branch reads the path, so a
+	// launcher link and the real binary behind it land on the SAME ledger. This
+	// is the whole invariant — every process in a fan-out appending to one file
+	// without being told — and it would be lost by resolving in only one branch:
+	// an install reached through ~/.promise/bin/promise and one reached through
+	// the epoch directory it points at would then keep separate tallies.
+	if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+		exe = resolved
+	}
+	if root, ok := worktreeRoot(exe); ok {
+		return ledger{path: filepath.Join(root, LedgerRelPath())}, true
+	}
 	return at(filepath.Dir(exe)), true
 }
+
+// current returns the ledger this process appends to.
+func current() (ledger, bool) { return forBinary(os.Executable) }
 
 // append writes one event. Best effort throughout: accounting must never be
 // able to fail the work it is accounting for, so a read-only directory or a
@@ -128,7 +184,7 @@ func (l ledger) append(e event) {
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := l.open()
 	if err != nil {
 		return
 	}
@@ -136,6 +192,22 @@ func (l ledger) append(e event) {
 	// peer processes. Hence building the whole line before opening the file.
 	_, _ = f.Write(append(line, '\n'))
 	f.Close()
+}
+
+// open opens the ledger for appending, creating the directory holding it if that
+// is what was missing. The mkdir is on the failure path rather than before every
+// open so the ordinary append still costs one syscall: .home/tmp exists after
+// the first event, and in a fresh clone nobody has created it yet — the compiler
+// may well run before any gate does.
+func (l ledger) open() (*os.File, error) {
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err == nil {
+		return f, nil
+	}
+	if mkErr := os.MkdirAll(filepath.Dir(l.path), 0o755); mkErr != nil {
+		return nil, err // the original failure is the one worth reporting
+	}
+	return os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 }
 
 // read folds the ledger. An absent one reads as an available zero — nothing has
@@ -146,7 +218,7 @@ func (l ledger) read() Ledger {
 	// Creating the file when absent both proves the directory is writable and
 	// leaves the anchor a writer will append to. An empty ledger is a valid,
 	// meaningful state, so this is not a side effect that changes any reading.
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := l.open()
 	if err != nil {
 		return out
 	}
@@ -209,7 +281,7 @@ func AddNetwork(n int64) {
 	if n <= 0 {
 		return
 	}
-	if l, ok := beside(); ok {
+	if l, ok := current(); ok {
 		l.append(event{Event: eventNetwork, Bytes: n})
 	}
 }
@@ -222,7 +294,7 @@ func AddMaterialized(name string, bytes int64, populations int) {
 	if bytes <= 0 && populations <= 0 {
 		return
 	}
-	if l, ok := beside(); ok {
+	if l, ok := current(); ok {
 		l.append(event{Event: eventMaterialize, Name: name, Bytes: bytes, Count: populations})
 	}
 }
@@ -251,14 +323,14 @@ func RegisterHome(home string) {
 	if seen {
 		return
 	}
-	if l, ok := beside(); ok {
+	if l, ok := current(); ok {
 		l.registerHome(home)
 	}
 }
 
-// Read folds the ledger beside the running binary.
+// Read folds the ledger this process appends to.
 func Read() Ledger {
-	if l, ok := beside(); ok {
+	if l, ok := current(); ok {
 		return l.read()
 	}
 	return Ledger{}

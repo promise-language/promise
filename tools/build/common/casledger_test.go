@@ -9,10 +9,11 @@ import (
 	"testing"
 )
 
-// writeLedger puts a ledger under root/bin, the way the compiler would.
+// writeLedger puts a ledger in the worktree's scratch dir, the way the compiler
+// would.
 func writeLedger(t *testing.T, root, contents string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(casLedgerPath(root)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(casLedgerPath(root), []byte(contents), 0o644); err != nil {
@@ -53,8 +54,97 @@ func TestCASLedgerFormat(t *testing.T) {
 	if casLedgerName != ".promise-cas.jsonl" {
 		t.Errorf("ledger name drifted: %q", casLedgerName)
 	}
-	if want := filepath.Join(root, "bin", ".promise-cas.jsonl"); casLedgerPath(root) != want {
+	if want := filepath.Join(root, ".home", "tmp", ".promise-cas.jsonl"); casLedgerPath(root) != want {
 		t.Errorf("casLedgerPath = %q, want %q", casLedgerPath(root), want)
+	}
+}
+
+// TestCASLedgerIsNotUnderBin states the operator rule as a test, so an edit that
+// moves the ledger back beside the binary fails here rather than quietly
+// reintroducing a writer into a directory reserved for ./make and `workspace
+// setup/update` (T2211).
+func TestCASLedgerIsNotUnderBin(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin") + string(filepath.Separator)
+	if got := casLedgerPath(root); strings.HasPrefix(got, binDir) {
+		t.Errorf("the ledger is under bin/ (%q) — only ./make and `workspace "+
+			"setup/update` write there", got)
+	}
+}
+
+// TestRemoveLegacyCASLedgerClearsBinAndNothingElse covers the migration step
+// T2211 added to the build. Both halves matter, and the second more than the
+// first: bin/ also holds the build's own sidecars, so a cleanup that ever grew
+// into a pattern sweep would delete the up-to-date marker and make every
+// subsequent build think itself stale.
+//
+// The build is the only caller because bin/ is gitignored — no commit can remove
+// a file there — and it is the only writer allowed in that directory at all.
+func TestRemoveLegacyCASLedgerClearsBinAndNothingElse(t *testing.T) {
+	binDir := t.TempDir()
+	legacy := filepath.Join(binDir, casLedgerName)
+	keep := map[string]string{
+		".promise.buildinfo": "2026.10-abc1234\n",
+		"promise":            "the compiler itself",
+		"verify":             "a tool",
+	}
+	if err := os.WriteFile(legacy, []byte(`{"event":"network","bytes":4096}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range keep {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(contents), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removeLegacyCASLedger(binDir)
+
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Errorf("the legacy ledger survived the build (stat err = %v) — it would "+
+			"then sit in bin/ forever, since nothing tracked can remove it", err)
+	}
+	for name, contents := range keep {
+		got, err := os.ReadFile(filepath.Join(binDir, name))
+		if err != nil {
+			t.Errorf("the cleanup removed bin/%s, which is the build's own: %v", name, err)
+			continue
+		}
+		if string(got) != contents {
+			t.Errorf("bin/%s reads %q, want %q", name, got, contents)
+		}
+	}
+}
+
+// TestRemoveLegacyCASLedgerAcceptsACleanBin: every build after the first runs
+// this against a bin/ that no longer holds the file, and on a fresh clone there
+// was never one. Neither may be an error — the cleanup is called for its effect
+// and its result is deliberately not checked at the call site.
+func TestRemoveLegacyCASLedgerAcceptsACleanBin(t *testing.T) {
+	binDir := t.TempDir()
+	removeLegacyCASLedger(binDir) // absent
+	removeLegacyCASLedger(binDir) // still absent
+	if entries, err := os.ReadDir(binDir); err != nil || len(entries) != 0 {
+		t.Errorf("a clean bin/ did not stay clean: %v entries, err %v", len(entries), err)
+	}
+}
+
+// TestCASLedgerIsIgnoredByGit is what keeps the blessing honest: WorktreeHash
+// covers untracked-but-not-ignored files, so a ledger git could see would make
+// every gate run change the tree identity that run is measuring. The coupling is
+// with .gitignore rather than with any code here, which is exactly why it needs
+// a test — nothing else would notice the rule being dropped.
+func TestCASLedgerIsIgnoredByGit(t *testing.T) {
+	root, err := RootForTests()
+	if err != nil {
+		t.Skipf("no repo to ask git about: %v", err)
+	}
+	rel, err := filepath.Rel(root, casLedgerPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunBytesIn(root, "git", "check-ignore", "-q", filepath.ToSlash(rel)); err != nil {
+		t.Errorf("git does not ignore %s (%v) — a gate run would then change the "+
+			"worktree hash it is measuring, and no verify could bless a tree", rel, err)
 	}
 }
 
@@ -411,17 +501,17 @@ func TestCASWindowSummaryDoesNotNameTheOneExpectedHome(t *testing.T) {
 
 // TestCASWindowRefusesARootThatCannotHoldALedger: where the window cannot be
 // opened the gate is told why rather than handed zeros, which is the one case
-// that must not read like a clean run. A file where bin/ should be is the
-// cheapest way to make the open fail without a permission trick that root or
-// Windows would skip.
+// that must not read like a clean run. A file where the ledger's own directory
+// should be is the cheapest way to make the open fail without a permission trick
+// that root or Windows would skip.
 func TestCASWindowRefusesARootThatCannotHoldALedger(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "bin"), []byte("not a directory"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".home"), []byte("not a directory"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	w := openCASWindow(root)
 	if w.open {
-		t.Fatal("a root whose bin/ is a file opened a window")
+		t.Fatal("a root whose .home is a file opened a window")
 	}
 	vals, incomplete := w.Values()
 	if vals != nil {

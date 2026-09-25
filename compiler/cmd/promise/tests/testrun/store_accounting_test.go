@@ -17,37 +17,50 @@ import (
 )
 
 // End to end: what a run costs the content-addressed store is written to a
-// ledger beside the compiler binary, and a run that uses several Promise homes
-// is visible as several (T2143).
+// ledger anchored to the compiler binary, and a run that uses several Promise
+// homes is visible as several (T2143).
 //
 // This is the regression T2133 was: clitest.IsolateHome gave each of the three
 // CLI test packages its own empty PROMISE_HOME, turning one warm 375 MB LLVM
 // view materialization into three cold ones per run. Nothing measured it and it
 // rode trunk for eighteen days, surfacing as a timeout in a progress-rendering
-// test. The ledger lives beside the BINARY rather than inside a home precisely
-// so that private homes cannot hide from it.
+// test. The ledger is anchored to the BINARY rather than to a home precisely so
+// that private homes cannot hide from it — in a worktree it lands in .home/tmp,
+// since bin/ is the build's alone to write (T2211).
 
-// compilerWithItsOwnLedger puts the built compiler in a directory of its own and
-// returns its path.
+// compilerWithItsOwnLedger puts the built compiler in a throwaway worktree of
+// its own and returns its path.
 //
-// A directory of its own is what gives this test a ledger of its own: the real
-// one under bin/ is a live measurement window whenever a gate is running, and a
-// test that wrote to it would be counted into somebody else's numbers. It is the
-// only way to get a second ledger — casmetrics derives the path from
-// os.Executable() and from nothing else, deliberately, so that no environment
-// variable can move it.
+// A worktree of its own is what gives this test a ledger of its own: the real
+// one is a live measurement window whenever a gate is running, and a test that
+// wrote to it would be counted into somebody else's numbers. It is the only way
+// to get a second ledger — casmetrics derives the path from os.Executable() and
+// from nothing else, deliberately, so that no environment variable can move it.
 //
-// Off Windows it is a hardlink, so it costs metadata rather than the tens of
-// megabytes T2133 is about. On Windows it is a copy: a running image is locked
-// by its file IDENTITY rather than by the path it was launched from, and a
-// hardlink is the same file — so while any peer test drives bin\promise.exe,
+// The layout is the production one and not just a directory: the compiler at
+// <root>/bin/<exe> under a root marker resolves its ledger to <root>/.home/tmp,
+// which is the branch every gate run takes (T2211). The marker file is inert —
+// the compiler only ever reads the catalog it embeds — so it buys the real
+// resolution path at the cost of one empty file.
+//
+// Off Windows the placement is a hardlink, so it costs metadata rather than the
+// tens of megabytes T2133 is about. On Windows it is a copy: a running image is
+// locked by its file IDENTITY rather than by the path it was launched from, and
+// a hardlink is the same file — so while any peer test drives bin\promise.exe,
 // which is nearly always, the temp-dir link cannot be removed, and t.TempDir()'s
 // RemoveAll failure is reported by testing as this test failing (T2154). ~35 MB
 // of copy is what a deletable file costs there.
 func compilerWithItsOwnLedger(t *testing.T) string {
 	t.Helper()
 	src := clitest.Bin(t)
-	dst := filepath.Join(clitest.TempDir(t), "promise")
+	root := clitest.TempDir(t)
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "catalog.toml"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(root, "bin", "promise")
 	if runtime.GOOS == "windows" {
 		dst += ".exe"
 	}
@@ -118,12 +131,20 @@ func removeRetrying(remove func(string) error, backoff func(int) time.Duration, 
 	return err
 }
 
-// readLedger folds the ledger beside a compiler. Kept to the same three event
-// kinds tools/build/common.readCASLedger folds, so a format change fails here
-// as well as in the two golden tests.
+// ledgerPath is where a compiler at <root>/bin/<exe> writes its ledger. Spelled
+// here from the outside on purpose: this is the black-box check that the path
+// casmetrics resolves and the one tools/build/common reads are the same file.
+func ledgerPath(bin string) string {
+	root := filepath.Dir(filepath.Dir(bin))
+	return filepath.Join(root, ".home", "tmp", ".promise-cas.jsonl")
+}
+
+// readLedger folds a compiler's ledger. Kept to the same three event kinds
+// tools/build/common.readCASLedger folds, so a format change fails here as well
+// as in the two golden tests.
 func readLedger(t *testing.T, bin string) (homes, names []string, network, materialized int64, populations int) {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(bin), ".promise-cas.jsonl"))
+	data, err := os.ReadFile(ledgerPath(bin))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil, 0, 0, 0
@@ -206,6 +227,13 @@ func TestStoreLedgerCountsEveryHomeARunUses(t *testing.T) {
 		}
 	}
 
+	// Nothing landed in bin/, which only ./make and `workspace setup/update`
+	// may write (T2211). Asserted end to end, against a real compiler, because
+	// the two golden tests can only pin what the path rule computes.
+	if _, err := os.Stat(filepath.Join(filepath.Dir(bin), ".promise-cas.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("three compilations left a ledger in bin/ (stat err = %v)", err)
+	}
+
 	gotHomes, _, _, _, _ := readLedger(t, bin)
 	if len(gotHomes) != 3 {
 		t.Fatalf("the ledger names %d home(s) for a run that used 3: %v\n"+
@@ -234,7 +262,7 @@ func TestStoreLedgerIsQuietOnAWarmHome(t *testing.T) {
 	if r := clitest.Run(t, bin, nil, "exec", uniqueProgram(t, 0)); r.ExitCode != 0 {
 		t.Fatalf("the first compilation failed%s", r.Detail())
 	}
-	if err := os.Remove(filepath.Join(filepath.Dir(bin), ".promise-cas.jsonl")); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(ledgerPath(bin)); err != nil && !os.IsNotExist(err) {
 		t.Fatalf("clearing the ledger: %v", err)
 	}
 	if r := clitest.Run(t, bin, nil, "exec", uniqueProgram(t, 1)); r.ExitCode != 0 {

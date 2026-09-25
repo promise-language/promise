@@ -12,11 +12,12 @@ package common
 // materialization becoming three cold ones per test run, unmeasured, for 18
 // days.
 //
-// The compiler appends an event per occurrence to a ledger beside its own
-// binary (compiler/internal/casmetrics). A gate empties that ledger once its
-// build and toolchain warm-up are done, and reads it back when the measurement
-// is over — so the numbers describe the measured phase and not how warm the
-// machine happened to be when it started.
+// The compiler appends an event per occurrence to a ledger anchored to its own
+// binary (compiler/internal/casmetrics): the worktree's scratch dir when that
+// binary is at <root>/bin/<exe>, since bin/ itself is the build's to write. A
+// gate empties that ledger once its build and toolchain warm-up are done, and
+// reads it back when the measurement is over — so the numbers describe the
+// measured phase and not how warm the machine happened to be when it started.
 //
 // The ledger's path rule and line format are spelled here a second time because
 // the tools are a separate Go module from the compiler and cannot import it —
@@ -35,13 +36,30 @@ import (
 	"strings"
 )
 
-// casLedgerName is the ledger's file name, in the directory holding the
-// compiler binary. Keep in lockstep with casmetrics.LedgerName.
+// casLedgerName is the ledger's file name. Keep in lockstep with
+// casmetrics.LedgerName.
 const casLedgerName = ".promise-cas.jsonl"
 
-// casLedgerPath is where this repository's compiler writes its ledger.
+// casLedgerPath is where this repository's compiler writes its ledger: the
+// worktree's scratch dir, NOT bin/ — only ./make and `workspace setup/update`
+// write there (T2211). Keep in lockstep with casmetrics.LedgerRelPath.
 func casLedgerPath(root string) string {
-	return filepath.Join(root, "bin", casLedgerName)
+	return filepath.Join(root, ".home", "tmp", casLedgerName)
+}
+
+// removeLegacyCASLedger deletes the ledger an older compiler left in bin/, where
+// it lived before T2211 moved it to the scratch dir above.
+//
+// It is called from the build because bin/ is gitignored — no commit can remove
+// a file there — and because the build is the only writer permitted to touch
+// that directory at all, which is the whole point of the item. It deletes ONE
+// exact name and never sweeps: bin/ also holds the build's own sidecars, and a
+// cleanup that guessed at a pattern would eat them.
+//
+// Delete this once no worktree in use predates T2211; a worktree is cured by a
+// single build, so that is soon, and nothing else depends on it.
+func removeLegacyCASLedger(binDir string) {
+	os.Remove(filepath.Join(binDir, casLedgerName))
 }
 
 // casEvent is one line of the ledger. Keep in lockstep with casmetrics.event.

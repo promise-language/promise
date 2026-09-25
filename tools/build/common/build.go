@@ -228,6 +228,11 @@ func RunBuild(root string, args []string) error {
 	infoFile := filepath.Join(binDir, ".promise.buildinfo")
 	os.WriteFile(infoFile, []byte(version+"\n"), 0o644)
 
+	// The store ledger used to live here and now lives in the worktree's scratch
+	// dir (T2211); the build is the one writer permitted to touch this directory,
+	// so clearing what an older compiler left behind belongs here.
+	removeLegacyCASLedger(binDir)
+
 	// 11. Invalidate gate values — compiler changed, prior verify results are stale
 	InvalidateGateValues(root)
 

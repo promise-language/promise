@@ -37,6 +37,12 @@ func TestLedgerFormat(t *testing.T) {
 	if LedgerName != ".promise-cas.jsonl" {
 		t.Errorf("ledger name drifted: %q", LedgerName)
 	}
+	// The path tools/build/common spells a second time (casLedgerPath). Pinning
+	// the literal here and there is what makes a change to one that is not made
+	// to the other fail immediately.
+	if want := filepath.Join(".home", "tmp", ".promise-cas.jsonl"); LedgerRelPath() != want {
+		t.Errorf("LedgerRelPath = %q, want %q", LedgerRelPath(), want)
+	}
 }
 
 // TestLedgerFolds: the four numbers a gate reports are a fold of the events,
@@ -112,6 +118,40 @@ func TestLedgerUnwritableReadsAsUnavailable(t *testing.T) {
 	}
 }
 
+// TestLedgerUncreatableDirectoryReadsAsUnavailable covers the other half of the
+// open path the scratch location introduced: the directory does not exist AND
+// cannot be made, because something else already occupies the name.
+//
+// This is the state a worktree is in when `.home` is a file rather than a
+// directory, and it is the only way the mkdir-and-retry can fail — without it
+// the rescue branch is exercised solely by its success. The answer must be
+// "unavailable" and not a clean zero, which is exactly what a gate reads as
+// "this run cost the store nothing" (T2211). tools/build/common asserts the same
+// state from the other side, in TestCASWindowRefusesARootThatCannotHoldALedger.
+//
+// No mode bits and so no Windows or root skip: a file where a directory must be
+// is refused by every platform, and by root as well.
+func TestLedgerUncreatableDirectoryReadsAsUnavailable(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".home"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	l := ledger{path: filepath.Join(root, LedgerRelPath())}
+	l.append(event{Event: eventNetwork, Bytes: 9}) // silently does nothing
+	got := l.read()
+	if got.Available {
+		t.Error("a ledger whose directory could not be created read as available")
+	}
+	if got.NetworkBytes != 0 {
+		t.Errorf("NetworkBytes = %d from a ledger that was never written", got.NetworkBytes)
+	}
+	if len(got.Homes) != 0 || len(got.Names) != 0 {
+		t.Errorf("an unwritable ledger named homes %v and causes %v", got.Homes, got.Names)
+	}
+}
+
 // TestLedgerSkipsTornLine: a writer killed mid-append can leave a partial
 // trailing line. The rest of the run's accounting is still worth having, so it
 // is skipped rather than failing the whole read.
@@ -164,6 +204,45 @@ func TestLedgerConcurrentAppends(t *testing.T) {
 	}
 }
 
+// TestLedgerConcurrentAppendsCreateTheDirectoryOnce is the same property on a
+// directory that does not exist yet, which is the state of every fresh clone —
+// and the case the test above cannot reach, since t.TempDir() hands it one.
+//
+// It is the concurrency surface the scratch location introduced: the first burst
+// of events all find the directory missing and all reach mkdir-and-retry at once.
+// A gate run in a new worktree does exactly this, with compilers rather than
+// goroutines, so an mkdir that failed for the loser of the race would silently
+// drop whatever that process was accounting for. MkdirAll is idempotent, which is
+// what makes every writer a winner; this pins it, since the alternative loses
+// events without any error anyone would see.
+func TestLedgerConcurrentAppendsCreateTheDirectoryOnce(t *testing.T) {
+	t.Parallel()
+	// The real relative path, whose two levels are both missing in a clone that
+	// has only ever run ./make — so the retry has a tree to build, not just a leaf.
+	l := ledger{path: filepath.Join(t.TempDir(), LedgerRelPath())}
+	const writers, each = 16, 25
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < each; j++ {
+				l.append(event{Event: eventNetwork, Bytes: 1})
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	got := l.read()
+	if !got.Available {
+		t.Fatal("the ledger never became available — no writer created the directory")
+	}
+	if want := int64(writers * each); got.NetworkBytes != want {
+		t.Errorf("NetworkBytes = %d, want %d — a writer that lost the mkdir race "+
+			"dropped its events silently", got.NetworkBytes, want)
+	}
+}
+
 // TestRegisterHomeIsIdempotent: a home already on file is not written again, so
 // a run that compiles a thousand files still reads as one home.
 func TestRegisterHomeIsIdempotent(t *testing.T) {
@@ -212,25 +291,178 @@ func countLines(s string) int {
 	return n
 }
 
+// TestLedgerAnchorIsTheWorktreeScratchDir is the rule T2211 established: a
+// compiler at <root>/bin/<exe> writes the worktree's scratch ledger and NOTHING
+// into bin/, which only ./make and `workspace setup/update` may write.
+//
+// It drives forBinary with a stub locator rather than the package façade,
+// because the resolution is the whole subject and a test binary is never in a
+// worktree — and because a stub keeps this parallel-safe, where a package
+// variable would not be.
+func TestLedgerAnchorIsTheWorktreeScratchDir(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	exe := fakeWorktreeBinary(t, root)
+
+	l, ok := forBinary(func() (string, error) { return exe, nil })
+	if !ok {
+		t.Fatal("forBinary found nothing to anchor a ledger to")
+	}
+	if want := filepath.Join(root, ".home", "tmp", LedgerName); l.path != want {
+		t.Errorf("ledger at %q, want %q", l.path, want)
+	}
+
+	// The scratch directory does not exist yet in a fresh clone, so the append
+	// has to create it — otherwise every event before the first gate run is
+	// silently dropped.
+	l.append(event{Event: eventNetwork, Bytes: 4096})
+	if got := l.read(); got.NetworkBytes != 4096 {
+		t.Errorf("the first append was dropped: %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "bin", LedgerName)); !os.IsNotExist(err) {
+		t.Errorf("a ledger appeared in bin/ (stat err = %v) — only ./make and "+
+			"`workspace setup/update` may write there (T2211)", err)
+	}
+}
+
+// TestLedgerAnchorFallsBackBesideAnInstalledBinary: outside a worktree there is
+// no bin/ to protect and no scratch root to use, so the binary's own directory
+// is the anchor — which is what keeps an installed compiler, and every go test
+// binary in this repo, accounting for itself.
+func TestLedgerAnchorFallsBackBesideAnInstalledBinary(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(binDir, "promise")
+	if err := os.WriteFile(exe, []byte("not really a compiler"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	l, ok := forBinary(func() (string, error) { return exe, nil })
+	if !ok {
+		t.Fatal("forBinary found nothing to anchor a ledger to")
+	}
+	if want := filepath.Join(binDir, LedgerName); l.path != want {
+		t.Errorf("ledger at %q, want %q — an install has no worktree to write into", l.path, want)
+	}
+}
+
+// TestLedgerAnchorReportsNoBinary: a locator that cannot answer leaves nothing
+// to anchor to, and the caller must get "unavailable" rather than a ledger at
+// some path derived from an empty string.
+func TestLedgerAnchorReportsNoBinary(t *testing.T) {
+	t.Parallel()
+	if _, ok := forBinary(func() (string, error) { return "", os.ErrNotExist }); ok {
+		t.Error("forBinary anchored a ledger despite not locating the binary")
+	}
+}
+
+// TestLedgerAnchorFollowsASymlinkedBinary: a launcher symlink resolves to the
+// tree holding the real binary. Without this the ledger would follow whatever
+// directory somebody put a link in, and the processes in one run would disagree
+// about which file they are appending to.
+func TestLedgerAnchorFollowsASymlinkedBinary(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("a symlink needs administrator rights on Windows")
+	}
+	root := t.TempDir()
+	real := fakeWorktreeBinary(t, root)
+	link := filepath.Join(t.TempDir(), "promise")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("linking the compiler: %v", err)
+	}
+
+	l, ok := forBinary(func() (string, error) { return link, nil })
+	if !ok {
+		t.Fatal("forBinary found nothing to anchor a ledger to")
+	}
+	if want := filepath.Join(root, ".home", "tmp", LedgerName); l.path != want {
+		t.Errorf("ledger at %q, want the linked tree's %q", l.path, want)
+	}
+}
+
+// TestLedgerAnchorAgreesThroughALinkOutsideAWorktree is the same invariant on the
+// fallback branch, where it is easiest to lose: an installed compiler reached
+// through ~/.promise/bin/promise and the same compiler reached through the epoch
+// directory that link points at must keep ONE tally, or the accounting silently
+// splits in two on how the binary happened to be invoked.
+func TestLedgerAnchorAgreesThroughALinkOutsideAWorktree(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("a symlink needs administrator rights on Windows")
+	}
+	install := filepath.Join(t.TempDir(), "epoch", "bin")
+	if err := os.MkdirAll(install, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(install, "promise")
+	if err := os.WriteFile(real, []byte("not really a compiler"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "promise")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("linking the compiler: %v", err)
+	}
+
+	direct, ok := forBinary(func() (string, error) { return real, nil })
+	if !ok {
+		t.Fatal("forBinary found nothing to anchor a ledger to")
+	}
+	linked, ok := forBinary(func() (string, error) { return link, nil })
+	if !ok {
+		t.Fatal("forBinary found nothing to anchor a ledger to through the link")
+	}
+	if direct.path != linked.path {
+		t.Errorf("the same compiler keeps two ledgers: %q through its own path, "+
+			"%q through a link to it", direct.path, linked.path)
+	}
+}
+
+// fakeWorktreeBinary places a stand-in compiler at <root>/bin/promise and marks
+// root as a Promise worktree, which is the whole of what the resolver reads.
+func fakeWorktreeBinary(t *testing.T, root string) string {
+	t.Helper()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, rootMarker), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(binDir, "promise")
+	if err := os.WriteFile(exe, []byte("not really a compiler"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return exe
+}
+
 // TestFacadeWritesBesideTheRunningBinary drives the package-level functions
 // rather than a ledger of its own, because WHERE they write is the whole design
 // (a ledger inside a Promise home cannot see a run that used three) and every
 // other test here deliberately bypasses it.
 //
+// This test binary is not in a worktree, so the façade takes the fallback branch
+// and writes beside the binary — the branch an installed compiler takes, and the
+// one the three suites that observe AddNetwork/AddMaterialized through the
+// façade rely on (blobstore, llvm_cas, cas_report).
+//
 // Not parallel, and it restores what it found: this is the one ledger every
 // caller in the process shares.
 func TestFacadeWritesBesideTheRunningBinary(t *testing.T) {
-	exe, err := os.Executable()
-	if err != nil {
-		t.Skip("no executable path to anchor a ledger to:", err)
+	l, ok := current()
+	if !ok {
+		t.Skip("no executable path to anchor a ledger to")
 	}
-	path := filepath.Join(filepath.Dir(exe), LedgerName)
-	restore := snapshot(t, path)
+	restore := snapshot(t, l.path)
 	defer restore()
 
 	before := Read()
 	if !before.Available {
-		t.Skipf("the directory holding this test binary cannot hold a ledger (%s)", filepath.Dir(exe))
+		t.Skipf("the ledger's directory cannot hold one (%s)", filepath.Dir(l.path))
 	}
 
 	// A home this process has never seen, so the per-process memo cannot hide

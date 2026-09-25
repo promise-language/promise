@@ -29,6 +29,8 @@ The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries i
 | `bin/prereqs` | Install build prerequisites (LLVM, Go, Java, wasmtime). |
 | `bin/run` | Run one contract gate and judge it against `tools/gates/thresholds.json`. `bin/run <gate>` measures and judges for a person; `bin/run <gate> --verdict` judges an envelope on stdin (what the SDK calls); `bin/run --list [--json]` prints the gates and every command `./make` builds — the workspace reads that list to refuse installing over a project tool and to decide which names it may remove, so it reports the whole build set rather than a subset. `bin/run <command> [args…]` dispatches `bin/<command>`, since the two kinds share one namespace. See [gate-system.md](gate-system.md#the-contract-gates-and-the-judge). |
 
+**Only `./make` and `workspace setup/update` write into `bin/`.** It holds tool binaries, the compiler, and the build's own up-to-date sidecars — nothing else, so that everything in it is something a build put there and the directory can be deleted and rebuilt without losing state. Anything a command needs to write inside the worktree goes under `.home/` instead, with `.home/tmp/` for scratch. Both are gitignored and therefore outside `WorktreeHash`: a run's own scratch must never change the tree identity that run is measuring.
+
 ## Architecture
 
 All tools share a common library (`tools/build/common/`) and are thin `main.go` wrappers under `tools/build/cmd/`. When one tool needs another (e.g., verify calls build), it calls the common library directly — no subprocess spawning.
@@ -283,7 +285,7 @@ The version string format:
 
 The epoch is read from `catalog.toml`. After building, writes `bin/.promise.hash` (SHA256 of the binary) for cache invalidation.
 
-`bin/` holds one other sidecar, written by the compiler rather than by the build: `bin/.promise-cas.jsonl`, the ledger of what runs cost the content-addressed store — bytes fetched over the wire, and bytes written exploding store content into toolchain views and CRT trees. It sits beside the binary because every compiler process in a run is that binary, while the Promise home they write into is a choice each of them makes separately; a ledger inside a home cannot see a run that used three. `bin/gate` and `bin/verify` empty it once their build and toolchain warm-up are done and read it back when they are finished — the gate to report the `cas_*` metrics, verify to print the run's cost in its summary ([gate-system.md](gate-system.md#store-metrics)).
+One file a run produces is written by the compiler rather than by the build, and so lives in the worktree's scratch dir rather than in `bin/`: `.home/tmp/.promise-cas.jsonl`, the ledger of what runs cost the content-addressed store — bytes fetched over the wire, and bytes written exploding store content into toolchain views and CRT trees. It is anchored to the *binary* (a compiler at `<root>/bin/<exe>` resolves `<root>`, and one outside a worktree keeps its ledger beside itself) because every compiler process in a run is that binary, while the Promise home they write into is a choice each of them makes separately; a ledger inside a home cannot see a run that used three. `bin/gate` and `bin/verify` empty it once their build and toolchain warm-up are done and read it back when they are finished — the gate to report the `cas_*` metrics, verify to print the run's cost in its summary ([gate-system.md](gate-system.md#store-metrics)).
 
 ### Release builds
 

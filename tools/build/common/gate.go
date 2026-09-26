@@ -184,11 +184,16 @@ func runGateWasmTests(root string, args []string) error {
 		}
 	}
 
-	// The runtime executes the built module; it contributes nothing to it, and
-	// docs/gate-system.md takes it from PATH. Absent, the gate fails loudly
-	// rather than reporting a measurement it did not make.
-	if Which("wasmtime") == "" { // path-ok: the documented wasm32-wasi test runtime
-		return fmt.Errorf("wasmtime not found — install with: bin/prereqs -wasm")
+	// The runtime executes the built module. Stage the pinned one before the
+	// build so a host that cannot obtain it fails loudly here, rather than
+	// reporting a measurement it did not make (T2169). Which copy runs is not
+	// this machine's business to decide: a gate's verdict has to describe the
+	// tree, and a suite run under whatever wasmtime happened to be installed
+	// describes the host as much as the tree.
+	if _, err := EnsureWasmtime(root); err != nil {
+		return fmt.Errorf("pinned wasmtime unavailable: %w\n"+
+			"  Stage it with `bin/prereqs -wasm`, or name an existing binary with PROMISE_WASMTIME\n"+
+			"  (note that a gate refuses to measure under an override)", err)
 	}
 
 	if !shared {
@@ -266,8 +271,12 @@ func runGateWasmWebTests(root string, args []string) error {
 		}
 	}
 
-	if Which("node") == "" { // path-ok: the documented wasm32-web test runtime (Node 20+)
-		return fmt.Errorf("node not found — install Node.js 20+ (https://nodejs.org/)")
+	// The pinned Node runs the wasm32-web harness — see runGateWasmTests above
+	// for why the gate stages a runtime rather than probing for one (T2169).
+	if _, err := EnsureNode(root); err != nil {
+		return fmt.Errorf("pinned node unavailable: %w\n"+
+			"  Stage it with `bin/prereqs -wasm`, or name an existing binary with PROMISE_NODE\n"+
+			"  (note that a gate refuses to measure under an override)", err)
 	}
 
 	if !shared {

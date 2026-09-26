@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -241,7 +241,7 @@ func TestCrossExecCommandNoHostProbing(t *testing.T) {
 // and the real dispatcher from drifting apart — stress uses the former to fail
 // before compiling, so a disagreement would let it compile and then die.
 func TestCanExecuteTargetAgreesWithDispatch(t *testing.T) {
-	t.Parallel()
+	stubWasmRuntimes(t) // no t.Parallel: t.Setenv forbids it
 	targets := []string{
 		"wasm32-wasi", "wasm32-web", "x86_64-pc-windows-msvc",
 		"riscv64-unknown-linux-musl", hostTargetForTest(),
@@ -251,10 +251,6 @@ func TestCanExecuteTargetAgreesWithDispatch(t *testing.T) {
 			continue // no known host triple for this platform
 		}
 		t.Run(target, func(t *testing.T) {
-			t.Parallel()
-			if isWasmWebTarget(target) {
-				skipWithoutNode(t)
-			}
 			preflight := canExecuteTarget(target)
 			_, err := crossExecCommand(context.Background(), target, "/tmp/test")
 			if (preflight == nil) != (err == nil) {
@@ -265,8 +261,7 @@ func TestCanExecuteTargetAgreesWithDispatch(t *testing.T) {
 }
 
 func TestCrossExecCommandWasmWeb(t *testing.T) {
-	t.Parallel()
-	skipWithoutNode(t)
+	stubWasmRuntimes(t) // no t.Parallel: t.Setenv forbids it
 	cmd, err := crossExecCommand(context.Background(), "wasm32-web", "/tmp/test.wasm")
 	if err != nil {
 		t.Fatalf("unexpected error for wasm-web target: %v", err)
@@ -296,7 +291,7 @@ func TestCrossExecCommandHostArgs(t *testing.T) {
 // rather than silently dropped, and that wasm32-web — whose Node harness has
 // nowhere to put argv — refuses instead of pretending it worked.
 func TestCrossExecCommandWasmArgs(t *testing.T) {
-	t.Parallel()
+	stubWasmRuntimes(t) // no t.Parallel: t.Setenv forbids it
 	cmd, err := crossExecCommand(context.Background(), "wasm32-wasi", "/tmp/t.wasm", "a", "b")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -310,15 +305,26 @@ func TestCrossExecCommandWasmArgs(t *testing.T) {
 	}
 }
 
-// skipWithoutNode skips a test that would construct a wasm32-web command.
-// runWasmWeb resolves the Node binary eagerly and calls os.Exit when it is
-// absent, so reaching it on a machine without Node would kill the whole test
-// binary rather than fail one test. A test states its own world.
-func skipWithoutNode(t *testing.T) {
+// stubWasmRuntimes points both WASM runtime overrides at paths that do not
+// exist, so a test about COMMAND CONSTRUCTION can construct one on any machine.
+//
+// This replaces a skip that asked the host whether it had Node (T2169). The
+// skip was the right shape for its time — runWasmWeb resolved Node eagerly and
+// called os.Exit, so reaching it without Node killed the whole test binary —
+// but "what does this machine have installed" is never a premise a test should
+// rest on: it runs a different check on every host, which is the defect T2116
+// and T2166 were both about. Now that the runtimes are pinned, the override is
+// the documented way for a test to bring its own
+// (docs/build-tools.md#llvm-staging: pinned prebuilts, an explicit PROMISE_*
+// override, or a stub it writes itself), so these tests assert on every host.
+//
+// The paths are sentinels, not plausible binaries: nothing here executes the
+// command, and anything that later tried to should fail loudly rather than
+// reach some real program.
+func stubWasmRuntimes(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("node"); err != nil { // path-ok: skips for the absent runtime itself, which is the legitimate form
-		t.Skip("node not installed; wasm32-web command construction needs it")
-	}
+	t.Setenv("PROMISE_WASMTIME", filepath.Join(t.TempDir(), "stub-wasmtime"))
+	t.Setenv("PROMISE_NODE", filepath.Join(t.TempDir(), "stub-node"))
 }
 
 // hostTargetForTest returns a known host triple for the current platform.
@@ -338,4 +344,62 @@ func hostTargetForTest() string {
 		return "x86_64-pc-windows-msvc"
 	}
 	return ""
+}
+
+// The command runs the PINNED runtime, not a bare name resolved through PATH.
+// This is the product half of T2169: `exec.CommandContext(ctx, "wasmtime", …)`
+// looked harmless and meant that whichever wasmtime a machine happened to carry
+// decided what a wasm suite reported — and that a user targeting wasm32-web
+// needed a global Node install, against the zero-dependency mandate.
+func TestCrossExecCommandUsesThePinnedRuntime(t *testing.T) {
+	dir := t.TempDir()
+	wasmtimePath := filepath.Join(dir, "pinned-wasmtime")
+	nodePath := filepath.Join(dir, "pinned-node")
+	t.Setenv("PROMISE_WASMTIME", wasmtimePath)
+	t.Setenv("PROMISE_NODE", nodePath)
+
+	wasi, err := crossExecCommand(context.Background(), "wasm32-wasi", "/tmp/t.wasm")
+	if err != nil {
+		t.Fatalf("wasm32-wasi: %v", err)
+	}
+	if wasi.Path != wasmtimePath || wasi.Args[0] != wasmtimePath {
+		t.Errorf("wasm32-wasi runs %q (argv0 %q), want the resolved %q — a bare name would go through PATH",
+			wasi.Path, wasi.Args[0], wasmtimePath)
+	}
+
+	web, err := crossExecCommand(context.Background(), "wasm32-web", "/tmp/t.wasm")
+	if err != nil {
+		t.Fatalf("wasm32-web: %v", err)
+	}
+	if web.Path != nodePath || web.Args[0] != nodePath {
+		t.Errorf("wasm32-web runs %q (argv0 %q), want the resolved %q", web.Path, web.Args[0], nodePath)
+	}
+}
+
+// An unobtainable runtime is an error the caller can report, not an os.Exit.
+// runWasmWeb used to kill the process on a missing Node, which gave its one
+// caller — which already returns an error — nothing to say, and made any test
+// that reached it take the whole test binary down with it.
+func TestCrossExecCommandReportsAnUnobtainableRuntime(t *testing.T) {
+	// isolateWasmRuntimes is what makes "unobtainable" true rather than likely —
+	// including closing the wire, which an earlier spelling of this test left
+	// open and thereby depended on the blobs being unpublished. See its comment.
+	isolateWasmRuntimes(t)
+
+	for _, target := range []string{"wasm32-wasi", "wasm32-web"} {
+		cmd, err := crossExecCommand(context.Background(), target, "/tmp/t.wasm")
+		if err == nil {
+			t.Errorf("%s returned a command (%v) with no runtime available; want an error", target, cmd)
+			continue
+		}
+		// The message has to name the override, since on a machine that cannot
+		// reach the blob host that is the only way forward.
+		wantVar := "PROMISE_WASMTIME"
+		if target == "wasm32-web" {
+			wantVar = "PROMISE_NODE"
+		}
+		if !strings.Contains(err.Error(), wantVar) {
+			t.Errorf("%s error = %q, want it to name %s", target, err, wantVar)
+		}
+	}
 }

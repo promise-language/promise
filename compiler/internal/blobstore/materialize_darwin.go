@@ -73,3 +73,24 @@ func PatchAndSignMachO(path string) {
 
 	exec.Command("codesign", "--force", "--sign", "-", path).CombinedOutput()
 }
+
+// EnsureAdHocSignature makes a materialized WASM test runtime loadable on macOS
+// (T2169). arm64 refuses to execute an unsigned Mach-O, so a runtime whose
+// signature did not survive the trip into the view has to be ad-hoc signed
+// before it can run.
+//
+// Deliberately NOT PatchAndSignMachO. wasmtime and node are self-contained
+// binaries with no Promise-relative dylib to find, so adding an @loader_path
+// rpath would buy nothing and would invalidate a perfectly good upstream
+// signature on the way — an unconditional re-sign is a change that can only
+// make a working binary worse. The CAS holds the raw upstream bytes either way,
+// so the normal case is that `codesign --verify` passes and this does nothing.
+//
+// Best-effort, like its sibling: a re-sign that fails leaves the file exactly as
+// it was, and the failure surfaces at exec time naming the runtime.
+func EnsureAdHocSignature(path string) {
+	if err := exec.Command("codesign", "--verify", path).Run(); err == nil {
+		return // signature survived — leave it alone
+	}
+	exec.Command("codesign", "--force", "--sign", "-", path).CombinedOutput()
+}

@@ -536,38 +536,43 @@ func doctorCheckJava() doctorCheck {
 }
 
 func doctorCheckWasmtime() doctorCheck {
-	c := makeDoctorCheck("wasmtime (optional — wasm32-wasi target)", doctorOK, false)
-
-	path, err := exec.LookPath("wasmtime") // path-ok: promise doctor reports host state — that is its whole subject
-	if err != nil {
-		c.Status = doctorWarn.String()
-		c.Summary = "Not found on PATH"
-		c.Fix = "Install from https://wasmtime.dev/ to run wasm32-wasi binaries"
-		return c
-	}
-
-	c.Summary = "Found: " + path
-	if out, err := exec.Command(path, "--version").Output(); err == nil {
-		c.Details = append(c.Details, strings.TrimSpace(string(out)))
-	}
-
-	return c
+	return doctorCheckWasmRuntime("wasmtime", "wasmtime (optional — wasm32-wasi target)")
 }
 
 func doctorCheckNode() doctorCheck {
-	c := makeDoctorCheck("node (optional — wasm32-web target tests)", doctorOK, false)
+	return doctorCheckWasmRuntime("node", "node (optional — wasm32-web target tests)")
+}
 
-	path, err := exec.LookPath("node") // path-ok: promise doctor reports host state — that is its whole subject
-	if err != nil {
-		c.Status = doctorWarn.String()
-		c.Summary = "Not found on PATH"
-		c.Fix = "Install Node.js to run wasm32-web tests"
-		return c
+// doctorCheckWasmRuntime reports a pinned WASM test runtime: which copy would
+// actually run, and — separately — whether the host happens to have one of its
+// own.
+//
+// Since T2169 an absent host copy is not a warning. The runtime is a pinned
+// dependency fetched on demand, so "not on PATH" describes the machine and says
+// nothing about whether a wasm target can be run here; warning about it would
+// send its reader to install something this compiler will not use. What is
+// worth a warning is the pinned runtime being unobtainable — and that is only
+// knowable by trying to fetch it, which `promise doctor` must not do (it
+// reports state, it does not acquire megabytes). So the check reports the pin,
+// notes an unused host copy when there is one, and leaves acquisition to the
+// run that needs it.
+func doctorCheckWasmRuntime(dep, title string) doctorCheck {
+	c := makeDoctorCheck(title, doctorOK, false)
+
+	if path, err := resolveWasmRuntimeIfLocal(dep); err == nil && path != "" {
+		c.Summary = "Pinned, staged: " + path
+		if out, err := exec.Command(path, "--version").Output(); err == nil {
+			c.Details = append(c.Details, "Version: "+strings.TrimSpace(string(out)))
+		}
+	} else {
+		c.Summary = "Pinned; fetched on demand (not staged on this machine yet)"
 	}
 
-	c.Summary = "Found: " + path
-	if out, err := exec.Command(path, "--version").Output(); err == nil {
-		c.Details = append(c.Details, "Version: "+strings.TrimSpace(string(out)))
+	// path-ok below: promise doctor reports host state — that is its whole
+	// subject. The line exists to answer "I have one installed, why isn't it
+	// being used", so it names the copy AND says it is not used.
+	if hostCopy, err := exec.LookPath(dep); err == nil { // path-ok: promise doctor reports host state — that is its whole subject
+		c.Details = append(c.Details, "Host copy at "+hostCopy+" is NOT used — the pinned runtime runs")
 	}
 
 	return c

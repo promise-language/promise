@@ -614,17 +614,10 @@ files = [{ src = "a", out = "b.gz" }]
 `,
 			want: "missing version",
 		},
-		{
-			name: "missing bundle_dir",
-			toml: `schema = 1
-[binaries.x]
-version = "1"
-[binaries.x.targets.linux-amd64]
-url = "https://example/a.tar.xz"
-files = [{ src = "a", out = "b.gz" }]
-`,
-			want: "missing bundle_dir",
-		},
+		// No "missing bundle_dir" case: an absent bundle_dir is legal and means
+		// "never embedded into the shipped compiler" — the WASM test runtimes'
+		// shape (T2169). TestPrebuiltsManifest_EmptyBundleDirIsValid states that
+		// rule directly.
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

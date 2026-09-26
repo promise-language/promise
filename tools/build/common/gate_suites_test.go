@@ -1,6 +1,7 @@
 package common
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -15,23 +16,27 @@ import (
 // package.
 //
 // The value is a sentinel rather than a plausible path: the product only asks
-// whether it is empty, and anything that later tried to EXECUTE it should fail
-// loudly rather than reach some real program.
+// whether staging SUCCEEDED, and anything that later tried to EXECUTE it should
+// fail loudly rather than reach some real program.
+//
+// Since T2169 the seam stages the PINNED runtime rather than probing PATH, so
+// the stub stands in for a download too: no test here may reach the network any
+// more than it may reach the host's installed set.
 func init() {
-	findRuntime = func(name string) string { return "stubbed-runtime:" + name }
+	findRuntime = func(root, dep string) (string, error) { return "stubbed-runtime:" + dep, nil }
 }
 
-// stubRuntimeMissing makes the probe report one runtime absent — how the test
-// ABOUT the probe states its premise, instead of hoping this host lacks a
+// stubRuntimeMissing makes the probe report one runtime unobtainable — how the
+// test ABOUT the probe states its premise, instead of hoping this host lacks a
 // program with some unlikely name.
 func stubRuntimeMissing(t *testing.T, name string) {
 	t.Helper()
 	saved := findRuntime
-	findRuntime = func(n string) string {
-		if n == name {
-			return ""
+	findRuntime = func(root, dep string) (string, error) {
+		if dep == name {
+			return "", errors.New("no blob hosted for this target")
 		}
-		return saved(n)
+		return saved(root, dep)
 	}
 	t.Cleanup(func() { findRuntime = saved })
 }
@@ -84,9 +89,10 @@ func TestTargetSuite_SummaryFieldsBecomeTheBaselinedMetrics(t *testing.T) {
 	}
 }
 
-// A missing runtime is not zero failures. Reporting a clean number for a suite
-// that never ran is the one failure mode an incomplete reason exists to
-// prevent — a ratchet would take it as the best this tree has ever been.
+// A runtime that could not be staged is not zero failures. Reporting a clean
+// number for a suite that never ran is the one failure mode an incomplete
+// reason exists to prevent — a ratchet would take it as the best this tree has
+// ever been.
 func TestTargetSuite_AMissingRuntimeMeasuresNothing(t *testing.T) {
 	stubRuntimeMissing(t, "no-such-runtime-anywhere")
 	stub := func(root, target string) (string, error) {
@@ -103,6 +109,17 @@ func TestTargetSuite_AMissingRuntimeMeasuresNothing(t *testing.T) {
 	}
 	if !strings.Contains(incomplete, "no-such-runtime-anywhere") {
 		t.Errorf("incomplete = %q, want it to name the missing runtime", incomplete)
+	}
+	// The reason has to say the PINNED runtime could not be staged. "not
+	// installed" would send its reader to install one, which since T2169 changes
+	// nothing about what the gate would run.
+	if !strings.Contains(incomplete, "pinned") || !strings.Contains(incomplete, "staged") {
+		t.Errorf("incomplete = %q, want it to report that the pinned runtime could not be staged", incomplete)
+	}
+	// And it must carry the underlying cause: "could not be staged" with no why
+	// leaves an offline host and an unpublished blob looking identical.
+	if !strings.Contains(incomplete, "no blob hosted for this target") {
+		t.Errorf("incomplete = %q, want it to carry the staging error", incomplete)
 	}
 }
 

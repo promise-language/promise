@@ -121,8 +121,11 @@ jobs:
       # prebuilt fetched by `bin/build` like LLVM itself (T0530). Nothing in the
       # build reads /usr/lib/<arch>-linux-musl any more.
 
-      - name: Install wasmtime (runtime for the wasm32-wasi tests)
-        uses: bytecodealliance/actions/wasmtime/setup@v1
+      # No wasmtime or Node install step: both WASM test runtimes are pinned
+      # prebuilts (T2169), staged on demand by the wasm gates and resolved by the
+      # compiler from the content-addressed store, exactly like LLVM above. This
+      # runner image ships a Node of its own; it is deliberately not used, so a
+      # runner-image bump cannot move a suite result.
 
       # Wine runs the cross-built Windows .exe (T0531). One runner, not four:
       # the cross-LINK is asserted on every platform by the PE import check in

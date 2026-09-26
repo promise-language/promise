@@ -511,7 +511,84 @@ func BuildRuntimeManifestFromCatalog(root, target, epoch string) (*runtimeManife
 	}
 	entries = append(entries, compilerRTEntries...)
 
+	runtimeEntries, err := buildWasmRuntimeEntriesFromCatalog(pm, catalog, target)
+	if err != nil {
+		return nil, err
+	}
+	entries = append(entries, runtimeEntries...)
+
 	return &runtimeManifest{Schema: runtimeManifestSchema, Epoch: epoch, Entries: entries}, nil
+}
+
+// buildWasmRuntimeEntriesFromCatalog projects the WASM test runtimes a `target`
+// host can run wasm modules with (T2169).
+//
+// Best-effort at PROJECTION time like the target dependencies above: a runtime
+// whose blobs are not published yet is skipped with a note rather than failing
+// the whole projection. It is not a licence to ship without them — a wasm
+// target simply cannot be executed by a binary whose manifest has no runtime —
+// but a missing wasm runner must not wipe the LLVM entries and silently
+// downgrade the binary to the empty placeholder.
+//
+// Unlike buildTargetDepEntriesFromCatalog these are HOST dependencies, so
+// `target` is the machine that will RUN the runtime and every host gets its own
+// pair. There is no arch fan-out and no embedded copy to fall back on: the
+// runtimes are deliberately in no variant, so the manifest is the only way a
+// client can obtain one.
+func buildWasmRuntimeEntriesFromCatalog(pm *PrebuiltsManifest, catalog *BlobsCatalog, target string) ([]runtimeManifestEntry, error) {
+	var entries []runtimeManifestEntry
+	for _, dep := range WasmRuntimeDeps() {
+		bin := pm.Binaries[dep]
+		if bin == nil {
+			continue // prebuilts.toml doesn't declare this runtime (older tree)
+		}
+		tEntry := bin.Targets[target]
+		if tEntry == nil || tEntry.Unsupported != "" {
+			continue // no runtime buildable for this host
+		}
+		tag := DepsReleaseTag(dep, bin.Version)
+		for _, f := range tEntry.ClientFiles() {
+			be, ok := catalog.Lookup(dep, bin.Version, target, f.Out)
+			if !ok {
+				fmt.Printf("  note: no %s blob hosted for %s/%s/%s/%s — %s targets cannot be run by this binary; publish via `bin/release publish-blobs --dependency %s --host %s`\n",
+					dep, dep, bin.Version, target, f.Out, wasmRuntimeTargetNote(dep), dep, target)
+				break // partial entries would strand the view builder
+			}
+			assetURL, err := BlobAssetURL(tag, be.SHA256, be.Compression)
+			if err != nil {
+				return nil, fmt.Errorf("entry %s: %w", blobIdent(*be), err)
+			}
+			mirrorURL, err := BlobMirrorURL(be.SHA256, be.Compression)
+			if err != nil {
+				return nil, fmt.Errorf("entry %s: %w", blobIdent(*be), err)
+			}
+			entries = append(entries, runtimeManifestEntry{
+				Name:   RuntimeManifestName(dep),
+				SHA256: be.SHA256,
+				Size:   be.Size,
+				// Plain blob on every host, macOS included: the view materializer
+				// only VERIFIES a runtime's signature and re-signs when it has to,
+				// where "macho-llvm" means the install_name_tool patch these
+				// self-contained binaries must not receive.
+				Kind: "blob",
+				Sources: []runtimeSource{
+					{Blob: assetURL, Compression: be.Compression, CompressedSize: be.CompressedSize},
+					{Blob: mirrorURL, Compression: be.Compression, CompressedSize: be.CompressedSize},
+					{Archive: tEntry.URL, ArchivePath: f.Src, ArchiveSHA256: tEntry.SHA256},
+				},
+			})
+		}
+	}
+	return entries, nil
+}
+
+// wasmRuntimeTargetNote names which wasm target a runtime serves, so the
+// catalog-miss note says what is actually lost rather than only what is absent.
+func wasmRuntimeTargetNote(dep string) string {
+	if dep == "node" {
+		return "wasm32-web"
+	}
+	return "wasm32-wasi"
 }
 
 // buildTargetDepEntriesFromCatalog projects one per-arch Linux *target*

@@ -25,12 +25,28 @@ import (
 // its own per-test deadline rather than at the process-level backstop (which is
 // per-test-timeout + 30s).
 
-// requireWasmtime skips the test when wasmtime is not installed (the wasm32-wasi
-// binary cannot be executed without it).
-func requireWasmtime(t *testing.T) {
+// runtimeUnobtainable matches the compiler's own report that it could not get
+// the pinned wasmtime — the two spellings resolveWasmRuntime produces when this
+// machine has neither staged the runtime nor can reach a blob host.
+var runtimeUnobtainable = regexp.MustCompile(`(could not obtain the pinned|carries no pinned) wasmtime`)
+
+// skipIfRuntimeUnobtainable skips when a run failed because this machine could
+// not get the pinned wasmtime. That is a fact about the environment, not about
+// the tree, so it is a skip; any OTHER failure is the test's own business and is
+// asserted on below.
+//
+// It replaces a `LookPath("wasmtime")` precondition (T2169). Since the compiler
+// no longer consults PATH, that probe answered a question nothing acts on: a
+// host with wasmtime installed but no pinned copy would have run the test and
+// failed, and a host with the pin staged and nothing on PATH would have skipped
+// a test it could run. Asking the binary under test is the only probe that
+// stays true as resolution changes, and it keeps no second copy of the
+// resolution rules — a skip whose premise the product itself states.
+func skipIfRuntimeUnobtainable(t *testing.T, combined string) {
 	t.Helper()
-	if _, err := exec.LookPath("wasmtime"); err != nil { // path-ok: skips for the absent runtime itself, which is the legitimate form
-		t.Skip("wasmtime not installed — skipping wasm32-wasi runtime timeout test")
+	if runtimeUnobtainable.MatchString(combined) {
+		t.Skip("the pinned wasmtime is not staged on this machine and could not be fetched — " +
+			"stage it with `bin/prereqs -wasm` to run this wasm32-wasi test")
 	}
 }
 
@@ -89,7 +105,6 @@ func assertInBinaryTimeout(t *testing.T, combined, testName, regressed string) {
 func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
-	requireWasmtime(t)
 
 	dir, err := os.MkdirTemp("", "t0680_wasm_timeout_")
 	if err != nil {
@@ -118,6 +133,7 @@ func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
 	cmd := exec.Command(promiseBin, "test", "--target", "wasm32-wasi", file)
 	output, runErr := cmd.CombinedOutput()
 	combined := string(output)
+	skipIfRuntimeUnobtainable(t, combined)
 
 	if runErr == nil {
 		t.Fatalf("expected non-zero exit on timeout, got success.\nOutput:\n%s", combined)
@@ -147,7 +163,6 @@ func TestT0680_WasmLivelockReportsTimeoutInBinary(t *testing.T) {
 func TestT1200_WasmChannelLivelockReportsTimeoutInBinary(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
-	requireWasmtime(t)
 
 	cases := []struct {
 		name string
@@ -213,6 +228,7 @@ func TestT1200_WasmChannelLivelockReportsTimeoutInBinary(t *testing.T) {
 
 			cmd := exec.Command(promiseBin, "test", "--target", "wasm32-wasi", file)
 			output, runErr := cmd.CombinedOutput()
+			skipIfRuntimeUnobtainable(t, string(output))
 			combined := string(output)
 
 			if runErr == nil {
@@ -249,7 +265,6 @@ func TestT1200_WasmChannelLivelockReportsTimeoutInBinary(t *testing.T) {
 func TestT1218_WasmMutexLivelockReportsTimeoutInBinary(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
-	requireWasmtime(t)
 
 	dir, err := os.MkdirTemp("", "t1218_wasm_timeout_")
 	if err != nil {
@@ -277,6 +292,7 @@ func TestT1218_WasmMutexLivelockReportsTimeoutInBinary(t *testing.T) {
 	cmd := exec.Command(promiseBin, "test", "--target", "wasm32-wasi", file)
 	output, runErr := cmd.CombinedOutput()
 	combined := string(output)
+	skipIfRuntimeUnobtainable(t, combined)
 
 	if runErr == nil {
 		t.Fatalf("expected non-zero exit on timeout, got success.\nOutput:\n%s", combined)
@@ -305,7 +321,6 @@ func TestT1218_WasmMutexLivelockReportsTimeoutInBinary(t *testing.T) {
 func TestT1220_WasmSelectLivelockReportsTimeoutInBinary(t *testing.T) {
 	t.Parallel()
 	promiseBin := clitest.Bin(t)
-	requireWasmtime(t)
 
 	dir, err := os.MkdirTemp("", "t1220_wasm_timeout_")
 	if err != nil {
@@ -339,6 +354,7 @@ func TestT1220_WasmSelectLivelockReportsTimeoutInBinary(t *testing.T) {
 	cmd := exec.Command(promiseBin, "test", "--target", "wasm32-wasi", file)
 	output, runErr := cmd.CombinedOutput()
 	combined := string(output)
+	skipIfRuntimeUnobtainable(t, combined)
 
 	if runErr == nil {
 		t.Fatalf("expected non-zero exit on timeout, got success.\nOutput:\n%s", combined)

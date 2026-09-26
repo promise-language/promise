@@ -418,6 +418,70 @@
       }
     },
     {
+      "dependency": "node",
+      "version": "22.22.2",
+      "target": "darwin-arm64",
+      "name": "node",
+      "sha256": "5c899797c4eb8f1db5563eea56538342ddb3e9276ee1b04a5a1f0f1023d2b011",
+      "size": 112989184,
+      "compression": "brotli",
+      "compressed_size": 25039191,
+      "compressed_sha256": "c4d27db7bb833bc0f1e1f91a159643c5f792f15269f15978ed6fa4404db81efe",
+      "source": {
+        "archive_url": "https://nodejs.org/dist/v22.22.2/node-v22.22.2-darwin-arm64.tar.xz",
+        "archive_sha256": "f8655beb4b86ff6588ed7e02c37f8574b58557bd3e880012814b1a4956fd9d88",
+        "member": "bin/node"
+      }
+    },
+    {
+      "dependency": "node",
+      "version": "22.22.2",
+      "target": "linux-amd64",
+      "name": "node",
+      "sha256": "81925c0995b5c1427b5d538e6a90ca2fdc4daffb786b09af749beaf7369d4e90",
+      "size": 124679552,
+      "compression": "brotli",
+      "compressed_size": 29897479,
+      "compressed_sha256": "cd29ddcc90903f747f6026b6ba6dbac6946ac268b3e4afa8ba49ad38a27023ce",
+      "source": {
+        "archive_url": "https://nodejs.org/dist/v22.22.2/node-v22.22.2-linux-x64.tar.xz",
+        "archive_sha256": "88fd1ce767091fd8d4a99fdb2356e98c819f93f3b1f8663853a2dee9b438068a",
+        "member": "bin/node"
+      }
+    },
+    {
+      "dependency": "node",
+      "version": "22.22.2",
+      "target": "linux-arm64",
+      "name": "node",
+      "sha256": "3159f9115ab4be7d318b7c28e946837a4dceb7f2b3c43232aa2f2e3852550b90",
+      "size": 121980552,
+      "compression": "brotli",
+      "compressed_size": 29475316,
+      "compressed_sha256": "b86abb7a585a0db17318e1bddcb1aa217e72a8dd182cfe50a09115a0506b5f24",
+      "source": {
+        "archive_url": "https://nodejs.org/dist/v22.22.2/node-v22.22.2-linux-arm64.tar.xz",
+        "archive_sha256": "e9e1930fd321a470e29bb68f30318bf58e3ecb4acb4f1533fb19c58328a091fe",
+        "member": "bin/node"
+      }
+    },
+    {
+      "dependency": "node",
+      "version": "22.22.2",
+      "target": "windows-amd64",
+      "name": "node.exe",
+      "sha256": "ae1a50511be58e987483fdbc12125407443926d2d394669ade2352776e920dd3",
+      "size": 87074816,
+      "compression": "brotli",
+      "compressed_size": 22994659,
+      "compressed_sha256": "a97e974cc1de81ee3432227becd4501ec479c1706b21a28057f2802829a44bc2",
+      "source": {
+        "archive_url": "https://nodejs.org/dist/v22.22.2/node-v22.22.2-win-x64.zip",
+        "archive_sha256": "7c93e9d92bf68c07182b471aa187e35ee6cd08ef0f24ab060dfff605fcc1c57c",
+        "member": "node.exe"
+      }
+    },
+    {
       "dependency": "openssl",
       "version": "3.5.7-r0",
       "target": "linux-amd64",
@@ -479,6 +543,70 @@
         "archive_url": "https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/openssl-libs-static-3.5.7-r0.apk",
         "archive_sha256": "592bb90fd5156de0a6dc657e154246eaa18f8c6e40677fb013c5a42b094eae86",
         "member": "usr/lib/libssl.a"
+      }
+    },
+    {
+      "dependency": "wasmtime",
+      "version": "44.0.0",
+      "target": "darwin-arm64",
+      "name": "wasmtime",
+      "sha256": "f21c5b36420fbcc0361e8dd5e9b58395b051c1e7b62f3e4bb6a3c2f81b13585c",
+      "size": 52385248,
+      "compression": "brotli",
+      "compressed_size": 10106346,
+      "compressed_sha256": "2b1c43cb7b16d0ab1692b8f4a9d3f8fbe84bfa487f5409b4359333d7d3b85f26",
+      "source": {
+        "archive_url": "https://github.com/bytecodealliance/wasmtime/releases/download/v44.0.0/wasmtime-v44.0.0-aarch64-macos.tar.xz",
+        "archive_sha256": "38a3b9d9fe64cee21bc9d9268e2c19fa35a7be59e030717545b84da0e6514eab",
+        "member": "wasmtime"
+      }
+    },
+    {
+      "dependency": "wasmtime",
+      "version": "44.0.0",
+      "target": "linux-amd64",
+      "name": "wasmtime",
+      "sha256": "b5a5d5f09c47b71caf5f6111c23c3ccf7b4e3c706a057fe2dcfd849b0c3d40e2",
+      "size": 65828088,
+      "compression": "brotli",
+      "compressed_size": 11682502,
+      "compressed_sha256": "437952db11991da2a48726d271776e3485fb9546eec74c4cd995ee2e661bce8c",
+      "source": {
+        "archive_url": "https://github.com/bytecodealliance/wasmtime/releases/download/v44.0.0/wasmtime-v44.0.0-x86_64-linux.tar.xz",
+        "archive_sha256": "52eba06fe9f4364aa6164a4a3eafb2ca692ba9a756cbe8137b5574871f8cbfc8",
+        "member": "wasmtime"
+      }
+    },
+    {
+      "dependency": "wasmtime",
+      "version": "44.0.0",
+      "target": "linux-arm64",
+      "name": "wasmtime",
+      "sha256": "55b3d1c0e9433b3ae70322bbf81f5e2fa8504445c63aae4bf3aabf8a2e0072e2",
+      "size": 64734024,
+      "compression": "brotli",
+      "compressed_size": 11234254,
+      "compressed_sha256": "e117edc9736347d24692c73f5c36ddccde39329394dbc43ddb60394905574083",
+      "source": {
+        "archive_url": "https://github.com/bytecodealliance/wasmtime/releases/download/v44.0.0/wasmtime-v44.0.0-aarch64-linux.tar.xz",
+        "archive_sha256": "294cae921fb88cbbcb60a914eaaaf313df3249d718609afb5804186b3f1912f5",
+        "member": "wasmtime"
+      }
+    },
+    {
+      "dependency": "wasmtime",
+      "version": "44.0.0",
+      "target": "windows-amd64",
+      "name": "wasmtime.exe",
+      "sha256": "7c51c10380e9a0fdf6ec30f0202f272e52664c4a3cf327a5cce74c7500416cf7",
+      "size": 44084736,
+      "compression": "brotli",
+      "compressed_size": 9283738,
+      "compressed_sha256": "66a34e3aad9e808d9350c4e41e623694ba72adcb237009773dc3746016dd5b1f",
+      "source": {
+        "archive_url": "https://github.com/bytecodealliance/wasmtime/releases/download/v44.0.0/wasmtime-v44.0.0-x86_64-windows.zip",
+        "archive_sha256": "6139de7554514c2df1e30cec9b1e6ca493685ece23a039f987b55bf32bc42a57",
+        "member": "wasmtime.exe"
       }
     }
   ]

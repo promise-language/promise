@@ -4436,7 +4436,7 @@ func announceToolchainOverride(envName, path string) {
 	// whether they are announced together at startup or one at a time as each
 	// tool is resolved.
 	if _, said := toolchainOverrideAnnounced.LoadOrStore(toolchainBannerSaid, true); !said {
-		fmt.Fprintln(toolchainWarnW, "warning: LLVM toolchain override in effect — this build does NOT use the pinned toolchain:")
+		fmt.Fprintln(toolchainWarnW, "warning: toolchain override in effect — this run does NOT use the pinned toolchain:")
 	}
 	fmt.Fprintf(toolchainWarnW, "warning:   %s=%s\n", envName, path)
 }
@@ -4454,10 +4454,16 @@ const toolchainBannerSaid = "\x00banner-said"
 func toolchainOverridesInEffect() []string {
 	names := []string{"PROMISE_CLANG", "PROMISE_USE_CLANG"}
 	seen := map[string]bool{}
-	for _, envName := range llvmToolEnvVars {
-		if !seen[envName] {
-			seen[envName] = true
-			names = append(names, envName)
+	// The WASM test runtimes are overridable on the same terms as the LLVM
+	// tools since they became pinned dependencies (T2169), so they belong in
+	// the same answer: a suite run under a substituted wasmtime is no more
+	// "the pinned toolchain" than a link done with a substituted lld.
+	for _, vars := range []map[string]string{llvmToolEnvVars, wasmRuntimeEnvVars} {
+		for _, envName := range vars {
+			if !seen[envName] {
+				seen[envName] = true
+				names = append(names, envName)
+			}
 		}
 	}
 	sort.Strings(names)
@@ -9142,8 +9148,9 @@ func runCatalogList() {
 // publishViewDir doesn't lose its staging dir mid-write (T1684).
 func cleanViewsUnderLock(home string) {
 	// Acquire all view locks before removing any trees. CleanCRTCache removes
-	// both crt-view and compiler-rt-view, so both locks must be held.
-	lockNames := []string{"llvm-view.lock", "crt-view.lock", "compiler-rt-view.lock"}
+	// both crt-view and compiler-rt-view, so both locks must be held; so does
+	// CleanLLVMCache for llvm-view and the WASM runtimes' runtime-view (T2169).
+	lockNames := []string{"llvm-view.lock", "runtime-view.lock", "crt-view.lock", "compiler-rt-view.lock"}
 	var unlocks []func()
 	for _, name := range lockNames {
 		unlock, err := blobstore.Lock(

@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/promise-language/promise/compiler/internal/module"
@@ -66,39 +65,24 @@ func materializeWebHarness() (string, error) {
 	return harnessPath, nil
 }
 
-// nodeMissingError returns a friendly install hint when the `node` executable
-// can't be found on PATH. wasm32-web tests require Node.js (>= 20).
-func nodeMissingError() error {
-	var hint string
-	switch runtime.GOOS {
-	case "windows":
-		hint = "winget install OpenJS.NodeJS"
-	case "darwin":
-		hint = "brew install node"
-	default:
-		hint = "sudo apt-get install nodejs (or https://nodejs.org/)"
-	}
-	return fmt.Errorf("node not found on PATH — install Node.js 20+: %s", hint)
-}
-
 // runWasmWeb constructs an *exec.Cmd that runs binaryPath under Node + the
 // embedded harness, scoped to ctx for timeout enforcement. Callers attach
 // stdin/stdout/stderr/process-group as they would for any other test binary.
 //
-// On lookup failure (node missing) or harness materialization failure, prints
-// a friendly diagnostic to stderr and exits with code 1 — matching how
-// wasmtime-missing failures are surfaced today (the existing wasmtime path
-// just lets exec.LookPath fail at exec time).
-func runWasmWeb(ctx context.Context, binaryPath string) *exec.Cmd {
-	nodePath, err := exec.LookPath("node") // path-ok: the documented wasm32-web runtime — it runs the module, it does not build it
+// Node is the PINNED runtime, resolved like every other dependency and never
+// taken from PATH (T2169) — so there is no install hint to print: installing a
+// Node would not change which one this runs. An unobtainable runtime or a
+// harness that cannot be written is returned as an error rather than exiting
+// the process, because the one caller (crossExecCommand) already reports one,
+// and a library function that calls os.Exit gives its caller nothing to say.
+func runWasmWeb(ctx context.Context, binaryPath string) (*exec.Cmd, error) {
+	nodePath, err := resolveWasmRuntime("node")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, nodeMissingError())
-		os.Exit(1)
+		return nil, err
 	}
 	harnessPath, err := materializeWebHarness()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot materialize wasm32-web harness: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("cannot materialize the wasm32-web harness: %w", err)
 	}
-	return exec.CommandContext(ctx, nodePath, harnessPath, binaryPath)
+	return exec.CommandContext(ctx, nodePath, harnessPath, binaryPath), nil
 }

@@ -45,10 +45,19 @@ var hostToolEnvironmentNames = map[string]bool{
 }
 
 // toolchainCommandNames are binaries whose output is, or determines, a build
-// artifact. Naming one of these bare to exec.Command resolves it through PATH
-// exactly as Which does, so the guard covers that spelling too — otherwise the
-// rule is bypassed by writing the lookup differently. Any `llvm-*` name counts.
+// artifact — plus the WASM test runtimes, whose choice determines a test
+// RESULT, which a measurement rests on just as heavily (T2169). Naming one of
+// these bare to exec.Command resolves it through PATH exactly as Which does, so
+// the guard covers that spelling too — otherwise the rule is bypassed by
+// writing the lookup differently. Any `llvm-*` name counts.
 var toolchainCommandNames = map[string]bool{
+	// The WASM test runtimes. `exec.CommandContext(ctx, "wasmtime", …)` in
+	// cross_exec.go went unnoticed for exactly as long as this list lacked the
+	// name and execCommandArg lacked the Context spelling — two holes that lined
+	// up, which is how the compiler kept a PATH lookup after T2108 removed the
+	// rest of them.
+	"wasmtime":   true,
+	"node":       true,
 	"opt":        true,
 	"llc":        true,
 	"lld":        true,
@@ -79,8 +88,13 @@ func isToolchainName(name string) bool {
 // from one whose argument is computed and therefore cannot be judged here.
 var hostToolLookupArg = regexp.MustCompile(`(?:Which|LookPath)\("([^"]*)"\)`)
 
-// execCommandArg matches exec.Command with a literal program name.
-var execCommandArg = regexp.MustCompile(`exec\.Command\("([^"]*)"`)
+// execCommandArg matches exec.Command — and exec.CommandContext, whose first
+// argument is the context, so the program name is the second — with a literal
+// program name.
+//
+// Both spellings, because they resolve a bare name through PATH identically and
+// a guard that knew only one is a guard you bypass by adding a context (T2169).
+var execCommandArg = regexp.MustCompile(`exec\.Command\("([^"]*)"|exec\.CommandContext\([^,]*,\s*"([^"]*)"`)
 
 // splitGoLine splits a Go source line into code and comment at the first `//`.
 // Deliberately as blunt as the Promise guards' equivalent: a `//` inside a
@@ -144,8 +158,12 @@ func hostToolLookup(code string) bool {
 		}
 	}
 	for _, m := range execCommandArg.FindAllStringSubmatch(code, -1) {
-		if isToolchainName(m[1]) {
-			return true
+		// The alternation has one group per spelling, so exactly one is set:
+		// m[1] for exec.Command, m[2] for exec.CommandContext.
+		for _, name := range m[1:] {
+			if name != "" && isToolchainName(name) {
+				return true
+			}
 		}
 	}
 	return false

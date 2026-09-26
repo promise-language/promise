@@ -47,6 +47,12 @@ var toolchainOverrideVars = []string{
 	"PROMISE_WASM_LD",
 	"PROMISE_CLANG",
 	"PROMISE_USE_CLANG",
+	// The WASM test runtimes, pinned since T2169 and overridable on the same
+	// terms. A suite run under a substituted wasmtime is no more "the pinned
+	// toolchain" than a link done with a substituted lld, so a gate must refuse
+	// to report a measurement made under one.
+	"PROMISE_WASMTIME",
+	"PROMISE_NODE",
 }
 
 // ToolchainOverrides returns every toolchain override in effect as
@@ -75,7 +81,7 @@ func announceToolchainOverrides() {
 	// Same shape as the compiler's banner (announceToolchainOverride in
 	// compiler/cmd/promise/main.go): the consequence heads it, the variables
 	// that caused it are listed under it.
-	fmt.Fprintln(os.Stderr, "warning: LLVM toolchain override in effect — this build does NOT use the pinned toolchain:")
+	fmt.Fprintln(os.Stderr, "warning: toolchain override in effect — this run does NOT use the pinned toolchain:")
 	for _, o := range overrides {
 		fmt.Fprintf(os.Stderr, "warning:   %s\n", o)
 	}

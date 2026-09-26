@@ -30,10 +30,16 @@ func crossExecCommand(ctx context.Context, target, binaryPath string, args ...st
 		if len(args) > 0 {
 			return nil, fmt.Errorf("cannot pass program arguments to a %s binary: the Node harness does not forward argv", target)
 		}
-		return runWasmWeb(ctx, binaryPath), nil
+		return runWasmWeb(ctx, binaryPath)
 	case isWasmTarget(target):
-		// wasmtime forwards trailing arguments to the guest as argv.
-		return exec.CommandContext(ctx, "wasmtime", append([]string{binaryPath}, args...)...), nil
+		// The pinned wasmtime, never one found on PATH (T2169) — see
+		// resolveWasmRuntime. wasmtime forwards trailing arguments to the guest
+		// as argv.
+		wasmtimePath, err := resolveWasmRuntime("wasmtime")
+		if err != nil {
+			return nil, err
+		}
+		return exec.CommandContext(ctx, wasmtimePath, append([]string{binaryPath}, args...)...), nil
 	case isHostTarget(target):
 		return exec.CommandContext(ctx, binaryPath, args...), nil
 	default:

@@ -623,31 +623,56 @@ func TestDoctorCheckJavaMissing(t *testing.T) {
 	}
 }
 
-func TestDoctorCheckWasmtimeMissing(t *testing.T) {
+// An absent host copy is not a warning any more (T2169). The runtimes are
+// pinned dependencies fetched on demand, so "not on PATH" describes the machine
+// and says nothing about whether this host can run a wasm target — warning about
+// it would send its reader to install something the compiler will not use.
+func TestDoctorCheckWasmRuntimes_AbsentHostCopyIsNotAWarning(t *testing.T) {
 	t.Setenv("PATH", "/nonexistent")
-	c := doctorCheckWasmtime()
-	if c.Status != "warning" {
-		t.Errorf("expected warning when wasmtime not on PATH, got %s", c.Status)
-	}
-	if !strings.Contains(c.Summary, "Not found") {
-		t.Errorf("expected 'Not found' in summary, got %s", c.Summary)
-	}
-	if c.Fix == "" {
-		t.Error("expected fix hint when wasmtime is missing")
+	t.Setenv("PROMISE_WASMTIME", "")
+	t.Setenv("PROMISE_NODE", "")
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
+	for _, c := range []doctorCheck{doctorCheckWasmtime(), doctorCheckNode()} {
+		if c.Status != "ok" {
+			t.Errorf("%s: status = %s, want ok — a pinned runtime that is merely unstaged is not a problem", c.Name, c.Status)
+		}
+		if c.Required {
+			t.Errorf("%s: should not be required", c.Name)
+		}
+		// The summary has to say the runtime is PINNED, so a reader knows the
+		// host's own copy is irrelevant rather than missing.
+		if !strings.Contains(strings.ToLower(c.Summary), "pinned") {
+			t.Errorf("%s: summary = %q, want it to report the pinned runtime", c.Name, c.Summary)
+		}
+		if c.Fix != "" {
+			t.Errorf("%s: fix = %q, want none — there is nothing for the user to install", c.Name, c.Fix)
+		}
 	}
 }
 
-func TestDoctorCheckNodeMissing(t *testing.T) {
-	t.Setenv("PATH", "/nonexistent")
-	c := doctorCheckNode()
-	if c.Status != "warning" {
-		t.Errorf("expected warning when node not on PATH, got %s", c.Status)
+// A host copy that DOES exist is reported, and reported as unused. That line is
+// the whole remaining value of a PATH probe here: it answers "I have wasmtime
+// installed, why is the suite running a different one".
+func TestDoctorCheckWasmRuntimes_NamesAnUnusedHostCopy(t *testing.T) {
+	dir := t.TempDir()
+	hostCopy := filepath.Join(dir, "wasmtime")
+	if err := os.WriteFile(hostCopy, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(c.Summary, "Not found") {
-		t.Errorf("expected 'Not found' in summary, got %s", c.Summary)
+	t.Setenv("PATH", dir)
+	t.Setenv("PROMISE_WASMTIME", "")
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
+	c := doctorCheckWasmtime()
+	joined := strings.Join(c.Details, "\n")
+	if !strings.Contains(joined, hostCopy) {
+		t.Errorf("details = %q, want the host copy at %s named", joined, hostCopy)
 	}
-	if c.Fix == "" {
-		t.Error("expected fix hint when node is missing")
+	if !strings.Contains(joined, "NOT used") {
+		t.Errorf("details = %q, want it to say the host copy is not used", joined)
 	}
 }
 

@@ -542,6 +542,25 @@ func viewComplete(viewDir string, entries []*blobstore.ManifestEntry) bool {
 // costs 375 MB, and conflating them would hide the difference the accounting
 // exists to show.
 func materializeViewFile(blobPath, dst string) (int64, error) {
+	return materializeExecutable(blobPath, dst, blobstore.PatchAndSignMachO)
+}
+
+// materializeRuntimeFile places a WASM test runtime (wasmtime, node) into its
+// view dir (T2169). Same placement as an LLVM tool — it is an executable the
+// compiler is about to run — but the macOS step is a signature CHECK rather
+// than a patch: these binaries are self-contained, so there is nothing to
+// rewrite and an unconditional re-sign could only replace a good upstream
+// signature with a weaker one. See blobstore.EnsureAdHocSignature.
+func materializeRuntimeFile(blobPath, dst string) (int64, error) {
+	return materializeExecutable(blobPath, dst, blobstore.EnsureAdHocSignature)
+}
+
+// materializeExecutable is the body both of the above share, with the macOS
+// post-step as a parameter — the one thing that differs between placing a tool
+// this compiler links WITH and a runtime it merely runs. Everything else (which
+// platform owns bytes, which gets a link, what the accounting reports) is a
+// property of the placement, not of the file.
+func materializeExecutable(blobPath, dst string, signDarwin func(string)) (int64, error) {
 	os.Remove(dst)
 	switch runtime.GOOS {
 	case "darwin":
@@ -560,7 +579,7 @@ func materializeViewFile(blobPath, dst string) (int64, error) {
 		if err := os.Chmod(dst, viewToolPerm); err != nil {
 			return written, err
 		}
-		blobstore.PatchAndSignMachO(dst)
+		signDarwin(dst)
 		return written, nil
 	case "windows":
 		return linkOrCopyBlob(blobPath, dst, viewToolPerm)
@@ -767,23 +786,90 @@ func compilerRTManifestName(arch, file string) string {
 // the only path that can serve one (docs/runtime-architecture.md).
 func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, waiting string,
 	local func(file string) ([]byte, bool)) (string, error) {
+	return resolveDepView(viewSubdir, arch, files,
+		func(file string) string { return targetDepManifestName(dep, arch, file) },
+		func(blobPath, dst string) (int64, error) { return linkOrCopyBlob(blobPath, dst, targetDepPerm) },
+		targetDepPerm, holder, waiting, local)
+}
+
+// targetDepPerm is the mode a materialized target-dependency file carries.
+// These are inert relocatable ELF objects and static archives — read by the
+// linker, never executed — so unlike viewToolPerm they need no execute bit.
+const targetDepPerm = 0o644
+
+// resolveDepView is the body resolveTargetDepView and resolveRuntimeView share:
+// look the files up in the embedded manifest, key a view dir on the blob set,
+// and populate it behind the same atomic-publish barrier. What differs between
+// a target dependency and a host runtime is only which NAME the manifest
+// carries them under (`nameFor`) and how a file is PLACED once found (`place` —
+// a 0644 link for an archive the linker reads, an executable materialization
+// for a runtime the compiler runs), so those are the parameters and everything
+// else is one implementation.
+//
+// `key` distinguishes view dirs that would otherwise collide: the musl arch for
+// a target dependency, the host target for a runtime.
+//
+// `perm` is the mode the `local` branch writes with. It is separate from
+// `place` because that branch writes bytes this binary already holds rather
+// than placing a blob, and a runtime written 0644 would be a view that
+// materializes successfully and then cannot be executed.
+// depViewDir computes where a dependency's view dir WOULD be, without
+// materializing anything or touching the network. Returns ("", nil) when the
+// embedded manifest carries no entry for the file set (thin placeholder, or a
+// dependency this binary has no pin for).
+//
+// Split out of resolveDepView so the "where is it" rule has one owner: the
+// no-fetch probes (`promise doctor`) need the same content-keyed path the
+// populator writes to, and a second copy of the keying would be a second
+// source of truth for a directory name that must match exactly.
+//
+// A zero-valued Dir means the manifest carries no entry for the file set.
+func depViewDir(viewSubdir, key string, files []string, nameFor func(file string) string) (depView, error) {
 	m, err := loadEmbeddedManifest()
 	if err != nil || m == nil {
-		return "", nil
+		return depView{}, nil
 	}
 	var entries []*blobstore.ManifestEntry
 	for _, f := range files {
-		e, ok := m.Lookup(targetDepManifestName(dep, arch, f))
+		e, ok := m.Lookup(nameFor(f))
 		if !ok {
-			return "", nil // manifest doesn't carry this dep's blobs → fall through
+			return depView{}, nil // manifest doesn't carry this dep's blobs → fall through
 		}
 		entries = append(entries, e)
 	}
 	home, err := module.PromiseHome()
 	if err != nil {
+		return depView{}, err
+	}
+	return depView{
+		Manifest: m,
+		Dir:      filepath.Join(home, "cache", viewSubdir, key+"-"+blobSetKey(entries)),
+		// The lock lives OUTSIDE the view tree so cleanViewsUnderLock's RemoveAll
+		// of cache/<viewSubdir> cannot delete it mid-hold.
+		LockPath: filepath.Join(home, "cache", viewSubdir+".lock"),
+		Entries:  entries,
+	}, nil
+}
+
+// depView is where one dependency's view lives and what it is made of — the
+// answer depViewDir computes and both the populator and the no-fetch probes
+// read.
+type depView struct {
+	Manifest *blobstore.Manifest
+	Dir      string
+	LockPath string
+	Entries  []*blobstore.ManifestEntry
+}
+
+func resolveDepView(viewSubdir, key string, files []string,
+	nameFor func(file string) string, place func(blobPath, dst string) (int64, error),
+	perm os.FileMode, holder, waiting string,
+	local func(file string) ([]byte, bool)) (string, error) {
+	view, err := depViewDir(viewSubdir, key, files, nameFor)
+	if err != nil || view.Dir == "" {
 		return "", err
 	}
-	viewDir := filepath.Join(home, "cache", viewSubdir, arch+"-"+blobSetKey(entries))
+	m, viewDir := view.Manifest, view.Dir
 	// Fast path: a previously published view (lock-free).
 	if depFilesPresent(viewDir, files) {
 		return viewDir, nil
@@ -794,8 +880,7 @@ func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, 
 	}
 	// Serialize population across processes so a partially-built view is never
 	// observable (same barrier as the LLVM view).
-	lockPath := filepath.Join(home, "cache", viewSubdir+".lock")
-	unlock, err := blobstore.Lock(lockPath, holder, waiting)
+	unlock, err := blobstore.Lock(view.LockPath, holder, waiting)
 	if err != nil {
 		return "", err
 	}
@@ -809,7 +894,7 @@ func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, 
 	var exploded int64
 	if err := publishViewDir(filepath.Dir(viewDir), viewDir, func(tmpDir string) error {
 		for _, f := range files {
-			name := targetDepManifestName(dep, arch, f)
+			name := nameFor(f)
 			entry, _ := m.Lookup(name)
 			dst := filepath.Join(tmpDir, f)
 			var blobPath string
@@ -819,7 +904,7 @@ func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, 
 			case sourceEmbedded:
 				// Writing the bytes we already hold costs a few MB into the same
 				// all-or-nothing staging dir; fetching them costs the wire.
-				if werr := os.WriteFile(dst, data, 0o644); werr != nil {
+				if werr := os.WriteFile(dst, data, perm); werr != nil {
 					return werr
 				}
 				exploded += int64(len(data))
@@ -831,7 +916,7 @@ func resolveTargetDepView(dep, viewSubdir, arch string, files []string, holder, 
 				}
 				blobPath = p
 			}
-			n, err := linkOrCopyBlob(blobPath, dst, 0o644)
+			n, err := place(blobPath, dst)
 			exploded += n
 			if err != nil {
 				return err
@@ -859,14 +944,18 @@ const (
 	sourceWire
 )
 
-// chooseTargetDepSource is resolveTargetDepView's three-way decision, lifted out
-// of the populate loop so it can be checked on every platform.
+// chooseTargetDepSource is resolveDepView's three-way decision, lifted out of
+// the populate loop so it can be checked on every platform.
 //
-// That matters more than it looks. The loop it came from cannot run at all off
-// Linux — no other target's manifest carries musl or compiler-rt blobs, so the
-// function returns at the manifest lookup and the branch below is dead code on
-// three of four platforms. A precedence this change turns on, verifiable only
-// where one CI job runs, is the shape T2152 and T2133 both had.
+// That mattered more than it looked when it was written: the only loop calling
+// it then was the musl/compiler-rt one, which cannot run off Linux — no other
+// target's manifest carries those blobs, so the function returned at the
+// manifest lookup and the branch below was dead code on three of four
+// platforms. A precedence turned on by a change verifiable only where one CI
+// job runs is the shape T2152 and T2133 both had. The WASM runtimes are host
+// dependencies, so since T2169 this loop runs on every platform — the seam is
+// still the right place for the decision, and now the real callers exercise it
+// too.
 //
 // The order is the whole semantic: the store first because its bytes are
 // content-verified, this binary's copy next because it costs no network, and the
@@ -933,6 +1022,178 @@ func resolveCompilerRTView(arch string) (string, error) {
 		"promise (materializing compiler-rt builtins)",
 		"Waiting for another process to finish staging the compiler-rt builtins...",
 		embeddedTargetDep(embeddedCompilerRT, "resources/compiler-rt/"+arch, hasEmbeddedCompilerRT))
+}
+
+// ── WASM test runtimes (T2169) ──────────────────────────────────────────────
+//
+// wasmtime and node EXECUTE a compiled wasm module; they contribute nothing to
+// it. They were nevertheless the last inputs this compiler took from the host's
+// PATH, which meant `promise test --target wasm32-web` on a user's own project
+// required a global Node install — against the zero-dependency mandate — and
+// meant a suite's result could turn on which version somebody happened to have.
+//
+// They are now pinned dependencies like everything else, resolved by the same
+// source list findLLVMTool uses and documented alongside it in
+// docs/runtime-architecture.md §"WASM Runtime Sources". They are NOT embedded
+// in any variant: Node alone is ~120 MB unpacked and only a run that actually
+// targets wasm wants one, which docs/distribution.md classes as fetched on
+// demand.
+
+// wasmRuntimeEnvVars names the per-runtime override variable, the explicit
+// bring-up/air-gap path. Same vocabulary and same meaning as llvmToolEnvVars:
+// setting one is announced on every run, and a gate refuses to measure under it.
+var wasmRuntimeEnvVars = map[string]string{
+	"wasmtime": "PROMISE_WASMTIME",
+	"node":     "PROMISE_NODE",
+}
+
+// runtimeManifestName is the runtime-manifest logical name for a WASM test
+// runtime, e.g. "node" → "runtime-node".
+//
+// Unlike targetDepManifestName there is no arch or file component: these are
+// HOST dependencies, so one host manifest describes exactly one of each, and
+// the file name is this host's own spelling of it (runtimeExeName). Keep in
+// lockstep with RuntimeManifestName in tools/build/common — separate Go
+// modules, so the format is duplicated by necessity (pinned by
+// TestRuntimeManifestName on both sides).
+func runtimeManifestName(dep string) string { return "runtime-" + dep }
+
+// runtimeExeName is a runtime's file name on this host ("node" / "node.exe").
+func runtimeExeName(dep string) string { return runtimeExeNameFor(runtime.GOOS, dep) }
+
+// runtimeExeNameFor is runtimeExeName with the host named rather than read from
+// the process, so the Windows branch is asserted on every platform the suite
+// runs on rather than only where Windows exists (docs/code-style.md §"Native
+// and cross targets in tests"). Mirrors isHostTargetFor's split.
+func runtimeExeNameFor(goos, dep string) string {
+	if goos == "windows" {
+		return dep + ".exe"
+	}
+	return dep
+}
+
+// resolveWasmRuntime returns the path to a pinned WASM test runtime, taking it
+// from exactly three places — the same source list, in the same order and for
+// the same reasons, as findLLVMTool:
+//
+//  1. the explicit `$PROMISE_WASMTIME` / `$PROMISE_NODE` override,
+//  2. the host-stable prebuilts cache `bin/build` / `bin/gate` populate, so a
+//     machine that has already staged the runtime never downloads it twice,
+//  3. the pinned view, materialized from the content-addressed store.
+//
+// PATH is never consulted. When none of the three answers, the error names the
+// pinned runtime and the override rather than suggesting an install — since
+// this compiler no longer looks at PATH, installing one would change nothing.
+func resolveWasmRuntime(dep string) (string, error) {
+	envVar, ok := wasmRuntimeEnvVars[dep]
+	if !ok {
+		return "", fmt.Errorf("%q is not a WASM test runtime", dep)
+	}
+	if v := strings.TrimSpace(os.Getenv(envVar)); v != "" {
+		announceToolchainOverride(envVar, v)
+		return v, nil
+	}
+	file := runtimeExeName(dep)
+	if p := prebuiltRuntimePath(dep, file); p != "" {
+		return p, nil
+	}
+	viewDir, err := resolveRuntimeView(dep, file)
+	if err != nil {
+		return "", fmt.Errorf("could not obtain the pinned %s: %w\n"+
+			"  Set %s to use a copy already on this machine", dep, err, envVar)
+	}
+	if viewDir == "" {
+		return "", fmt.Errorf("this build carries no pinned %s for %s-%s\n"+
+			"  Set %s to name one, or use a compiler built from a tree whose blobs.json has it",
+			dep, runtime.GOOS, runtime.GOARCH, envVar)
+	}
+	return filepath.Join(viewDir, file), nil
+}
+
+// resolveWasmRuntimeIfLocal is resolveWasmRuntime without the fetch: it answers
+// where the runtime is on THIS machine right now, and ("", nil) when obtaining
+// it would need the network.
+//
+// `promise doctor` reports state and must not acquire tens of megabytes to do
+// it, so it asks this. Same source order as resolveWasmRuntime — override,
+// prebuilts cache, an already-published view — minus the one step that can go
+// to the wire, which is exactly resolveLLVMView's allowFetch=false split.
+func resolveWasmRuntimeIfLocal(dep string) (string, error) {
+	envVar, ok := wasmRuntimeEnvVars[dep]
+	if !ok {
+		return "", fmt.Errorf("%q is not a WASM test runtime", dep)
+	}
+	if v := strings.TrimSpace(os.Getenv(envVar)); v != "" {
+		return v, nil
+	}
+	file := runtimeExeName(dep)
+	if p := prebuiltRuntimePath(dep, file); p != "" {
+		return p, nil
+	}
+	view, err := depViewDir("runtime-view", runtime.GOOS+"-"+runtime.GOARCH,
+		[]string{file}, func(string) string { return runtimeManifestName(dep) })
+	if err != nil || view.Dir == "" {
+		return "", err
+	}
+	if !depFilesPresent(view.Dir, []string{file}) {
+		return "", nil // pinned, but not staged here yet
+	}
+	return filepath.Join(view.Dir, file), nil
+}
+
+// resolveRuntimeView materializes one WASM test runtime from the CAS into
+// cache/runtime-view/<host>-<blobSetKey>/. Returns ("", nil) when the embedded
+// manifest carries no entry for it, exactly as resolveTargetDepView does, so
+// the caller can say which runtime this build has no pin for.
+//
+// `local` is nil: unlike the musl CRT and the compiler-rt builtins, this binary
+// embeds no copy to skip a download with — that is the whole point of keeping
+// the runtimes out of every variant.
+func resolveRuntimeView(dep, file string) (string, error) {
+	return resolveDepView("runtime-view", runtime.GOOS+"-"+runtime.GOARCH, []string{file},
+		func(string) string { return runtimeManifestName(dep) },
+		materializeRuntimeFile, viewToolPerm,
+		"promise (materializing the "+dep+" runtime)",
+		"Waiting for another process to finish staging the "+dep+" runtime...",
+		nil)
+}
+
+// prebuiltRuntimePath returns a WASM runtime's path in the host-stable
+// prebuilts cache, or "" when it is not staged there. The findPrebuiltTool
+// analogue for runtimes: a machine that has run `bin/gate wasm-test` or
+// `bin/prereqs -wasm` already holds the pinned bytes outside promise home, and
+// downloading them a second time into the CAS would be pure waste.
+//
+// Pinned, not discovered: `bin/pin-prebuilts` verified the upstream archive's
+// sha256 before `tools.ok` was written, so this is a local copy of the pinned
+// release rather than a host find.
+func prebuiltRuntimePath(dep, file string) string {
+	root := prebuiltsCacheRoot()
+	if root == "" {
+		return ""
+	}
+	target := runtime.GOOS + "-" + runtime.GOARCH
+	// Any cached version dir for this target; prefer the newest when several
+	// checkouts pinned different ones.
+	matches, _ := filepath.Glob(filepath.Join(root, dep+"-slim", "*", target, file))
+	upstream, _ := filepath.Glob(filepath.Join(root, dep, "*", target, file))
+	best, bestVer := "", ""
+	for _, p := range append(matches, upstream...) {
+		fi, err := os.Stat(p)
+		if err != nil || fi.IsDir() || fi.Size() == 0 {
+			continue
+		}
+		// tools.ok is written only after the fetch fully extracted + verified the
+		// dir, so its presence rejects a half-populated cache.
+		if _, err := os.Stat(filepath.Join(filepath.Dir(p), "tools.ok")); err != nil {
+			continue
+		}
+		ver := filepath.Base(filepath.Dir(filepath.Dir(p)))
+		if best == "" || compareLLVMVersion(ver, bestVer) > 0 {
+			best, bestVer = p, ver
+		}
+	}
+	return best
 }
 
 // unbrotliBytes decompresses a brotli byte slice.

@@ -615,31 +615,85 @@ func TestViewMaterializeConcurrent(t *testing.T) {
 	}
 }
 
-// TestCleanViewsUnderLock verifies cleanViewsUnderLock removes the llvm-view and
-// crt-view trees while holding the cross-process locks (T1684). A goroutine
+// TestCleanViewsUnderLock verifies cleanViewsUnderLock removes every derived
+// view tree while holding the cross-process locks (T1684). A goroutine
 // attempting to acquire one of those locks during the clean must block until the
 // clean is finished — the lock serialization is the whole point of the fix.
+//
+// runtime-view is in the list since T2169. It is the largest of them — a Node
+// view alone is ~120 MB — so a view left out here is disk this command promised
+// to reclaim and did not, and a stale view that a later run could serve from a
+// name-only match.
 func TestCleanViewsUnderLock(t *testing.T) {
 	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
 
+	// Every view tree cleanViewsUnderLock is responsible for, and the lock each
+	// one must be removed under. Kept as one table so a view added to the
+	// product without its lock fails here rather than silently racing a
+	// concurrent materializer.
+	views := map[string]string{
+		"llvm-view":        "llvm-view.lock",
+		"runtime-view":     "runtime-view.lock",
+		"crt-view":         "crt-view.lock",
+		"compiler-rt-view": "compiler-rt-view.lock",
+	}
+
 	cacheDir := filepath.Join(home, "cache")
-	// Seed the view trees that CleanLLVMCache/CleanCRTCache remove.
-	for _, dir := range []string{
-		"llvm-view/host-abc",
-		"crt-view/host-def",
-		"compiler-rt-view/host-ghi",
-	} {
-		if err := os.MkdirAll(filepath.Join(cacheDir, dir), 0o755); err != nil {
+	for dir := range views {
+		if err := os.MkdirAll(filepath.Join(cacheDir, dir, "host-abc"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	cleanViewsUnderLock(home)
 
-	for _, dir := range []string{"llvm-view", "crt-view", "compiler-rt-view"} {
+	for dir := range views {
 		if _, err := os.Stat(filepath.Join(cacheDir, dir)); !os.IsNotExist(err) {
 			t.Errorf("%s should have been removed, stat err = %v", dir, err)
+		}
+	}
+
+	// Each view's lock file must exist afterwards: cleanViewsUnderLock creates
+	// it to take the lock, and it lives OUTSIDE the view tree precisely so the
+	// RemoveAll above cannot delete it mid-hold. A lock that vanished with its
+	// tree is the T1684 defect.
+	for dir, lock := range views {
+		if _, err := os.Stat(filepath.Join(cacheDir, lock)); err != nil {
+			t.Errorf("%s was cleaned without holding %s (stat err = %v)", dir, lock, err)
+		}
+	}
+}
+
+// The product's lock list must cover every tree its clean functions remove.
+// Without this, adding a view to CleanLLVMCache/CleanCRTCache and forgetting its
+// lock reads as working — the tree is removed, just not safely — and only shows
+// up as a rare mid-write failure on a busy machine.
+func TestCleanViewsUnderLockCoversEveryViewItRemoves(t *testing.T) {
+	home := clitest.TempDir(t)
+	t.Setenv("PROMISE_HOME", home)
+	cacheDir := filepath.Join(home, "cache")
+
+	// Seed one extra view that nothing is responsible for, to prove the check
+	// below is actually reading what was removed rather than passing vacuously.
+	for _, dir := range []string{"llvm-view", "runtime-view", "crt-view", "compiler-rt-view"} {
+		if err := os.MkdirAll(filepath.Join(cacheDir, dir, "v"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleanViewsUnderLock(home)
+
+	locks, err := filepath.Glob(filepath.Join(cacheDir, "*-view.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := map[string]bool{}
+	for _, l := range locks {
+		held[strings.TrimSuffix(filepath.Base(l), ".lock")] = true
+	}
+	for _, dir := range []string{"llvm-view", "runtime-view", "crt-view", "compiler-rt-view"} {
+		if !held[dir] {
+			t.Errorf("%s was removed but no %s.lock was taken — the clean can race a materializer", dir, dir)
 		}
 	}
 }
@@ -1136,6 +1190,471 @@ func TestChooseTargetDepSourceOrdersItsThreeSources(t *testing.T) {
 			}
 			if string(data) != tc.wantData {
 				t.Errorf("data = %q, want %q — only the embedded source carries bytes", data, tc.wantData)
+			}
+		})
+	}
+}
+
+// ── WASM test runtimes (T2169) ──────────────────────────────────────────────
+
+// The manifest name is a cross-module contract: tools/build/common projects the
+// entry under this spelling and the compiler looks it up by it, in separate Go
+// modules where only a test on each side keeps the two in step. Its twin is
+// TestRuntimeManifestName in tools/build/common/runtime_slim_test.go.
+func TestRuntimeManifestName(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ dep, want string }{
+		{"wasmtime", "runtime-wasmtime"},
+		{"node", "runtime-node"},
+	} {
+		if got := runtimeManifestName(tc.dep); got != tc.want {
+			t.Errorf("runtimeManifestName(%q) = %q, want %q", tc.dep, got, tc.want)
+		}
+	}
+}
+
+// Every host's file name is asserted on every host. Reading runtime.GOOS would
+// check one, leaving the Windows branch verified only where Windows runs —
+// the shape T2206 and T2152 both had.
+func TestRuntimeExeNameForNamesThePlatform(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ goos, dep, want string }{
+		{"linux", "node", "node"},
+		{"darwin", "node", "node"},
+		{"windows", "node", "node.exe"},
+		{"linux", "wasmtime", "wasmtime"},
+		{"windows", "wasmtime", "wasmtime.exe"},
+	} {
+		if got := runtimeExeNameFor(tc.goos, tc.dep); got != tc.want {
+			t.Errorf("runtimeExeNameFor(%q, %q) = %q, want %q", tc.goos, tc.dep, got, tc.want)
+		}
+	}
+	// The wrapper must forward the running host and nothing else: without this,
+	// every row above can pass while real callers get a different answer.
+	if got, want := runtimeExeName("node"), runtimeExeNameFor(runtime.GOOS, "node"); got != want {
+		t.Errorf("runtimeExeName(node) = %q, want the %s answer %q", got, runtime.GOOS, want)
+	}
+}
+
+// The override outranks everything, because an explicit request that a staged
+// copy could silently outrank is an explicit request dropped — the same reason
+// findLLVMTool checks $PROMISE_OPT first.
+func TestResolveWasmRuntimePrefersTheOverride(t *testing.T) {
+	stub := filepath.Join(t.TempDir(), "my-wasmtime")
+	t.Setenv("PROMISE_WASMTIME", stub)
+	got, err := resolveWasmRuntime("wasmtime")
+	if err != nil {
+		t.Fatalf("resolveWasmRuntime with an override set: %v", err)
+	}
+	if got != stub {
+		t.Errorf("resolveWasmRuntime = %q, want the override %q", got, stub)
+	}
+}
+
+// A runtime staged in the host prebuilts cache is used without touching the
+// CAS. This is what keeps a machine that has run `bin/gate wasm-test` from
+// downloading a second copy of a ~120 MB Node into its Promise home — the same
+// bridge resolveLLVMView has had since it was written.
+func TestResolveWasmRuntimeUsesTheHostPrebuiltsCache(t *testing.T) {
+	cacheRoot := t.TempDir()
+	t.Setenv("PROMISE_PREBUILTS_CACHE", cacheRoot)
+	t.Setenv("PROMISE_WASMTIME", "")
+	t.Setenv("PROMISE_HOME", t.TempDir()) // an empty CAS: nothing to find there
+
+	target := runtime.GOOS + "-" + runtime.GOARCH
+	file := runtimeExeName("wasmtime")
+	staged := filepath.Join(cacheRoot, "wasmtime-slim", "44.0.0", target)
+	if err := os.MkdirAll(staged, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(staged, file)
+	if err := os.WriteFile(exe, []byte("pinned"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without tools.ok the cache dir is half-populated and must be ignored:
+	// serving a partial fetch as a runtime is how a truncated download becomes
+	// a mysterious exec failure.
+	if got := prebuiltRuntimePath("wasmtime", file); got != "" {
+		t.Errorf("a cache dir with no tools.ok answered %q, want it ignored", got)
+	}
+	if err := os.WriteFile(filepath.Join(staged, "tools.ok"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveWasmRuntime("wasmtime")
+	if err != nil {
+		t.Fatalf("resolveWasmRuntime against a staged prebuilt: %v", err)
+	}
+	if got != exe {
+		t.Errorf("resolveWasmRuntime = %q, want the staged prebuilt %q", got, exe)
+	}
+}
+
+// isolateWasmRuntimes puts a test in a world where no source can answer for
+// either runtime: no override, an empty prebuilts cache, an empty CAS, and every
+// manifest source rewritten to a closed loopback port.
+//
+// That last part is what makes the premise true rather than merely likely. The
+// first spelling of these tests only set the first three, which established
+// "nothing local can answer" — and was silently relying on the blobs being
+// UNPUBLISHED for the wire to fail too. The moment T2169's blobs went up, both
+// tests started fetching ~40 MB apiece from GitHub and passing resolution, so
+// they failed; a test that reaches the network is also one whose result depends
+// on the network. PROMISE_BLOB_MIRROR replaces scheme+host on blob AND archive
+// sources alike (blobstore.rewriteSource / rewriteBlobSource), so one variable
+// closes every route, offline and instantly.
+func isolateWasmRuntimes(t *testing.T) {
+	t.Helper()
+	t.Setenv("PROMISE_WASMTIME", "")
+	t.Setenv("PROMISE_NODE", "")
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
+	t.Setenv("PROMISE_HOME", t.TempDir())
+	// Port 1 on loopback: refused immediately, no DNS, no egress.
+	t.Setenv("PROMISE_BLOB_MIRROR", "http://127.0.0.1:1")
+}
+
+// When no source can answer, the failure names the runtime AND the override.
+// It must not suggest installing one: since the compiler stopped consulting
+// PATH, an install changes nothing, and a message that sends its reader to do
+// one wastes their time on a fix that cannot work.
+func TestResolveWasmRuntimeReportsWhatCannotBeObtained(t *testing.T) {
+	isolateWasmRuntimes(t)
+
+	for dep, envVar := range map[string]string{"wasmtime": "PROMISE_WASMTIME", "node": "PROMISE_NODE"} {
+		_, err := resolveWasmRuntime(dep)
+		if err == nil {
+			t.Errorf("%s resolved with no source available", dep)
+			continue
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, dep) || !strings.Contains(msg, envVar) {
+			t.Errorf("%s error = %q, want it to name the runtime and %s", dep, msg, envVar)
+		}
+		for _, forbidden := range []string{"brew install", "winget", "apt-get", "nodejs.org"} {
+			if strings.Contains(msg, forbidden) {
+				t.Errorf("%s error = %q, must not suggest %q — installing one changes nothing now", dep, msg, forbidden)
+			}
+		}
+	}
+}
+
+// An unknown runtime is refused rather than probed for.
+func TestResolveWasmRuntimeRejectsAnUnknownRuntime(t *testing.T) {
+	t.Parallel()
+	if _, err := resolveWasmRuntime("deno"); err == nil {
+		t.Fatal("an unknown runtime was accepted")
+	}
+	if _, err := resolveWasmRuntimeIfLocal("deno"); err == nil {
+		t.Fatal("the no-fetch probe accepted an unknown runtime")
+	}
+}
+
+// The no-fetch probe answers "" rather than reaching the network, so
+// `promise doctor` can report state without acquiring tens of megabytes to do
+// it. It still honours the two local sources, in the same order.
+func TestResolveWasmRuntimeIfLocalNeverFetches(t *testing.T) {
+	// The mirror here is belt and braces: the point of the probe is that it never
+	// reaches a source at all, so if it ever did, the closed port turns a silent
+	// download into an immediate, visible failure.
+	isolateWasmRuntimes(t)
+
+	got, err := resolveWasmRuntimeIfLocal("wasmtime")
+	if err != nil {
+		t.Fatalf("the no-fetch probe errored instead of reporting absence: %v", err)
+	}
+	if got != "" {
+		t.Errorf("probe = %q, want empty on a machine with nothing staged", got)
+	}
+
+	stub := filepath.Join(t.TempDir(), "my-wasmtime")
+	t.Setenv("PROMISE_WASMTIME", stub)
+	if got, _ := resolveWasmRuntimeIfLocal("wasmtime"); got != stub {
+		t.Errorf("probe = %q, want the override %q", got, stub)
+	}
+}
+
+// A runtime is materialized EXECUTABLE. The target dependencies beside it are
+// inert archives placed 0644, and a runtime that inherited that mode would
+// stage successfully and then fail at exec time with an EACCES naming a path,
+// far from the step that caused it.
+func TestMaterializeRuntimeFileIsExecutable(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	blob := filepath.Join(dir, "blob")
+	if err := os.WriteFile(blob, []byte("runtime bytes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "wasmtime")
+	if _, err := materializeRuntimeFile(blob, dst); err != nil {
+		t.Fatalf("materializeRuntimeFile: %v", err)
+	}
+	info, err := os.Stat(dst) // follows the Linux symlink to its target
+	if err != nil {
+		t.Fatalf("stat materialized runtime: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Errorf("materialized runtime mode = %v, want the execute bit set", info.Mode().Perm())
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != "runtime bytes" {
+		t.Errorf("materialized runtime = %q (err %v), want the blob's bytes", got, err)
+	}
+}
+
+// A WASM runtime override counts as a toolchain override, so the banner
+// announces it and `bin/gate` refuses to report a measurement made under one
+// (T2169). A suite run under a substituted wasmtime is no more "the pinned
+// toolchain" than a link done with a substituted lld, and the gate's refusal
+// reads exactly this list.
+func TestWasmRuntimeOverridesAreToolchainOverrides(t *testing.T) {
+	for dep, envVar := range wasmRuntimeEnvVars {
+		t.Run(dep, func(t *testing.T) {
+			for _, v := range llvmToolOverrideVars {
+				t.Setenv(v, "")
+			}
+			t.Setenv("PROMISE_CLANG", "")
+			t.Setenv("PROMISE_USE_CLANG", "")
+			for _, v := range wasmRuntimeEnvVars {
+				t.Setenv(v, "")
+			}
+			if got := toolchainOverridesInEffect(); len(got) != 0 {
+				t.Fatalf("overrides in effect with nothing set: %v", got)
+			}
+			t.Setenv(envVar, "/custom/"+dep)
+			got := toolchainOverridesInEffect()
+			if len(got) != 1 || got[0] != envVar {
+				t.Errorf("toolchainOverridesInEffect() = %v, want exactly [%s]", got, envVar)
+			}
+		})
+	}
+}
+
+// The announcement is made when the override is actually taken, so a run that
+// silently used a substituted runtime is impossible — the same contract
+// findLLVMTool has for $PROMISE_OPT.
+func TestResolveWasmRuntimeAnnouncesTheOverride(t *testing.T) {
+	stub := filepath.Join(t.TempDir(), "my-node")
+	t.Setenv("PROMISE_NODE", stub)
+	toolchainOverrideAnnounced.Delete("PROMISE_NODE")
+	toolchainOverrideAnnounced.Delete(toolchainBannerSaid)
+
+	var banner bytes.Buffer
+	old := toolchainWarnW
+	toolchainWarnW = &banner
+	t.Cleanup(func() {
+		toolchainWarnW = old
+		toolchainOverrideAnnounced.Delete("PROMISE_NODE")
+		toolchainOverrideAnnounced.Delete(toolchainBannerSaid)
+	})
+
+	if _, err := resolveWasmRuntime("node"); err != nil {
+		t.Fatal(err)
+	}
+	out := banner.String()
+	if !strings.Contains(out, "PROMISE_NODE="+stub) {
+		t.Errorf("banner = %q, want it to name the override that was taken", out)
+	}
+	if !strings.Contains(out, "does NOT use the pinned toolchain") {
+		t.Errorf("banner = %q, want it to state the consequence", out)
+	}
+}
+
+// A dep the manifest carries no entry for resolves to ("", nil) rather than an
+// error — the signal resolveWasmRuntime turns into "this build carries no
+// pinned <dep>". Asserted through an unknown dep because that is the only way
+// to reach the miss on a binary whose own manifest does carry both runtimes.
+func TestResolveRuntimeViewMissingFromManifestIsNotAnError(t *testing.T) {
+	t.Setenv("PROMISE_HOME", t.TempDir())
+	viewDir, err := resolveRuntimeView("deno", "deno")
+	if err != nil {
+		t.Fatalf("a manifest miss must not be an error: %v", err)
+	}
+	if viewDir != "" {
+		t.Errorf("viewDir = %q, want empty for a dep the manifest does not carry", viewDir)
+	}
+}
+
+// The no-fetch probe reports a runtime staged in the host prebuilts cache. This
+// is the "Pinned, staged: <path>" line `promise doctor` prints, and the reason
+// an absent host copy is no longer a warning.
+func TestResolveWasmRuntimeIfLocalFindsAStagedPrebuilt(t *testing.T) {
+	cacheRoot := t.TempDir()
+	t.Setenv("PROMISE_PREBUILTS_CACHE", cacheRoot)
+	t.Setenv("PROMISE_WASMTIME", "")
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
+	target := runtime.GOOS + "-" + runtime.GOARCH
+	file := runtimeExeName("wasmtime")
+	staged := filepath.Join(cacheRoot, "wasmtime-slim", "44.0.0", target)
+	if err := os.MkdirAll(staged, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(staged, file)
+	if err := os.WriteFile(exe, []byte("pinned"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staged, "tools.ok"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveWasmRuntimeIfLocal("wasmtime")
+	if err != nil {
+		t.Fatalf("resolveWasmRuntimeIfLocal: %v", err)
+	}
+	if got != exe {
+		t.Errorf("probe = %q, want the staged prebuilt %q", got, exe)
+	}
+}
+
+// prebuiltRuntimePath must reject a cache entry that cannot be executed, and
+// prefer the newest version when several checkouts pinned different ones.
+//
+// The rejections are the load-bearing half: a zero-byte file or a directory
+// wearing the runtime's name would otherwise be handed to exec and fail far from
+// here, and serving the *older* of two pins would silently run a version the
+// tree is not pinned to — the drift T2169 exists to end.
+func TestPrebuiltRuntimePathRejectsUnusableEntriesAndPrefersTheNewest(t *testing.T) {
+	cacheRoot := t.TempDir()
+	t.Setenv("PROMISE_PREBUILTS_CACHE", cacheRoot)
+	target := runtime.GOOS + "-" + runtime.GOARCH
+	file := runtimeExeName("wasmtime")
+
+	stage := func(version string, write func(dir string)) string {
+		dir := filepath.Join(cacheRoot, "wasmtime-slim", version, target)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(dir)
+		if err := os.WriteFile(filepath.Join(dir, "tools.ok"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(dir, file)
+	}
+
+	// A zero-byte file is a fetch that did not finish.
+	stage("41.0.0", func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, file), nil, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if got := prebuiltRuntimePath("wasmtime", file); got != "" {
+		t.Errorf("a zero-byte cache entry was accepted: %q", got)
+	}
+
+	// A directory wearing the runtime's name is not a runtime.
+	stage("42.0.0", func(dir string) {
+		if err := os.MkdirAll(filepath.Join(dir, file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if got := prebuiltRuntimePath("wasmtime", file); got != "" {
+		t.Errorf("a directory was accepted as a runtime: %q", got)
+	}
+
+	// Two real pins: the newer must win, and numerically — 9.0.0 must not
+	// outrank 44.0.0 the way a lexical sort would.
+	older := stage("9.0.0", func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, file), []byte("old"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	})
+	newer := stage("44.0.0", func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, file), []byte("new"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	})
+	got := prebuiltRuntimePath("wasmtime", file)
+	if got == older {
+		t.Errorf("prebuiltRuntimePath chose 9.0.0 over 44.0.0 — a lexical comparison, not a numeric one")
+	}
+	if got != newer {
+		t.Errorf("prebuiltRuntimePath = %q, want the newest pin %q", got, newer)
+	}
+}
+
+// The upstream-archive cache dir (<dep>/<version>/<target>/) is a valid source
+// too, not only the <dep>-slim/ one: `bin/pin-prebuilts` and the catalog-miss
+// fallback both populate it, and a dev host that has only that copy must not
+// re-download the runtime into its CAS.
+func TestPrebuiltRuntimePathAcceptsTheUpstreamCacheDir(t *testing.T) {
+	cacheRoot := t.TempDir()
+	t.Setenv("PROMISE_PREBUILTS_CACHE", cacheRoot)
+	target := runtime.GOOS + "-" + runtime.GOARCH
+	file := runtimeExeName("node")
+
+	dir := filepath.Join(cacheRoot, "node", "22.22.2", target)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, file)
+	if err := os.WriteFile(exe, []byte("pinned node"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tools.ok"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := prebuiltRuntimePath("node", file); got != exe {
+		t.Errorf("prebuiltRuntimePath = %q, want the upstream cache copy %q", got, exe)
+	}
+}
+
+// The CAS view is the third and last source, and the only one that can serve a
+// machine which has never staged the runtime — an end user's thin compiler. Both
+// its success paths are asserted here: resolveWasmRuntime returning the view's
+// executable, and the no-fetch probe reporting the same path as "staged", which
+// is what `promise doctor` prints.
+//
+// The view is populated by hand rather than fetched, so the test asserts the
+// resolution and path arithmetic without a network or a store. Its location is
+// computed the way the product computes it (depViewDir), so a change to the
+// content-keying moves the fixture with it instead of silently passing against a
+// directory nothing reads.
+func TestResolveWasmRuntimeUsesAPopulatedCASView(t *testing.T) {
+	for _, dep := range []string{"wasmtime", "node"} {
+		t.Run(dep, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("PROMISE_HOME", home)
+			t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir()) // nothing staged there
+			t.Setenv("PROMISE_WASMTIME", "")
+			t.Setenv("PROMISE_NODE", "")
+			// Closed port: if resolution ever reached the wire this would fail
+			// fast rather than quietly downloading tens of megabytes.
+			t.Setenv("PROMISE_BLOB_MIRROR", "http://127.0.0.1:1")
+
+			file := runtimeExeName(dep)
+			view, err := depViewDir("runtime-view", runtime.GOOS+"-"+runtime.GOARCH,
+				[]string{file}, func(string) string { return runtimeManifestName(dep) })
+			if err != nil {
+				t.Fatalf("depViewDir: %v", err)
+			}
+			if view.Dir == "" {
+				t.Skipf("this build's manifest carries no pinned %s, so the view path is not defined", dep)
+			}
+			if err := os.MkdirAll(view.Dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			want := filepath.Join(view.Dir, file)
+			if err := os.WriteFile(want, []byte("staged "+dep), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := resolveWasmRuntime(dep)
+			if err != nil {
+				t.Fatalf("resolveWasmRuntime against a populated view: %v", err)
+			}
+			if got != want {
+				t.Errorf("resolveWasmRuntime = %q, want the view's executable %q", got, want)
+			}
+
+			// The probe must agree: doctor reporting a different path from the one
+			// a run executes is a report about a file nobody uses.
+			probed, err := resolveWasmRuntimeIfLocal(dep)
+			if err != nil {
+				t.Fatalf("resolveWasmRuntimeIfLocal: %v", err)
+			}
+			if probed != want {
+				t.Errorf("probe = %q, want the same path the run resolves (%q)", probed, want)
 			}
 		})
 	}

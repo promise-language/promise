@@ -149,8 +149,10 @@ func RunTest(root string, args []string) error {
 		}
 
 		if opts.wasm {
-			if Which("wasmtime") == "" { // path-ok: the documented wasm32-wasi test runtime
-				return fmt.Errorf("wasmtime not found — install with: bin/prereqs --wasm")
+			// The pinned runtime, not the host's — see runtime_slim.go (T2169).
+			if _, err := EnsureWasmtime(root); err != nil {
+				return fmt.Errorf("pinned wasmtime unavailable: %w\n"+
+					"  Stage it with `bin/prereqs -wasm`, or name an existing binary with PROMISE_WASMTIME", err)
 			}
 			Progress().Println("\nRunning promise tests (wasm32-wasi)...")
 			_, err = RunPromiseTests(root, "wasm32-wasi")
@@ -160,8 +162,10 @@ func RunTest(root string, args []string) error {
 		}
 
 		if opts.wasmWeb {
-			if Which("node") == "" { // path-ok: the documented wasm32-web test runtime (Node 20+)
-				return fmt.Errorf("node not found — install Node.js 20+ (see bin/prereqs)")
+			// The pinned runtime, not the host's — see runtime_slim.go (T2169).
+			if _, err := EnsureNode(root); err != nil {
+				return fmt.Errorf("pinned node unavailable: %w\n"+
+					"  Stage it with `bin/prereqs -wasm`, or name an existing binary with PROMISE_NODE", err)
 			}
 			Progress().Println("\nRunning promise tests (wasm32-web)...")
 			_, err = RunPromiseTests(root, "wasm32-web")

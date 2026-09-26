@@ -22,7 +22,7 @@ The original model embedded **everything** in the binary (~61 MB on Linux, more 
 | Class | Examples | How it's carried |
 |-------|----------|------------------|
 | **Always embedded** (small, always needed) | Compiler frontend + codegen, standard library source, the tiny stub, the **dependency manifest** | Compiled in / `go:embed` |
-| **Fetched on demand** (large, target-specific) | LLVM host tools (`opt`, `llc`, `lld`, `libLLVM`), wasm runner (`wasmtime`/Node harness), CRTs (musl), target sysroots | Content-addressed cache ([The dependency store](#the-dependency-store)) |
+| **Fetched on demand** (large, target-specific) | LLVM host tools (`opt`, `llc`, `lld`, `libLLVM`), the wasm runtimes (`wasmtime`, `node`), CRTs (musl), target sysroots | Content-addressed cache ([The dependency store](#the-dependency-store)) |
 
 The binary embeds a **manifest** — one entry per heavy dependency, separating **content identity** (`logical name`, `sha256`, `size`) from **acquisition** (a ranked list of sources describing *how* to obtain it). The `sha256` identifies the blob's *content* — it is the cache key and the integrity check — **not** a download URL. At the moment a dependency is required, the compiler looks it up in the shared content-addressed cache (`~/.promise/cache/blobs/sha256/<hash>`); if present it is used, if absent it is acquired by trying the manifest's sources in order, **verified against the embedded `sha256`**, cached, and used. That hash is the **trust anchor** — an acquired blob needs no separate signature, only a content match. The acquisition layer is deliberately flexible (a source may be a direct download *or* a path inside a compressed archive); see [The dependency store](#the-dependency-store) for the entry shape and why this matters for the private→public transition.
 
@@ -251,7 +251,7 @@ The install script downloads only the top-level binary (and `SHA256SUMS`); every
 ~/.promise/cache/
   blobs/sha256/
     3f9a…/opt           ← a specific LLVM opt build (the source of truth)
-    7c21…/wasmtime
+    7c21…/wasmtime         ← a WASM test runtime (so is node) — fetched only by a run that targets wasm
     a0e4…/libLLVM.dylib
   archives/sha256/
     1b7c…                ← a cached archive (bandwidth optimization only; [Fetch flow](#fetch-flow) Archive reuse)

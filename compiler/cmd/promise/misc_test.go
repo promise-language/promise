@@ -519,7 +519,7 @@ func TestAnnounceToolchainOverridesAtStartup(t *testing.T) {
 
 	out := banner.String()
 	for _, want := range []string{
-		"this build does NOT use the pinned toolchain",
+		"this run does NOT use the pinned toolchain",
 		"PROMISE_LLC=/custom/llc",
 		"PROMISE_WASM_LD=/custom/wasm-ld",
 	} {

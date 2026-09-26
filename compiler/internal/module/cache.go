@@ -770,16 +770,20 @@ func CleanEmbeddedModuleCache() error {
 var tmpTrashSeq atomic.Uint64
 
 // CleanLLVMCache removes all cached LLVM tool extractions, including the
-// content-addressed view dirs (T0769). The CAS blobs themselves are
-// content-addressed and never stale, so they are intentionally NOT removed here.
+// content-addressed view dirs (T0769), and the WASM test runtimes' view
+// (T2169) — another derived working copy of pinned blobs, reclaimed on the same
+// terms. The CAS blobs themselves are content-addressed and never stale, so
+// they are intentionally NOT removed here.
 func CleanLLVMCache() error {
 	home, err := PromiseHome()
 	if err != nil {
 		return err
 	}
 	err = os.RemoveAll(filepath.Join(home, "cache", "llvm"))
-	if e := os.RemoveAll(filepath.Join(home, "cache", "llvm-view")); e != nil && err == nil {
-		err = e
+	for _, dir := range []string{"llvm-view", "runtime-view"} {
+		if e := os.RemoveAll(filepath.Join(home, "cache", dir)); e != nil && err == nil {
+			err = e
+		}
 	}
 	return err
 }

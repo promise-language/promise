@@ -272,7 +272,7 @@ The tracker knows each agent's OS and idle status, dispatching to the right targ
 | Linux | darwin-arm64, windows-amd64 |
 | Windows | linux-amd64, darwin-arm64 |
 
-WASM is cross-platform (runs anywhere with wasmtime) so it is a commit gate, not a platform gate.
+WASM is cross-platform (the pinned `wasmtime` is staged for every supported host) so it is a commit gate, not a platform gate.
 
 ---
 
@@ -298,7 +298,7 @@ Metric-only gates (`stress`, `coverage`, `wasm-size`) omit `files`. Test gates p
 
 One gate invocation reports exactly one target, stamped once at the top of the envelope — never per record. `bin/gate test` reports the host (e.g. `linux-amd64`) and is host-only; `bin/gate wasm-test` reports `wasm32-wasi`; `bin/gate wasm-web-test` reports `wasm32-web`; `go-test`/`stress`/`coverage`/`wasm-size` report the host they ran on. Any unknown argument (including `-wasm` to `bin/gate test`) is rejected — wasm tests are separate single-target gates (`bin/gate wasm-test`, `bin/gate wasm-web-test`).
 
-The two wasm targets are separate gates because they run under different runtimes: `wasm-test` needs `wasmtime` on PATH, while `wasm-web-test` executes the module under the Node harness (`compiler/cmd/promise/wasm_web_harness.js`) and needs Node 20+. Keeping them apart means a host missing one runtime still reports the other, rather than the pair failing together.
+The two wasm targets are separate gates because they run under different runtimes: `wasm-test` runs the module under the pinned `wasmtime`, while `wasm-web-test` runs it under the pinned Node (20+) plus the embedded harness (`compiler/cmd/promise/wasm_web_harness.js`). Both runtimes are pinned prebuilts staged on demand, not host installs ([runtime-architecture.md](runtime-architecture.md#wasm-runtime-sources)) — so what a gate can report no longer turns on what a machine happens to have. Keeping them apart still matters: a host that cannot obtain one runtime reports the other, rather than the pair failing together.
 
 ### Envelope
 
@@ -445,8 +445,8 @@ These gates speak the contract the flow SDK and BASE share, and the SDK **fails 
 | `tested` | both host suites | both |
 | `integration` | `formatted` + `builds` + `checked` + `tested`, measured at once — what a landing decision rests on | all of the above |
 | `fit` | the machine, before work is given to it | `worktree_free_bytes`, `build_cache_free_bytes` |
-| `tested:wasm` | the Promise suite against wasm32-wasi (needs `wasmtime`) | `wasm_test_failures`, `wasm_leak_count`, `wasm_test_count` |
-| `tested:wasm-web` | the Promise suite against wasm32-web, under Node | `wasm_web_test_failures`, `wasm_web_leak_count`, `wasm_web_test_count` |
+| `tested:wasm` | the Promise suite against wasm32-wasi, under the pinned `wasmtime` | `wasm_test_failures`, `wasm_leak_count`, `wasm_test_count` |
+| `tested:wasm-web` | the Promise suite against wasm32-web, under the pinned Node | `wasm_web_test_failures`, `wasm_web_leak_count`, `wasm_web_test_count` |
 | `tested:stress` | tests that do not agree with themselves across repeated runs | `stress_flaky_count`, `stress_iterations` |
 | `covered` | how much of each language's source the suites reach | `go_coverage_pct`, `promise_coverage_pct` |
 | `size:wasm` | what the wasm32-wasi canaries compile to, per canary | `wasm_size_<canary>`, `wasm_size_total` |

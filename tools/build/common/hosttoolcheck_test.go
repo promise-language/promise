@@ -153,3 +153,48 @@ func TestCheckHostToolLookups_ErrorsWhenGitCannotList(t *testing.T) {
 		t.Errorf("error should name the failing step, got: %v", err)
 	}
 }
+
+// The two spellings of a bare toolchain invocation are one rule. T2169 found
+// `exec.CommandContext(ctx, "wasmtime", …)` in the compiler still resolving a
+// runtime through PATH, long after T2108 had removed every other such lookup:
+// the guard knew `exec.Command` but not the Context form, and knew LLVM's tool
+// names but not the WASM runtimes'. Two holes that lined up, and a rule is only
+// as good as the spelling it recognises.
+func TestCheckHostToolLookups_RejectsBareCommandContext(t *testing.T) {
+	for _, tc := range []struct{ name, code string }{
+		{"wasmtime", "package common\nfunc f() { exec.CommandContext(ctx, \"wasmtime\", p) }\n"},    // path-ok: fixture text for this guard's own test
+		{"node", "package common\nfunc f() { exec.CommandContext(ctx, \"node\", p) }\n"},            // path-ok: fixture text for this guard's own test
+		{"extra spacing", "package common\nfunc f() { exec.CommandContext(ctx,  \"clang\", p) }\n"}, // path-ok: fixture text for this guard's own test
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, stage := initGitRepoWithStager(t)
+			stage("tools/build/common/x.go", []byte(tc.code))
+			if err := CheckHostToolLookups(root); err == nil {
+				t.Fatal("a bare toolchain name passed to exec.CommandContext was accepted")
+			}
+		})
+	}
+}
+
+// The same call, annotated, is permitted — the marker is what the guard is for,
+// and a rule with no way to say "this one is deliberate" gets deleted instead.
+func TestCheckHostToolLookups_AllowsAnnotatedCommandContext(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("tools/build/common/x.go",
+		[]byte("package common\nfunc f() { exec.CommandContext(ctx, \"wasmtime\", p) } // path-ok: a test's own stub\n")) // path-ok: fixture text for this guard's own test
+	if err := CheckHostToolLookups(root); err != nil {
+		t.Fatalf("an annotated exec.CommandContext was rejected: %v", err)
+	}
+}
+
+// A non-toolchain program named to exec.CommandContext is not the guard's
+// business: which `tar` runs cannot change what a Promise artifact contains or
+// what a suite reports, which is the line the toolchain list draws.
+func TestCheckHostToolLookups_AllowsNonToolchainCommandContext(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("tools/build/common/x.go",
+		[]byte("package common\nfunc f() { exec.CommandContext(ctx, \"tar\", p) }\n"))
+	if err := CheckHostToolLookups(root); err != nil {
+		t.Fatalf("a non-toolchain exec.CommandContext was rejected: %v", err)
+	}
+}

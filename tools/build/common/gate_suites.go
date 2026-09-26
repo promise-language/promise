@@ -33,10 +33,10 @@ import (
 
 // measureTestedWasm runs the Promise suite against wasm32-wasi.
 //
-// The runtime is a precondition rather than a result: a host with no wasmtime
-// has not been told anything about this tree, and reporting zero failures for a
-// suite that never ran is the false clean result an incomplete reason exists to
-// prevent.
+// The runtime is a precondition rather than a result: a host that cannot obtain
+// wasmtime has not been told anything about this tree, and reporting zero
+// failures for a suite that never ran is the false clean result an incomplete
+// reason exists to prevent.
 func measureTestedWasm(root string) ([]Metric, string, error) {
 	return measureTargetSuite(root, targetSuite{
 		target:  "wasm32-wasi",
@@ -55,7 +55,7 @@ func measureTestedWasmWeb(root string) ([]Metric, string, error) {
 }
 
 // targetSuite names one cross-compiled suite: which target to build for, which
-// host program has to be present to run it, and the prefix its metrics carry.
+// runtime has to be obtainable to run it, and the prefix its metrics carry.
 // The prefix is the baselines' spelling, not a new one — these metrics have
 // been ratcheted per platform for as long as the legacy subcommands have
 // written them, and a gate reporting the same measurement under a new name
@@ -66,25 +66,26 @@ type targetSuite struct {
 	prefix  string
 }
 
-// findRuntime answers whether this host carries a target's runtime. It is the
-// one question in these measurements whose subject is the MACHINE rather than
-// the tree, which is exactly why it is a seam: a test that stubs the runner
-// precisely so it needs no toolchain must not then be decided by what this
-// machine happens to have on PATH (T2166, the same class as T2116). The
-// product binding is Which — the probe itself is legitimate: it gates on a
-// runtime that EXECUTES a built artifact without contributing to it, which
-// docs/code-style.md §"Host tools in Go sources" names as one of the three
-// lookups that hold, and docs/gate-system.md says `tested:wasm` needs wasmtime
-// present.
-var findRuntime = Which
+// findRuntime obtains a target's runtime for this host. It is the one step in
+// these measurements whose subject is the MACHINE rather than the tree, which
+// is exactly why it is a seam: a test that stubs the runner precisely so it
+// needs no toolchain must not then be decided by what this machine happens to
+// carry (T2166, the same class as T2116).
+//
+// The product binding is EnsureWasmRuntime, so what it asks is no longer "does
+// this host have one" but "can the PINNED one be staged" (T2169). The
+// difference is the whole point: the first question is answered by whatever
+// somebody installed, and a suite whose result turns on that describes the host
+// as much as the tree.
+var findRuntime = EnsureWasmRuntime
 
 // measureTargetSuite is the body both cross-target suites share, with the
 // runner as a parameter so a test can pin which summary field becomes which
 // metric without a WASM toolchain or a four-minute suite.
 func measureTargetSuite(root string, s targetSuite, runSuite suiteRunner) ([]Metric, string, error) {
-	if findRuntime(s.runtime) == "" {
+	if _, err := findRuntime(root, s.runtime); err != nil {
 		return []Metric{}, fmt.Sprintf(
-			"%s is not installed, so the %s suite did not run", s.runtime, s.target), nil
+			"the pinned %s could not be staged (%v), so the %s suite did not run", s.runtime, err, s.target), nil
 	}
 	if err := ensureGateBuild(root); err != nil {
 		return []Metric{}, buildDidNotComplete("the "+s.target+" suite did not run", err), nil

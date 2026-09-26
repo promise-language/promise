@@ -276,3 +276,137 @@ sha256 = "c8dc9a9e98a23a30f4b5c89f44b7978e1d45db637742824304e0031aca12b200"
 files = [
   { src = "usr/lib/llvm21/lib/clang/21/lib/aarch64-alpine-linux-musl/libclang_rt.builtins-aarch64.a", out = "libclang_rt.builtins.a" },
 ]
+
+# ----------------------------------------------------------------------------
+# WASM test runtimes (wasmtime, node) — required to RUN a wasm32-wasi or
+# wasm32-web binary (T2169).
+#
+# These were the last toolchain inputs taken from the host PATH. Every other
+# dependency above obeys T2108 ("the build takes no toolchain binary from the
+# host"); these two decided whether an entire test suite ran at all, which is a
+# larger effect on a measurement than any compiler flag. A host without wasmtime
+# reported an *incomplete* wasm gate — nothing about the tree — and `node` meant
+# whatever the developer or the CI image happened to install, so a suite passing
+# under one version and failing under another was indistinguishable from a real
+# regression.
+#
+# It is also a PRODUCT requirement, not only a gate one: `promise test --target
+# wasm32-web` for a user's own project went through the same PATH lookup, so an
+# end user could not test a web-targeted Promise project without installing Node
+# globally. docs/distribution.md already lists the "wasm runner
+# (`wasmtime`/Node harness)" as a fetched-on-demand content-addressed
+# dependency; this pin is what makes that true.
+#
+# **HOST dependencies, not target ones.** Unlike the musl CRT / OpenSSL /
+# compiler-rt blocks above (whose `target` is the Linux target being linked
+# FOR), `target` here is the machine that RUNS the runtime. A darwin host
+# testing wasm32-wasi needs the darwin wasmtime.
+#
+# **One file each.** The harness invocation is `node <harness.js> <module.wasm>`
+# and `wasmtime <module.wasm> [args...]` — a plain script and a plain module, no
+# npm, no node_modules, no native addons. Official distributions are relocatable
+# archives whose single `bin/node` / `wasmtime` runs by itself; only the Windows
+# MSI and macOS pkg "install" anything. So the existing `files = [{src, out}]`
+# extraction covers both: take the one executable and nothing else.
+#
+# **Never embedded.** `bundle_dir` is empty: these are large (Node is ~120 MB
+# unpacked) and target-specific, so they are resolved lazily from the
+# content-addressed store when a wasm run actually needs one — never staged into
+# the shipped binary, and never fetched on a cold home that does no wasm work.
+# That matches docs/distribution.md's "full = host LLVM + host CRT" variant rule.
+#
+# **Known limitation (Linux).** Official Node builds link glibc, so they do not
+# run on a musl-only host (an Alpine dev container). Our runners are glibc;
+# PROMISE_NODE is the escape hatch, and nodejs.org's unofficial musl builds
+# exist if that ever becomes real. wasmtime's Linux releases have the same
+# glibc baseline.
+#
+# **Known limitation (macOS).** arm64 requires a valid signature. Extraction and
+# the brotli round trip are byte-preserving, so the upstream signature survives;
+# EnsureWasmtime/EnsureNode verify it and ad-hoc re-sign only if it does not
+# (runtime_slim.go). Unlike the LLVM Mach-O hook, no install_name_tool runs —
+# these binaries are self-contained and adding an rpath would invalidate a good
+# signature for nothing.
+# ----------------------------------------------------------------------------
+[binaries.wasmtime]
+version = "44.0.0"
+# Empty: never embedded into the shipped compiler. See the header above.
+bundle_dir = ""
+
+[binaries.wasmtime.targets.linux-amd64]
+url = "https://github.com/bytecodealliance/wasmtime/releases/download/v44.0.0/wasmtime-v44.0.0-x86_64-linux.tar.xz"
+sha256 = "52eba06fe9f4364aa6164a4a3eafb2ca692ba9a756cbe8137b5574871f8cbfc8"
+files = [
+  { src = "wasmtime", out = "wasmtime" },
+]
+
+[binaries.wasmtime.targets.linux-arm64]
+url = "https://github.com/bytecodealliance/wasmtime/releases/download/v44.0.0/wasmtime-v44.0.0-aarch64-linux.tar.xz"
+sha256 = "294cae921fb88cbbcb60a914eaaaf313df3249d718609afb5804186b3f1912f5"
+files = [
+  { src = "wasmtime", out = "wasmtime" },
+]
+
+[binaries.wasmtime.targets.darwin-arm64]
+url = "https://github.com/bytecodealliance/wasmtime/releases/download/v44.0.0/wasmtime-v44.0.0-aarch64-macos.tar.xz"
+sha256 = "38a3b9d9fe64cee21bc9d9268e2c19fa35a7be59e030717545b84da0e6514eab"
+files = [
+  { src = "wasmtime", out = "wasmtime" },
+]
+
+[binaries.wasmtime.targets.darwin-amd64]
+# Mirrors [binaries.llvm.targets.darwin-amd64]: upstream publishes an x86_64
+# macOS wasmtime, but the platform has no LLVM 22 tarball, so a compiler cannot
+# be built there at all. Declared rather than omitted so the refusal names its
+# reason instead of reading as an oversight.
+unsupported = "macOS x86_64 is deferred — no upstream LLVM 22.1.0 tarball, so no compiler is built for this target"
+url = ""
+sha256 = ""
+files = []
+
+[binaries.wasmtime.targets.windows-amd64]
+url = "https://github.com/bytecodealliance/wasmtime/releases/download/v44.0.0/wasmtime-v44.0.0-x86_64-windows.zip"
+sha256 = "6139de7554514c2df1e30cec9b1e6ca493685ece23a039f987b55bf32bc42a57"
+files = [
+  { src = "wasmtime.exe", out = "wasmtime.exe" },
+]
+
+[binaries.node]
+# Active LTS. docs/gate-system.md requires >= 20 for the wasm32-web harness.
+version = "22.22.2"
+# Empty: never embedded into the shipped compiler. See the header above.
+bundle_dir = ""
+
+[binaries.node.targets.linux-amd64]
+url = "https://nodejs.org/dist/v22.22.2/node-v22.22.2-linux-x64.tar.xz"
+sha256 = "88fd1ce767091fd8d4a99fdb2356e98c819f93f3b1f8663853a2dee9b438068a"
+files = [
+  { src = "bin/node", out = "node" },
+]
+
+[binaries.node.targets.linux-arm64]
+url = "https://nodejs.org/dist/v22.22.2/node-v22.22.2-linux-arm64.tar.xz"
+sha256 = "e9e1930fd321a470e29bb68f30318bf58e3ecb4acb4f1533fb19c58328a091fe"
+files = [
+  { src = "bin/node", out = "node" },
+]
+
+[binaries.node.targets.darwin-arm64]
+url = "https://nodejs.org/dist/v22.22.2/node-v22.22.2-darwin-arm64.tar.xz"
+sha256 = "f8655beb4b86ff6588ed7e02c37f8574b58557bd3e880012814b1a4956fd9d88"
+files = [
+  { src = "bin/node", out = "node" },
+]
+
+[binaries.node.targets.darwin-amd64]
+unsupported = "macOS x86_64 is deferred — no upstream LLVM 22.1.0 tarball, so no compiler is built for this target"
+url = ""
+sha256 = ""
+files = []
+
+[binaries.node.targets.windows-amd64]
+url = "https://nodejs.org/dist/v22.22.2/node-v22.22.2-win-x64.zip"
+sha256 = "7c93e9d92bf68c07182b471aa187e35ee6cd08ef0f24ab060dfff605fcc1c57c"
+files = [
+  { src = "node.exe", out = "node.exe" },
+]

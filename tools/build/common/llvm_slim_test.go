@@ -44,8 +44,17 @@ func (c *countingBlobFetcher) FetchAsset(tag, asset, dst string) error {
 
 // seedSlimCatalog populates blobs.json with both `opt` and `llc` entries
 // matching the prebuilts.toml shape produced by fakeReleaseRoot — the catalog
-// hit path EnsureLLVMBlobs uses.
+// hit path EnsureLLVMBlobs uses. Targets linux-amd64, which is what
+// fakeReleaseRoot declares.
 func seedSlimCatalog(t *testing.T, root string, contents map[string]string) (sha256ByName, brByName map[string][]byte) {
+	t.Helper()
+	return seedSlimCatalogFor(t, root, "linux-amd64", contents)
+}
+
+// seedSlimCatalogFor is seedSlimCatalog with the target named rather than fixed,
+// for the projections that are per-HOST rather than per-arch (the WASM runtimes,
+// T2169) and so have to be asserted for every platform from any one of them.
+func seedSlimCatalogFor(t *testing.T, root, target string, contents map[string]string) (sha256ByName, brByName map[string][]byte) {
 	t.Helper()
 	sha256ByName = map[string][]byte{}
 	brByName = map[string][]byte{}
@@ -57,7 +66,7 @@ func seedSlimCatalog(t *testing.T, root string, contents map[string]string) (sha
 		if err := cat.Upsert(BlobEntry{
 			Dependency:       "llvm",
 			Version:          "22.1.0",
-			Target:           "linux-amd64",
+			Target:           target,
 			Name:             name,
 			SHA256:           sha,
 			Size:             int64(len(raw)),

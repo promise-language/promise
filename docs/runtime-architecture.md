@@ -633,6 +633,37 @@ The override is checked first so an explicit request is never silently outranked
 by a shipped install; with no override, an installed Promise always uses its own
 tools.
 
+### WASM Runtime Sources
+
+Running a `wasm32-wasi` or `wasm32-web` binary needs a runtime — `wasmtime` for
+the former, `node` plus the embedded harness for the latter. `resolveWasmRuntime(dep)`
+takes one from exactly three places, the same shape and the same order as the
+LLVM tools above:
+
+1. **Environment override**: `$PROMISE_WASMTIME`, `$PROMISE_NODE` — the explicit
+   bring-up and air-gap path, announced whenever it is in effect
+2. **Host prebuilts cache**: the pinned copy `bin/prereqs -wasm`, the wasm gates
+   or `bin/test --wasm` already staged outside the Promise home, so a machine
+   that has one never downloads it twice. (`bin/build` does *not* stage them —
+   they are wanted by a wasm run, not by a build.)
+3. **Pinned runtime view**: materialized from the content-addressed store,
+   fetching the pinned blob if this host has not cached it
+
+`PATH` is never consulted. A runtime *executes* a built module rather than
+contributing bytes to it, which for a long time read as a reason it could come
+from the host — but which copy runs still decides whether a suite runs at all,
+and which version runs decides what it reports. When none of the three sources
+answers, the compiler fails naming the pinned runtime and the override, rather
+than suggesting an install that would change nothing.
+
+Neither runtime ships inside any variant, `all` included: Node alone is ~120 MB
+unpacked, and only a run that actually targets wasm wants one — the
+[fetched-on-demand](distribution.md#what-is-always-in-the-binary-and-what-is-fetched-on-demand)
+class. The view holds an executable copy (a symlink to the CAS blob on Linux, a
+hardlink on Windows, a clone on macOS); unlike an LLVM Mach-O it is never
+patched, and on macOS is ad-hoc re-signed only if its upstream signature did not
+survive the trip.
+
 ### CRT Object Discovery
 
 `findCRT(target)` discovers glibc CRT objects needed by `ld.lld`:

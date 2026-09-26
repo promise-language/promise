@@ -32,6 +32,16 @@ type PrebuiltsManifest struct {
 }
 
 // PrebuiltEntry is one binary (e.g., "llvm", "wasmtime") in the manifest.
+//
+// BundleDir is where the release bundle ops write this dependency's gzipped
+// output. **Empty means the dependency is never embedded into the shipped
+// compiler** — it is resolved from the content-addressed store when something
+// needs it, and nothing stages it into the binary. That is the WASM test
+// runtimes' shape (T2169): large, target-specific, and only wanted by a run
+// that actually targets wasm, which docs/distribution.md classes as fetched on
+// demand rather than always embedded. Every embedding consumer names its
+// dependency explicitly (BundleLLVM, EmbedMuslCRT, …), so an empty BundleDir is
+// never joined into a path.
 type PrebuiltEntry struct {
 	Version   string                  `toml:"version"`
 	BundleDir string                  `toml:"bundle_dir"`
@@ -127,9 +137,9 @@ func (m *PrebuiltsManifest) validate() error {
 		if entry.Version == "" {
 			return fmt.Errorf("binary %q: missing version", name)
 		}
-		if entry.BundleDir == "" {
-			return fmt.Errorf("binary %q: missing bundle_dir", name)
-		}
+		// An empty bundle_dir is legal and means "never embedded" — see
+		// PrebuiltEntry.BundleDir. There is nothing to validate about a
+		// directory no bundle op will ever write to.
 		for tname, t := range entry.Targets {
 			if t == nil {
 				return fmt.Errorf("binary %q target %q: nil entry", name, tname)

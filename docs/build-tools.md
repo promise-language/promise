@@ -26,7 +26,7 @@ The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries i
 | `bin/coverage` | Test coverage analysis for Go packages and Promise tests. |
 | `bin/stress` | Stress testing for flaky test detection. |
 | `bin/setup` | One-time dev setup (git hooks). |
-| `bin/prereqs` | Install build prerequisites (LLVM, Go, Java, wasmtime). |
+| `bin/prereqs` | Report build prerequisites. The host must supply Go and Java; LLVM, the musl CRT and the WASM test runtimes are pinned and reported rather than prescribed. `bin/prereqs -wasm` stages the pinned `wasmtime` and `node` now instead of leaving them to the run that needs them. |
 | `bin/run` | Run one contract gate and judge it against `tools/gates/thresholds.json`. `bin/run <gate>` measures and judges for a person; `bin/run <gate> --verdict` judges an envelope on stdin (what the SDK calls); `bin/run --list [--json]` prints the gates and every command `./make` builds — the workspace reads that list to refuse installing over a project tool and to decide which names it may remove, so it reports the whole build set rather than a subset. `bin/run <command> [args…]` dispatches `bin/<command>`, since the two kinds share one namespace. See [gate-system.md](gate-system.md#the-contract-gates-and-the-judge). |
 
 **Only `./make` and `workspace setup/update` write into `bin/`.** It holds tool binaries, the compiler, and the build's own up-to-date sidecars — nothing else, so that everything in it is something a build put there and the directory can be deleted and rebuilt without losing state. Anything a command needs to write inside the worktree goes under `.home/` instead, with `.home/tmp/` for scratch. Both are gitignored and therefore outside `WorktreeHash`: a run's own scratch must never change the tree identity that run is measuring.
@@ -257,10 +257,12 @@ reason*, never on a `PATH` probe. A suite that asks the host what it has runs a
 different check on every machine, which is how a green CI and a red trunk came
 to describe the same commit (T2116). The exceptions are narrow and each is
 annotated at its site: tools that report host state (`bin/prereqs`,
-`promise doctor`), the test runtimes `wasmtime` and `node` that *execute* a built
-module without contributing to it (see [gate-system.md](gate-system.md)), and an
-explicitly requested non-default target linking against the host's own runtime
-(see [runtime-architecture.md](runtime-architecture.md) §"CRT Object Discovery").
+`promise doctor`), and an explicitly requested non-default target linking against
+the host's own runtime (see [runtime-architecture.md](runtime-architecture.md)
+§"CRT Object Discovery"). The WASM test runtimes `wasmtime` and `node` were a
+third exception until T2169 pinned them; they are now ordinary pinned
+dependencies, overridable per binary with `PROMISE_WASMTIME` / `PROMISE_NODE`
+like every other tool.
 `common.CheckHostToolLookups` enforces this over the tracked Go sources — it runs
 in `bin/verify`'s structural phase and in the tools test suite, so the rule no
 longer lives only in a commit message.

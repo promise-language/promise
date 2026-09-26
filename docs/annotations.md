@@ -148,7 +148,7 @@ The complete set. Anything not listed here is not an annotation; see [Not annota
 
 **Targets** and **Parameters** are reconciled against `builtinMetas` and `metaParamSpecs`
 mechanically ([Adding an annotation](#adding-an-annotation)), so both are written in a fixed vocabulary: the declaration kinds `types`,
-`enums`, `fields`, `methods`, `functions`, `parameters` and `variants`, and parameters spelled
+`enums`, `fields`, `methods`, `functions`, `parameters`, `variants` and `imports`, and parameters spelled
 `` `name` (kind, positional|named[, optional]) ``. A positional parameter is required unless it
 carries `optional`; a named one may always be omitted, so it never does. **Targets** records the
 declaration kinds an annotation attaches to and nothing narrower — that `` `interior `` further
@@ -187,6 +187,7 @@ them, and the same check holds the two copies equal.
 | `` `extern `` | functions | `symbol` (string, positional) | Function linked by symbol name |
 | `` `wasm_import `` | functions | `module` (string, positional); `name` (string, positional) | Bind to a WASM host import |
 | `` `target `` | types, enums, functions | `condition` (target-condition, positional) | Compile-time platform filtering |
+| `` `link `` | imports | — | Import kept for what it links; never flagged unused |
 | `` `embed `` | functions | `path` (string, positional); `compress` (bool, named) | Embed a file at compile time |
 | `` `lifetime `` | parameters, functions, methods | `name` (identifier, positional) | Explicit lifetime name |
 | `` `serializable `` | types, enums | `tag` (string, named) | Synthesize `encode`/`decode` |
@@ -630,6 +631,22 @@ exist can sit in a module indefinitely and fail only for whoever first calls it.
   diagnostic's list is derived from the accepted set so the two cannot drift.
 - **Read by** `Info.FilteredDecls` (`sema/check.go`); the identifier check in
   `sema/metaparams.go` against `ValidExcludeIdents` (`sema/target.go`).
+
+### link
+
+- **Targets** imports · **Parameters** — none
+- **Effect** Declares that the import is kept for what it **links** rather than for a name it
+  binds, so the unused-import check ([Import Scope](module-system.md#import-scope), rule 4)
+  never flags it. Nothing else changes: the import binds its alias and links its module exactly
+  as it would without the annotation.
+- **Interactions** It is the only annotation that targets an import, and it applies to every
+  import form — named, aliased, anonymous (`as _`) and sourced. It asserts nothing the
+  compiler could derive: an import kept for a link effect is indistinguishable, at the
+  declaration, from one whose references were deleted, which is precisely why the intent has
+  to be written rather than inferred. The implicit `use std as _;` never warns and so never
+  needs it.
+- **Read by** `checkUnusedImports` (`sema/decl.go`), through `Module.IsLinkOnly`
+  (`types/object.go`).
 
 ### embed
 

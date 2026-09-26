@@ -92,7 +92,11 @@ type term struct {
 //
 // A cap is declared by a person and changes only when one edits it. A baseline
 // is derived — the best a metric has been — and ratchets in its declared
-// direction. A metric carrying both must satisfy both.
+// direction. A metric carrying both must satisfy both: a cap looser than the
+// baseline beside it would otherwise forgive exactly the regression the ratchet
+// exists to catch. The verdict records the term that DECIDED it — the one that
+// failed, or the cap when both hold — because one metric carries one term on
+// the wire and it has to be the one the answer rests on.
 //
 // AN INCOMPLETE RUN IS NOT ACCEPTABLE. A verdict is a claim about a subject,
 // and a run that did not measure its whole subject has no grounds to make one:
@@ -117,21 +121,43 @@ func judge(env Envelope, caps map[string]Threshold, baselines map[string]Baselin
 	terms = map[string]term{}
 	var failed []string
 	for _, m := range env.Metrics {
-		if t, capped := caps[m.Name]; capped {
-			terms[m.Name] = term{Kind: "cap", Direction: string(t.Direction), Value: t.Cap}
-			if !withinCap(m, t) {
-				failed = append(failed, fmt.Sprintf("%s is %s, cap %s %s", m.Name, m.String(), t.Direction, formatCap(t.Cap)))
-			}
-			continue
-		}
+		t, capped := caps[m.Name]
 		// Enforced baselines only: a Pending entry has no value to compare
 		// against yet, and an Informational one is tracked and never blocks.
 		b, tracked := baselines[m.Name]
-		if !tracked || b.Value == nil || b.Direction == "" || b.Type == "informational" {
-			continue
+		enforced := tracked && b.Value != nil && b.Direction != "" && b.Type != "informational"
+
+		capFailed := capped && !withinCap(m, t)
+		baseFailed := enforced && !checkRatchet(b.Direction, *b.Value, m.Number())
+
+		// Each term is built only when it exists, so neither can be recorded
+		// from a map miss's zero value if this priority list is ever reordered.
+		var capTerm, baseTerm term
+		if capped {
+			capTerm = term{Kind: "cap", Direction: string(t.Direction), Value: t.Cap}
 		}
-		terms[m.Name] = term{Kind: "baseline", Direction: b.Direction, Value: *b.Value}
-		if !checkRatchet(b.Direction, *b.Value, m.Number()) {
+		if enforced {
+			baseTerm = term{Kind: "baseline", Direction: b.Direction, Value: *b.Value}
+		}
+		// The verdict carries the term that decided it: the one that failed, or
+		// the cap when both hold — it is the requirement, while the baseline
+		// beside it only records how far the metric has come.
+		switch {
+		case capFailed:
+			terms[m.Name] = capTerm
+		case baseFailed:
+			terms[m.Name] = baseTerm
+		case capped:
+			terms[m.Name] = capTerm
+		case enforced:
+			terms[m.Name] = baseTerm
+		default:
+			continue // no term of either kind — this metric is not judged
+		}
+		if capFailed {
+			failed = append(failed, fmt.Sprintf("%s is %s, cap %s %s", m.Name, m.String(), t.Direction, formatCap(t.Cap)))
+		}
+		if baseFailed {
 			failed = append(failed, fmt.Sprintf("%s is %s, baseline %s %s", m.Name, m.String(), b.Direction, formatCap(*b.Value)))
 		}
 	}

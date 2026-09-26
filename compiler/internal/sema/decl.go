@@ -36,6 +36,8 @@ func (c *Checker) declare(file *ast.File) {
 			mod.SetCatalogName(u.CatalogName)
 		}
 		mod.SetGlob(isGlob)
+		c.validateMetas(u.Annotations, TargetImport)
+		mod.SetLinkOnly(c.hasAnnotation(u.Annotations, "link"))
 
 		// Resolve module scope from pre-loaded scopes
 		c.resolveModuleScope(u, mod)
@@ -1768,8 +1770,9 @@ func (c *Checker) resolvePlacement(annotations []*ast.MetaAnnotation) types.Plac
 // import is unused when no `alias.` reference resolved against it; an anonymous
 // import is unused when none of its injected names were referenced in the file.
 // The injected `use std as _;` / `use gzip as _gzip;` (empty Pos().File) never
-// warn. A warning, not an error — a stray import is a tidiness issue, not a
-// correctness one.
+// warn, and neither does an import carrying `link — one kept for what it links
+// rather than for a name it binds (T2192). A warning, not an error — a stray
+// import is a tidiness issue, not a correctness one.
 func (c *Checker) checkUnusedImports() {
 	// Build per-file sets of referenced objects from recorded identifier uses,
 	// so an anonymous import's injected names can be checked for use.
@@ -1788,6 +1791,9 @@ func (c *Checker) checkUnusedImports() {
 		p := mod.Pos()
 		if p.File == "" {
 			continue // injected std/gzip imports are internal — never warn
+		}
+		if mod.IsLinkOnly() {
+			continue // `link: kept for what it links (module-system.md#import-scope)
 		}
 		pos := ast.Pos{File: p.File, Line: p.Line, Column: p.Column}
 		if mod.IsGlob() {

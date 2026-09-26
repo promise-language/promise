@@ -11,6 +11,7 @@
   "unformatted_promise_files": {"direction": "at_most", "cap": 0},
   "promise_check_errors":      {"direction": "at_most", "cap": 0},
   "promise_check_failures":    {"direction": "at_most", "cap": 0},
+  "promise_check_warnings":    {"direction": "at_most", "cap": 0},
   "go_test_failures":          {"direction": "at_most", "cap": 0},
   "go_test_packages_failed":   {"direction": "at_most", "cap": 0},
   "host_test_failures":        {"direction": "at_most", "cap": 0},

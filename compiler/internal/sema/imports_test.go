@@ -227,6 +227,100 @@ func TestImportScope_UnusedAnonymousImportWarns(t *testing.T) {
 	expectNoErrorContaining(t, errs2, "unused import")
 }
 
+// module-system.md#import-scope rule 4: `link says the import is kept for what it links,
+// so the unused
+// check honours it. The B0319 regression test is the case that needs it — its
+// `use net;` is what declares the libc externs whose names the file's own
+// functions must not collide with, and a `net.` reference would be beside the
+// point (T2192).
+func TestImportScope_LinkImportDoesNotWarn(t *testing.T) {
+	errs := checkUnit(t, []unitFile{
+		{"a.pr", "use path `link;\nmain() { print_line(\"hi\"); }\n"},
+	}, testModuleScopes(t))
+	// Nothing reported at all, not merely no "unused import": an absence of the
+	// one message would still hold if `link stopped being a known annotation —
+	// the diagnostic would just be a different one.
+	expectNoErrors(t, errs)
+}
+
+// `link on an anonymous import says the same thing about the names it injects.
+func TestImportScope_LinkAnonymousImportDoesNotWarn(t *testing.T) {
+	errs := checkUnit(t, []unitFile{
+		{"a.pr", "use path as _ `link;\nmain() { print_line(\"hi\"); }\n"},
+	}, testModuleScopes(t))
+	expectNoErrors(t, errs)
+}
+
+// `link suppresses the warning and nothing else: the alias still binds, so the
+// import is a normal one that happens to say why it is there.
+func TestImportScope_LinkImportStillBindsAlias(t *testing.T) {
+	errs := checkUnit(t, []unitFile{
+		{"a.pr", "use path `link;\nmain() { print_line(path.join(\"/a\", \"b\")); }\n"},
+	}, testModuleScopes(t))
+	expectNoErrors(t, errs)
+}
+
+// The annotation targets imports and nothing else.
+func TestImportScope_LinkOnFunctionRejected(t *testing.T) {
+	errs := checkUnit(t, []unitFile{
+		{"a.pr", "main() `link { print_line(\"hi\"); }\n"},
+	}, testModuleScopes(t))
+	expectError(t, errs, "cannot be applied to function")
+}
+
+// `link declares no parameters, and a parameter an annotation does not declare
+// is a compile error rather than something silently discarded
+// (annotations.md#the-set-is-closed). Duplicates are rejected the same way.
+func TestImportScope_LinkParameterAndDuplicateRejected(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"parameter", "use path `link(\"why\");\nmain() { print_line(\"hi\"); }\n",
+			"`link takes no parameters"},
+		{"duplicate", "use path `link `link;\nmain() { print_line(\"hi\"); }\n",
+			"duplicate meta annotation `link"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := checkUnit(t, []unitFile{{"a.pr", tt.src}}, testModuleScopes(t))
+			expectError(t, errs, tt.want)
+		})
+	}
+}
+
+// An annotation that exists but does not target imports is rejected, and the
+// diagnostic names the declaration kind it was written on. That word is the only
+// place `imports` becomes user-visible, so it is asserted rather than inferred:
+// `doc` on a `use` is the likeliest real mistake now that imports take
+// annotations at all (T2192).
+func TestImportScope_AnnotationWithWrongTargetOnImportRejected(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"doc", "use path `doc(\"why\");\nmain() { print_line(path.join(\"/a\", \"b\")); }\n",
+			"meta `doc cannot be applied to import"},
+		{"copy", "use path `copy;\nmain() { print_line(path.join(\"/a\", \"b\")); }\n",
+			"meta `copy cannot be applied to import"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := checkUnit(t, []unitFile{{"a.pr", tt.src}}, testModuleScopes(t))
+			expectError(t, errs, tt.want)
+		})
+	}
+}
+
+// An unknown annotation on an import is rejected like anywhere else — the set
+// is closed (annotations.md#the-set-is-closed).
+func TestImportScope_UnknownAnnotationOnImportRejected(t *testing.T) {
+	errs := checkUnit(t, []unitFile{
+		{"a.pr", "use path `linked;\nmain() { print_line(\"hi\"); }\n"},
+	}, testModuleScopes(t))
+	expectError(t, errs, "unknown meta annotation")
+}
+
 // language-design.md#variable-declarations: two anonymous imports in one file that export the same name conflict.
 func TestImportScope_TwoAnonymousImportsSameNameConflict(t *testing.T) {
 	errs := checkUnit(t, []unitFile{

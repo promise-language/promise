@@ -37,6 +37,36 @@ func TestRoundTripSimple(t *testing.T) {
 	}
 }
 
+// TestRoundTripUseAnnotations pins that an import's annotations survive the
+// cache. A `link import warns as unused the moment the flag is dropped, so a
+// cache that silently loses it makes the same file diagnose differently
+// depending on whether it was parsed or replayed (T2192).
+func TestRoundTripUseAnnotations(t *testing.T) {
+	f := &ast.File{}
+	f.SetPosEnd(ast.Pos{File: "test.pr", Line: 1, Column: 0}, ast.Pos{File: "test.pr", Line: 10, Column: 0})
+	linked := makeUseDecl("net", "", "net")
+	link := &ast.MetaAnnotation{Name: "link"}
+	link.SetPosEnd(ast.Pos{File: "test.pr", Line: 1, Column: 8}, ast.Pos{File: "test.pr", Line: 1, Column: 13})
+	linked.Annotations = []*ast.MetaAnnotation{link}
+	f.Uses = []*ast.UseDecl{makeUseDecl("_", "", "std"), linked}
+	f.Decls = []ast.Decl{makeFuncDecl("main")}
+
+	decoded, err := Decode(Encode(f))
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+	if len(decoded.Uses) != 2 {
+		t.Fatalf("got %d use decls, want 2", len(decoded.Uses))
+	}
+	if got := decoded.Uses[0].Annotations; len(got) != 0 {
+		t.Errorf("std use gained annotations: %v", got)
+	}
+	got := decoded.Uses[1].Annotations
+	if len(got) != 1 || got[0].Name != "link" {
+		t.Fatalf("annotations = %v, want one `link", got)
+	}
+}
+
 // TestRoundTripExpressions tests all expression types.
 func TestRoundTripExpressions(t *testing.T) {
 	pos := ast.Pos{File: "test.pr", Line: 1, Column: 0}

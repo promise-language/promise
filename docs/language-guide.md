@@ -784,7 +784,7 @@ s := Ref[LocalState](LocalState(count: 0));   // non-atomic counter
 - **Named** (`use io;`) — **both types and functions** are accessed through the module prefix (`io.File`, `io.read_line()`). There is no special unprefixed-function path; naked `File`/`read_line()` is an error.
 - **Anonymous** (`use path as _;`) — injects the module's names at the top level, usable with no prefix (exactly how `std` is imported). Name conflicts fall back to the prefix.
 
-**Imports are per-file.** A `use` binds its alias only in the file that declares it — never in the other files of the same module. Each file declares what it uses, so the same `use json;` normally appears in every file that references `json.`, and reading one file tells you where all of its names come from. Declaring an import a file never uses is a warning.
+**Imports are per-file.** A `use` binds its alias only in the file that declares it — never in the other files of the same module. Each file declares what it uses, so the same `use json;` normally appears in every file that references `json.`, and reading one file tells you where all of its names come from. Declaring an import a file never uses is a warning — unless it carries `` `link `` (`use net `link;`), which says the import is kept for what it **links** rather than for a name it binds.
 
 ```promise
 // Import a catalog module

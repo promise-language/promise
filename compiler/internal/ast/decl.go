@@ -18,6 +18,7 @@ type UseDecl struct {
 	// CatalogName is the catalog module name (first IDENT in catalog form).
 	// Empty for sourced imports.
 	CatalogName string
+	Annotations []*MetaAnnotation
 }
 
 func (*UseDecl) declTag() {}

@@ -298,6 +298,27 @@ isolation by a tool, or moved between modules, without its meaning changing.
    A warning rather than an error: a stray import is a tidiness problem, not a correctness
    one, and failing a build over it is a poor trade for one-shot code generation.
 
+   **`` `link `` says the import is kept for what it links.** An import does two things —
+   it binds a name, and it puts a module into the program. A file that wants only the second
+   has nothing to reference, and no number of `alias.` references would be honest:
+
+   ```promise
+   use net `link;     // for net's socket PAL, not for a name this file uses
+   ```
+
+   The annotation ([link](annotations.md#link)) is read by the unused check and by nothing
+   else: the import binds its alias and links its module exactly as it would without it. It
+   exists so the intent is *written down* rather than inferred from an absence — an
+   unreferenced import that quietly changes the binary is the kind of hidden effect this
+   language avoids, so a file that wants one must say so. The case that needs it: a
+   regression test whose own functions are named `connect`/`send`/`recv` and must not
+   collide with the libc externs `net` declares — a `net.` reference would be beside the
+   point, and dropping the import would retire what the test checks.
+
+   Reach for it only when there is genuinely nothing to name. An import you could
+   reference and do not is the dead weight rule 4 is about, and `` `link `` does not make
+   it live.
+
 ### Aliasing
 
 If a module name is inconvenient, alias it with `as`:
@@ -478,10 +499,10 @@ does) appear in every file that uses it. See [Import Scope](#import-scope) for t
 
 ```antlr
 useDecl
-    : USE IDENT (AS bindingName)? SEMI     // catalog:  use json; / use json as j; / use json as _;
-    | USE bindingName stringLiteral SEMI   // sourced:  use parser "github.com/...";
-    ;                                      //           use models "./libs/models";
-                                           //           use _ "./libs/models";
+    : USE IDENT (AS bindingName)? metaAnnotation* SEMI     // catalog:  use json; / use json as j; / use json as _;
+    | USE bindingName stringLiteral metaAnnotation* SEMI   // sourced:  use parser "github.com/...";
+    ;                                                      //           use models "./libs/models";
+                                                           //           use _ "./libs/models";
 
 bindingName
     : IDENT
@@ -490,7 +511,9 @@ bindingName
 ```
 
 The two alternatives disambiguate cleanly on the third token: `stringLiteral` → sourced,
-`AS`/`SEMI` → catalog. The alias position in both forms is a `bindingName`, so `_` is
+`AS`/`SEMI` → catalog. Both forms take trailing annotations, in the same position every
+other declaration does; `` `link `` ([Import Scope](#import-scope), rule 4) is the only one
+that targets an import. The alias position in both forms is a `bindingName`, so `_` is
 accepted wherever an alias is: `use json as _;` and `use _ "./libs/models";` are the catalog
 and sourced spellings of the same anonymous import.
 

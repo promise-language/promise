@@ -711,6 +711,7 @@ func (e *encoder) file(f *ast.File) {
 		e.str(u.Alias)
 		e.str(u.Path)
 		e.str(u.CatalogName)
+		e.annotations(u.Annotations)
 	}
 	e.u32(uint32(len(f.Decls)))
 	for _, d := range f.Decls {

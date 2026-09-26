@@ -138,13 +138,11 @@ func TestJudge_AtLeastFloor(t *testing.T) {
 	}
 }
 
-// The other sense a cap can have, and it is untested by the project's own data:
-// thresholds.json holds only fit's two at_least floors, so nothing exercises
-// the ceiling this repository actually reaches for first. It is the sense a
-// count of bad things takes — TestIntegration_PartMetricsAreJudged allows any
-// integration metric to be judged by a cap instead of a baseline, and every one
-// of them counts something that should not happen — so the branch is one edit
-// to thresholds.json away from being load-bearing.
+// The other sense a cap can have, and the one this repository reaches for
+// first: every count of something being wrong carries an `at_most 0` ceiling in
+// thresholds.json (TestCorrectnessMetricsAreCappedAtZero), because the only
+// correct value for such a count is zero and a ratchet from a non-zero one is a
+// standing allowance.
 func TestJudge_AtMostCeiling(t *testing.T) {
 	caps := map[string]Threshold{"vet_findings": {Direction: AtMost, Cap: 0}}
 	over := Envelope{Gate: "checked:go", Metrics: []Metric{Count("vet_findings", 3)}}
@@ -195,6 +193,104 @@ func TestJudge_BaselineRatchet(t *testing.T) {
 	up := Envelope{Gate: "tested", Metrics: []Metric{Count("host_test_count", 12)}}
 	if ok, _, detail := judge(up, nil, baselines); !ok {
 		t.Errorf("moving in the ratchet's direction must pass: %s", detail)
+	}
+}
+
+// A metric carrying both terms must satisfy BOTH. The cap is the requirement a
+// person wrote and the baseline the best the metric has been, so judging on the
+// cap alone would let a cap looser than the baseline beside it forgive exactly
+// the regression the ratchet exists to catch (T2192).
+func TestJudge_CapAndBaselineBothApply(t *testing.T) {
+	three := 3.0
+	caps := map[string]Threshold{"host_leak_count": {Direction: AtMost, Cap: 10}}
+	baselines := map[string]Baseline{"host_leak_count": {Value: &three, Direction: "down"}}
+
+	// Within the loose cap, but a regression against the tighter baseline.
+	env := Envelope{Gate: "tested", Metrics: []Metric{Count("host_leak_count", 5)}}
+	ok, terms, detail := judge(env, caps, baselines)
+	if ok || !strings.Contains(detail, "host_leak_count is 5, baseline down 3") {
+		t.Errorf("the baseline must still judge a capped metric: ok=%v detail=%q", ok, detail)
+	}
+	if terms["host_leak_count"].Kind != "baseline" {
+		t.Errorf("the verdict must carry the term that decided it, got %v", terms["host_leak_count"])
+	}
+
+	// Over the cap: the cap decides, and is what the verdict carries.
+	over := Envelope{Gate: "tested", Metrics: []Metric{Count("host_leak_count", 11)}}
+	ok, terms, detail = judge(over, caps, baselines)
+	if ok || !strings.Contains(detail, "host_leak_count is 11, cap at_most 10") {
+		t.Errorf("a missed cap must fail: ok=%v detail=%q", ok, detail)
+	}
+	if terms["host_leak_count"].Kind != "cap" {
+		t.Errorf("term kind = %q, want cap", terms["host_leak_count"].Kind)
+	}
+
+	// Within both: acceptable, and the cap is the term recorded — it is the
+	// requirement, while the baseline only records how far the metric has come.
+	within := Envelope{Gate: "tested", Metrics: []Metric{Count("host_leak_count", 2)}}
+	ok, terms, detail = judge(within, caps, baselines)
+	if !ok {
+		t.Errorf("within both terms must pass: %s", detail)
+	}
+	if terms["host_leak_count"].Kind != "cap" || terms["host_leak_count"].Value != 10 {
+		t.Errorf("term = %v, want the cap", terms["host_leak_count"])
+	}
+}
+
+// A baseline beside a cap judges only when it is ENFORCED. Statement coverage
+// cannot see this: the same lines run either way, and dropping the informational
+// clause while restructuring would make every gate carrying a tracked-but-not-
+// enforced baseline start blocking on it (T2192).
+func TestJudge_CapWithNonEnforcedBaseline(t *testing.T) {
+	zero := 0.0
+	caps := map[string]Threshold{"host_leak_count": {Direction: AtMost, Cap: 10}}
+	env := Envelope{Gate: "tested", Metrics: []Metric{Count("host_leak_count", 5)}}
+
+	for _, tt := range []struct {
+		name     string
+		baseline Baseline
+	}{
+		// Informational: tracked, never blocks — even though 5 > 0 would fail it.
+		{"informational", Baseline{Value: &zero, Direction: "down", Type: "informational"}},
+		// Pending: a direction but no value yet, so there is nothing to compare.
+		{"pending", Baseline{Direction: "down"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			baselines := map[string]Baseline{"host_leak_count": tt.baseline}
+			ok, terms, detail := judge(env, caps, baselines)
+			if !ok {
+				t.Errorf("a %s baseline must not block: %s", tt.name, detail)
+			}
+			if terms["host_leak_count"].Kind != "cap" {
+				t.Errorf("term = %v, want the cap — only an enforced baseline judges", terms["host_leak_count"])
+			}
+		})
+	}
+}
+
+// The term the verdict selected is the one a person sees. renderVerdict is the
+// only surface that shows it, so the dual-term case is pinned here too: the
+// baseline decided, so the baseline is what the line names, with the ✗.
+func TestRenderVerdict_ShowsTheTermThatDecided(t *testing.T) {
+	three := 3.0
+	caps := map[string]Threshold{"host_leak_count": {Direction: AtMost, Cap: 10}}
+	baselines := map[string]Baseline{"host_leak_count": {Value: &three, Direction: "down"}}
+
+	// Within the loose cap, over the tighter baseline.
+	over := Envelope{Gate: "tested", Metrics: []Metric{Count("host_leak_count", 5)}}
+	got := renderVerdict(over, caps, baselines)
+	if !strings.Contains(got, "baseline down 3") || !strings.Contains(got, "✗") {
+		t.Errorf("rendered %q, want the deciding baseline term marked failed", got)
+	}
+	if strings.Contains(got, "cap at_most 10") {
+		t.Errorf("rendered %q, want the term that decided, not the one that held", got)
+	}
+
+	// Within both: the cap is the requirement, and it is what the line names.
+	within := Envelope{Gate: "tested", Metrics: []Metric{Count("host_leak_count", 2)}}
+	got = renderVerdict(within, caps, baselines)
+	if !strings.Contains(got, "cap at_most 10") || !strings.Contains(got, "✓") {
+		t.Errorf("rendered %q, want the cap marked satisfied", got)
 	}
 }
 

@@ -35,6 +35,7 @@ var metaTargetWords = map[string]string{
 	"TargetEnum":    "enums",
 	"TargetParam":   "parameters",
 	"TargetVariant": "variants",
+	"TargetImport":  "imports",
 	// TargetReturn is declared in sema but no annotation targets a return
 	// type, so the Index has no word for one. Registering the first such annotation
 	// must fail here until the Index gains the spelling — which is the point.

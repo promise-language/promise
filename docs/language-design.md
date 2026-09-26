@@ -2363,6 +2363,7 @@ Meta annotations appear in post-definition position:
 - **Methods**: `greet() string `meta { ... }`
 - **Functions**: `add(int a, int b) int `meta { ... }`
 - **Parameters**: `foo(int x `doc("description"), int y `deprecated) { ... }`
+- **Imports**: `use net `link;`
 
 ### Annotation Examples
 

@@ -1,7 +1,11 @@
 // B0319: User-defined functions must not collide with PAL/libc names.
 // A user function named "write", "read", "close", etc. should compile
 // and run correctly despite PAL declaring libc externs with the same names.
-use net;
+// The import is here for what it links, not for a name this file references:
+// net's socket PAL declares libc @connect/@send/@recv, the very names the
+// functions below define. Drop it and those three cases stop testing anything
+// — so it carries `link (module-system.md#import-scope, rule 4).
+use net `link;
 
 write(int x) int {
   return x * 2;

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -649,6 +650,41 @@ func TestBuildUseDecl(t *testing.T) {
 	assertEqual(t, file.Uses[0].Alias, "_")
 	assertEqual(t, file.Uses[0].Path, "./libs/models")
 	assertEqual(t, file.Uses[0].CatalogName, "")
+}
+
+// TestBuildUseDeclAnnotations verifies that an import's trailing annotations
+// reach the AST, on BOTH grammar alternatives (T2192). The catalog form is what
+// `link is written on in practice, but the sourced form accepts it too and has
+// its own alternative in the grammar — an alternative nothing asserted on is one
+// that can lose its `metaAnnotation*` without a test noticing.
+func TestBuildUseDeclAnnotations(t *testing.T) {
+	names := func(u *UseDecl) []string {
+		var out []string
+		for _, a := range u.Annotations {
+			out = append(out, a.Name)
+		}
+		return out
+	}
+	for _, tt := range []struct {
+		name string
+		src  string
+		want []string
+	}{
+		{"catalog", "use net `link;", []string{"link"}},
+		{"catalog_aliased", "use net as n `link;", []string{"link"}},
+		{"catalog_glob", "use net as _ `link;", []string{"link"}},
+		{"sourced", `use models "./libs/models" ` + "`link;", []string{"link"}},
+		{"sourced_glob", `use _ "./libs/models" ` + "`link;", []string{"link"}},
+		{"none", "use net;", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			assertLen(t, file.Uses, 1)
+			if got := names(file.Uses[0]); !slices.Equal(got, tt.want) {
+				t.Errorf("annotations = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 // TestBuildStatements verifies statement AST structure.

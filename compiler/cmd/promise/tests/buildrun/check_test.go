@@ -126,6 +126,27 @@ func TestCheckWarningsDoNotFail(t *testing.T) {
 	}
 }
 
+// An import carrying `link is kept for what it links rather than for a name it
+// binds, so it is not unused and check says so — `ok`, no warning line (T2192).
+func TestCheckLinkImportIsNotAWarning(t *testing.T) {
+	t.Parallel()
+	dir := clitest.TempDir(t)
+	writeFiles(t, dir, map[string]string{
+		"main.pr": "use path `link;\n\nmain() {\n  print_line(\"hi\");\n}\n",
+	})
+
+	stdout, stderr, ok := runCheck(t, dir, "main.pr")
+	if !ok {
+		t.Fatalf("a `link import must check clean\nstdout: %s\nstderr: %s", stdout, stderr)
+	}
+	if got := strings.TrimSpace(stdout); got != "ok main.pr" {
+		t.Errorf("result line = %q, want %q", got, "ok main.pr")
+	}
+	if strings.Contains(stderr, "unused import") {
+		t.Errorf("a `link import must not warn; stderr: %s", stderr)
+	}
+}
+
 func TestCheckErrorsExitNonZeroAndCount(t *testing.T) {
 	t.Parallel()
 	dir := clitest.TempDir(t)

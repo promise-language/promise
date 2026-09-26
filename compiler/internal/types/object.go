@@ -102,6 +102,7 @@ type Module struct {
 	catalogName string // catalog module name (empty for sourced)
 	scope       *Scope // the module's exported symbols
 	isGlob      bool   // true if imported with `as _` (unqualified access)
+	linkOnly    bool   // true if the import carries `link — kept for what it links
 }
 
 // NewModule creates a new module object.
@@ -129,3 +130,10 @@ func (m *Module) IsGlob() bool { return m.isGlob }
 
 // SetGlob marks the module as a glob import.
 func (m *Module) SetGlob(v bool) { m.isGlob = v }
+
+// IsLinkOnly returns true if the import carries `link — it is kept for what it
+// links rather than for a name it binds, so it is never flagged unused.
+func (m *Module) IsLinkOnly() bool { return m.linkOnly }
+
+// SetLinkOnly marks the import as kept for its linking effect.
+func (m *Module) SetLinkOnly(v bool) { m.linkOnly = v }

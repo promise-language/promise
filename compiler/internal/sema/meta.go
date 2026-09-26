@@ -19,6 +19,7 @@ const (
 	TargetParam
 	TargetVariant
 	TargetReturn
+	TargetImport
 )
 
 func targetLabel(t MetaTarget) string {
@@ -39,6 +40,8 @@ func targetLabel(t MetaTarget) string {
 		return "variant"
 	case TargetReturn:
 		return "return type"
+	case TargetImport:
+		return "import"
 	default:
 		return "declaration"
 	}
@@ -64,6 +67,7 @@ var builtinMetas = map[string][]MetaTarget{
 	"packed":       {TargetType},
 	"align":        {TargetType},
 	"extern":       {TargetFunc},
+	"link":         {TargetImport},
 	"target":       {TargetType, TargetEnum, TargetFunc},
 	"serializable": {TargetType, TargetEnum},
 	"key":          {TargetField, TargetVariant},

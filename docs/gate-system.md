@@ -186,6 +186,18 @@ The `coverage` entry above is **Pending** (has direction but no value -- will be
 - `down`: value can only decrease (fewer leaks = better)
 - `exact`: value must match exactly (zero failures)
 
+**A count of things being wrong is capped at zero, never baselined.** A metric that counts
+something that should not happen — a failure, a leak, a diagnostic, an unformatted or
+unbuildable file — is not a quality that improves over time: the only correct value is `0`, so
+each is written as an `at_most 0` **cap** in `thresholds.json`. Which metrics those are is not
+a second list to keep in step: every metric `integration`'s parts must carry a term for is one
+of them, and `TestCorrectnessMetricsAreCappedAtZero` holds the caps and that set equal.
+A `down` ratchet from a non-zero value would be a standing allowance — it says "this many are
+fine" and leaves a number a later reader can edit — so a measurement worse than the term is a
+**defect to fix, never a number to write down**: resolving an item may not move a baseline to
+gain forgiveness. Such a metric may still carry a baseline, and it still ratchets; it records
+progress and never grants permission.
+
 **How it works:**
 1. Reads `.promise-home/gate-values.json` and requires its recorded `worktree` identity to equal the current one -- values are valid at any age while the tree is unchanged, and rejected the moment it changes
 2. Reads `tools/gates/baselines.json` for current platform
@@ -196,7 +208,14 @@ The `coverage` entry above is **Pending** (has direction but no value -- will be
 7. If improvement: updates `baselines.json` in-place, stages it with the commit
 8. Queries tracker for active exceptions (gate ID + tracker bug ID + expiry)
 
-**Defense-in-depth:** The `.githooks/pre-commit` hook runs a lightweight check that `baselines.json` values only improve vs. the committed version. Informational and Pending entries are skipped. The hook also rejects commits when running the formatter would introduce changes, so unformatted code never reaches origin and surfaces as a spurious diff the next time someone runs verify. Both are the commit gate's, not this repository's — see [build-tools.md](build-tools.md#pre-commit-hook).
+**Defense-in-depth:** The `.githooks/pre-commit` hook runs a lightweight check that `baselines.json` values only improve vs. the committed version. It compares the staged file against `HEAD:tools/gates/baselines.json` across **every platform's block**, not just the host's, and refuses a removal as well as a raise — so neither editing an Enforced entry nor deleting it gets a commit through:
+
+```
+workspace: ratcheted-baselines: metric(s) moved the wrong way:
+  windows-amd64/promise_check_warnings: ratcheted-down metric increased from 1 to 2
+```
+
+Informational and Pending entries are skipped. The hook also rejects commits when running the formatter would introduce changes, so unformatted code never reaches origin and surfaces as a spurious diff the next time someone runs verify. Both are the commit gate's, not this repository's — see [build-tools.md](build-tools.md#pre-commit-hook).
 
 **Key files:**
 - `tools/build/common/verify_summary.go` -- `GateValues` type + IO, `ParseTestSummaryLine`

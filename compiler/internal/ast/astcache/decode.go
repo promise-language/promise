@@ -933,6 +933,7 @@ func (d *decoder) file() *ast.File {
 			u.Alias = d.str()
 			u.Path = d.str()
 			u.CatalogName = d.str()
+			u.Annotations = d.annotations()
 			f.Uses[i] = u
 		}
 	}

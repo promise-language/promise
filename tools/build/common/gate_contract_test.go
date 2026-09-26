@@ -300,6 +300,47 @@ func TestIntegration_PartMetricsAreJudged(t *testing.T) {
 	}
 }
 
+// integrationCostMetrics are the integration metrics that are judged but do NOT
+// count something being wrong: they are what a run COST. A cost is a quality of
+// the machinery rather than of the change, so it ratchets instead of being
+// capped. Spelling the reason keeps the classification a decision — a new
+// integration metric lands in one list or the other, and neither inherits
+// silently.
+var integrationCostMetrics = map[string]string{
+	"cas_network_bytes": "bytes a run pulled over the wire into the store. It SHOULD be zero and is ratcheted `exact 0` today (T2150, T2153) — but an expensive run is not a defect in whichever change happened to measure it.",
+	"cas_home_count":    "how many private PROMISE_HOMEs a run materialized, ratcheted `down` from 1 (T2153). The floor is a fact about how the suites are sandboxed, not a count of anything wrong.",
+}
+
+// Every OTHER metric integrationMetrics demands a term for counts something
+// being WRONG — a failure, a leak, a diagnostic, an unformatted file — and the
+// only correct value for such a count is zero. So the term is an `at_most 0`
+// CAP, never a ratchet from a non-zero figure: a ratchet would be a standing
+// allowance ("this many are fine") and a number a later reader could edit to
+// buy forgiveness instead of fixing what moved it (T2192).
+//
+// A raise of a baseline is refused mechanically by the commit gate's
+// `ratcheted-baselines` check. Nothing guards thresholds.json the same way, so
+// this test is what makes weakening a cap as hard: it takes a visible edit here.
+func TestCorrectnessMetricsAreCappedAtZero(t *testing.T) {
+	caps, err := loadThresholds("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range integrationMetrics {
+		if _, cost := integrationCostMetrics[name]; cost {
+			continue
+		}
+		th, ok := caps[name]
+		if !ok {
+			t.Errorf("%s carries no cap in %s — a count of things being wrong is capped at zero, never baselined", name, ThresholdsFile)
+			continue
+		}
+		if th.Direction != AtMost || th.Cap != 0 {
+			t.Errorf("%s = %+v, want at_most 0", name, th)
+		}
+	}
+}
+
 // fit's floors are caps: they are absolutes a person edits, not numbers that
 // ratchet with history.
 func TestFit_FloorsAreCaps(t *testing.T) {

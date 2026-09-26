@@ -11,8 +11,8 @@ compilationUnit
     ;
 
 useDecl
-    : USE IDENT (AS bindingName)? SEMI              # catalogImport
-    | USE bindingName stringLiteral SEMI             # sourcedImport
+    : USE IDENT (AS bindingName)? metaAnnotation* SEMI    # catalogImport
+    | USE bindingName stringLiteral metaAnnotation* SEMI  # sourcedImport
     ;
 
 declaration

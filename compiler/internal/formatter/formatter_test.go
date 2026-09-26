@@ -433,6 +433,16 @@ func TestFormat(t *testing.T) {
 			expected: "use _ \"github.com/acme/lib\";\nuse parser \"github.com/acme/parser\";\n",
 		},
 		{
+			name:     "use with link annotation preserved",
+			input:    "use net `link;\n",
+			expected: "use net `link;\n",
+		},
+		{
+			name:     "use with link annotation sorted",
+			input:    "use net `link;\nuse io;\n",
+			expected: "use io;\nuse net `link;\n",
+		},
+		{
 			name:     "use mixed forms sorted",
 			input:    "use json;\nuse _ \"github.com/init\";\nuse io;\nuse parser \"github.com/acme/parser\";\n",
 			expected: "use _ \"github.com/init\";\nuse io;\nuse json;\nuse parser \"github.com/acme/parser\";\n",

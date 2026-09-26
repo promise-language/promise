@@ -28,11 +28,15 @@ func (b *Builder) VisitCatalogImport(ctx *parser.CatalogImportContext) interface
 			alias = b.bindingText(bn)
 		}
 	}
-	return &UseDecl{
+	node := &UseDecl{
 		nodeBase:    b.baseFromContext(ctx),
 		Alias:       alias,
 		CatalogName: name,
 	}
+	for _, ma := range ctx.AllMetaAnnotation() {
+		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
+	}
+	return node
 }
 
 func (b *Builder) VisitSourcedImport(ctx *parser.SourcedImportContext) interface{} {
@@ -45,11 +49,15 @@ func (b *Builder) VisitSourcedImport(ctx *parser.SourcedImportContext) interface
 		}
 	}
 	path = strings.Trim(path, "\"")
-	return &UseDecl{
+	node := &UseDecl{
 		nodeBase: b.baseFromContext(ctx),
 		Alias:    alias,
 		Path:     path,
 	}
+	for _, ma := range ctx.AllMetaAnnotation() {
+		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
+	}
+	return node
 }
 
 func (b *Builder) VisitDeclaration(ctx *parser.DeclarationContext) interface{} {

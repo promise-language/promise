@@ -1058,13 +1058,13 @@ func (c *Checker) markValueType(named *types.Named, d *ast.TypeDecl, report bool
 // (markValueType forbids them), so on a value type this reports only
 // requirements from a `structural interface parent — the relationship T1730
 // newly admits.
-func unimplementedParentAbstract(named *types.Named) (types.AbstractMethodInfo, bool) {
+func unimplementedParentAbstract(named *types.Named) (types.InheritedMethodInfo, bool) {
 	for _, am := range named.ParentAbstractMethods() {
 		if named.LookupAbstractImpl(am.Method) == nil {
 			return am, true
 		}
 	}
-	return types.AbstractMethodInfo{}, false
+	return types.InheritedMethodInfo{}, false
 }
 
 // valueTypeOverride returns the first method a value type declares that

@@ -367,6 +367,7 @@ func CheckWithIdentities(file *ast.File, moduleScopes map[string]*types.Scope, t
 	c.validateEnumNoSelfRefRecursion(file) // T0628: reject directly-recursive enums before codegen stack-overflows
 	c.validateConstructors(file)           // Validate: constructor inheritance (after all types defined)
 	c.validateAbstractOverrides(file)      // T1376: reject concrete overrides with incompatible signatures
+	c.validateInheritedOverrides(file)     // T2184: reject overrides of a CONCRETE parent method with incompatible signatures
 	c.validateInvariantMethods(file)       // T1752: _validate! shape + every construction path on a validated type is failable
 	c.validateProtocolAnnotations(file)    // T1731: validate `structural(protocol: true) placement
 	c.checkProtocolNearMisses(file)        // T1731+T1732: reject protocol near-miss signatures (in-scope + unimported)
@@ -461,6 +462,7 @@ func DeclareAndDefineWithProtocols(file *ast.File, moduleScopes map[string]*type
 	c.validateEnumNoSelfRefRecursion(file) // T0628: reject directly-recursive enums before codegen stack-overflows
 	c.validateConstructors(file)           // Validate: constructor inheritance
 	c.validateAbstractOverrides(file)      // T1376: reject concrete overrides with incompatible signatures
+	c.validateInheritedOverrides(file)     // T2184: reject overrides of a CONCRETE parent method with incompatible signatures
 	c.validateInvariantMethods(file)       // T1752: _validate! shape + every construction path on a validated type is failable
 	c.validateProtocolAnnotations(file)    // T1731: validate `structural(protocol: true) placement
 	c.checkProtocolNearMisses(file)        // T1731+T1732: reject protocol near-miss signatures (in-scope + unimported)

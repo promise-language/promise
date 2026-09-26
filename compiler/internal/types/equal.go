@@ -609,6 +609,45 @@ func SatisfiesAbstract(concrete, abstract *Signature, subst map[*TypeParam]Type,
 	return identicalSignaturesWithSelf(concrete, substAbstract, self, replacement)
 }
 
+// SatisfiesInherited reports whether a concrete override satisfies the CONCRETE
+// parent method whose vtable slot it takes over (T2184). It is SatisfiesAbstract
+// plus one relaxation an abstract requirement does not get: a covariant return
+// under NOMINAL inheritance.
+//
+// identicalSignaturesWithSelf admits a covariant return only when the
+// requirement's return type is a structural interface, because that is the case
+// structural satisfaction has to answer. Inheritance has a second one: a child
+// whose method returns the child type where the parent's returns the parent
+// type. `Sub[T] is Base[T]` with a synthesized `clone() Sub[T]` over
+// `clone() Base[T]` is the shape the tree already relies on, and it is sound —
+// both are {vtable_ptr, instance_ptr}, and the parent-typed call site reads
+// exactly that.
+//
+// The relaxation is deliberately gated on subtypeWidens and not on AssignableTo.
+// subtypeWidens is the exact set of widenings codegen's view-box path can
+// realize; AssignableTo also admits ref decay and optional wrapping, whose LLVM
+// shapes differ from the slot's — accepting those would reopen this bug from the
+// other side. It also lives here rather than inside identicalSignaturesWithSelf
+// so Implements / ImplementsInst / the protocol near-miss check keep answering
+// exactly what they answer today (T1933).
+func SatisfiesInherited(concrete, inherited *Signature, subst map[*TypeParam]Type, self, replacement *Named) bool {
+	if SatisfiesAbstract(concrete, inherited, subst, self, replacement) {
+		return true
+	}
+	substInherited := Substitute(inherited, subst).(*Signature)
+	if concrete.result == nil || substInherited.result == nil {
+		return false
+	}
+	if !subtypeWidens(concrete.result, substInherited.result) {
+		return false
+	}
+	// Re-run the full comparator with ONLY the return type relaxed, so params,
+	// failability and the receiver's borrow kind are still judged by the one
+	// rule set. The substitution is already applied, hence the nil subst.
+	relaxed := NewSignature(substInherited.recv, substInherited.params, concrete.result, substInherited.canError)
+	return SatisfiesAbstract(concrete, relaxed, nil, self, replacement)
+}
+
 // ReceiverBorrowMatches reports whether the concrete method's receiver has the
 // same borrow kind (`this` vs `~this`) as the requirement's. It is the single
 // definition of the rule: SatisfiesAbstract rejects on it, and sema's

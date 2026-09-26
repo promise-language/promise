@@ -1,0 +1,226 @@
+// T2184: overriding a CONCRETE parent method is signature-checked. The illegal
+// half is a declaration error, so it lives in
+// compiler/internal/sema/t2184_test.go — nothing illegal can be written here.
+// This file pins the LEGAL half at runtime: every relaxation the check must keep
+// accepting has to still dispatch to the override and still adapt at the parent
+// crossing.
+//
+// tests/e2e/T1952_first_parent_view_adapter_test.pr already covers the
+// failability, optional-return and extra-defaulted-parameter relaxations over a
+// concrete parent. What no file covered for a hand-written method is the
+// COVARIANT RETURN under nominal inheritance — `Sub.self() Sub` overriding
+// `Base.self() Base`. `clone_inherited_generic_test.pr` exercises that shape only
+// through the compiler-synthesized `clone`, so a check that rejected the
+// hand-written form would have passed the whole suite.
+type _Shape `doc("A parent whose method returns the parent type.") {
+  int tag;
+  describe(this) string `doc("Names this shape.") {
+    return "shape:{this.tag}";
+  }
+  copy(this) _Shape `doc("Returns a fresh value of the parent type.") {
+    return _Shape(tag: this.tag);
+  }
+}
+
+type _Circle is _Shape `doc("Relaxes the return type to the child type — a covariant override.") {
+  copy(this) _Circle `doc("Returns a fresh value of the CHILD type.") {
+    return _Circle(tag: this.tag + 10);
+  }
+  describe(this) string `doc("Names this circle.") {
+    return "circle:{this.tag}";
+  }
+}
+
+covariant_return_called_on_the_concrete_type() `test {
+  _Circle c = _Circle(tag: 1);
+  _Circle again = c.copy();
+  assert(again.tag == 11, "the override ran and kept the child's static type");
+  assert(again.describe() == "circle:11", "and the result is genuinely a _Circle");
+}
+
+covariant_return_called_through_the_parent_view() `test {
+  // The parent's call site reads the slot as returning _Shape. The override
+  // returns _Circle. Both are {vtable_ptr, instance_ptr} and the returned value
+  // must still carry _Circle's vtable, so the virtual describe() reaches
+  // _Circle's body rather than _Shape's.
+  _Shape s = _Circle(tag: 2);
+  _Shape copied = s.copy();
+  assert(copied.tag == 12, "the override ran through the parent's slot");
+  assert(copied.describe() == "circle:12", "and the result kept the child's vtable");
+}
+
+covariant_return_is_still_downcastable() `test {
+  _Shape s = _Circle(tag: 3);
+  _Shape copied = s.copy();
+  assert(copied is _Circle, "the covariantly returned value answers `is` for the concrete type");
+}
+
+// The parent used as itself is unaffected — the guard that admitting the
+// relaxation did not disturb the type that declared the slot.
+parent_used_as_itself_is_unaffected() `test {
+  _Shape s = _Shape(tag: 4);
+  _Shape copied = s.copy();
+  assert(copied.tag == 4, "_Shape's own copy runs unchanged");
+  assert(copied.describe() == "shape:4", "and returns a plain _Shape");
+}
+
+// A generic parent: the requirement is an Instance (`_GBox[T]`), not a bare
+// Named, so the comparator has to resolve the child's parent-arg substitution
+// before it can see that `_GTagged[T]` widens to `_GBox[T]`. This is the exact
+// shape the check rejected before types.SatisfiesInherited existed.
+
+type _GBox[T] `doc("A generic parent whose method returns the parent instance.") {
+  T v;
+  rebuild(this) _GBox[T] `doc("Returns a fresh parent-typed box.") {
+    return _GBox[T](v: this.v);
+  }
+  label(this) string `doc("Names this box.") {
+    return "box";
+  }
+}
+
+type _GTagged[T] is _GBox[T] `doc("Covariantly narrows the return to the child instance.") {
+  rebuild(this) _GTagged[T] `doc("Returns a fresh child-typed box.") {
+    return _GTagged[T](v: this.v);
+  }
+  label(this) string `doc("Names this tagged box.") {
+    return "tagged";
+  }
+}
+
+generic_covariant_return_through_the_parent_view() `test {
+  _GBox[int] b = _GTagged[int](v: 7);
+  _GBox[int] again = b.rebuild();
+  assert(again.v == 7, "the override ran and carried the payload");
+  assert(again.label() == "tagged", "and the result kept the child's vtable");
+}
+
+generic_parent_used_as_itself_is_unaffected() `test {
+  _GBox[int] b = _GBox[int](v: 5);
+  _GBox[int] again = b.rebuild();
+  assert(again.v == 5, "_GBox's own rebuild runs unchanged");
+  assert(again.label() == "box", "and returns a plain _GBox");
+}
+
+// A covariant override whose return carries a HEAP payload. Every type above
+// holds only ints, so none of them has a drop path — a covariant return that
+// leaked the instance, or dropped it twice at the parent crossing, would run
+// green through all of them. The batch harness compares alloc counts around
+// each test, so this is what makes that check mean something here.
+
+type _Named `doc("A parent whose covariant return owns a heap string.") {
+  string name;
+  rename(this) _Named `doc("Returns a fresh parent carrying a derived name.") {
+    return _Named(name: this.name + "-base");
+  }
+  who(this) string `doc("Names this value.") {
+    return "named:{this.name}";
+  }
+}
+
+type _Tagged is _Named `doc("Covariantly narrows the return to the child type.") {
+  rename(this) _Tagged `doc("Returns a fresh CHILD carrying a derived name.") {
+    return _Tagged(name: this.name + "-tagged");
+  }
+  who(this) string `doc("Names this tagged value.") {
+    return "tagged:{this.name}";
+  }
+}
+
+// Built at runtime so the payload is a heap string, not a .rodata literal —
+// a literal's drop is a no-op and would hide exactly the bug this guards.
+_heap_name() string `doc("Builds a heap-allocated name.") {
+  string part = "abc";
+  return part + "-" + part + "-defghij";
+}
+
+covariant_return_with_a_heap_payload_through_the_parent_view() `test {
+  _Named n = _Tagged(name: _heap_name());
+  _Named renamed = n.rename();
+  assert(renamed.who() == "tagged:abc-abc-defghij-tagged", "the override ran and the heap payload survived the crossing");
+}
+
+covariant_return_with_a_heap_payload_on_the_concrete_type() `test {
+  _Tagged t = _Tagged(name: _heap_name());
+  _Tagged renamed = t.rename();
+  assert(renamed.name == "abc-abc-defghij-tagged", "the override ran on the concrete type");
+}
+
+heap_payload_parent_used_as_itself() `test {
+  _Named n = _Named(name: _heap_name());
+  _Named renamed = n.rename();
+  assert(renamed.who() == "named:abc-abc-defghij-base", "_Named's own rename runs unchanged");
+}
+
+// The three relaxations T1952 covers for `Closer`, restated over a plain parent
+// with no interface in sight — the check must not treat a nominal parent more
+// strictly than a structural one.
+
+type _Res `doc("A parent with a failable release and an optional peek.") {
+  int mark;
+  release!(~this) `doc("Marks 1.") {
+    this.mark = 1;
+  }
+  peek(~this) int? `doc("Absent by default.") {
+    return none;
+  }
+  emit(~this, int n) `doc("Records n.") {
+    this.mark = n;
+  }
+}
+
+type _Relaxed is _Res `doc("Relaxes all three: non-failable, bare return, extra defaulted parameter.") {
+  release(~this) `doc("Marks 2, and cannot raise.") {
+    this.mark = 2;
+  }
+  peek(~this) int `doc("Always 9.") {
+    return 9;
+  }
+  emit(~this, int n, int bump = 5) `doc("Records n plus bump.") {
+    this.mark = n + bump;
+  }
+}
+
+relaxations_over_a_plain_parent_adapt_at_the_crossing() `test {
+  _Res r = _Relaxed(mark: 0);
+  r.release()?!;
+  assert(r.mark == 2, "the non-failable override ran through the failable slot");
+
+  _Res p = _Relaxed(mark: 0);
+  if v := p.peek() {
+    assert(v == 9, "the bare return was wrapped as `some` by the adapter");
+  } else {
+    assert(false, "the adapter must wrap the bare return as `some`, not `none`");
+  }
+
+  _Res e = _Relaxed(mark: 0);
+  e.emit(3);
+  assert(e.mark == 8, "the adapter supplied the omitted parameter's default");
+}
+
+relaxed_release_reports_no_error() `test {
+  _Res r = _Relaxed(mark: 0);
+  bool raised = false;
+  r.release()? e {
+    raised = true;
+  };
+  assert(!raised, "a non-failable override reports success through the parent slot");
+  assert(r.mark == 2, "and still ran");
+}
+
+relaxed_parent_used_as_itself_is_unaffected() `test {
+  _Res r = _Res(mark: 0);
+  r.release()?!;
+  assert(r.mark == 1, "_Res's own failable release runs unchanged");
+
+  _Res p = _Res(mark: 0);
+  if v := p.peek() {
+    assert(false, "_Res.peek is absent by default, got {v}");
+  } else {
+    assert(true, "_Res.peek returns none when not overridden");
+  }
+
+  _Res e = _Res(mark: 0);
+  e.emit(3);
+  assert(e.mark == 3, "_Res's own emit runs unchanged, with no bump to add");
+}

@@ -521,10 +521,11 @@ type abstractMethodInfo struct {
 	declarer *Named
 }
 
-// AbstractMethodInfo pairs an abstract method inherited from a parent with the
-// interface that declared it (the Self type for signature comparison). Exported
-// for the sema override-validation pass.
-type AbstractMethodInfo struct {
+// InheritedMethodInfo pairs a method inherited from a parent with the type that
+// declared it (the Self type for signature comparison). Exported for the sema
+// override-validation passes, which use it for both abstract requirements and
+// concrete inherited declarations.
+type InheritedMethodInfo struct {
 	Method   *Method
 	Declarer *Named
 }
@@ -534,14 +535,76 @@ type AbstractMethodInfo struct {
 // overrides. Unlike allAbstractMethodsWithDeclarer (which drops the type's own
 // overrides), this returns the full set so a validator can compare each override
 // against the requirement it claims to satisfy.
-func (n *Named) ParentAbstractMethods() []AbstractMethodInfo {
-	var out []AbstractMethodInfo
+func (n *Named) ParentAbstractMethods() []InheritedMethodInfo {
+	var out []InheritedMethodInfo
 	for _, p := range n.parents {
 		for _, am := range p.Named.allAbstractMethodsWithDeclarer() {
-			out = append(out, AbstractMethodInfo{Method: am.method, Declarer: am.declarer})
+			out = append(out, InheritedMethodInfo{Method: am.method, Declarer: am.declarer})
 		}
 	}
 	return out
+}
+
+// InheritedSlotDeclarations returns, for each direct parent INDEPENDENTLY, the
+// NEAREST declaration of every vtable slot reachable through that parent, paired
+// with the type that declared it. It is what an override must be measured
+// against (T2184).
+//
+// Nearest, not first-introduced, is the load-bearing choice. AllVirtualMethods
+// answers a different question — where a slot sits in the layout — so it keeps
+// the ANCESTOR-most declaration: for `R is Q is P` it reports P's. But the shape
+// a caller reads is the one its own static type promises, so an override of Q's
+// relaxed `close(~this)` is measured against Q, not against P's `close!(~this)`
+// which Q already legally relaxed. Measuring against P would accept a child that
+// re-tightens the slot Q's call sites read as void. Relaxations compose, and Q
+// was itself checked against P when Q was declared, so the nearest declaration
+// is both necessary and sufficient.
+//
+// The `seen` map is per parent, never shared: when two parents declare the same
+// slot with different shapes, a child must satisfy BOTH — each parent crossing
+// reads the slot through its own view vtable.
+func (n *Named) InheritedSlotDeclarations() []InheritedMethodInfo {
+	var out []InheritedMethodInfo
+	for _, p := range n.parents {
+		out = p.Named.nearestSlotDeclarations(map[string]bool{}, out)
+	}
+	return out
+}
+
+// nearestSlotDeclarations appends this type's own slot declarations (which
+// shadow any the parents contribute), then recurses into parents.
+func (n *Named) nearestSlotDeclarations(seen map[string]bool, out []InheritedMethodInfo) []InheritedMethodInfo {
+	for _, m := range n.methods {
+		key := methodSlotKey(m)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, InheritedMethodInfo{Method: m, Declarer: n})
+	}
+	for _, p := range n.parents {
+		out = p.Named.nearestSlotDeclarations(seen, out)
+	}
+	return out
+}
+
+// LookupOwnSlotDeclaration returns this type's OWN declaration for m's vtable
+// slot — never an inherited one — abstract or concrete, or nil when this type
+// declares nothing for that slot.
+//
+// Own-only is the point: it answers "what does THIS declaration put in the
+// slot", which is what an override check must compare against its parent's.
+// Resolving through parents instead would compare a sibling parent's
+// declaration against another parent's and report a type that declared nothing.
+//
+// It keys off the full slot key rather than the bare name, so the unary and
+// binary variants of an operator never resolve to each other (methodSlotKey
+// appends "$unary", T0883) — a getter and a plain method of the same name DO
+// share a slot, and resolve to each other, because they share a vtable entry.
+// LookupAbstractImpl, which dispatches on kind by name, cannot be switched over
+// to this without changing what Implements answers — that is T1933's subject.
+func (n *Named) LookupOwnSlotDeclaration(m *Method) *Method {
+	return n.lookupOwnMethodBySlotKey(methodSlotKey(m))
 }
 
 // LookupAbstractImpl returns the method on n that occupies the slot an abstract

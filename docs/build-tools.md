@@ -351,9 +351,13 @@ answers about one tree that could differ, and only the first wrote the record th
 commit guard reads — a tree the gate had passed three times was still refused as
 unverified (T2170). Two consequences follow, both deliberate:
 
-- **Verify reports no metric `integration` does not.** Its `gate-values.json`
-  sidecar is exactly the envelope's metrics; the `wasm_*` keys it used to add
-  described suites `integration` does not measure.
+- **Verify reports and judges no metric `integration` does not**, and the
+  reverse: the store metrics reach its envelope too, so the two verdicts cannot
+  differ on them. Its `gate-values.json` sidecar is the envelope's metrics less
+  that pair — judging a number and ratcheting one are separate properties, and
+  this is the only place they part company
+  ([why](gate-system.md#store-metrics)). The `wasm_*` keys the sidecar used to
+  add described suites `integration` does not measure.
 - **A failing Go suite no longer skips the Promise suites.** The composition
   measures every part, because a partial envelope is a measurement of something
   other than `integration` — which is the divergence being removed. Each part's

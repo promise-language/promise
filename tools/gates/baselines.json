@@ -6,7 +6,9 @@
       "updated": "2026-09-14"
     },
     "cas_home_count": {
-      "type": "informational"
+      "value": 1,
+      "direction": "down",
+      "updated": "2026-09-24"
     },
     "cas_materializations": {
       "type": "informational"
@@ -15,7 +17,9 @@
       "type": "informational"
     },
     "cas_network_bytes": {
-      "type": "informational"
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-24"
     },
     "go_coverage_pct": {
       "direction": "up"
@@ -185,7 +189,9 @@
       "updated": "2026-09-14"
     },
     "cas_home_count": {
-      "type": "informational"
+      "value": 1,
+      "direction": "down",
+      "updated": "2026-09-24"
     },
     "cas_materializations": {
       "type": "informational"
@@ -194,7 +200,9 @@
       "type": "informational"
     },
     "cas_network_bytes": {
-      "type": "informational"
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-24"
     },
     "go_coverage_pct": {
       "direction": "up"
@@ -353,7 +361,9 @@
       "updated": "2026-09-14"
     },
     "cas_home_count": {
-      "type": "informational"
+      "value": 1,
+      "direction": "down",
+      "updated": "2026-09-24"
     },
     "cas_materializations": {
       "type": "informational"
@@ -362,7 +372,9 @@
       "type": "informational"
     },
     "cas_network_bytes": {
-      "type": "informational"
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-24"
     },
     "go_test_failures": {
       "value": 0,
@@ -447,7 +459,9 @@
       "updated": "2026-09-14"
     },
     "cas_home_count": {
-      "type": "informational"
+      "value": 1,
+      "direction": "down",
+      "updated": "2026-09-24"
     },
     "cas_materializations": {
       "type": "informational"
@@ -456,7 +470,9 @@
       "type": "informational"
     },
     "cas_network_bytes": {
-      "type": "informational"
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-09-24"
     },
     "go_test_failures": {
       "value": 0,

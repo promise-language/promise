@@ -250,6 +250,10 @@ var integrationMetrics = []string{
 	"promise_check_failures", "promise_check_errors", "promise_check_warnings",
 	"go_test_failures", "go_test_packages_failed",
 	"host_test_failures", "host_leak_count",
+	// Not a gate's own metric: what the run cost the store, added once around
+	// the whole measurement. Enforced for the same reason as the rest — a
+	// landing decision rests on them (T2153).
+	"cas_network_bytes", "cas_home_count",
 }
 
 // Every metric integration's parts report must carry a term — a person-edited
@@ -319,7 +323,6 @@ func TestFit_FloorsAreCaps(t *testing.T) {
 var integrationMetricsUnjudged = map[string]string{
 	"host_test_count":     "a suite's size is not a quality of the change. It ratchets `up` where a target carries a figure, but requiring that everywhere would fail a target for deleting a test — which is sometimes the right change.",
 	"promise_check_units": "how many units the checker was given is not a quality of the change either — merging two files into a module lowers it without checking any less. It ratchets `up` where a target carries a figure; what guards against a sweep that measured nothing is the gate's refusal of a run that printed no summary.",
-	"cas_network_bytes":   "what a run pulls over the wire into the store SHOULD be enforced at exactly zero. T2150 gave a cold home the embedded copy of an artifact this binary carries instead of a download, so it should now be zero; T2153 promotes it once a -count=1 gate run has said so on linux and darwin as well as windows, since a term here commits every target at once.",
 	// The scheduled gates' metrics. They are judged — every one of them carries
 	// a ratcheted baseline on the targets that measure it — but they are not
 	// INTEGRATION metrics, and integrationMetrics demands a term on every
@@ -333,7 +336,6 @@ var integrationMetricsUnjudged = map[string]string{
 	// wasm_size_minimal, _strings, _collections, _concurrency and _full. They
 	// are built from the file names rather than spelled, so the scanner above
 	// cannot see them; they are ratcheted per target exactly as the total is.
-	"cas_home_count": "one home per run is the end state, and T2150 removed the private PROMISE_HOME the Go suite built per test (29 → 1, measured on windows-amd64). T2153 promotes it once the other targets have been measured too. Note when promoting: bin/verify does not pass -count=1, so its Go phase reports a figure that moves with the test cache — which is why the store metrics stay out of its gate values, and must, or the commit gate ratchets the baseline down to a cached run and fails the next full one.",
 }
 
 // metricNameLiteral matches the name a gate gives a metric at the only place

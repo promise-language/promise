@@ -322,12 +322,15 @@ func (r *verifyRun) stepIntegration() error {
 	// so anything fetched or exploded below is work the TREE asked for a second
 	// time — the shape T2133 had, and nothing measured for eighteen days.
 	//
-	// Reported to the operator, and deliberately NOT written into the gate values
-	// below. This run does not pass -count=1, so its Go phase reports anywhere
-	// from one home to thirty depending on how much of the suite Go's test cache
-	// replayed (T2150); a ratchet fed from that would settle on whichever run
-	// replayed the most and then fail every full one. The gates measure with
-	// -count=1 and are where these numbers are judged.
+	// JUDGED here, like every other metric `integration` reports, and kept out
+	// of the gate values below — the two are separate properties and this is the
+	// only metric where they differ. Judging is owed because verify's verdict is
+	// the judge's verdict on integration's envelope; a metric the gate enforces
+	// and verify does not is a change that passes verify, is blessed by it, and
+	// fails `bin/run integration`. Feeding a baseline is NOT owed: the Go phase
+	// here does not pass -count=1, so a cache-replayed run spawns no compiler and
+	// reports no home where a cold one reports its one, and a ratchet fed from
+	// the first settles below every later run (T2150).
 	r.store = openCASWindow(r.root)
 
 	// The identity of the content about to be measured. AFTER the repairs, so
@@ -341,6 +344,9 @@ func (r *verifyRun) stepIntegration() error {
 	if err != nil {
 		return err
 	}
+	// The same append `bin/gate` makes, from the same function, so the envelope
+	// judged here and the one `bin/run integration` judges carry one metric set.
+	r.store.AddToEnvelope(&env)
 	tree, moved := settledTree(r.root, before)
 	env.Tree = tree
 	env.Incomplete = joinIncomplete(env.Incomplete, moved)
@@ -380,6 +386,11 @@ func (r *verifyRun) stepPush() error {
 // this used to add described suites `integration` does not measure at all.
 // Warning-only, unlike the blessing: a stale sidecar is refused by its own
 // worktree identity, where a missing blessing refuses every later commit.
+//
+// The store metrics are the one exception, and are dropped here: this run's Go
+// phase replays whatever the test cache holds, so the home count it reports is
+// a fact about the cache rather than about the tree. They are still judged —
+// stepIntegration says why both halves are right.
 func (r *verifyRun) writeGateValues() {
 	gv := &GateValues{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -387,6 +398,9 @@ func (r *verifyRun) writeGateValues() {
 		Values:    make(map[string]float64, len(r.env.Metrics)),
 	}
 	for _, m := range r.env.Metrics {
+		if isContractStoreMetric(m.Name) {
+			continue
+		}
 		gv.Values[m.Name] = m.Number()
 	}
 	if err := WriteGateValues(r.root, gv); err != nil {

@@ -157,6 +157,20 @@ func openCASWindow(root string) casWindow {
 	return casWindow{root: root, open: true}
 }
 
+// isContractStoreMetric reports whether a name is one of the two the window
+// adds to a contract envelope, for the one caller that has an envelope and
+// needs to tell them from the gate's own metrics (verify's gate values).
+//
+// Spelled here rather than shared with Metrics through a constant: a metric
+// name exists by being written into a Count/Size call, which is the only place
+// the drift scanner in gate_contract_test.go can see one. So this is a second
+// spelling on purpose, and TestContractStoreMetricPredicateMatchesMetrics is
+// what keeps it honest — the same bargain casLedgerName already makes with
+// casmetrics.LedgerName.
+func isContractStoreMetric(name string) bool {
+	return name == "cas_network_bytes" || name == "cas_home_count"
+}
+
 // Values folds the window into the gate values a tracker gate reports. The four
 // are always present, zeros included: a counter that appears only when non-zero
 // cannot be judged against a baseline of zero.
@@ -200,13 +214,6 @@ func (w casWindow) AddTo(values map[string]float64) {
 // to carry an enforced term on every target, and a byte or population count is
 // legitimately non-zero the first time a clone builds. The other two go to the
 // tracker gates and to `promise test`, where no term is owed.
-//
-// Neither of these two is enforced YET. T2150 removed the private PROMISE_HOME
-// the Go suite built per test and stopped a cold home fetching artifacts the
-// binary embeds, so the tree should now report 1 and 0 — measured on
-// windows-amd64. Promoting them commits every target at once, so T2153 holds
-// them informational until a -count=1 gate run has confirmed the figure on
-// linux and darwin too.
 func (w casWindow) Metrics() ([]Metric, string) {
 	vals, incomplete := w.Values()
 	if vals == nil {
@@ -216,6 +223,23 @@ func (w casWindow) Metrics() ([]Metric, string) {
 		Size("cas_network_bytes", int64(vals["cas_network_bytes"]), "bytes"),
 		Count("cas_home_count", int(vals["cas_home_count"])),
 	}, ""
+}
+
+// AddToEnvelope appends the window's contract metrics to an envelope, carrying
+// the reason forward when it could not be opened.
+//
+// Both paths that produce a judged `integration` envelope call this: the
+// `bin/gate` process entry point and bin/verify. It is one function rather than
+// the same six lines twice because the two envelopes may not carry different
+// metrics — "verify passed" and "integration passed" are one answer about one
+// tree rather than two that can differ (docs/gate-system.md), and a metric
+// enforced on one path and absent from the other is exactly how they differ:
+// the run that adds a private PROMISE_HOME passes verify, is blessed by it, and
+// fails `bin/run integration`.
+func (w casWindow) AddToEnvelope(env *Envelope) {
+	metrics, incomplete := w.Metrics()
+	env.Metrics = append(env.Metrics, metrics...)
+	env.Incomplete = joinIncomplete(env.Incomplete, incomplete)
 }
 
 // ensureToolchainWarm materializes the toolchain into the ambient Promise home

@@ -512,9 +512,7 @@ func runContractGate(root string, args []string, stdout io.Writer) error {
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	if measured {
-		metrics, incomplete := store.Metrics()
-		env.Metrics = append(env.Metrics, metrics...)
-		env.Incomplete = joinIncomplete(env.Incomplete, incomplete)
+		store.AddToEnvelope(&env)
 		// What the numbers are about. A run whose tree moved carries no
 		// identity, so nothing downstream can bless content this did not see.
 		tree, moved := settledTree(root, beforeTree)

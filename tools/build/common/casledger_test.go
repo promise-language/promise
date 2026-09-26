@@ -3,6 +3,9 @@ package common
 import (
 	"bytes"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -223,9 +226,9 @@ func TestCASWindowCountsHomes(t *testing.T) {
 	if vals["cas_home_count"] != 3 {
 		t.Fatalf("cas_home_count = %v, want 3", vals["cas_home_count"])
 	}
-	// The count only does its job if a term on it would reject the three. That
-	// term is not enforced yet — a real sweep reports 29 homes (T2150) — so what
-	// is pinned here is that the number and the ratchet agree once it is.
+	// The count only does its job if the term on it rejects the three. That term
+	// is `down` from 1 on every target (T2153), so this pins the number and the
+	// ratchet agreeing: three private homes fail it, one passes.
 	if checkRatchet("down", 1, vals["cas_home_count"]) {
 		t.Error("three private homes would pass a down-from-one baseline — the metric would not have caught T2133")
 	}
@@ -277,14 +280,133 @@ func TestCASWindowMetricsAreTheTwoWithAnAbsoluteEndState(t *testing.T) {
 	}
 }
 
+// TestCASWindowAddToEnvelopeIsWhatBothJudgedPathsUse: `bin/gate` and bin/verify
+// both produce an envelope that gets judged, and they must carry one metric set
+// — "verify passed" and "integration passed" are one answer about one tree
+// rather than two that can differ (docs/gate-system.md). Now that these two
+// metrics are enforced (T2153), a path that omitted them would bless a tree the
+// other path rejects, so what is pinned here is the append itself.
+func TestCASWindowAddToEnvelopeIsWhatBothJudgedPathsUse(t *testing.T) {
+	root := t.TempDir()
+	writeLedger(t, root, `{"event":"network","bytes":64}
+{"event":"home","path":"/w/.promise-home"}
+{"event":"home","path":"/tmp/private-home"}
+`)
+	env := Envelope{Metrics: []Metric{Count("vet_findings", 0)}}
+	casWindow{root: root, open: true}.AddToEnvelope(&env)
+
+	got := map[string]float64{}
+	for _, m := range env.Metrics {
+		got[m.Name] = m.Number()
+	}
+	if len(got) != 3 {
+		t.Fatalf("metrics = %v, want the gate's own plus the two store metrics", got)
+	}
+	if got["cas_network_bytes"] != 64 || got["cas_home_count"] != 2 {
+		t.Errorf("metrics = %v, want cas_network_bytes=64 and cas_home_count=2", got)
+	}
+	if env.Incomplete != "" {
+		t.Errorf("incomplete = %q, want none — the window was measured", env.Incomplete)
+	}
+	// Both readings fail their own term, which is the point of enforcing them:
+	// a byte off the wire and a second private home are each a defect.
+	if checkRatchet("exact", 0, got["cas_network_bytes"]) {
+		t.Error("64 bytes off the wire passes an exact-zero baseline")
+	}
+	if checkRatchet("down", 1, got["cas_home_count"]) {
+		t.Error("two homes passes a down-from-one baseline")
+	}
+}
+
+// TestCASWindowAddToEnvelopeSaysWhyWhenUnmeasured: an unopened window adds no
+// numbers and carries its reason onto the envelope, so a run that could not
+// measure the store is judged as incomplete rather than as a clean zero.
+func TestCASWindowAddToEnvelopeSaysWhyWhenUnmeasured(t *testing.T) {
+	env := Envelope{Metrics: []Metric{Count("vet_findings", 0)}}
+	casWindow{root: t.TempDir(), why: "no ledger here"}.AddToEnvelope(&env)
+
+	if len(env.Metrics) != 1 {
+		t.Errorf("metrics = %v, want only the gate's own", env.Metrics)
+	}
+	if !strings.Contains(env.Incomplete, "no ledger here") {
+		t.Errorf("incomplete = %q, want the window's reason", env.Incomplete)
+	}
+}
+
+// TestContractStoreMetricPredicateMatchesMetrics: isContractStoreMetric spells
+// the two names a second time, because a metric name only exists to the drift
+// scanner by being written into a Count/Size call. This is the pin that keeps
+// the two spellings one set — a name added to Metrics and not to the predicate
+// would silently reach verify's gate values, which is the ratchet these are
+// deliberately kept out of.
+func TestContractStoreMetricPredicateMatchesMetrics(t *testing.T) {
+	root := t.TempDir()
+	writeLedger(t, root, `{"event":"home","path":"/w/.promise-home"}`+"\n")
+	metrics, _ := casWindow{root: root, open: true}.Metrics()
+	if len(metrics) == 0 {
+		t.Fatal("the window reported no contract metrics at all")
+	}
+	for _, m := range metrics {
+		if !isContractStoreMetric(m.Name) {
+			t.Errorf("Metrics reports %q but isContractStoreMetric does not know it — it would reach verify's gate values", m.Name)
+		}
+	}
+	// And nothing else claims to be one: a gate's own metric wrongly matching
+	// would be dropped from the sidecar that advances its baseline.
+	for _, name := range []string{"host_leak_count", "vet_findings", "cas_materialized_bytes", "cas_materializations"} {
+		if isContractStoreMetric(name) {
+			t.Errorf("isContractStoreMetric claims %q, which Metrics does not report", name)
+		}
+	}
+}
+
+// TestVerifyGateValuesDropTheStoreMetrics: verify JUDGES the store metrics (the
+// test above) and must not feed them to whatever advances a baseline. Its Go
+// phase does not pass -count=1, so a cache-replayed run spawns no compiler and
+// reports no home where a cold one reports its one; a ratchet fed from the
+// first settles below every later run and then fails it (T2150/T2153).
+func TestVerifyGateValuesDropTheStoreMetrics(t *testing.T) {
+	root := initBareGitRepo(t)
+	if err := os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &verifyRun{root: root, env: Envelope{
+		Target: "darwin-arm64",
+		Metrics: []Metric{
+			Count("host_leak_count", 0),
+			Size("cas_network_bytes", 0, "bytes"),
+			Count("cas_home_count", 1),
+		},
+	}}
+	r.writeGateValues()
+
+	worktree, err := WorktreeHash(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gv, err := ReadGateValues(root, worktree)
+	if err != nil {
+		t.Fatalf("read gate values: %v", err)
+	}
+	if _, ok := gv.Values["host_leak_count"]; !ok {
+		t.Errorf("gate values = %v, want the gate's own metrics kept", gv.Values)
+	}
+	for _, name := range []string{"cas_network_bytes", "cas_home_count"} {
+		if _, ok := gv.Values[name]; ok {
+			t.Errorf("gate values carry %s = %v; a baseline fed from a cache-replayed run settles below every cold one",
+				name, gv.Values[name])
+		}
+	}
+}
+
 // TestBaselinesCarryEveryStoreMetricOnEveryTarget: a term is per-target data,
 // and a metric tracked on one platform and absent on another means a landing
 // decision there rests on a number nobody looks at (docs/gate-system.md). All
-// four are registered on all four targets; none is enforced yet, because a real
-// sweep reports 22 homes and ~55 MB fetched (T2150) and an enforced term today
-// would fail every run rather than the changes that add a home. Promotion is a
-// value and a direction in each block, and this test is what makes "in each
-// block" mechanical rather than remembered.
+// four are registered on all four targets: the two with an absolute end state
+// carry enforced terms (T2153), the two that differ by platform by construction
+// are tracked. What this test makes mechanical rather than remembered is the
+// "on every target" half — a metric registered on three blocks of four is
+// invisible on the fourth until somebody sits down there.
 func TestBaselinesCarryEveryStoreMetricOnEveryTarget(t *testing.T) {
 	root, err := RootForTests()
 	if err != nil {
@@ -575,5 +697,72 @@ func TestCASWindowSummaryIsSilentOnAnUnreadableLedger(t *testing.T) {
 	// disagree only in verbosity.
 	if vals, incomplete := (casWindow{root: root, open: true}).Values(); vals != nil || incomplete == "" {
 		t.Errorf("Values() = %v / %q, want no numbers and a reason", vals, incomplete)
+	}
+}
+
+// TestBothJudgedEnvelopesAppendTheStoreCost pins the call itself, in both
+// places that build an envelope somebody judges: `bin/gate`'s process entry
+// point and bin/verify's integration step.
+//
+// A source scan rather than a behavioural test, for the reason
+// reportedMetricNames gives: exercising either path means measuring
+// `integration`, which is a quarter of an hour. stepIntegration is 0%-covered
+// and stays that way until its steps are injectable (T2092), so without this
+// the enforcement verify gained with these terms could be deleted in one line
+// and every test would still pass — and the failure it would let through is
+// the one these metrics exist to catch: a change that adds a private
+// PROMISE_HOME, blessed by verify, rejected by `bin/run integration`.
+func TestBothJudgedEnvelopesAppendTheStoreCost(t *testing.T) {
+	for _, want := range []struct{ file, fn string }{
+		{"verify.go", "stepIntegration"},
+		{"gate_contract.go", "runContractGate"},
+	} {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, want.file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", want.file, err)
+		}
+		var body *ast.BlockStmt
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == want.fn {
+				body = fn.Body
+			}
+		}
+		if body == nil {
+			t.Errorf("%s: no func %s — this guard is looking for a function that moved", want.file, want.fn)
+			continue
+		}
+		found := false
+		ast.Inspect(body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "AddToEnvelope" {
+				found = true
+			}
+			return true
+		})
+		if !found {
+			t.Errorf("%s: %s builds a judged envelope without calling AddToEnvelope — "+
+				"the store metrics would be enforced on the other path only, and the two verdicts could differ",
+				want.file, want.fn)
+		}
+	}
+}
+
+// TestVerifyGateValuesSurvivesAnUnwritableSidecar covers the branch that keeps a
+// sidecar failure warning-only. The blessing is the hard one; this is not, so a
+// root that cannot take the file must leave the run intact rather than fail it.
+func TestVerifyGateValuesSurvivesAnUnwritableSidecar(t *testing.T) {
+	// Not a git repo, so WriteGateValues cannot stamp a worktree identity and
+	// refuses — the failure TestWriteGateValues_NotAGitRepo pins from below.
+	r := &verifyRun{root: t.TempDir(), env: Envelope{
+		Target:  "darwin-arm64",
+		Metrics: []Metric{Count("host_leak_count", 0)},
+	}}
+	r.writeGateValues() // must not panic, and must not fail the run
+	if _, err := os.Stat(filepath.Join(r.root, ".promise-home", "gate-values.json")); err == nil {
+		t.Error("a sidecar was written into a root with no worktree identity")
 	}
 }

@@ -7,15 +7,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/promise-language/flow/pkg/verifiedtree"
 )
 
-// The contract, tested from the recording end: the id verify records must
-// equal the id the guard computes over the real index after `git add -A`,
-// because that agreement is the whole of what the two ends share.
+// What is tested here is this project's POLICY — which measurement earns a
+// blessing, and who records it — not how a tree id is computed or written.
+// That is flow/pkg/verifiedtree's, and it carries its own suite for it; a copy
+// here would be this project asserting another module's arithmetic, which is
+// the duplication the primitive was created to end (flow#423).
 //
 // The workspace's TestRecordPathAgreesWithGuard is not carried: the guard end
 // lives in that repository, and pinning its spelling is that repository's test.
@@ -54,21 +56,6 @@ func vtRepo(t *testing.T) string {
 	return dir
 }
 
-// bless is what production does on a passing measurement: take the identity of
-// the content as it stands, and hand blessIfPassed the envelope a green
-// `integration` run produces. The tests below are about the identity and the
-// record, so the gate name and the verdict are fixed here; the tests that vary
-// them are at the end of this file.
-func bless(t *testing.T, dir string) error {
-	t.Helper()
-	tree, err := treeIdentity(dir)
-	if err != nil {
-		return err
-	}
-	return blessIfPassed(dir, Envelope{Gate: integrationGate, Tree: tree}, true)
-}
-
-// recordedTree reads back the id a blessing wrote.
 func recordedTree(t *testing.T, dir string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(dir, ".workspace", "verified-tree"))
@@ -78,255 +65,6 @@ func recordedTree(t *testing.T, dir string) string {
 	return strings.TrimSpace(string(data))
 }
 
-func TestRecordMatchesRealStage(t *testing.T) {
-	dir := vtRepo(t)
-	writeFile(t, dir, "a.txt", "a\n")
-	writeFile(t, dir, "sub/b.txt", "b\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-	writeFile(t, dir, "a.txt", "a2\n")
-
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("bless: %v", err)
-	}
-	vtGit(t, dir, "add", "-A")
-	staged, err := RunOutputIn(dir, "git", "write-tree")
-	if err != nil {
-		t.Fatalf("git write-tree: %v", err)
-	}
-	if got := recordedTree(t, dir); got != strings.TrimSpace(staged) {
-		t.Errorf("recorded %s, but git add -A stages %s — the two ends disagree", got, staged)
-	}
-}
-
-func TestRecordIncludesUntracked(t *testing.T) {
-	// A step whose whole output is new files must produce a committable match,
-	// which is why `git stash create` (tracked modifications only) was rejected.
-	dir := vtRepo(t)
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-	writeFile(t, dir, "new.txt", "new\n")
-
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("bless: %v", err)
-	}
-	names, err := RunOutputIn(dir, "git", "ls-tree", "-r", "--name-only", recordedTree(t, dir))
-	if err != nil {
-		t.Fatalf("git ls-tree: %v", err)
-	}
-	if !strings.Contains(names, "new.txt") {
-		t.Errorf("untracked non-ignored file missing from recorded tree: %q", names)
-	}
-}
-
-func TestRecordRespectsIgnoreRules(t *testing.T) {
-	// An ignored file stays out; a tracked-but-ignored file stays in — the
-	// reason the temp index is seeded rather than left empty.
-	dir := vtRepo(t)
-	writeFile(t, dir, ".gitignore", ".workspace/\nignored.txt\npinned.txt\n")
-	writeFile(t, dir, "pinned.txt", "pinned\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "add", "-f", "pinned.txt")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-	writeFile(t, dir, "ignored.txt", "ignored\n")
-
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("bless: %v", err)
-	}
-	names, err := RunOutputIn(dir, "git", "ls-tree", "-r", "--name-only", recordedTree(t, dir))
-	if err != nil {
-		t.Fatalf("git ls-tree: %v", err)
-	}
-	if strings.Contains(names, "ignored.txt") {
-		t.Errorf("ignored file should not be in the recorded tree: %q", names)
-	}
-	if !strings.Contains(names, "pinned.txt") {
-		t.Errorf("tracked-but-ignored file should be in the recorded tree: %q", names)
-	}
-}
-
-func TestRecordTrackedSetFollowsIndexNotHEAD(t *testing.T) {
-	// The tracked set `git add -A` starts from is the real index's, not
-	// HEAD's, and the two differ exactly where ignore rules bite: an ignored
-	// file force-added but not yet committed must be in the blessed tree, and
-	// one just `git rm --cached`ed must be out. Seeded any other way, the
-	// record is a tree no `git add -A` can stage — a permanent guard refusal
-	// whose named recovery, re-running verify, reproduces it.
-	dir := vtRepo(t)
-	writeFile(t, dir, ".gitignore", ".workspace/\nadded.txt\ndropped.txt\n")
-	writeFile(t, dir, "dropped.txt", "dropped\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "add", "-f", "dropped.txt")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-	writeFile(t, dir, "added.txt", "added\n")
-	vtGit(t, dir, "add", "-f", "added.txt")
-	vtGit(t, dir, "rm", "-q", "--cached", "dropped.txt")
-
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("bless: %v", err)
-	}
-	vtGit(t, dir, "add", "-A")
-	staged, err := RunOutputIn(dir, "git", "write-tree")
-	if err != nil {
-		t.Fatalf("git write-tree: %v", err)
-	}
-	if got := recordedTree(t, dir); got != strings.TrimSpace(staged) {
-		t.Errorf("recorded %s, but git add -A stages %s — the two ends disagree", got, staged)
-	}
-	names, err := RunOutputIn(dir, "git", "ls-tree", "-r", "--name-only", recordedTree(t, dir))
-	if err != nil {
-		t.Fatalf("git ls-tree: %v", err)
-	}
-	if !strings.Contains(names, "added.txt") {
-		t.Errorf("force-added file missing from recorded tree: %q", names)
-	}
-	if strings.Contains(names, "dropped.txt") {
-		t.Errorf("rm --cached'ed file should not be in the recorded tree: %q", names)
-	}
-}
-
-func TestRecordLeavesIndexAlone(t *testing.T) {
-	dir := vtRepo(t)
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-	writeFile(t, dir, "staged.txt", "staged\n")
-	vtGit(t, dir, "add", "staged.txt")
-	writeFile(t, dir, "unstaged.txt", "unstaged\n")
-
-	before, err := RunOutputIn(dir, "git", "diff", "--cached", "--name-only")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("bless: %v", err)
-	}
-	after, err := RunOutputIn(dir, "git", "diff", "--cached", "--name-only")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if before != after {
-		t.Errorf("recording disturbed the real index: before %q, after %q", before, after)
-	}
-}
-
-func TestRecordIsAtomicallyReplaced(t *testing.T) {
-	// A second record replaces the first and leaves no temp file behind. The
-	// rename is what keeps a reader from ever seeing a half-written id, and it
-	// consumes the temp file rather than copying it — so a repo verified daily
-	// does not end up with one .verified-tree-* per run.
-	dir := vtRepo(t)
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("first record: %v", err)
-	}
-	first := recordedTree(t, dir)
-	writeFile(t, dir, "b.txt", "b\n")
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("second record: %v", err)
-	}
-	if second := recordedTree(t, dir); second == first {
-		t.Errorf("both records are %s — the second did not replace the first", second)
-	}
-	entries, err := os.ReadDir(filepath.Join(dir, ".workspace"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".verified-tree-") {
-			t.Errorf("temp file %s survived the rename", e.Name())
-		}
-	}
-}
-
-func TestRecordRefusesWhenTheRecordIsNotIgnored(t *testing.T) {
-	// The .gitignore entry is a precondition of the contract, not a tidiness
-	// preference: without it the record is part of what `git add -A` stages,
-	// so rewriting it after the tree was measured blesses an id no commit can
-	// match — and re-running verify, the guard's named recovery, reproduces
-	// it. Recording must say so instead of producing that state.
-	dir := vtInit(t)
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-
-	err := bless(t, dir)
-	if err == nil {
-		t.Fatal("recording into a repo that does not ignore .workspace/ must fail")
-	}
-	if !strings.Contains(err.Error(), ".gitignore") {
-		t.Errorf("the error must name the fix, got: %v", err)
-	}
-	if Exists(filepath.Join(dir, ".workspace", "verified-tree")) {
-		t.Error("nothing should be blessed when the record path is not ignored")
-	}
-}
-
-func TestClearBlessing(t *testing.T) {
-	dir := t.TempDir()
-	record := filepath.Join(dir, ".workspace", "verified-tree")
-	writeFile(t, dir, ".workspace/verified-tree", "abc\n")
-	if err := clearBlessing(dir); err != nil {
-		t.Fatalf("clearing an existing record: %v", err)
-	}
-	if Exists(record) {
-		t.Error("record should be gone after clear")
-	}
-	if err := clearBlessing(dir); err != nil {
-		t.Fatalf("clearing an absent record should not be an error: %v", err)
-	}
-}
-
-func TestRecordOutsideGitCheckout(t *testing.T) {
-	dir := t.TempDir()
-
-	// "Outside a checkout" has to be arranged, not assumed. bin/verify points
-	// TMPDIR at .promise-home/tmp inside this repository (SetupLocalCache), so
-	// under a real verify run t.TempDir() sits *inside* a git checkout and git
-	// finds the enclosing .git by walking up. GIT_CEILING_DIRECTORIES stops
-	// that walk at this test's own temp parent, which is the only directory it
-	// affects.
-	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
-
-	// Assert the precondition rather than trusting it: without this the test
-	// passes whenever TMPDIR happens to fall outside a repository and fails
-	// whenever it does not, which is how it read as green standalone and red
-	// under bin/verify.
-	if _, err := gitWithIndex(dir, "", "rev-parse", "--git-dir"); err == nil {
-		t.Fatalf("precondition: %s is still inside a git checkout", dir)
-	}
-
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("outside a checkout recording should be a no-op, not an error: %v", err)
-	}
-	if Exists(filepath.Join(dir, ".workspace", "verified-tree")) {
-		t.Error("no record should be written outside a git checkout")
-	}
-}
-
-// TestRunVerifyRedRunLeavesNothingBlessed pins the wiring, not the helper: the
-// clear has to sit at the top of RunVerify, before any step can change the
-// tree. A stale blessing surviving a failed verify is the one outcome the
-// contract must never produce — the guard would honour a record describing
-// content that no longer exists.
-//
-// The run is driven over an empty temp root. It does NOT redden on the first
-// step — formatting an empty tree succeeds — it reddens in the build, where
-// GenerateParser finds no grammar. That is still after every step the clear has
-// to precede, so the contract holds; what matters is that the failure is the
-// same one on every machine. It was not: the build used to reach DownloadAntlr
-// and this test passed on whichever accident the host supplied — a failed fetch,
-// a missing JVM, or a full ANTLR run — which is how a live request to antlr.org
-// came to be made by every bin/verify (T2116). Both assertions below pin that:
-// the error names the missing grammar, and no jar is fetched into the root.
-// HOME is redirected so acquireVerifyLock takes a private lock rather than the
-// host's ~/.promise/verify.lock, which an outer bin/verify holds while these
-// tests run — otherwise the run would return ErrLockTimeout before reaching
-// the clear, and the test would pass or fail depending on who invoked it.
 func TestRunVerifyRedRunLeavesNothingBlessed(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -356,248 +94,6 @@ func TestRunVerifyRedRunLeavesNothingBlessed(t *testing.T) {
 	}
 }
 
-// stagedTree is what a real `git add -A` in dir produces — the id the guard
-// will compute at commit time, and therefore the one the record must equal.
-func stagedTree(t *testing.T, dir string) string {
-	t.Helper()
-	vtGit(t, dir, "add", "-A")
-	staged, err := RunOutputIn(dir, "git", "write-tree")
-	if err != nil {
-		t.Fatalf("git write-tree: %v", err)
-	}
-	return strings.TrimSpace(staged)
-}
-
-func TestRecordBeforeTheRepoHasAnIndex(t *testing.T) {
-	// A clone that has never run `git add` has no .git/index file at all, so
-	// the seed step finds nothing to copy. That is not a failure: an empty
-	// seed is exactly that repo's tracked set, which is the one case where
-	// "empty" and "the real index" agree. Untested, this path only ever runs
-	// on a machine nobody is watching — a fresh clone's first verify.
-	dir := vtRepo(t)
-	writeFile(t, dir, "a.txt", "a\n")
-	writeFile(t, dir, "sub/b.txt", "b\n")
-
-	realIndex := filepath.Join(dir, ".git", "index")
-	if Exists(realIndex) {
-		t.Fatalf("precondition: %s exists, so this is not the no-index case", realIndex)
-	}
-
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("blessing with no index yet: %v", err)
-	}
-	if got, want := recordedTree(t, dir), stagedTree(t, dir); got != want {
-		t.Errorf("recorded %s, but git add -A stages %s — the two ends disagree", got, want)
-	}
-}
-
-func TestRecordIsStableWhileTheContentIs(t *testing.T) {
-	// The headline property of the content-addressed replacement: the blessing
-	// survives everything that is not a content change. A tree blessed last
-	// week and untouched is still blessed — so neither a rewritten-identical
-	// file (new mtime, same bytes) nor an ignored build output appearing
-	// afterwards may move the id. If either did, the gate would refuse a
-	// commit the tree has not actually changed since, and the clock this
-	// replaced would be back in a different disguise.
-	dir := vtRepo(t)
-	writeFile(t, dir, ".gitignore", ".workspace/\nbuild-output/\n")
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("first record: %v", err)
-	}
-	first := recordedTree(t, dir)
-
-	// Same bytes, different mtime — the index's stat cache is invalidated but
-	// the blob is not.
-	writeFile(t, dir, "a.txt", "a\n")
-	old := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(filepath.Join(dir, "a.txt"), old, old); err != nil {
-		t.Fatal(err)
-	}
-	// And an ignored artefact of the kind every build step leaves behind.
-	writeFile(t, dir, "build-output/artifact.bin", "junk\n")
-
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("second record: %v", err)
-	}
-	if second := recordedTree(t, dir); second != first {
-		t.Errorf("id moved without a content change: %s then %s", first, second)
-	}
-}
-
-func TestRecordFormatIsOneNewlineTerminatedId(t *testing.T) {
-	// The reading end is bin/precommit-guard, in another repository. Nothing
-	// in this build catches a drift in the on-disk shape, so the shape is
-	// pinned here: exactly one object id and one trailing newline, no
-	// whitespace, no second line, no comment.
-	dir := vtRepo(t)
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("bless: %v", err)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, ".workspace", "verified-tree"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(data)
-	if !strings.HasSuffix(body, "\n") || strings.Count(body, "\n") != 1 {
-		t.Fatalf("record must be exactly one newline-terminated line, got %q", body)
-	}
-	id := strings.TrimSuffix(body, "\n")
-	if len(id) != 40 && len(id) != 64 { // sha1 or sha256 object format
-		t.Fatalf("record is not an object id: %q", id)
-	}
-	for _, r := range id {
-		if !strings.ContainsRune("0123456789abcdef", r) {
-			t.Fatalf("record is not lowercase hex: %q", id)
-		}
-	}
-}
-
-func TestRecordFailsWhenTheRecordDirectoryIsBlocked(t *testing.T) {
-	// .workspace/ occupied by a regular file. The record cannot be created,
-	// and the only acceptable outcome is a named failure: recording is verify's
-	// one hard-failing step precisely because a silent skip is
-	// indistinguishable from a pass and refuses every later commit with no way
-	// to tell why.
-	dir := vtInit(t)
-	writeFile(t, dir, ".gitignore", ".workspace\n")
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-	writeFile(t, dir, ".workspace", "not a directory\n")
-
-	err := bless(t, dir)
-	if err == nil {
-		t.Fatal("recording with .workspace occupied by a file must fail")
-	}
-	if !strings.Contains(err.Error(), ".workspace") {
-		t.Errorf("the error must name the path it could not create, got: %v", err)
-	}
-}
-
-func TestRecordCleansUpWhenTheRenameFails(t *testing.T) {
-	// The rename is the atomic step, and every failure exit before and after it
-	// removes the temp file. Nothing else in the repo would ever notice the
-	// litter — the record's directory is gitignored — so a leaked
-	// .verified-tree-* per failed run would accumulate silently forever.
-	dir := vtRepo(t)
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-	// A directory cannot be replaced by a rename from a regular file.
-	writeFile(t, dir, ".workspace/verified-tree/occupied", "x\n")
-
-	if err := bless(t, dir); err == nil {
-		t.Fatal("recording over a directory must fail")
-	}
-	entries, err := os.ReadDir(filepath.Join(dir, ".workspace"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".verified-tree-") {
-			t.Errorf("temp file %s survived a failed record", e.Name())
-		}
-	}
-}
-
-func TestRecordLeavesNoTempIndexBehind(t *testing.T) {
-	// The temp index is a whole copy of the real one — on this repository a
-	// multi-megabyte file. It is removed by a defer, which is exactly the kind
-	// of cleanup that survives review and then quietly stops running.
-	tmp := t.TempDir()
-	t.Setenv("TMPDIR", tmp) // unix
-	t.Setenv("TMP", tmp)    // windows
-	t.Setenv("TEMP", tmp)
-
-	dir := vtRepo(t)
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("bless: %v", err)
-	}
-	entries, err := os.ReadDir(tmp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "verified-tree-") {
-			t.Errorf("temp index dir %s survived recording", e.Name())
-		}
-	}
-}
-
-func TestEnsureRecordIgnoredAcceptsTheSpellingItRecommends(t *testing.T) {
-	// The refusal tells the reader to add "/.workspace/" — the anchored
-	// spelling this repository's own .gitignore uses. If that spelling did not
-	// satisfy the check, the error would send them in a circle.
-	dir := vtInit(t)
-	writeFile(t, dir, ".gitignore", "/.workspace/\n")
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-
-	if err := ensureRecordIgnored(dir); err != nil {
-		t.Fatalf("the spelling the error recommends must satisfy the check: %v", err)
-	}
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("bless: %v", err)
-	}
-	if got, want := recordedTree(t, dir), stagedTree(t, dir); got != want {
-		t.Errorf("recorded %s, but git add -A stages %s", got, want)
-	}
-}
-
-func TestEnsureRecordIgnoredIsSilentWhenTheProbeCannotAnswer(t *testing.T) {
-	// "Not ignored" is exit 1 and nothing else. A probe that cannot answer at
-	// all — here, no repository to ask — must not redden an otherwise green
-	// verify: the check exists to catch a misconfigured .gitignore, not to add
-	// a second way for git itself to fail the run. The no-checkout no-op in
-	// recordBlessing would not save it; ensureRecordIgnored is reached
-	// through other paths, and the reason it returns nil has to be this one.
-	dir := t.TempDir()
-	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
-
-	probe := exec.Command("git", "check-ignore", "-q", "--", verifiedTreeRecord)
-	probe.Dir = dir
-	err := probe.Run()
-	var exit *exec.ExitError
-	if err == nil || (errors.As(err, &exit) && exit.ExitCode() == 1) {
-		t.Fatalf("precondition: the probe answered (%v) instead of failing to run", err)
-	}
-
-	if err := ensureRecordIgnored(dir); err != nil {
-		t.Errorf("an unanswerable probe must not fail the run, got: %v", err)
-	}
-}
-
-func TestGitWithIndexReportsAFailureWithNoStderr(t *testing.T) {
-	// `git check-ignore -q` says "no" by exit code alone — no stdout, no
-	// stderr. The fallback branch has to produce a usable message from that
-	// and, in particular, must not index args[0] out of an empty slice.
-	dir := vtRepo(t)
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-
-	out, err := gitWithIndex(dir, "", "check-ignore", "-q", "--", "a.txt")
-	if err == nil {
-		t.Fatalf("a non-ignored path must report failure, got %q", out)
-	}
-	if !strings.Contains(err.Error(), "check-ignore") {
-		t.Errorf("the error must name the subcommand that failed, got: %v", err)
-	}
-}
-
 func TestRunVerifyRefusesWhenTheStaleBlessingCannotBeCleared(t *testing.T) {
 	// Fail-closed at the top. If the previous blessing cannot be removed,
 	// verify must stop before its first step rather than run to green over a
@@ -620,184 +116,6 @@ func TestRunVerifyRefusesWhenTheStaleBlessingCannotBeCleared(t *testing.T) {
 	}
 }
 
-func TestRecordInALinkedWorktree(t *testing.T) {
-	// A linked worktree keeps its index at .git/worktrees/<name>/index, and
-	// `git rev-parse --git-path index` answers with an absolute path there
-	// rather than the repo-relative ".git/index" a normal checkout gets. That
-	// asymmetry is the whole reason for the IsAbs branch in the seed step: join
-	// an already-absolute path onto the root and the copy silently finds
-	// nothing, so the temp index is seeded empty and every tracked-but-ignored
-	// file drops out of the blessed tree. Agents run this repository's flows in
-	// worktrees, so this is the ordinary case there, not an exotic one.
-	main := vtRepo(t)
-	writeFile(t, main, ".gitignore", ".workspace/\npinned.txt\n")
-	writeFile(t, main, "pinned.txt", "pinned\n")
-	writeFile(t, main, "a.txt", "a\n")
-	vtGit(t, main, "add", "-A")
-	vtGit(t, main, "add", "-f", "pinned.txt")
-	vtGit(t, main, "commit", "-q", "-m", "base")
-
-	linked := filepath.Join(t.TempDir(), "wt")
-	vtGit(t, main, "worktree", "add", "-q", "-b", "wt", linked)
-
-	realIndex, err := gitWithIndex(linked, "", "rev-parse", "--git-path", "index")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !filepath.IsAbs(realIndex) {
-		t.Skipf("this git answers --git-path with %q in a linked worktree; the absolute case is what this test is for", realIndex)
-	}
-
-	writeFile(t, linked, "b.txt", "b\n")
-	if err := bless(t, linked); err != nil {
-		t.Fatalf("bless in a linked worktree: %v", err)
-	}
-	if got, want := recordedTree(t, linked), stagedTree(t, linked); got != want {
-		t.Errorf("recorded %s, but git add -A stages %s — the two ends disagree", got, want)
-	}
-	names, err := RunOutputIn(linked, "git", "ls-tree", "-r", "--name-only", recordedTree(t, linked))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(names, "pinned.txt") {
-		t.Errorf("tracked-but-ignored file dropped out — the index was not seeded: %q", names)
-	}
-}
-
-// identityAtCapture reads a file's identity through an open handle rather than
-// from its path, so it names the file that existed at the moment of the call.
-//
-// os.Stat is not usable for this. On Windows the FileInfo it returns carries
-// the path and resolves the volume serial + file index lazily, inside
-// os.SameFile — so both sides of a comparison re-resolve to whatever lives at
-// that name by then, and two stats of one path compare equal however the file
-// was replaced. The assertion below would hold for a correct implementation
-// and a broken one alike (T2087). (*os.File).Stat fills the id from the handle,
-// and discriminates on every platform.
-func identityAtCapture(t *testing.T, path string) os.FileInfo {
-	t.Helper()
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return fi
-}
-
-func TestRecordReplacesRatherThanRewritesInPlace(t *testing.T) {
-	// The reader is a different process — bin/precommit-guard, mid-commit —
-	// so "atomic" here is not a nicety. A rewrite in place (open with O_TRUNC,
-	// then write) exposes a window in which the record is a zero-length file,
-	// and the guard reading it then refuses a commit over content that is
-	// perfectly well blessed. Replacement is checked by file identity rather
-	// than by racing a reader. The write STRATEGY is all this asserts: that a
-	// second record lands new content is TestRecordIsAtomicallyReplaced's, and
-	// asserting it twice is two places to change when the contract moves.
-	dir := vtRepo(t)
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-	record := filepath.Join(dir, ".workspace", "verified-tree")
-
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("first record: %v", err)
-	}
-	before := identityAtCapture(t, record)
-
-	writeFile(t, dir, "b.txt", "b\n")
-	if err := bless(t, dir); err != nil {
-		t.Fatalf("second record: %v", err)
-	}
-	after := identityAtCapture(t, record)
-	if os.SameFile(before, after) {
-		t.Error("the record was rewritten in place — a reader can catch it empty")
-	}
-}
-
-// The oracle above must be able to FAIL, and that is not self-evident: the
-// defect this test set carries a scar from was an oracle that quietly stopped
-// discriminating on one platform (os.SameFile over two os.Stats of one path —
-// T2087), so TestRecordReplacesRatherThanRewritesInPlace passed for a correct
-// implementation and would have passed for a broken one. A test that cannot
-// fail is indistinguishable from a passing one, and nothing else in the suite
-// notices the difference.
-//
-// So: drive identityAtCapture over BOTH write strategies on a scratch file and
-// require it to tell them apart. Whatever platform this runs on, a capture that
-// has degraded back to naming the path rather than the file fails here — next
-// to the helper, rather than as a silent gap in the test that uses it.
-func TestIdentityAtCaptureTellsReplacementFromRewrite(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "record")
-
-	// Replacement — what recordBlessing does: a fresh file renamed over
-	// the name. The two captures must name different files.
-	if err := os.WriteFile(target, []byte("one\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	before := identityAtCapture(t, target)
-	tmp := filepath.Join(dir, ".record-tmp")
-	if err := os.WriteFile(tmp, []byte("two\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(tmp, target); err != nil {
-		t.Fatal(err)
-	}
-	if os.SameFile(before, identityAtCapture(t, target)) {
-		t.Error("a rename-replace read as the same file — the capture is naming the path, not the file, so the assertion it backs holds for any implementation")
-	}
-
-	// Rewrite in place — the strategy that exposes a zero-length window. Same
-	// file throughout, or the oracle answers "replaced" to everything and is
-	// equally useless in the other direction.
-	rewritten := identityAtCapture(t, target)
-	if err := os.WriteFile(target, []byte("three\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !os.SameFile(rewritten, identityAtCapture(t, target)) {
-		t.Error("an in-place rewrite read as a different file — the oracle calls everything a replacement and can never catch one")
-	}
-}
-
-// The temp file is an implementation detail of the atomic write, and it must
-// not outlive the write. .workspace/ is gitignored, so litter there is invisible
-// to every check in this repository — it would accumulate one file per verify
-// run, silently, and the only symptom would be a puzzling directory. This also
-// pins the mechanism rather than a proxy for it: a rename consumed the temp
-// file, and nothing else does.
-func TestRecordLeavesNoTemporaryFileBehind(t *testing.T) {
-	dir := vtRepo(t)
-	writeFile(t, dir, "a.txt", "a\n")
-	vtGit(t, dir, "add", "-A")
-	vtGit(t, dir, "commit", "-q", "-m", "base")
-
-	for i, content := range []string{"b\n", "c\n", "d\n"} {
-		writeFile(t, dir, "b.txt", content)
-		if err := bless(t, dir); err != nil {
-			t.Fatalf("record %d: %v", i, err)
-		}
-	}
-
-	entries, err := os.ReadDir(filepath.Join(dir, ".workspace"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, e := range entries {
-		names = append(names, e.Name())
-	}
-	if !slices.Equal(names, []string{"verified-tree"}) {
-		t.Errorf(".workspace/ holds %v after three records — the temp file outlived the write, and it is gitignored, so nothing else would ever say so", names)
-	}
-}
-
-// --- The blessing rule ---
-
-// blessedEnvelope is what a green `integration` run hands the judging layer.
 func blessedEnvelope(tree string) Envelope {
 	return Envelope{
 		SchemaVersion: EnvelopeSchemaVersion,
@@ -863,8 +181,8 @@ func TestBlessIfPassed_RecordsOnlyAPassingIntegrationVerdictOnThisTree(t *testin
 func TestBlessIfPassed_OutsideAGitCheckoutIsANoOp(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
-	if _, err := gitWithIndex(dir, "", "rev-parse", "--git-dir"); err == nil {
-		t.Fatalf("precondition: %s is still inside a git checkout", dir)
+	if id, err := treeIdentity(dir); err != nil || id != "" {
+		t.Fatalf("precondition: %s is still inside a git checkout (id %q, err %v)", dir, id, err)
 	}
 	if err := blessIfPassed(dir, blessedEnvelope(""), true); err != nil {
 		t.Errorf("blessIfPassed outside a checkout = %v, want a reported no-op", err)
@@ -940,8 +258,8 @@ func TestBlessing_IsTheSameFromVerifyAndFromTheJudge(t *testing.T) {
 	fromVerify := recordedTree(t, dir)
 
 	// The flow's path, over the same unchanged tree.
-	if err := clearBlessing(dir); err != nil {
-		t.Fatalf("clearBlessing: %v", err)
+	if err := verifiedtree.Clear(dir); err != nil {
+		t.Fatalf("clearing the blessing: %v", err)
 	}
 	body, err := json.Marshal(env)
 	if err != nil {
@@ -993,5 +311,119 @@ func TestJudgeStdin_ARedVerdictBlessesNothing(t *testing.T) {
 	}
 	if Exists(filepath.Join(dir, ".workspace", "verified-tree")) {
 		t.Error("a failing verdict blessed the tree")
+	}
+}
+
+// TestBlessIfPassed_ARecordThatCannotBeWrittenIsNotAMovedTree pins the
+// difference between the two ways a green verdict can end with nothing
+// recorded, because the recoveries are opposites.
+//
+// A checkout that does not ignore the record's path cannot be blessed at all:
+// the record would be part of what `git add -A` stages, so writing it would
+// change the very tree it names and no commit could ever match. The primitive
+// refuses, and this project must SURFACE that refusal — reported as
+// errTreeMoved it would read as "measure again", and measuring again reproduces
+// it exactly, forever, over a defect one .gitignore line fixes. Nothing may be
+// recorded either way.
+func TestBlessIfPassed_ARecordThatCannotBeWrittenIsNotAMovedTree(t *testing.T) {
+	dir := vtInit(t) // deliberately no .gitignore: .workspace/ is not ignored
+	writeFile(t, dir, "a.txt", "a\n")
+	vtGit(t, dir, "add", "-A")
+	vtGit(t, dir, "commit", "-q", "-m", "base")
+	here, err := treeIdentity(dir)
+	if err != nil {
+		t.Fatalf("treeIdentity: %v", err)
+	}
+
+	err = blessIfPassed(dir, blessedEnvelope(here), true)
+	if err == nil {
+		t.Fatal("a record that cannot be written must fail the run, not pass quietly")
+	}
+	if errors.Is(err, errTreeMoved) {
+		t.Errorf("reported as a moved tree, which sends the reader to re-measure: %v", err)
+	}
+	if !strings.Contains(err.Error(), ".workspace/verified-tree") {
+		t.Errorf("the failure must name the path it could not write, got: %v", err)
+	}
+	if Exists(filepath.Join(dir, ".workspace", "verified-tree")) {
+		t.Error("nothing may be recorded when the record's own path is not ignored")
+	}
+}
+
+// TestSettledTree_ACheckoutThatVanishedMidRunStampsNothing covers the other way
+// the after-reading can fail to answer: the run began with an identity and the
+// checkout is gone by the time it ends.
+//
+// It must report that it measured less than a full run rather than stamp the id
+// it started with — a stamp there would let a later verdict bless content this
+// run can no longer describe.
+func TestSettledTree_ACheckoutThatVanishedMidRunStampsNothing(t *testing.T) {
+	dir := vtRepo(t)
+	writeFile(t, dir, "a.txt", "a\n")
+	vtGit(t, dir, "add", "-A")
+	vtGit(t, dir, "commit", "-q", "-m", "base")
+	before, err := treeIdentity(dir)
+	if err != nil || before == "" {
+		t.Fatalf("precondition: treeIdentity = (%q, %v)", before, err)
+	}
+
+	// GIT_CEILING_DIRECTORIES stops the upward walk at this test's own temp
+	// parent, so removing .git leaves a directory that is not a checkout rather
+	// than one inside whatever encloses TMPDIR.
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	if err := os.RemoveAll(filepath.Join(dir, ".git")); err != nil {
+		t.Fatalf("removing .git: %v", err)
+	}
+
+	tree, incomplete := settledTree(dir, before)
+	if tree != "" {
+		t.Errorf("a run whose checkout vanished must stamp nothing, got %q", tree)
+	}
+	if !strings.Contains(incomplete, "could not be read") {
+		t.Errorf("incomplete = %q, want it to say the identity could not be read", incomplete)
+	}
+}
+
+// TestStepRecord_BlessesOnTheRunsOwnVerdict is the wiring between the pipeline
+// and the rule: verify's `record` step must hand blessIfPassed the envelope and
+// the verdict THIS run produced.
+//
+// It is one line, and that is exactly why it is pinned. A transposed or
+// hard-coded argument there — `true` for r.acceptable, an envelope from
+// anywhere else — is invisible to every test of blessIfPassed itself, and it
+// blesses a tree the run judged red.
+func TestStepRecord_BlessesOnTheRunsOwnVerdict(t *testing.T) {
+	// recorded is what the step left behind, and measured is the id the run
+	// judged — a green step must record exactly that one.
+	record := func(acceptable bool) (recorded, measured string, err error) {
+		t.Helper()
+		dir := vtRepo(t)
+		writeFile(t, dir, "a.txt", "a\n")
+		vtGit(t, dir, "add", "-A")
+		vtGit(t, dir, "commit", "-q", "-m", "base")
+		measured, err = treeIdentity(dir)
+		if err != nil {
+			t.Fatalf("treeIdentity: %v", err)
+		}
+		r := &verifyRun{root: dir, env: blessedEnvelope(measured), acceptable: acceptable}
+		if err := r.stepRecord(); err != nil {
+			return "", measured, err
+		}
+		if !Exists(filepath.Join(dir, ".workspace", "verified-tree")) {
+			return "", measured, nil
+		}
+		return recordedTree(t, dir), measured, nil
+	}
+
+	recorded, measured, err := record(true)
+	if err != nil {
+		t.Fatalf("a green run's record step: %v", err)
+	}
+	if recorded != measured {
+		t.Errorf("a green run recorded %q, want the tree it judged %q", recorded, measured)
+	}
+
+	if recorded, _, err := record(false); err != nil || recorded != "" {
+		t.Errorf("a red run = (%q, %v), want it to record nothing and not fail", recorded, err)
 	}
 }

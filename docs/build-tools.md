@@ -12,7 +12,7 @@ bin/build                       # build the compiler
 bin/verify                      # full pre-commit check
 ```
 
-The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries into `bin/`. Each binary embeds a hash of the `tools/` source files and refuses to run if the source has changed, prompting you to re-run `./make`.
+The only prerequisite is Go 1.26.1+ — the floor `tools/build` inherits from the flow SDK it calls for the tree blessing. A 1.25 toolchain still works where `GOTOOLCHAIN` is left at its `auto` default, which fetches the newer one on demand; `GOTOOLCHAIN=local` needs 1.26.1 installed. Running `./make` compiles all tool binaries into `bin/`. Each binary embeds a hash of the `tools/` source files and refuses to run if the source has changed, prompting you to re-run `./make`.
 
 ## Tool Inventory
 
@@ -462,10 +462,16 @@ warns: a silently skipped record is indistinguishable from a pass and would refu
 every later commit with no way to tell why. Outside a git checkout there is no
 commit to gate, so recording reports a no-op instead.
 
-**The identity function is this project's only for now.** The end state is that
-the flow defines the tree identity and how a passing measurement is recorded, and
-every managed project calls those primitives; `blessing.go`'s callers are shaped
-for that swap.
+**The tree identity is the flow's, not this project's.** `flow/pkg/verifiedtree`
+defines how the id is computed, recorded and checked; `blessing.go` holds only
+the policy that package leaves to its caller — which measurement earns a
+blessing. The fact has more than one reader (this project's verify writes the
+record, the workspace's commit guard reads it, a runner joins an earlier
+execution), and no reader may trust another's arithmetic: the primitive exists
+to end five hand-rolled copies of the same hash, and this project used to carry
+the sixth. The two ends of the workspace's `tool-contract.md` §8 contract now
+agree by construction rather than by two prose descriptions that happened to
+match.
 
 ### Flags
 

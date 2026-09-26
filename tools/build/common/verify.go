@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/promise-language/flow/pkg/verifiedtree"
 )
 
 var errInterrupted = fmt.Errorf("interrupted by Ctrl+C")
@@ -55,8 +56,8 @@ const verifyUsage = "usage: bin/verify [--clean] [--push] [--lock-timeout=<dur>]
 // run instead.
 //
 // The refusal NAMES THE REPLACEMENT, as every other refusal in this tree does —
-// ensureRecordIgnored names the .gitignore line, the staleness check names
-// ./make. A bare usage line says the flag is gone and leaves the reader to
+// the staleness check names ./make, and verifiedtree's refusal names the
+// .gitignore line. A bare usage line says the flag is gone and leaves the reader to
 // discover where the measurement went, and for the two WASM targets it went
 // somewhere that still exists and is still run on a schedule. Losing a flag and
 // losing a suite are different facts, and a caller is entitled to be told which
@@ -261,8 +262,10 @@ func (r *verifyRun) release() {
 	}
 }
 
-// stepClear drops any previous blessing before anything else runs.
-func (r *verifyRun) stepClear() error { return clearBlessing(r.root) }
+// stepClear drops any previous blessing before anything else runs. The removal
+// is verifiedtree's, like the writing end it undoes — an absent record is
+// success there, which is exactly the state this step exists to produce.
+func (r *verifyRun) stepClear() error { return verifiedtree.Clear(r.root) }
 
 // stepClean wipes the repo-local home so the run starts from a known state.
 // It cannot change what is measured — `integration` spells its own commands —

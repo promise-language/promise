@@ -40,7 +40,7 @@ func RunPrereqs(root string, args []string) error {
 		ver, _ := RunOutputQuiet("go", "version")
 		fmt.Printf("✅ go:       %s\n", ver)
 	} else {
-		fmt.Println("❌ go:       NOT FOUND — install Go 1.25+ from https://go.dev/dl/")
+		fmt.Println("❌ go:       NOT FOUND — install Go 1.26.1+ from https://go.dev/dl/")
 		ok = false
 	}
 

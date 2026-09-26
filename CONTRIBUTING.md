@@ -20,7 +20,7 @@ the scheduler, allocator, and PAL are all codegen-emitted LLVM IR. See
 
 ## 1. Prerequisites
 
-- **Go 1.25+** (the only thing needed to build the build tools)
+- **Go 1.26.1+** (the only thing needed to build the build tools; a 1.25 toolchain also works under the default `GOTOOLCHAIN=auto`, which fetches the newer one on demand)
 - **Java** — used by ANTLR4 to regenerate the parser
 - **clang** and **LLVM 22+** (`opt`, `llc`, `lld`)
 - **wasmtime** and **Node.js** — only for the WASM test targets

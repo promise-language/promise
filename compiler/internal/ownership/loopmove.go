@@ -30,24 +30,24 @@ import (
 // Precision limits (biased toward false positives, per this package's existing
 // convention — a rejected valid program is a diagnostic, a missed move is a
 // use-after-free):
-//   - Only the three move sites that call noteLoopMoveSite yield diagnostics; the
+//   - Only the move sites that call noteLoopMoveSite yield diagnostics; the
 //     mustUse `<-t` discharge is not hooked, so that shape stays undetected
-//     (false-negative direction, no regression).
-//   - A move inside a `while` CONDITION is not reported: the condition is checked
-//     before the entry-state snapshot, so the name already reads Moved at entry.
-//     The classic-for condition and update clauses ARE covered (their snapshot is
-//     taken before the header). Same false-negative direction.
-//   - refcountedShare exempts every move of a Channel/Arc/Weak, including an
-//     explicit `sink(move ch)` into a consuming parameter — which does transfer
-//     the single refcount and so IS loop-carried. Narrowing that needs the move
-//     site to carry whether it is a sharing or a consuming move (T1535).
+//     (false-negative direction, no regression). Tracked as T1560.
 
 // loopMoveSite is one recorded move of a name inside one loop body: the position
 // drives the diagnostic and the back-edge reachability test, the type drives the
-// refcountedShare carve-out.
+// refcountedShare carve-out. `sharing` narrows that carve-out further (T1536,
+// ex-T1535): it is true only at the specific call sites codegen lowers as a
+// refcount bump — for-in ITERABLE and while-let VALUE evaluation, and `go {}`
+// block captures (retainCapturedSpawnHandles/§17.4 duplicate the handle at the
+// spawn site) — never at a genuine ownership transfer (explicit `move` argument,
+// `move ||` capture, assignment, return, var-decl init, classic-for init). Only
+// a site with sharing=true is eligible for the refcountedShare exemption; every
+// other Channel/Arc/Weak move site is checked like any other type.
 type loopMoveSite struct {
-	pos ast.Pos
-	typ types.Type
+	pos     ast.Pos
+	typ     types.Type
+	sharing bool
 }
 
 // noteLoopMoveSite records that `name` is moved at `pos` inside every loop body
@@ -58,7 +58,7 @@ type loopMoveSite struct {
 // v); break; }`) still re-executes once per iteration of an OUTER loop, so the
 // outer frame has to see it too. Duplicate positions are dropped so a site is
 // recorded once per frame.
-func (c *Checker) noteLoopMoveSite(name string, pos ast.Pos, typ types.Type) {
+func (c *Checker) noteLoopMoveSite(name string, pos ast.Pos, typ types.Type, sharing bool) {
 	if name == "" || name == "_" || len(c.loopFrames) == 0 {
 		return
 	}
@@ -74,17 +74,18 @@ func (c *Checker) noteLoopMoveSite(name string, pos ast.Pos, typ types.Type) {
 			}
 		}
 		if !dup {
-			frame.moveSites[name] = append(frame.moveSites[name], loopMoveSite{pos: pos, typ: typ})
+			frame.moveSites[name] = append(frame.moveSites[name], loopMoveSite{pos: pos, typ: typ, sharing: sharing})
 		}
 	}
 }
 
-// refcountedShare reports whether a "move" of this type is lowered as a refcount
-// bump rather than an ownership transfer — Channel, Arc and Weak all share the
-// pointer instead of consuming it (see expr_concurrency.go, "refcounted —
-// sharing the pointer is fine"). Re-performing such a move on every iteration is
-// sound, so these are exempt. Required for the `for v in ch` inside a `go {}`
-// block nested in an outer loop shape used across tests/concurrency.
+// refcountedShare reports whether type t is one of the refcounted sharable
+// handles (Channel, Arc, Weak) eligible for the sharing carve-out. This is a
+// necessary but not sufficient condition: reportLoopCarriedMoves also requires
+// the specific recorded site to have sharing=true — see loopMoveSite. A
+// refcounted type moved at a non-sharing site (an explicit `move` argument, a
+// `move ||` capture, an assignment) is a genuine ownership transfer and is NOT
+// exempt (T1536, ex-T1535).
 func refcountedShare(t types.Type) bool {
 	if t == nil {
 		return false
@@ -250,7 +251,7 @@ func (c *Checker) reportLoopCarriedMoves(body *ast.Block, entry StateMap, skip .
 			continue
 		}
 		for _, site := range moveSites[name] {
-			if refcountedShare(site.typ) || movePathAlwaysLeavesLoop(body.Stmts, site.pos) {
+			if (site.sharing && refcountedShare(site.typ)) || movePathAlwaysLeavesLoop(body.Stmts, site.pos) {
 				continue
 			}
 			// One diagnostic per name per loop, at the first site the back edge

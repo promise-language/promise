@@ -1721,13 +1721,20 @@ func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 	// silent UAF unless recordAliasHandleReuseCandidates sees loopDepth>0 and
 	// lands the candidate on this frame (raised by enterLoopBody).
 	snap := c.enterLoopBody(s.Body)
+	// T1536: snapshot entry state BEFORE the condition, mirroring
+	// checkClassicForStmt — the condition is re-evaluated every iteration, so a
+	// move inside it (e.g. a `move` call argument or a `move ||` capture) is
+	// exactly as loop-carried as a body move. Previously this clone happened
+	// after checkExpr(s.Cond), so a move performed by the condition itself was
+	// already Moved at "entry" and reportLoopCarriedMoves's precondition never
+	// fired.
+	savedState := c.state.clone()
 	c.checkExpr(s.Cond)
 	// Expire call-scoped borrows from the condition so the loop body can
 	// re-borrow the same variables.
 	if c.borrows != nil {
 		c.borrows.ExpireCallScoped()
 	}
-	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
 	c.reportLoopCarriedMoves(s.Body, savedState)
@@ -1741,6 +1748,13 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	// so a bare single-owner handle aliased into a generic call there is reused
 	// across the back-edge (silent UAF) unless its candidate lands on this frame.
 	snap := c.enterLoopBody(s.Body)
+	// T1536: snapshot entry state BEFORE the value expression, mirroring
+	// checkWhileStmt — the value expression is re-evaluated every iteration, so
+	// a move nested inside it (e.g. a `move` call argument) is exactly as
+	// loop-carried as a body move. The while-let source's own per-iteration
+	// consumption below is intentional (T1436) and is excluded via the `skip`
+	// list passed to reportLoopCarriedMoves, the same way s.Binding is.
+	savedState := c.state.clone()
 	c.checkExpr(s.Value)
 	// T1436: a while-let consumes its optional source exactly like if-let —
 	// genWhileUnwrapStmt clears the source ident's drop flag and drops the
@@ -1749,7 +1763,11 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	// a use-after-move instead of reading the freed payload at runtime (SEGV).
 	// A call/getter source is a no-op (tryMove only moves idents); a body that
 	// reassigns the source re-inits it, so terminating while-let loops stay legal.
-	c.tryMove(s.Value)
+	//
+	// T1536 (ex-T1535): tryMoveSharing — this VALUE position is re-evaluated
+	// every iteration and, for the refcounted handles, codegen's duplicate-on-
+	// unwrap lowering makes repeating it sound; see tryMoveSharing's doc.
+	c.tryMoveSharing(s.Value)
 	// T0589: same shape as if-let — `while x := a { … }` consumes the inner
 	// heap value of a borrowed Optional parameter on each loop iteration.
 	// Caller still owns and drops the same allocation → double-free / UAF on
@@ -1768,7 +1786,6 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	if s.Binding != "" && s.Binding != "_" {
 		c.state[s.Binding] = Owned
 	}
-	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 
 	// T1153: the while-unwrap binding is a fresh owned value produced per iteration
@@ -1787,7 +1804,15 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	}
 
 	c.checkBlock(s.Body)
-	c.reportLoopCarriedMoves(s.Body, savedState, s.Binding)
+	// T1536: the while-let source identifier (if bare) is deliberately moved
+	// every iteration above (T1436) — exclude it from the loop-carried-move
+	// check the same way the binding is, or the ordinary `while x := o { … }`
+	// idiom would now misreport.
+	skip := []string{s.Binding}
+	if ident, ok := s.Value.(*ast.IdentExpr); ok {
+		skip = append(skip, ident.Name)
+	}
+	c.reportLoopCarriedMoves(s.Body, savedState, skip...)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)
 	c.exitLoopBody(snap)
 }
@@ -1796,8 +1821,14 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	c.checkExpr(s.Iterable)
 	// For-in borrows the iterable for iteration — field reads are not
 	// consumed, so skip the field-move check for MemberExpr (B0341).
+	//
+	// T1536 (ex-T1535): tryMoveSharing — the ITERABLE is evaluated once per
+	// loop entry but, for a channel iterable nested in an outer loop (`for i
+	// in .. { go { for v in ch {} } }`), codegen's duplicate-on-capture
+	// lowering makes repeating it across the OUTER back edge sound; see
+	// tryMoveSharing's doc.
 	if _, isMember := s.Iterable.(*ast.MemberExpr); !isMember {
-		c.tryMove(s.Iterable)
+		c.tryMoveSharing(s.Iterable)
 	}
 	// Expire call-scoped borrows from the iterable expression so the loop
 	// body can re-borrow the same variables.
@@ -2066,6 +2097,18 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 		}
 	} else if s.UpdateValue != nil {
 		c.checkExpr(s.UpdateValue)
+		// T1536 (ex-T1561): a simple `=` update clause re-owns its target on
+		// every iteration, exactly like the identical shape in the body
+		// (TestT1498MoveThenReassignOK) — without this, reportLoopCarriedMoves
+		// below sees the target moved-and-never-reowned and wrongly rejects a
+		// valid program (`for …; …; v = f() { g(move v); }`).
+		if s.UpdateOp == ast.OpAssign {
+			if ident, ok := s.UpdateTarget.(*ast.IdentExpr); ok {
+				if _, tracked := c.state[ident.Name]; tracked {
+					c.state[ident.Name] = Owned
+				}
+			}
+		}
 	}
 	c.reportLoopCarriedMoves(s.Body, savedState)
 	c.mergeLoopState(s.Body, savedState, savedBorrows)

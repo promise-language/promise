@@ -758,10 +758,10 @@ test_t0441_three_element_mixed_types() `test {
 // test used to spell out is now a compile error — a move of a binding declared
 // outside the loop re-reaches the move site on the back edge. `Vector.filled`
 // pushes in a loop from a BORROWED generic param, so it covers
-// `maybeDupPushElement`'s tuple clone (the always-dup, no-drop-flag path) but
-// NOT `pushElemNeedsDup`'s runtime drop-flag CFG, which the moved-local form was
-// the only cover for. That CFG is no longer reachable from a legal program —
-// tracked as a dead-path/coverage question in T1534.
+// `maybeDupPushElement`'s tuple clone (the always-dup, no-drop-flag path). The
+// runtime drop-flag re-check CFG the moved-local form used to be the only cover
+// for was dead code (T1536, ex-T1534: no legal program could reach the
+// already-consumed branch) and has been removed from expr_container.go.
 test_t0399_repush_owned_tuple_loop() `test {
   t := ("hello".to_string(), 42);
   v := (string, int)[].filled(t, 3);

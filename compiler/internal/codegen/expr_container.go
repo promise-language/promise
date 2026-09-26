@@ -166,42 +166,24 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 			// Don't clear source drop flag — source retains its string.
 			// Don't claim string temp — original temp is freed normally by cleanup.
 		} else {
-			// B0302: When the source is an ident with a drop flag AND the element
-			// type is droppable, use a runtime check: if the flag is still true this
-			// is the first push (move semantics — clear flag). If false, the variable
-			// was already consumed (e.g., in a prior loop iteration of Vector.filled)
-			// — dup the element to avoid aliased pointers that cause double-free.
+			// B0302: When the source is an ident with a drop flag, this is always
+			// the first (and only) push of it — a plain move, no dup needed. Every
+			// source shape that could reach a SECOND push of the same drop-flagged
+			// ident is now a compile error: straight-line reuse and conditional-
+			// merge reuse were already "use of moved variable" before this file
+			// existed, and T1536 closed the loop-carried forms (loop-body move,
+			// while/for-header move, and the refcounted-consume exemption that
+			// used to let a loop-carried `v.push(move r)` of an Arc/Weak element
+			// slip through). `Vector.filled`, the shape that originally motivated
+			// a runtime dup-on-second-push check here, pushes from a BORROWED
+			// parameter — no drop flag, so it was never on this path at all; it
+			// takes the "no drop flag" branch below. T1534 removed the now-dead
+			// runtime CondBr/Phi that used to gate this on a flag re-check.
 			// For idents WITHOUT a drop flag (function params), always dup droppable
 			// types. For non-ident sources, see the T0376 branch below.
 			dupped := false
 			if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
-				if flagAlloca, hasFlag := c.dropFlags[ident.Name]; hasFlag {
-					if c.pushElemNeedsDup(resolvedElem) {
-						// Runtime branch: flag=true → first use (move), flag=false → dup
-						flag := c.block.NewLoad(irtypes.I1, flagAlloca)
-						moveBlock := c.newBlock("push.move")
-						dupBlock := c.newBlock("push.dup")
-						mergeBlock := c.newBlock("push.merge")
-						c.block.NewCondBr(flag, moveBlock, dupBlock)
-
-						c.block = moveBlock
-						moveEnd := c.block
-						c.block.NewBr(mergeBlock)
-
-						// Generate dup INSIDE the dup block so the allocation only
-						// happens when the value was already consumed.
-						c.block = dupBlock
-						dupVal := c.maybeDupPushElement(argVal, resolvedElem)
-						dupEnd := c.block
-						c.block.NewBr(mergeBlock)
-
-						c.block = mergeBlock
-						argVal = c.block.NewPhi(
-							ir.NewIncoming(argVal, moveEnd),
-							ir.NewIncoming(dupVal, dupEnd),
-						)
-						dupped = true
-					}
+				if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
 					c.clearDropFlag(ident.Name)
 				} else if !c.isBareModuleGetterIdent(ident) {
 					// No drop flag (function parameter): always dup droppable types.

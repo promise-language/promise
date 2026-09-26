@@ -372,8 +372,8 @@ func TestT1498ChannelIterInGoBlockInLoopOK(t *testing.T) {
 // A move in the classic-`for` CONDITION re-runs on every iteration just like a
 // body move. Its position is in the header, so no body statement contains it —
 // containingStmtIndex returns -1 and the site is (correctly) assumed to reach the
-// back edge. Contrast TestT1498MoveInWhileConditionNotYetReported below: the
-// classic-for snapshot is taken before the header, the plain-`while` one is not.
+// back edge. See also TestT1498MoveInWhileConditionReported: the plain-`while`
+// form is the same shape, now covered the same way (T1536).
 func TestT1498MoveInClassicForConditionReported(t *testing.T) {
 	errs := ownerErrs(t, t1498Sink+`
 		f() {
@@ -624,12 +624,13 @@ func TestT1498TwoNamesReportedInStableOrder(t *testing.T) {
 
 // === Move sites other than a `move`-marked call argument ===
 //
-// noteLoopMoveSite is called from tryMove, tryMoveConsume and checkLambdaExpr,
-// and each of those has many callers. The tests above all reach it through a
-// `move`-marked call argument; the ones below cover the other statement and
-// expression forms that consume a name, so a future refactor that reroutes one
-// of them (say, binding a new tryMove* wrapper) cannot silently drop its move
-// site.
+// noteLoopMoveSite is called from moveLocal (the shared tail of tryMoveImpl —
+// via the tryMove/tryMoveSharing wrappers — tryMoveConsume, and a lambda `move`
+// capture), and from goclosure.go's two `go {}` capture-marking functions —
+// each has many callers. The tests above all reach it through a `move`-marked
+// call argument; the ones below cover the other statement and expression forms
+// that consume a name, so a future refactor that reroutes one of them cannot
+// silently drop its move site.
 
 // Binding an owned local to a new typed variable moves it (strings are non-Copy),
 // so the second iteration binds a freed value. stmt.go's typed-var-decl path.
@@ -933,15 +934,14 @@ func TestT1498UseAfterLoopStillReportsPlainMoved(t *testing.T) {
 	}
 }
 
-// === Known gaps, pinned so the fix flips a test rather than adding one ===
-
-// T1536: a move in a plain `while` CONDITION is NOT reported — checkWhileStmt
-// walks the condition before cloning the entry state, so the name already reads
-// Moved at "entry". This still miscompiles (repro B's unbounded allocation), so
-// this test pins the current wrong acceptance; flip it to expectOwnerError when
-// T1536 lands. The classic-for header, whose snapshot IS taken first, is covered
-// by TestT1498MoveInClassicForConditionReported.
-func TestT1498MoveInWhileConditionNotYetReported(t *testing.T) {
+// T1536: a move in a plain `while` CONDITION re-runs on every iteration just
+// like a body move. checkWhileStmt now clones the entry state before walking
+// the condition (mirroring checkClassicForStmt), so the name reads Owned at
+// "entry" and the back-edge re-reach is caught. This is repro B's shape from
+// the item (an unbounded allocation from a moved closure capture, verified via
+// `take`'s plain move here); the classic-for header form is covered by
+// TestT1498MoveInClassicForConditionReported.
+func TestT1498MoveInWhileConditionReported(t *testing.T) {
 	errs := ownerErrs(t, t1498Sink+`
 		f() {
 			string v = "-" + "n";
@@ -951,14 +951,32 @@ func TestT1498MoveInWhileConditionNotYetReported(t *testing.T) {
 			}
 		}
 	`)
-	expectNoOwnerError(t, errs, "moved on every iteration")
+	expectOwnerError(t, errs, "use of moved variable 'v': it is moved on every iteration of this loop")
 }
 
-// T1535: refcountedShare exempts EVERY Arc/Weak move, including an explicit
-// `sink(move r)` into a consuming parameter — which does hand over the single
-// refcount and so is genuinely loop-carried. Pinned for the same reason as
-// T1536's test: closing T1535 should flip these to expectOwnerError.
-func TestT1498ArcAndWeakConsumingMoveExemptKnownGap(t *testing.T) {
+// T1536: the item's exact repro — a `move ||` lambda-capture inside a `while`
+// CONDITION, not just a plain `move`. This exercises checkLambdaExpr's
+// noteLoopMoveSite call, a different code path than tryMove's.
+func TestT1498MoveCaptureInWhileConditionReported(t *testing.T) {
+	errs := ownerErrs(t, t1498Sink+`
+		f() {
+			string suffix = "-" + "n";
+			int i = 0;
+			while (consume(move || -> suffix) > 0 && i < 3) {
+				i += 1;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'suffix': it is moved on every iteration of this loop")
+}
+
+// T1536 (ex-T1535): refcountedShare used to exempt EVERY Arc/Weak move,
+// including an explicit `sink(move r)` into a consuming parameter — which does
+// hand over the single refcount and so is genuinely loop-carried. The `sharing`
+// flag on loopMoveSite now narrows the exemption to the specific call sites
+// codegen lowers as a refcount bump (for-in iterable, while-let value, `go {}`
+// captures); an explicit `move` call argument is not one of them.
+func TestT1498ArcAndWeakConsumingMoveInLoopReported(t *testing.T) {
 	errs := ownerErrs(t, `
 		sink_ref(Ref[int] move r) int { return 1; }
 		f() {
@@ -968,7 +986,7 @@ func TestT1498ArcAndWeakConsumingMoveExemptKnownGap(t *testing.T) {
 			}
 		}
 	`)
-	expectNoOwnerError(t, errs, "moved on every iteration")
+	expectOwnerError(t, errs, "use of moved variable 'r': it is moved on every iteration of this loop")
 
 	errs = ownerErrs(t, `
 		sink_weak(Weak[int] move w) int { return 1; }
@@ -980,8 +998,44 @@ func TestT1498ArcAndWeakConsumingMoveExemptKnownGap(t *testing.T) {
 			}
 		}
 	`)
-	expectNoOwnerError(t, errs, "moved on every iteration")
+	expectOwnerError(t, errs, "use of moved variable 'w': it is moved on every iteration of this loop")
 }
+
+// T1536: audited per the item's suggestion — checkWhileUnwrapStmt's VALUE
+// expression has the same "checked before the entry snapshot" bug as a plain
+// `while` condition. A move nested inside the value expression (here, a `move`
+// call argument to `wrap`, not the while-let source itself) is loop-carried.
+func TestT1498MoveInWhileUnwrapValueReported(t *testing.T) {
+	errs := ownerErrs(t, `
+		wrap(string move s) int? { return s.len; }
+		f() {
+			string v = "-" + "n";
+			int i = 0;
+			while r := wrap(move v) {
+				i += 1;
+				if i >= 3 { break; }
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'v': it is moved on every iteration of this loop")
+}
+
+// Regression guard for the fix above: the ordinary while-let idiom — the
+// source identifier itself is what's consumed every iteration (T1436's
+// intentional per-iteration move) — must stay accepted now that the entry
+// snapshot is taken before the value expression is checked.
+func TestT1498WhileUnwrapOrdinarySourceMoveOK(t *testing.T) {
+	ownerOK(t, `
+		f() {
+			int? o = 5;
+			while r := o {
+				o = none;
+			}
+		}
+	`)
+}
+
+// === Known gaps, pinned so the fix flips a test rather than adding one ===
 
 // T1560: `<-t` frees the Task's G but ownership never marks the handle moved, so
 // neither the straight-line double await nor the loop form is diagnosed — both
@@ -1012,17 +1066,32 @@ func TestT1498AwaitOfOuterTaskNotYetReported(t *testing.T) {
 	expectNoOwnerError(t, errs, "use of moved variable")
 }
 
-// T1561: the classic-`for` UPDATE clause is checked as a bare expression —
-// checkClassicForStmt never sets its target back to Owned — so a reassignment
-// there does not shield the move even though it runs before the back edge. The
-// equivalent `while` form (reassign as the last body statement) is accepted and
-// runs correctly, so this rejection is a false positive. Flip to ownerOK when
-// T1561 lands.
-func TestT1498ClassicForUpdateReassignFalsePositive(t *testing.T) {
-	errs := ownerErrs(t, t1498Sink+`
+// T1536 (ex-T1561): the classic-`for` UPDATE clause's simple-`=` reassignment
+// now re-owns its target, exactly like the equivalent `while` form (reassign
+// as the last body statement, TestT1498MoveThenReassignOK) — both are accepted
+// and run correctly.
+func TestT1498ClassicForUpdateReassignOK(t *testing.T) {
+	ownerOK(t, t1498Sink+`
 		f() {
 			string v = "-" + "n";
 			for int i = 0; i < 3; v = "x" + "y" {
+				take(move v);
+			}
+		}
+	`)
+}
+
+// Coverage guard for the re-own fix above: a COMPOUND update clause (`+=`, not
+// a simple `=`) must NOT re-own its target — checkClassicForStmt's new re-own
+// branch is gated on `s.UpdateOp == ast.OpAssign` specifically, mirroring
+// checkAssignStmt's own resurrection guard (only a simple `=` resurrects).
+// Without the gate, `v += "x"` would wrongly re-own `v` the same way `v = "x"`
+// does, silently accepting a shape that's still genuinely loop-carried.
+func TestT1498ClassicForUpdateCompoundDoesNotReownReported(t *testing.T) {
+	errs := ownerErrs(t, t1498Sink+`
+		f() {
+			string v = "-" + "n";
+			for int i = 0; i < 3; v += "x" {
 				take(move v);
 			}
 		}
@@ -1052,6 +1121,45 @@ func TestT1498RefcountedShareClassification(t *testing.T) {
 	for _, tc := range cases {
 		if got := refcountedShare(tc.typ); got != tc.want {
 			t.Errorf("refcountedShare(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// T1536 (ex-T1535): reportLoopCarriedMoves's exemption requires BOTH
+// site.sharing AND refcountedShare(site.typ) — neither alone is sufficient.
+// Exercised directly against reportLoopCarriedMoves (white-box) rather than
+// only through source, since only two call sites (tryMoveSharing's two
+// callers) and go{}-capture marking ever set sharing=true; a source-level test
+// can't easily isolate the "sharing but non-refcounted type" cell below.
+func TestT1498SharingRequiresRefcountedType(t *testing.T) {
+	body := &ast.Block{}
+	body.SetPosEnd(
+		ast.Pos{File: "test.pr", Line: 2, Column: 0},
+		ast.Pos{File: "test.pr", Line: 8, Column: 0},
+	)
+	site := ast.Pos{File: "test.pr", Line: 4, Column: 6}
+	arc := types.NewArc(types.TypInt)
+
+	cases := []struct {
+		name       string
+		sharing    bool
+		typ        types.Type
+		wantReport bool
+	}{
+		{"sharing + refcounted: exempt", true, arc, false},
+		{"sharing + non-refcounted: not exempt", true, types.TypString, true},
+		{"non-sharing + refcounted: not exempt (T1535 fix)", false, arc, true},
+		{"non-sharing + non-refcounted: not exempt", false, types.TypString, true},
+	}
+	for _, tc := range cases {
+		frame := &aliasLoopFrame{moveSites: map[string][]loopMoveSite{
+			"v": {{pos: site, typ: tc.typ, sharing: tc.sharing}},
+		}}
+		c := &Checker{state: StateMap{"v": Moved}, loopFrames: []*aliasLoopFrame{frame}}
+		c.reportLoopCarriedMoves(body, StateMap{"v": Owned})
+		got := len(c.errors) != 0
+		if got != tc.wantReport {
+			t.Errorf("%s: reported=%v, want %v (errs=%v)", tc.name, got, tc.wantReport, c.errors)
 		}
 	}
 }
@@ -1086,15 +1194,15 @@ func TestT1498NoteLoopMoveSiteDedupsPerFrame(t *testing.T) {
 
 	// Outside any loop there is no frame to record into — must be a silent no-op.
 	c := &Checker{}
-	c.noteLoopMoveSite("v", first, types.TypString)
+	c.noteLoopMoveSite("v", first, types.TypString, false)
 
 	frame := &aliasLoopFrame{}
 	c.loopFrames = []*aliasLoopFrame{frame}
-	c.noteLoopMoveSite("", first, types.TypString)  // unnamed
-	c.noteLoopMoveSite("_", first, types.TypString) // discard
-	c.noteLoopMoveSite("v", first, types.TypString)
-	c.noteLoopMoveSite("v", first, types.TypString) // same site again — dropped
-	c.noteLoopMoveSite("v", second, types.TypString)
+	c.noteLoopMoveSite("", first, types.TypString, false)  // unnamed
+	c.noteLoopMoveSite("_", first, types.TypString, false) // discard
+	c.noteLoopMoveSite("v", first, types.TypString, false)
+	c.noteLoopMoveSite("v", first, types.TypString, false) // same site again — dropped
+	c.noteLoopMoveSite("v", second, types.TypString, false)
 
 	if len(frame.moveSites) != 1 {
 		t.Fatalf("expected sites for exactly one name, got %v", frame.moveSites)

@@ -64,7 +64,13 @@ func (c *Checker) checkGoClosureCaptures(e *ast.GoExpr) {
 		// again. noteLoopMoveSite first, so a capture inside a loop body is caught
 		// by the existing loop-move machinery (a second iteration would move an
 		// already-moved closure).
-		c.noteLoopMoveSite(name, e.Pos(), v.Type())
+		//
+		// T1536 (ex-T1535): sharing=true — a `go {}` block capture is a spawn-site
+		// duplication (retainCapturedSpawnHandles, §17.4), not a transfer, for the
+		// refcounted handles (Channel/Arc/Weak) refcountedShare recognizes. For
+		// every other closure type sharing is moot: refcountedShare(typ) is false
+		// so the exemption never applies regardless.
+		c.noteLoopMoveSite(name, e.Pos(), v.Type(), true)
 		c.state[name] = Moved
 	}
 }
@@ -119,7 +125,14 @@ func (c *Checker) checkGoDroppableCaptures(e *ast.GoExpr) {
 			continue
 		}
 		// Mark moved: the goroutine takes ownership (B0354).
-		c.noteLoopMoveSite(name, e.Pos(), typ)
+		//
+		// T1536 (ex-T1535): sharing=true — for the Arc/Weak subset of what
+		// reaches this path (Channel is already skipped above), the spawn site
+		// duplicates the handle (retainCapturedSpawnHandles, §17.4) rather than
+		// transferring it, so a loop-carried capture here is sound to repeat.
+		// For every other droppable type sharing is moot: refcountedShare(typ)
+		// is false so the exemption never applies regardless.
+		c.noteLoopMoveSite(name, e.Pos(), typ, true)
 		c.state[name] = Moved
 	}
 }

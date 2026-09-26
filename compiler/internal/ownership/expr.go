@@ -542,7 +542,28 @@ func (c *Checker) rejectWrapCoercedHandleEscapeExpr(expr ast.Expr) bool {
 // variable is not actively borrowed. Borrowed parameters are not moved —
 // reads stay legal — but consuming contexts (call to `~` param, etc.) must
 // use tryMoveConsume to enforce the T0338 check.
+//
+// This is the plain (non-consuming-slot) move path: return, var-decl init,
+// assignment, classic-for init, match subject, and similar positions. These
+// are genuine ownership transfers (§6.2), so their loop-move sites are never
+// exempt from the refcountedShare carve-out — see tryMoveSharing for the two
+// positions that are.
 func (c *Checker) tryMove(expr ast.Expr) {
+	c.tryMoveImpl(expr, false)
+}
+
+// tryMoveSharing is tryMove for the two positions codegen lowers as a refcount
+// bump rather than an ownership transfer — a for-in loop's ITERABLE and a
+// while-let's unwrapped VALUE (T1536, ex-T1535). Repeating either of these
+// every loop iteration re-performs a duplicate, not a consume, so a
+// Channel/Arc/Weak moved here is eligible for the refcountedShare exemption in
+// reportLoopCarriedMoves. Every other tryMove caller keeps the non-sharing
+// default.
+func (c *Checker) tryMoveSharing(expr ast.Expr) {
+	c.tryMoveImpl(expr, true)
+}
+
+func (c *Checker) tryMoveImpl(expr ast.Expr, sharing bool) {
 	// T1212: reject an escaping wrap-coerced borrowed single-owner handle local.
 	if c.rejectWrapCoercedHandleEscapeExpr(expr) {
 		return
@@ -612,7 +633,7 @@ func (c *Checker) tryMove(expr ast.Expr) {
 	if c.state[ident.Name] == Borrowed {
 		return
 	}
-	c.moveLocal(ident.Name, ident.Pos(), v.Type())
+	c.moveLocal(ident.Name, ident.Pos(), v.Type(), sharing)
 }
 
 // moveLocal is the shared tail of every move of a non-Copy local — tryMove,
@@ -620,8 +641,12 @@ func (c *Checker) tryMove(expr ast.Expr) {
 // ruled out Copy types and Borrowed state. A use-bound variable cannot be moved
 // (it needs close() at scope exit), and a variable cannot be moved while a
 // borrow of it is live; otherwise the site is recorded for the T1498 loop
-// back-edge check and the name is marked Moved.
-func (c *Checker) moveLocal(name string, pos ast.Pos, typ types.Type) {
+// back-edge check and the name is marked Moved. `sharing` (T1536, ex-T1535)
+// threads straight through to noteLoopMoveSite — true only from tryMoveSharing's
+// two callers, false from every other caller (tryMoveConsume, a lambda `move`
+// capture), since those are genuine ownership transfers, not the refcount-bump
+// duplication a sharing site represents.
+func (c *Checker) moveLocal(name string, pos ast.Pos, typ types.Type, sharing bool) {
 	if c.pinned[name] {
 		c.errorf(pos, "cannot move use-bound variable '%s'", name)
 		return
@@ -629,7 +654,7 @@ func (c *Checker) moveLocal(name string, pos ast.Pos, typ types.Type) {
 	if c.borrows != nil && c.borrows.HasAnyBorrow(name) {
 		c.errorf(pos, "cannot move '%s' while it is borrowed", name)
 	}
-	c.noteLoopMoveSite(name, pos, typ)
+	c.noteLoopMoveSite(name, pos, typ, sharing)
 	c.state[name] = Moved
 }
 
@@ -729,7 +754,9 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	if _, tracked := c.state[ident.Name]; !tracked {
 		return
 	}
-	c.moveLocal(ident.Name, ident.Pos(), v.Type())
+	// T1536 (ex-T1535): a consume site is always a genuine ownership transfer,
+	// never the refcount-bump lowering — never eligible for the sharing carve-out.
+	c.moveLocal(ident.Name, ident.Pos(), v.Type(), false)
 }
 
 // tryMoveConsumeCastSubject peels ParenExpr / CastExpr from expr and runs
@@ -3181,7 +3208,9 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 				c.errorf(e.Pos(), "use of moved variable '%s'", name)
 				continue
 			}
-			c.moveLocal(name, e.Pos(), cv.Obj.Type())
+			// T1536 (ex-T1535): an explicit `move ||` capture is a real ownership
+			// transfer, not the duplicate-on-plain-capture case — never sharing.
+			c.moveLocal(name, e.Pos(), cv.Obj.Type(), false)
 		}
 	}
 

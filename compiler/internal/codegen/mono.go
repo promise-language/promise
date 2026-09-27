@@ -265,7 +265,7 @@ func collectMonoInstances(info *sema.Info, spiralInstances map[string]bool) []*t
 		}
 		switch origin := inst.Origin().(type) {
 		case *types.Named:
-			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			subst := types.FieldSubstMap(origin, inst.TypeArgs())
 			for _, f := range origin.AllFields() {
 				ft := types.Substitute(f.Type(), subst)
 				discoverInstances(ft, &result, seen)
@@ -361,7 +361,7 @@ func resolveTypeInstancesFromFuncInstances(
 		}
 		switch origin := inst.Origin().(type) {
 		case *types.Named:
-			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			subst := types.FieldSubstMap(origin, inst.TypeArgs())
 			for _, f := range origin.AllFields() {
 				ft := types.Substitute(f.Type(), subst)
 				discoverInstances(ft, &newInstances, seen)
@@ -834,7 +834,7 @@ func CollectArgTypeNames(inst *types.Instance) []*types.TypeName {
 				obj := o.Obj()
 				if obj != nil && !seen[obj] {
 					seen[obj] = true
-					subst := types.BuildSubstMap(o.TypeParams(), tt.TypeArgs())
+					subst := types.FieldSubstMap(o, tt.TypeArgs())
 					for _, f := range o.AllFields() {
 						visit(types.Substitute(f.Type(), subst))
 					}
@@ -2705,7 +2705,7 @@ func collectMonoInstancesWithExtra(modInfo *sema.ModuleInfo, modFile *ast.File, 
 		}
 		switch origin := inst.Origin().(type) {
 		case *types.Named:
-			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			subst := types.FieldSubstMap(origin, inst.TypeArgs())
 			for _, f := range origin.AllFields() {
 				ft := types.Substitute(f.Type(), subst)
 				discoverInstances(ft, &result, seen)

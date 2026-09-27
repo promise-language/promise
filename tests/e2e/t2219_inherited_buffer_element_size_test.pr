@@ -1,0 +1,99 @@
+// T2219: duplicating an element whose by-value buffer is INHERITED sized the buffer
+// by an unbound type parameter. The clone walk substituted `AllFields()` with a map
+// built from the CHILD's params only, so the inherited `T[] items` (typed in the
+// PARENT's T) kept an unresolved element type, which lowers to a pointer. The copy
+// moved `cap * sizeof(ptr)` bytes: right for `int` on a 64-bit host by coincidence,
+// wrong on wasm32 (4-byte pointers) and wrong everywhere for any element whose size
+// is not the pointer size. These shapes cover elements wider and narrower than a
+// pointer so the host catches the regression too.
+type BaseVT2219[T] {
+  T[] items;
+}
+type DerVT2219[T] is BaseVT2219[T] {
+  int n;
+}
+type MidVT2219[T] is BaseVT2219[T] {
+  int n;
+}
+type LeafVT2219[T] is MidVT2219[T] {
+  int m;
+}
+
+// Wider than a pointer: a 16-byte tuple element.
+inherited_wide_element_round_trips() `test {
+  Vector[DerVT2219[(int, int)]] v = [];
+  v.push(DerVT2219[(int, int)](items: [(1, 10), (2, 20), (3, 30)], n: 7));
+  d := v[0];
+  assert(d.items.len == 3, "wide buffer read back");
+  (a, b) := d.items[2];
+  assert(a == 3 && b == 30, "wide buffer contents");
+  (c, e) := d.items[0];
+  assert(c == 1 && e == 10, "wide buffer first element");
+  assert(d.n == 7, "own field intact");
+}
+
+// Narrower than a pointer: a one-byte element.
+inherited_narrow_element_round_trips() `test {
+  Vector[DerVT2219[u8]] v = [];
+  u8 x = 1;
+  u8 y = 200;
+  u8 z = 255;
+  v.push(DerVT2219[u8](items: [x, y, z], n: 4));
+  d := v[0];
+  assert(d.items.len == 3, "narrow buffer read back");
+  assert(d.items[0] == x && d.items[1] == y && d.items[2] == z, "narrow buffer contents");
+  assert(d.n == 4, "own field intact");
+}
+
+// Two levels: the grandparent's buffer resolves through the composed chain.
+two_level_inherited_wide_element_round_trips() `test {
+  Vector[LeafVT2219[(int, int)]] v = [];
+  v.push(LeafVT2219[(int, int)](items: [(5, 50), (6, 60)], n: 1, m: 2));
+  d := v[0];
+  assert(d.items.len == 2, "grandparent buffer read back");
+  (a, b) := d.items[1];
+  assert(a == 6 && b == 60, "grandparent buffer contents");
+  assert(d.n == 1 && d.m == 2, "own fields intact");
+}
+
+// A Map read duplicates the element through the same clone.
+inherited_wide_element_round_trips_through_map() `test {
+  m := Map[int, DerVT2219[(int, int)]]();
+  m[0] = DerVT2219[(int, int)](items: [(7, 70), (8, 80)], n: 9);
+  d := m[0]!;
+  assert(d.items.len == 2, "map read back the inherited buffer");
+  (a, b) := d.items[1];
+  assert(a == 8 && b == 80, "map read contents");
+  assert(d.n == 9, "map read own field");
+}
+
+// The duplicate owns its buffer: growing it leaves the container's copy alone,
+// and the container's copy still reads back correctly.
+inherited_wide_element_read_is_a_copy() `test {
+  Vector[DerVT2219[(int, int)]] v = [];
+  v.push(DerVT2219[(int, int)](items: [(1, 2)], n: 0));
+  d := v[0];
+  d.items.push((3, 4));
+  assert(d.items.len == 2, "the copy grew");
+  (a, b) := d.items[1];
+  assert(a == 3 && b == 4, "the copy's new element");
+  assert(v[0].items.len == 1, "the container's element did not grow");
+  (c, e) := v[0].items[0];
+  assert(c == 1 && e == 2, "the container's element is intact");
+}
+
+// A NON-generic child of a generic parent has no type params of its own, so the
+// resolved type is a plain Named rather than an Instance; the parent binding
+// (`BaseVT2219.T → (int, int)`) still has to reach the inherited buffer's clone.
+type WideDerT2219 is BaseVT2219[(int, int)] {
+  int n;
+}
+non_generic_child_inherited_wide_element_round_trips() `test {
+  Vector[WideDerT2219] v = [];
+  v.push(WideDerT2219(items: [(1, 10), (2, 20), (3, 30)], n: 7));
+  d := v[0];
+  assert(d.items.len == 3, "non-generic child buffer read back");
+  (a, b) := d.items[2];
+  assert(a == 3 && b == 30, "non-generic child buffer contents");
+  assert(d.n == 7, "own field intact");
+}

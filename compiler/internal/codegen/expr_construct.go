@@ -255,7 +255,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		var localSubst map[*types.TypeParam]types.Type
 		if inst, ok := typ.(*types.Instance); ok {
 			if origin, ok := inst.Origin().(*types.Named); ok && len(origin.TypeParams()) > 0 {
-				localSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+				localSubst = types.FieldSubstMap(origin, inst.TypeArgs())
 			}
 		}
 		fieldTypeMap := make(map[string]types.Type)
@@ -790,7 +790,7 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 	var vtLocalSubst map[*types.TypeParam]types.Type
 	if inst, ok := typ.(*types.Instance); ok {
 		if origin, ok := inst.Origin().(*types.Named); ok && len(origin.TypeParams()) > 0 {
-			vtLocalSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			vtLocalSubst = types.FieldSubstMap(origin, inst.TypeArgs())
 		}
 	}
 	fieldTypeMap := make(map[string]types.Type)

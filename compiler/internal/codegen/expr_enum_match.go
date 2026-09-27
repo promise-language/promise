@@ -2142,17 +2142,10 @@ func (c *Compiler) heapTypeSafeToDup(named *types.Named, resolved types.Type, se
 		return false
 	}
 
-	// Build substitution for generic instances
-	var subst map[*types.TypeParam]types.Type
-	if inst, ok := resolved.(*types.Instance); ok && len(named.TypeParams()) > 0 {
-		subst = types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
-	}
-
+	// Judge every field — inherited ones included — at its bound type (T2219).
+	subst := c.fieldSubst(named, resolved)
 	for _, f := range named.AllFields() {
-		fType := f.Type()
-		if subst != nil {
-			fType = types.Substitute(fType, subst)
-		}
+		fType := types.Substitute(f.Type(), subst)
 		// T1230: a field that transitively nests a closure (*types.Signature)
 		// through user-type/enum/Optional/Tuple/Array — but NOT through a
 		// refcounted std container (Ref/Weak/...) — is NOT dup-safe. The closure

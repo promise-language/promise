@@ -252,7 +252,7 @@ func (c *Compiler) ensureValueTypeLayout(typ types.Type) {
 		if _, exists := c.monoLayouts[name]; exists {
 			return
 		}
-		subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+		subst := types.FieldSubstMap(origin, t.TypeArgs())
 		// Recurse into field types first so nested value types are laid out. A
 		// generic value type has no value parent to lay out first — sema rejects
 		// value-type inheritance when either side is generic (T1527).

@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"maps"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -1370,18 +1371,32 @@ func singleOwnerHandleName(typ types.Type, named *types.Named) string {
 	return ""
 }
 
+// fieldSubst returns the substitution that resolves the declared type of every
+// field in named.AllFields() for the type `resolved` names: a generic instance
+// binds its own params from its type args; otherwise the active c.typeSubst
+// (inside a mono body) is used. Either way the parent-chain bindings are merged
+// in, because AllFields() types an INHERITED field in the PARENT's type params
+// (the T1970 rule). A child-only map left an inherited `T[]` duplicated with
+// pointer-sized elements — including for a non-generic child of a generic
+// parent (`Der is Base[(int, int)]`), which has no params of its own (T2219).
+// Never returns nil; never mutates c.typeSubst.
+func (c *Compiler) fieldSubst(named *types.Named, resolved types.Type) map[*types.TypeParam]types.Type {
+	if inst, ok := resolved.(*types.Instance); ok && len(named.TypeParams()) > 0 {
+		return types.FieldSubstMap(named, inst.TypeArgs())
+	}
+	subst := maps.Clone(c.typeSubst)
+	if subst == nil {
+		subst = make(map[*types.TypeParam]types.Type)
+	}
+	types.MergeParentSubst(named, subst)
+	return subst
+}
+
 // dupHeapValueFields walks the fields of a heap user type instance and dups
 // any droppable sub-fields (strings, vectors, channels, nested heap types).
 // B0236: Called after memcpy to fix up shared pointers in the new copy.
 func (c *Compiler) dupHeapValueFields(named *types.Named, resolvedType types.Type, layout *TypeDeclLayout, typedNewPtr value.Value) {
-	// Build substitution for generic instances
-	var subst map[*types.TypeParam]types.Type
-	if inst, ok := resolvedType.(*types.Instance); ok && len(named.TypeParams()) > 0 {
-		subst = types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
-	} else if c.typeSubst != nil {
-		subst = c.typeSubst
-	}
-
+	subst := c.fieldSubst(named, resolvedType)
 	instanceStructType := layout.Instance.LLVMType
 	for _, f := range named.AllFields() {
 		fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
@@ -1389,10 +1404,7 @@ func (c *Compiler) dupHeapValueFields(named *types.Named, resolvedType types.Typ
 			continue
 		}
 
-		fType := f.Type()
-		if subst != nil {
-			fType = types.Substitute(fType, subst)
-		}
+		fType := types.Substitute(f.Type(), subst)
 
 		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedNewPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))

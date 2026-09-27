@@ -301,7 +301,7 @@ func countLines(s string) int {
 // variable would not be.
 func TestLedgerAnchorIsTheWorktreeScratchDir(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := resolvedTempDir(t)
 	exe := fakeWorktreeBinary(t, root)
 
 	l, ok := forBinary(func() (string, error) { return exe, nil })
@@ -331,7 +331,7 @@ func TestLedgerAnchorIsTheWorktreeScratchDir(t *testing.T) {
 // binary in this repo, accounting for itself.
 func TestLedgerAnchorFallsBackBesideAnInstalledBinary(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := resolvedTempDir(t)
 	binDir := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -369,7 +369,7 @@ func TestLedgerAnchorFollowsASymlinkedBinary(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a symlink needs administrator rights on Windows")
 	}
-	root := t.TempDir()
+	root := resolvedTempDir(t)
 	real := fakeWorktreeBinary(t, root)
 	link := filepath.Join(t.TempDir(), "promise")
 	if err := os.Symlink(real, link); err != nil {
@@ -424,6 +424,28 @@ func TestLedgerAnchorAgreesThroughALinkOutsideAWorktree(t *testing.T) {
 
 // fakeWorktreeBinary places a stand-in compiler at <root>/bin/promise and marks
 // root as a Promise worktree, which is the whole of what the resolver reads.
+// resolvedTempDir is t.TempDir() with symlinks resolved, for a test that
+// compares a path forBinary RETURNED against one the test built itself.
+//
+// forBinary resolves the binary's path before anchoring, deliberately: a
+// launcher link and the real binary behind it must land on one ledger. So an
+// expectation assembled from an unresolved path cannot match it. On macOS
+// t.TempDir() hands back a path through the /var -> /private/var symlink, which
+// is exactly that case; on Linux and Windows the two spellings coincide, which
+// is why this only ever failed on one platform (T1363 is the same shape).
+//
+// Only the path-comparing tests need it. A test that just writes to a ledger and
+// reads it back is indifferent to which spelling it used.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolving the temp dir: %v", err)
+	}
+	return resolved
+}
+
 func fakeWorktreeBinary(t *testing.T, root string) string {
 	t.Helper()
 	binDir := filepath.Join(root, "bin")

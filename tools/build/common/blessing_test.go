@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/promise-language/flow/pkg/verifiedtree"
+	"github.com/promise-language/promise/tools/build/internal/verifiedtree"
 )
 
 // What is tested here is this project's POLICY — which measurement earns a

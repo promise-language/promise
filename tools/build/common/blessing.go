@@ -46,7 +46,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/promise-language/flow/pkg/verifiedtree"
+	"github.com/promise-language/promise/tools/build/internal/verifiedtree"
 )
 
 // errTreeMoved is the refusal to bless content that no longer exists: the

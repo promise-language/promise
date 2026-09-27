@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
-	"github.com/promise-language/flow/pkg/verifiedtree"
+	"github.com/promise-language/promise/tools/build/internal/verifiedtree"
 )
 
 var errInterrupted = fmt.Errorf("interrupted by Ctrl+C")

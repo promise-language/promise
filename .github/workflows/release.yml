@@ -106,7 +106,14 @@ jobs:
           submodules: false
       - uses: actions/setup-go@v6
         with:
-          go-version-file: compiler/go.mod
+          # tools/build/go.mod, NOT compiler/go.mod: the very next step is
+          # `./make`, which builds the tools module, and setup-go pins
+          # GOTOOLCHAIN=local so a version below its minimum cannot self-upgrade.
+          # This file must be whichever module declares the HIGHEST minimum — a
+          # `go` directive is a floor and toolchains are backward compatible, so
+          # the higher one satisfies both. Skew here fails at bootstrap, before
+          # any product code runs (T2240).
+          go-version-file: tools/build/go.mod
           cache: true
           cache-dependency-path: compiler/go.sum
       # No LLVM install step here either (T0798): the embedded manifest
@@ -190,7 +197,14 @@ jobs:
           submodules: false   # needed only to attach the committed scripts/install.*
       - uses: actions/setup-go@v6
         with:
-          go-version-file: compiler/go.mod
+          # tools/build/go.mod, NOT compiler/go.mod: the very next step is
+          # `./make`, which builds the tools module, and setup-go pins
+          # GOTOOLCHAIN=local so a version below its minimum cannot self-upgrade.
+          # This file must be whichever module declares the HIGHEST minimum — a
+          # `go` directive is a floor and toolchains are backward compatible, so
+          # the higher one satisfies both. Skew here fails at bootstrap, before
+          # any product code runs (T2240).
+          go-version-file: tools/build/go.mod
           cache: true
           cache-dependency-path: compiler/go.sum
       - name: Bootstrap dev tools

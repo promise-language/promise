@@ -1,0 +1,77 @@
+// T1759: the view's type arguments must reach the view vtable.
+//
+// getOrEmitViewVtable substitutes with the view's full type, but the three box
+// helpers — primitive/string/handle, value type (stack), value type (heap) — passed
+// only the bare interface. So an adapter for a requirement mentioning the view's `T`
+// was built against the UNSUBSTITUTED signature: `T?` resolved to `{ i1, ptr }` while
+// the concrete returned `{ i1, i64 }`, and `opt` rejected the module — sema had
+// accepted it, so the diagnostic pointed at LLVM rather than the source. The same
+// omission collapsed the vtable cache key, so one concrete boxed into two
+// instantiations of one generic view would have shared whichever vtable came first.
+//
+// Compiling this file is most of the regression test; the assertions check dispatch.
+type Countdown is Iterator[int] {
+  int n `value;
+  next(~this) int? {
+    if (this.n <= 0) {
+      return none;
+    }
+    this.n = this.n - 1;
+    return this.n + 1;
+  }
+}
+
+value_type_boxed_into_a_generic_interface() `test {
+  Iterator[int] it = Countdown(n: 3);
+  assert(it.count() == 3, "a value type boxed into Iterator[int] iterates");
+}
+
+value_type_generic_view_yields_substituted_values() `test {
+  Iterator[int] it = Countdown(n: 3);
+  int total = 0;
+  for v in it {
+    total = total + v;
+  }
+  assert(total == 6, "the adapter returns int?, not an unbound T?");
+}
+
+type Base {
+  get id int => 1;
+}
+
+type Producer[T] `structural {
+  produce(this) T `abstract;
+}
+
+// A heap concrete reaching a generic view through a SECOND `is` parent — the shape
+// the item was first filed with.
+heap_concrete_second_parent_generic_view() `test {
+  Producer[int] p = Countdown2(n: 5);
+  assert(p.produce() == 5, "a second-parent generic view dispatches with the right type");
+}
+
+type Countdown2 is Base, Producer[int] {
+  int n;
+  produce(this) int {
+    return this.n;
+  }
+}
+
+// A view type parameter that appears in no requirement: the concrete satisfies every
+// instantiation, so one concrete really can be boxed into two of them at once. Each
+// needs its own vtable and its own adapter symbol.
+type Marker[T] `structural {
+  tag!(this) int `abstract;
+}
+
+type Thing {
+  int n `value;
+  tag(this) int => this.n;
+}
+
+two_instantiations_of_one_generic_view() `test {
+  Marker[int] a = Thing(n: 1);
+  Marker[string] b = Thing(n: 2);
+  assert(a.tag()?! == 1, "the first instantiation dispatches to its own adapter");
+  assert(b.tag()?! == 2, "the second instantiation dispatches to its own adapter");
+}

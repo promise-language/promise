@@ -1157,6 +1157,8 @@ An explicit `is` turns a silent structural match into a checked claim: the compi
 
 An **enum** may satisfy a protocol structurally — the near-miss check accepts it on the same terms as a type — but cannot declare `is`, since an enum has no inheritance clause. The explicit-conformance discipline therefore applies to types only, and an enum's conformance stays a structural match by construction.
 
+**A requirement that takes `Self` is checked at a boxed call.** Through a boxed view, `Self` is the interface, so nothing static stops two different concrete types meeting in one call — `Ordered a = 3; Ordered b = "x"; a < b` type-checks. The adapter therefore compares the argument's runtime type against the receiver's before unboxing it, and a mismatch **panics** naming the interface, the requirement, and the expected concrete type, rather than reinterpreting one concrete's payload as another's.
+
 **Generated bindings.** `promise bind` generates Promise types from external interface definitions (WIT, WebIDL) whose names are chosen by the source IDL and routinely collide with reserved names — `close`, `read`, `write`, `next`. Renaming them would break fidelity with the IDL, so the generator emits `` `structural(protocol: false) `` on each generated type. The exemption is type-level rather than method-level on purpose: generated bindings are checked into module repositories, and a per-method exemption would silently break them the next time the protocol set grew.
 
 **Which interfaces carry the tag.** Reserving a name is a strong claim, and it is worth making only for a name whose meaning the language is prepared to own. `Format`, `Parse`, `Reader`, `Writer`, `Closer`, `Encodable`, `Decodable`, `Cloneable`, `Hashable`, `Equal`, `Ordered`, `Iterator`, and `Stream` carry it. Returning a concrete iterator from `iter()` is idiomatic — the covariant return relaxation ensures that `iter() ConcreteIter` satisfies `Stream[T]` when `ConcreteIter` satisfies `Iterator[T]`, so `iter` methods are never rejected for using concrete return types.
@@ -3117,6 +3119,26 @@ Dog dog = animal as! Dog;     // unsafe — panics if animal is not a Dog
 animal as Dog ?: defaultDog;            // cast or default
 (animal as Dog)?.bark();                // cast and chain
 ```
+
+#### Is and as against a structural interface
+
+Conformance to a `` `structural `` interface is a **compile-time** property (see [Structural Interface Satisfaction](#structural-interface-satisfaction)), so both operators answer it at compile time rather than at run time. `x is Iface` is a constant, and `x as Iface` is the same widening an assignment performs — it boxes the subject behind the interface's view vtable and always succeeds:
+
+```promise
+Sink s = Counter(base: 5);
+bool ok = s is Sink;                    // constant true — s IS a Sink
+Tagged t = seat as! Tagged;             // widening: boxes, never panics
+Tagged? u = booth as Tagged;            // widening: always `some`
+```
+
+Four cases, in order:
+
+- the subject's static type **satisfies** the interface — `is` is `true`, `as!` succeeds, `as` yields `some`, and neither narrows (the subject is already at least as specific);
+- the subject is `U?` where `U` satisfies it — `is` is the optional's **presence flag**;
+- the subject's type still mentions an **unbound type parameter** — the answer is deferred to monomorphization and folded per instantiation;
+- otherwise — a **compile error**. The check would be a constant `false`, and there is no runtime answer to fall back on: crossing into a view requires the concrete type's view-specific vtable, and no runtime concrete→vtable lookup exists.
+
+Casting **out of** a structural interface to a concrete type is unaffected: that direction is a genuine downcast and stays a runtime-checked `as` / `as!`.
 
 #### Keyword disambiguation
 

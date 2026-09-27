@@ -1,0 +1,141 @@
+// T1532 / T1562: `is` and `as` against a `structural interface.
+//
+// Both used to be runtime questions and both answered wrongly. `is` walked the RTTI
+// parent chain, which records only nominal `is` parents, so `s is Sink` was false
+// even when `s` was DECLARED `Sink`. `as` ran the same walk and then handed back the
+// subject's own representation without boxing: a value-type subject panicked codegen
+// (`store operands are not compatible: src=%promise_Seat_v; dst={ i8*, i8* }*`) while
+// `promise check` accepted the program, and a heap subject silently yielded `none`.
+//
+// Conformance to a `structural interface is a compile-time property, so both are now
+// resolved at compile time: `is` is a constant (or the presence flag for an optional
+// subject), and a cast is the same widening an assignment performs. A subject whose
+// static type cannot satisfy the interface is a compile error — see
+// docs/language-design.md#is-and-as-against-a-structural-interface.
+type Sink `structural {
+  emit(this, int x) int `abstract;
+}
+
+type Counter {
+  int base `value;
+  emit(this, int x) int => this.base + x;
+}
+
+type Tagged `structural {
+  get tag int `abstract;
+}
+
+type Seat {
+  int row `value;
+  get tag int => this.row * 2;
+}
+
+type Booth {
+  int seat;
+  get tag int => this.seat + 100;
+}
+
+// ---- `is` ----
+
+is_on_a_value_declared_as_the_interface() `test {
+  Sink s = Counter(base: 5);
+  assert(s is Sink, "s is statically Sink, so the check holds");
+}
+
+is_on_a_concrete_that_satisfies_it() `test {
+  Counter c = Counter(base: 5);
+  assert(c is Sink, "a concrete that satisfies Sink is a Sink");
+}
+
+is_on_a_widened_optional_is_the_presence_flag() `test {
+  Sink? a = Counter(base: 5);
+  assert(a is Sink, "a present optional holding a Sink is a Sink");
+}
+
+is_on_an_absent_optional_is_false() `test {
+  Sink? a = none;
+  assert(!(a is Sink), "an absent optional is not a Sink");
+}
+
+// The subject is still evaluated — a constant answer must not skip its effects, and
+// its temps must still be cleaned up (this test would leak otherwise).
+is_still_evaluates_its_subject() `test {
+  assert(make_counter() is Sink, "the subject was evaluated and the check holds");
+}
+
+make_counter() Counter {
+  return Counter(base: 5);
+}
+
+// ---- `as` / `as!` ----
+
+cast_a_value_type_subject() `test {
+  s := Seat(row: 9);
+  Tagged t = s as! Tagged;
+  assert(t.tag == 18, "a value-type subject boxes and dispatches");
+}
+
+cast_a_heap_subject() `test {
+  b := Booth(seat: 3);
+  Tagged t = b as! Tagged;
+  assert(t.tag == 103, "a heap subject views and dispatches");
+}
+
+cast_optional_form_always_yields_some() `test {
+  b := Booth(seat: 3);
+  if t := b as Tagged {
+    assert(t.tag == 103, "`as` yields some for a satisfying subject");
+  } else {
+    assert(false, "`as` to a satisfied interface must never be none");
+  }
+}
+
+// The three positions the item enumerates: var decl (above), push argument, and
+// vector literal element.
+cast_in_a_push_argument() `test {
+  Tagged[] v = Tagged[]();
+  s := Seat(row: 4);
+  v.push(s as! Tagged);
+  assert(v[0].tag == 8, "a cast in push argument position boxes");
+}
+
+cast_in_a_vector_literal() `test {
+  s := Seat(row: 6);
+  Tagged[] v = [s as! Tagged];
+  assert(v[0].tag == 12, "a cast in vector-literal position boxes");
+}
+
+// ---- the downcast direction is unaffected ----
+
+downcast_out_of_an_interface_still_runtime_checks() `test {
+  Sink s = Counter(base: 5);
+  if c := s as Counter {
+    assert(c.emit(1) == 6, "the concrete comes back out");
+  } else {
+    assert(false, "the downcast should have matched");
+  }
+}
+
+// ---- a generic body folds per instantiation ----
+
+type Show `structural {
+  to_string() string `abstract;
+}
+
+type Named {
+  string n;
+  to_string() string => this.n;
+}
+
+type Plain {
+  int k;
+}
+
+probe[T](T v) bool {
+  return v is Show;
+}
+
+generic_is_folds_per_instantiation() `test {
+  assert(probe[Named](Named(n: "a")), "Named satisfies Show");
+  assert(!probe[Plain](Plain(k: 1)), "Plain does not satisfy Show");
+}

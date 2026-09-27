@@ -657,7 +657,11 @@ func TestDoctorCheckWasmRuntimes_AbsentHostCopyIsNotAWarning(t *testing.T) {
 // installed, why is the suite running a different one".
 func TestDoctorCheckWasmRuntimes_NamesAnUnusedHostCopy(t *testing.T) {
 	dir := t.TempDir()
-	hostCopy := filepath.Join(dir, "wasmtime")
+	name := "wasmtime"
+	if runtime.GOOS == "windows" {
+		name += ".exe" // LookPath resolves only PATHEXT extensions there
+	}
+	hostCopy := filepath.Join(dir, name)
 	if err := os.WriteFile(hostCopy, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}

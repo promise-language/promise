@@ -1201,13 +1201,24 @@ func (c *Compiler) tryConstantElements(elements []ast.Expr, elemType types.Type,
 }
 
 // tryConstantExpr attempts to evaluate an expression as a compile-time constant.
-// Returns nil if the expression is not a constant literal.
+// Returns nil if the expression is not a constant literal, or if the element slot's
+// LLVM kind cannot hold one.
+//
+// T1475: the kind check is the point. An element destined for a `Vector[<structural
+// interface>]` slot has LLVM type `{ i8*, i8* }` — it must be BOXED, which only the
+// heap path can do. The IntLit/FloatLit arms used to substitute `I64`/`Double` when
+// elemLLVM was not an integer/float type, and BoolLit/CharLit never looked at it at
+// all, so a struct-typed slot silently received a scalar constant and `opt` rejected
+// the .rodata global with `constant expression type mismatch`. Returning nil instead
+// falls the whole literal back to the heap path, which boxes each element. Same class
+// of call-site guard T1297 added for Optional element types, one level lower so it
+// generalizes to every element type whose representation is not a scalar.
 func (c *Compiler) tryConstantExpr(expr ast.Expr, elemType types.Type, elemLLVM irtypes.Type) constant.Constant {
 	switch e := expr.(type) {
 	case *ast.IntLit:
 		intType, ok := elemLLVM.(*irtypes.IntType)
 		if !ok {
-			intType = irtypes.I64
+			return nil
 		}
 		// T1418: parse at full precision. The old strconv.ParseInt/ParseUint pair
 		// truncated to 64 bits and constant.NewInt then SIGN-EXTENDED the int64
@@ -1222,12 +1233,18 @@ func (c *Compiler) tryConstantExpr(expr ast.Expr, elemType types.Type, elemLLVM 
 	case *ast.FloatLit:
 		floatType, ok := elemLLVM.(*irtypes.FloatType)
 		if !ok {
-			floatType = irtypes.Double
+			return nil
 		}
 		return constFloatFromRaw(floatType, e.Raw)
 	case *ast.BoolLit:
+		if _, ok := elemLLVM.(*irtypes.IntType); !ok {
+			return nil
+		}
 		return constBool(e.Value)
 	case *ast.CharLit:
+		if _, ok := elemLLVM.(*irtypes.IntType); !ok {
+			return nil
+		}
 		return constCharFromRaw(e.Raw)
 	case *ast.UnaryExpr:
 		// Handle negative literals: -42, -3.14

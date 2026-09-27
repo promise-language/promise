@@ -336,6 +336,14 @@ type Info struct {
 	// patterns, the entry is absent and codegen falls back to name-based lookup.
 	IsPatternTypes map[ast.IsPattern]types.Type
 
+	// StructuralIs records every `is` expression whose target is a `structural`
+	// interface. Conformance to one is a compile-time property, so codegen emits a
+	// constant here instead of an RTTI walk — which records only nominal `is`
+	// parents and therefore answered false for every such check (T1532). An entry
+	// with Decided=false is a generic body checked with its type parameters
+	// unbound; codegen folds it per instantiation.
+	StructuralIs map[ast.Expr]*StructuralIsInfo
+
 	// ErrorHandlerTypes maps error handler expressions to their resolved type
 	// when the handler includes type arguments (e.g., `? e is DataError[string]`).
 	ErrorHandlerTypes map[*ast.ErrorHandlerExpr]types.Type

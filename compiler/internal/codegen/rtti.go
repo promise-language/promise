@@ -98,6 +98,48 @@ func (c *Compiler) collectMonoParentIDs(named *types.Named, subst map[*types.Typ
 	}
 }
 
+// typeIdentityIDs returns the RTTI identity a value of typ carries: its own type
+// ID, and the deduplicated transitive parent IDs promise_type_is walks when the
+// first comparison misses. A generic instance additionally lists its origin's ID
+// (so `x is Container` matches as well as `x is Container[int]`) and its
+// substituted mono parents.
+//
+// One implementation, shared by the concrete type's own typeinfo (emitTypeInfo,
+// emitMonoTypeInfoGlobals) and by the structural box that stands in for it
+// (getBoxTypeInfo) — so `x is T` answers the same whether x reached the check
+// boxed behind an interface view or not (T1902).
+func (c *Compiler) typeIdentityIDs(typ types.Type) (int32, []int32) {
+	typeID, _ := c.resolveTypeID(typ)
+	var parentIDs []int32
+	if inst, ok := typ.(*types.Instance); ok {
+		if named, ok := inst.Origin().(*types.Named); ok && len(named.TypeParams()) > 0 {
+			parentIDs = append(parentIDs, c.assignTypeID(named))
+			parentIDs = append(parentIDs, c.collectAllParentIDs(named)...)
+			if subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs()); subst != nil {
+				c.collectMonoParentIDs(named, subst, &parentIDs)
+			}
+			return typeID, dedupTypeIDs(parentIDs)
+		}
+	}
+	if named := extractNamed(typ); named != nil {
+		parentIDs = c.collectAllParentIDs(named)
+	}
+	return typeID, dedupTypeIDs(parentIDs)
+}
+
+// dedupTypeIDs removes duplicates while preserving first-seen order.
+func dedupTypeIDs(ids []int32) []int32 {
+	seen := make(map[int32]bool, len(ids))
+	var unique []int32
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			unique = append(unique, id)
+		}
+	}
+	return unique
+}
+
 // emitTypeInfo creates a global type info constant for a Named type.
 // Layout: { i8* vtable_ptr, i8* drop_fn_ptr, i8* clone_fn_ptr, i32 type_id, i32 num_parents, [N x i32] parent_ids }
 // B0226: drop_fn_ptr enables runtime dispatch to the correct drop function for
@@ -106,8 +148,7 @@ func (c *Compiler) collectMonoParentIDs(named *types.Named, subst map[*types.Typ
 // function in dupHeapValue, so polymorphic vector slicing produces independent
 // copies of the concrete subtype (rather than truncating via the static layout).
 func (c *Compiler) emitTypeInfo(named *types.Named) *ir.Global {
-	typeID := c.assignTypeID(named)
-	parentIDs := c.collectAllParentIDs(named)
+	typeID, parentIDs := c.typeIdentityIDs(named)
 	numParents := len(parentIDs)
 	globalName := "promise_typeinfo_" + c.typeGlobalName(named)
 
@@ -653,31 +694,11 @@ func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
 			continue
 		}
 
-		typeID := c.monoTypeIDs[name]
-
-		// Collect parent IDs. Include both origin Named IDs (for bare `x is Container`)
-		// and mono instance IDs (for generic `x is Container[int]`).
-		parentIDs := c.collectAllParentIDs(named)
-		originID := c.assignTypeID(named)
-		// Prepend origin ID (dedup handled below)
-		parentIDs = append([]int32{originID}, parentIDs...)
-
-		// Add mono parent type IDs: for LabeledContainer[int] is Container[T],
-		// substitute T→int to get Container[int], then include its mono type ID.
-		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
-		if subst != nil {
-			c.collectMonoParentIDs(named, subst, &parentIDs)
-		}
-		// Deduplicate in case origin ID was already in parent chain
-		seen := make(map[int32]bool)
-		var deduped []int32
-		for _, id := range parentIDs {
-			if !seen[id] {
-				seen[id] = true
-				deduped = append(deduped, id)
-			}
-		}
-		parentIDs = deduped
+		// Identity: this instance's own ID, its origin's ID (so bare
+		// `x is Container` matches as well as `x is Container[int]`), the origin's
+		// parents, and the substituted mono parents — all from typeIdentityIDs, the
+		// one implementation the structural box also uses.
+		typeID, parentIDs := c.typeIdentityIDs(inst)
 		numParents := len(parentIDs)
 
 		var structType *irtypes.StructType
@@ -933,10 +954,20 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 			// a boxed concrete (primitive scalar, string, opaque native handle) is the
 			// heap box { i8* typeinfo, i8* payload }, not the payload. Only the adapter
 			// unwraps it: it loads field 1 from the box first.
-			needsAdapter := concreteMethod != nil && (needsViewAdapter(concreteMethod.Sig(), m.Sig()) || c.viewBoxesConcrete(concrete))
+			// T1881: a `Self` parameter also forces an adapter — the slot's signature
+			// is the interface's, so the argument arrives BOXED and only an adapter
+			// can hand the concrete method its own representation. This applies to a
+			// synthesized structural DEFAULT too, which has no types.Method on the
+			// concrete: its body was synthesized with Self bound to the concrete, so
+			// its signature is the interface's under that same substitution.
+			concreteSig := c.concreteSlotSignature(concrete, m, concreteMethod)
+			instSubst := c.viewInstanceSubst(concrete, fromType)
+			needsAdapter := concreteSig != nil && (needsViewAdapter(concreteSig, m.Sig()) ||
+				(concreteMethod != nil && c.viewBoxesConcrete(concrete)) ||
+				c.viewSlotNeedsParamUnbox(concreteSig, m.Sig(), instSubst))
 			switch {
 			case needsAdapter:
-				adapter := c.emitViewMethodAdapter(concrete, concreteCacheKey, fromType, view, concreteMethod, m, fn)
+				adapter := c.emitViewMethodAdapter(concrete, concreteCacheKey, fromType, view, viewCacheKey, concreteSig, m, fn)
 				entries = append(entries, constant.NewBitCast(adapter, irtypes.I8Ptr))
 			case c.viewBoxesConcrete(concrete):
 				// T1887: the receiver is boxed but the signature needs no other
@@ -946,7 +977,7 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 				// would hand the method the box instead of the payload, so interpose
 				// a thunk that only unwraps the receiver.
 				entries = append(entries, constant.NewBitCast(
-					c.emitBoxedReceiverThunk(concreteCacheKey, view, m, fn), irtypes.I8Ptr))
+					c.emitBoxedReceiverThunk(concreteCacheKey, viewCacheKey, m, fn), irtypes.I8Ptr))
 			default:
 				entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
 			}
@@ -957,7 +988,7 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 			// structural default keeps its null so verifyNoNullVtableSlots still
 			// catches the T1880 synthesis gap it is responsible for.
 			if !structuralDefault {
-				if stub := c.emitUnimplementedViewStub(concreteCacheKey, view, m); stub != nil {
+				if stub := c.emitUnimplementedViewStub(concreteCacheKey, view, viewCacheKey, m); stub != nil {
 					entries = append(entries, constant.NewBitCast(stub, irtypes.I8Ptr))
 					continue
 				}
@@ -1041,11 +1072,11 @@ func viewMemberTag(m *types.Method) string {
 // under `promise test` that is often the assert on the stub's own zero return
 // value, which double-panics and prints `fatal: panic during panic recovery`
 // instead. Strictly better than address 0 either way, and exact once T1907 lands.
-func (c *Compiler) emitUnimplementedViewStub(concreteCacheKey string, view *types.Named, m *types.Method) *ir.Func {
+func (c *Compiler) emitUnimplementedViewStub(concreteCacheKey string, view *types.Named, viewCacheKey string, m *types.Method) *ir.Func {
 	if c.funcs["promise_panic"] == nil {
 		return nil
 	}
-	name := fmt.Sprintf("%s.%s%s$view_stub_as_%s", concreteCacheKey, m.Name(), viewMemberTag(m), view.Obj().Name())
+	name := fmt.Sprintf("%s.%s%s$view_stub_as_%s", concreteCacheKey, m.Name(), viewMemberTag(m), viewCacheKey)
 	if fn, ok := c.funcs[name]; ok {
 		return fn
 	}
@@ -1214,6 +1245,113 @@ func needsViewAdapter(concrete, iface *types.Signature) bool {
 	return false
 }
 
+// concreteSlotSignature is the signature of the function actually filling this view
+// vtable slot. Normally that is the concrete's own declared method. For a synthesized
+// structural DEFAULT the concrete declares nothing — the body was synthesized from
+// the interface's with `Self` bound to the concrete — so the signature is the
+// interface's under that same substitution. Returns nil when neither applies.
+//
+// Both kinds must reach the same adapter decision (T1881): a default whose
+// requirement takes `Self` has a concrete-shaped parameter exactly as a declared
+// method does, so a slot pointed straight at it would receive the call site's box.
+func (c *Compiler) concreteSlotSignature(concrete *types.Named, m *types.Method, concreteMethod *types.Method) *types.Signature {
+	sig := m.Sig()
+	if concreteMethod != nil {
+		sig = concreteMethod.Sig()
+	}
+	// A structural default is synthesized per concrete with `Self` bound to it, so
+	// the emitted function's parameters are concrete-shaped even though the method
+	// sema recorded still spells them in the interface's terms. Substituting here is
+	// what lets the adapter decision see the `Self` parameter for what it is.
+	//
+	// `Self` is spelled as the interface that DECLARES the default, which may be an
+	// ancestor of the one the slot came through — `Ordered` inherits `!=` from
+	// `Equal`, and the synthesis recurses into parent interfaces for exactly that
+	// reason. Substituting the whole structural ancestry covers either spelling
+	// without having to re-derive which ancestor declared it.
+	if owner := c.structuralDefaultOwner(concrete, m); owner != nil {
+		return c.substituteSelfChain(sig, owner, concrete)
+	}
+	if concreteMethod == nil {
+		return nil
+	}
+	return sig
+}
+
+// substituteSelfChain replaces `Self` in sig with concrete, where `Self` may be
+// spelled as owner or as any of owner's structural ancestors.
+func (c *Compiler) substituteSelfChain(sig *types.Signature, owner, concrete *types.Named) *types.Signature {
+	seen := map[*types.Named]bool{}
+	var walk func(n *types.Named)
+	walk = func(n *types.Named) {
+		if n == nil || seen[n] {
+			return
+		}
+		seen[n] = true
+		if substituted, ok := types.SubstituteSelf(sig, n, concrete).(*types.Signature); ok {
+			sig = substituted
+		}
+		for _, pr := range n.Parents() {
+			if pr.Named.IsStructural() {
+				walk(pr.Named)
+			}
+		}
+	}
+	walk(owner)
+	return sig
+}
+
+// viewParamNeedsUnbox reports whether the interface declares this parameter as a
+// structural VIEW while the concrete method wants its own representation — the
+// `Self`-parameter shape, `Ordered.<(Self other)` against `int.<(int other)` or
+// `Cents.<(Cents other)`.
+//
+// The vtable slot's signature comes from the INTERFACE, so such a parameter is boxed
+// by the call site; an adapter must therefore stand between the slot and the concrete
+// to unbox it again. Stated once here because three places depend on agreeing about
+// it: getOrEmitViewVtable (does this slot need an adapter at all), the adapter's own
+// argument handling, and genVirtualBinaryOpValues' call-site coercion. A slot pointed
+// straight at the concrete while the call site boxes would hand the method a box and
+// let it read the box's header as the payload (T1881).
+func (c *Compiler) viewParamNeedsUnbox(ifaceParam, concreteParam *types.Param,
+	instSubst map[*types.TypeParam]types.Type) bool {
+
+	ifaceLLVM := c.resolveParamType(ifaceParam)
+	st, ok := ifaceLLVM.(*irtypes.StructType)
+	if !ok || len(st.Fields) != 2 ||
+		!st.Fields[0].Equal(irtypes.I8Ptr) || !st.Fields[1].Equal(irtypes.I8Ptr) {
+		return false // the interface does not hand over a view here
+	}
+	wantType := concreteParam.Type()
+	if instSubst != nil {
+		wantType = types.Substitute(wantType, instSubst)
+	}
+	if c.typeSubst != nil {
+		wantType = types.Substitute(wantType, c.typeSubst)
+	}
+	if wantNamed := extractNamed(wantType); wantNamed == nil || isStructuralView(wantNamed) {
+		return false // the concrete wants a view too — same representation
+	}
+	return !c.resolveType(wantType).Equal(ifaceLLVM)
+}
+
+// viewSlotNeedsParamUnbox reports whether any of this slot's parameters has the
+// shape viewParamNeedsUnbox describes.
+func (c *Compiler) viewSlotNeedsParamUnbox(concreteSig, ifaceSig *types.Signature,
+	instSubst map[*types.TypeParam]types.Type) bool {
+
+	n := len(ifaceSig.Params())
+	if len(concreteSig.Params()) < n {
+		n = len(concreteSig.Params())
+	}
+	for i := 0; i < n; i++ {
+		if c.viewParamNeedsUnbox(ifaceSig.Params()[i], concreteSig.Params()[i], instSubst) {
+			return true
+		}
+	}
+	return false
+}
+
 // emitViewMethodAdapter generates a thunk function with the interface method's LLVM
 // signature that forwards to the concrete method, supplying default values for extra
 // params and wrapping the return if needed (non-failable→failable, T→T?).
@@ -1222,11 +1360,12 @@ func (c *Compiler) emitViewMethodAdapter(
 	concreteCacheKey string,
 	concreteFromType types.Type,
 	view *types.Named,
-	concreteMethod, ifaceMethod *types.Method,
+	viewCacheKey string,
+	concreteSig *types.Signature,
+	ifaceMethod *types.Method,
 	concreteFn *ir.Func,
 ) *ir.Func {
 	ifaceSig := ifaceMethod.Sig()
-	concreteSig := concreteMethod.Sig()
 	// T1885: the concrete method's declared types are written in the GENERIC type's
 	// terms — `Vector[T].clone() Self` resolves to `Vector[T]`, not `Vector[int]`.
 	// The adapter is per-instance, so resolve them against this instance's arguments;
@@ -1246,8 +1385,13 @@ func (c *Compiler) emitViewMethodAdapter(
 	// (concreteCacheKey, view) pair, so boxing one concrete into two DIFFERENT
 	// views that each expose a same-named adapter-requiring method would
 	// otherwise emit two definitions under one LLVM name (invalid IR).
+	// T1759: the view half is its CACHE KEY, which carries the view's type args
+	// (Iterator[int]) when it is an instance — the same key the vtable global uses.
+	// It is the bare interface name for a non-generic view, so only generic views
+	// change spelling; without it a concrete boxed into two instantiations of one
+	// generic view would emit two adapters under one name.
 	adapterName := fmt.Sprintf("%s.%s%s$view_adapt_as_%s",
-		concreteCacheKey, ifaceMethod.Name(), viewMemberTag(ifaceMethod), view.Obj().Name())
+		concreteCacheKey, ifaceMethod.Name(), viewMemberTag(ifaceMethod), viewCacheKey)
 
 	var params []*ir.Param
 	if ifaceSig.Recv() != nil {
@@ -1314,9 +1458,22 @@ func (c *Compiler) emitViewMethodAdapter(
 		paramIdx++
 	}
 
-	// Forward interface params
+	// Forward interface params, unboxing each one the concrete wants in its own
+	// representation (T1881). A requirement written over `Self` — `Ordered.<(Self
+	// other)`, `Equal.==(Self other)` — hands the adapter the caller's VIEW, but the
+	// concrete method wants the payload: `int.<` takes an i64, not a `{i8*, i8*}`.
+	// This is the contravariant dual of the receiver unbox above, and it is checked:
+	// `Ordered a = 3; Ordered b = "x"; a < b` type-checks, because `Self` at the call
+	// site is the view, so nothing static stops two concretes meeting in one
+	// operator. Reinterpreting a string box as an i64 would be silent nonsense, so
+	// the box's RTTI identity (T1902) is compared and a mismatch panics naming both.
 	for i := 0; i < len(ifaceSig.Params()); i++ {
-		args = append(args, params[paramIdx])
+		arg := value.Value(params[paramIdx])
+		if i < len(concreteSig.Params()) {
+			arg = c.unboxViewParam(arg, concreteType, concreteFromType, instSubst,
+				ifaceSig.Params()[i], concreteSig.Params()[i], view, ifaceMethod)
+		}
+		args = append(args, arg)
 		paramIdx++
 	}
 
@@ -1448,6 +1605,55 @@ func (c *Compiler) emitViewMethodAdapter(
 	}
 
 	return fn
+}
+
+// unboxViewParam converts one interface-shaped adapter parameter into the
+// representation the concrete method declares, checking the box's RTTI identity
+// first. It is the contravariant dual of emitViewMethodAdapter's receiver unbox, and
+// it shares unboxStructuralValue with the downcast so box and unbox stay one
+// description.
+//
+// It fires only when the interface hands over a `{i8*, i8*}` view and the concrete
+// wants something else — a requirement written over `Self`, like `Ordered.<(Self
+// other)` against `int.<(int other)`. Everything else passes straight through.
+//
+// The check is not defensive noise: `Self` at a boxed call site IS the view, so
+// `Ordered a = 3; Ordered b = "x"; a < b` type-checks and would otherwise reinterpret
+// a string box's payload pointer as an i64.
+func (c *Compiler) unboxViewParam(arg value.Value, concreteType *types.Named, concreteFromType types.Type,
+	instSubst map[*types.TypeParam]types.Type, ifaceParam, concreteParam *types.Param,
+	view *types.Named, ifaceMethod *types.Method) value.Value {
+
+	if !c.viewParamNeedsUnbox(ifaceParam, concreteParam, instSubst) {
+		return arg
+	}
+	wantType := concreteParam.Type()
+	if instSubst != nil {
+		wantType = types.Substitute(wantType, instSubst)
+	}
+	if c.typeSubst != nil {
+		wantType = types.Substitute(wantType, c.typeSubst)
+	}
+	wantNamed := extractNamed(wantType)
+
+	// Identity check: the payload must really be the concrete this adapter is for.
+	if typeID, known := c.resolveTypeID(concreteFromType); known && c.funcs["promise_type_is"] != nil {
+		variantPtr := c.loadVariantPtr(c.extractInstancePtr(arg))
+		matched := c.block.NewCall(c.funcs["promise_type_is"],
+			variantPtr, constant.NewInt(irtypes.I32, int64(typeID)))
+		isMatch := c.block.NewICmp(enum.IPredNE, matched, constant.NewInt(irtypes.I32, 0))
+		okBlock := c.newBlock("viewarg.ok")
+		badBlock := c.newBlock("viewarg.mismatch")
+		c.block.NewCondBr(isMatch, okBlock, badBlock)
+
+		c.block = badBlock
+		c.emitPanicCString(fmt.Sprintf("%s.%s expects both sides to be %s, got a different concrete type",
+			view.Obj().Name(), ifaceMethod.Name(), c.concreteViewKey(concreteType, concreteFromType)))
+		c.emitPanicReturn()
+
+		c.block = okBlock
+	}
+	return c.unboxStructuralValue(arg, wantNamed, wantType, false)
 }
 
 // adaptViewDefaultArg applies the ordinary argument pipeline's ownership and
@@ -1725,7 +1931,7 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 
 	// Non-user-value types (primitives, string) → structural interface: box into view
 	if !c.isUserValueType(fromType) && c.isUserValueType(toType) {
-		return c.boxForStructuralView(val, fromNamed, toNamed, fromType)
+		return c.boxForStructuralView(val, fromNamed, toNamed, fromType, toType)
 	}
 
 	// Opaque container types (Vector, Channel, Task) are user types with i8*
@@ -1740,7 +1946,7 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 			}
 		}
 		if ok {
-			return c.boxForStructuralView(val, fromNamed, toNamed, fromType)
+			return c.boxForStructuralView(val, fromNamed, toNamed, fromType, toType)
 		}
 	}
 
@@ -1751,7 +1957,7 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 	// Pure value type → structural interface: the value struct is wider than {i8*, i8*}.
 	// Stack-allocate the value, store it, and create a view with {vtable, &alloca}.
 	if fromNamed.IsValueType() && toNamed.IsStructural() {
-		return c.boxValueTypeForStructuralView(val, fromNamed, toNamed, fromType)
+		return c.boxValueTypeForStructuralView(val, fromNamed, toNamed, fromType, toType)
 	}
 
 	// Guard: verify the LLVM value is actually a {i8*, i8*} struct before modifying it.
@@ -1809,12 +2015,19 @@ func isMaterializedViewPtr(val value.Value) bool {
 
 // boxForStructuralView boxes a primitive or string value into a structural interface
 // view ({i8*, i8*}) when the target is a structural interface.
+//
+// toType is the view's FULL type, not just toNamed. getOrEmitViewVtable needs it for
+// two things and the box sites used to drop it (T1759): the adapter thunk builds its
+// signature from the interface's, so a requirement mentioning the view's `T` resolved
+// to i8* while the concrete returned i64 and `opt` rejected the module; and the vtable
+// cache key is per (concrete, view), so one concrete satisfying both `Producer[int]`
+// and `Producer[string]` would have reused whichever vtable was built first.
 // For primitives: heap-allocates a { typeinfo, scalar } box and creates {vtable, box}.
 // For string (T1280): heap-allocates a { typeinfo, string_ptr } box holding an owned
 // deep clone and creates {vtable, box}, so the box drops cleanly on escape.
 // For opaque containers/handles (T1885): the same { typeinfo, payload } box, so the
 // RTTI drop dispatch has a header to read instead of the payload's own first word.
-func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
+func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType, toType types.Type) value.Value {
 	// Only box when target is a structural interface represented as a fat pointer
 	// (a `structural target that is itself a value type is a flat struct — T1550).
 	if !isStructuralView(toNamed) {
@@ -1830,7 +2043,7 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 	}
 
 	// Get view vtable for concrete → structural interface
-	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType)
+	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType, toType)
 	vtablePtr := constant.NewBitCast(viewVtable, irtypes.I8Ptr)
 
 	// Create the instance pointer
@@ -1852,7 +2065,10 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 		// T1284: flat-box typeinfo carries a size-specialized clone_fn so structural
 		// clone/slice deep-copies the box (null drop_fn keeps pal_free-on-drop).
-		c.block.NewStore(constant.NewBitCast(c.getFlatBoxTypeInfo(boxSize), irtypes.I8Ptr), tiField)
+		// T1902: it also carries the primitive's own type ID and parents, so
+		// `Format f = 3; f is int` (and `f is Ordered`) answer as they would unboxed.
+		c.block.NewStore(constant.NewBitCast(
+			c.getBoxTypeInfo(fromType, nil, c.getFlatBoxClone(boxSize)), irtypes.I8Ptr), tiField)
 		scalarField := c.block.NewGetElementPtr(boxType, typed,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 		c.block.NewStore(val, scalarField)
@@ -1862,7 +2078,7 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 		// T1280: Heap-box the string as { i8* typeinfo, i8* string_ptr }. Field 1 is an
 		// OWNED deep clone (dupString) so the box owns its payload independently of the
 		// caller's string temp — no aliasing, no use-after-return dangle. Field 0 carries
-		// a dedicated typeinfo (@promise_typeinfo_stringbox) whose drop_fn
+		// a dedicated typeinfo (@promise_typeinfo_box$string) whose drop_fn
 		// (@__promise_string_box_drop) drops the cloned string via promise_string_drop
 		// (honoring the rodata literal flag), then pal_free's the box. That real drop_fn
 		// makes every RTTI drop site (local free, moved-param free, struct/enum-field
@@ -1937,7 +2153,9 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 			typeInfo, boxDrop = c.getContainerBoxTypeInfo(fromNamed, fromType), owningDrop
 		default:
 			stored = val
-			typeInfo, boxDrop = c.getFlatBoxTypeInfo(boxSize), c.palFree
+			// T1902: a borrowed single-owner handle still aliases its payload under a
+			// null-drop header, but the header names the concrete so `is`/`as` work.
+			typeInfo, boxDrop = c.getBoxTypeInfo(boxPayloadType, nil, c.getFlatBoxClone(boxSize)), c.palFree
 		}
 		raw := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, boxSize))
 		typed := c.block.NewBitCast(raw, irtypes.NewPointer(boxType))
@@ -1973,7 +2191,7 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 // it falls through to pal_free(box). The malloc is registered as an owned heap temp so
 // the correct owner frees it exactly once (transfers to the caller on return/binding,
 // freed at statement end for borrow args).
-func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
+func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType, toType types.Type) value.Value {
 	// T1550: never box into a `structural target that is itself a value type — it has
 	// a flat value struct, not a fat pointer. Defence in depth; coerceToView already
 	// returns early for such targets.
@@ -1987,7 +2205,7 @@ func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toN
 		return val
 	}
 	// Get view vtable for value type → structural interface
-	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType)
+	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType, toType)
 	vtablePtr := constant.NewBitCast(viewVtable, irtypes.I8Ptr)
 
 	// Heap-allocate the value type struct and store the value.
@@ -2006,7 +2224,7 @@ func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toN
 	// is a correct deep copy, so this is always safe; we must never leave the value's
 	// own vtable in field 0 (that would make the drop path misread a bogus drop_fn).
 	var tiPtr constant.Constant = constant.NewBitCast(
-		c.getFlatBoxTypeInfo(int64(c.typeSize(valType))), irtypes.I8Ptr)
+		c.getBoxTypeInfo(fromType, nil, c.getFlatBoxClone(int64(c.typeSize(valType)))), irtypes.I8Ptr)
 	if ti := c.lookupTypeInfoGlobal(fromType); ti != nil {
 		tiPtr = constant.NewBitCast(ti, irtypes.I8Ptr)
 	}
@@ -2038,13 +2256,13 @@ func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toN
 // __promise_structural_drop, which reads slot 0 as a typeinfo pointer and, seeing
 // a null drop_fn_ptr (pure value types have no drop), frees the box via pal_free.
 // Method dispatch is unaffected: value-type methods read their fields at index 1+.
-func (c *Compiler) boxValueTypeForStructuralViewHeap(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
+func (c *Compiler) boxValueTypeForStructuralViewHeap(val value.Value, fromNamed, toNamed *types.Named, fromType, toType types.Type) value.Value {
 	// T1550: see boxValueTypeForStructuralView — a value-type `structural target is a
 	// flat struct, so the crossing is a plain copy rather than a heap box.
 	if !isStructuralView(toNamed) {
 		return val
 	}
-	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType)
+	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType, toType)
 	vtablePtr := constant.NewBitCast(viewVtable, irtypes.I8Ptr)
 
 	// Heap-allocate a box the size of the value struct.
@@ -2084,7 +2302,7 @@ func (c *Compiler) coerceReturnToView(val value.Value, fromType, toType types.Ty
 	if fromNamed != nil && toNamed != nil && fromNamed != toNamed &&
 		c.isUserValueType(fromType) && c.isUserValueType(toType) &&
 		fromNamed.IsValueType() && isStructuralView(toNamed) {
-		return c.boxValueTypeForStructuralViewHeap(val, fromNamed, toNamed, fromType)
+		return c.boxValueTypeForStructuralViewHeap(val, fromNamed, toNamed, fromType, toType)
 	}
 	return c.coerceToView(val, fromType, toType)
 }
@@ -2217,10 +2435,10 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 // resolvable types.Method. Every other parameter and the result pass through
 // untouched — the signature already matched, which is why no full adapter was
 // required (T1887).
-func (c *Compiler) emitBoxedReceiverThunk(concreteCacheKey string, view *types.Named, m *types.Method, fn *ir.Func) *ir.Func {
+func (c *Compiler) emitBoxedReceiverThunk(concreteCacheKey, viewCacheKey string, m *types.Method, fn *ir.Func) *ir.Func {
 	// The member tag keeps a getter/setter (or binary/unary) pair from sharing one
 	// symbol (T1905), exactly as the adapter name does.
-	name := fmt.Sprintf("%s.%s%s$view_unbox_as_%s", concreteCacheKey, m.Name(), viewMemberTag(m), view.Obj().Name())
+	name := fmt.Sprintf("%s.%s%s$view_unbox_as_%s", concreteCacheKey, m.Name(), viewMemberTag(m), viewCacheKey)
 	if existing, ok := c.funcs[name]; ok {
 		return existing
 	}

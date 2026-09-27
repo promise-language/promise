@@ -199,7 +199,13 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 // All primitive hashes use the Promise-implemented _fnv1a_hash function.
 // String hash uses a codegen-emitted LLVM IR function (__promise_hash_string).
 func (c *Compiler) genNativeHashGetter(e *ast.MemberExpr, named *types.Named) (value.Value, bool) {
-	target := c.genExprAutoPropagate(e.Target) // B0323
+	return c.emitNativeHash(named, c.genExprAutoPropagate(e.Target)) // B0323
+}
+
+// emitNativeHash is the value-level core of the `hash` getter. The AST site above and
+// the synthesized `native` shim a view vtable slot needs (T1881) both call it, so
+// `Hashable h = 3; h.hash` computes the same hash whichever way it is reached.
+func (c *Compiler) emitNativeHash(named *types.Named, target value.Value) (value.Value, bool) {
 	hashFn := c.funcs["_fnv1a_hash"]
 	switch named {
 	case types.TypInt, types.TypI64, types.TypUint, types.TypU64:
@@ -476,6 +482,7 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 	if getter.Sig().Recv() == nil {
 		// `global getter: no receiver argument (T1749).
 		result := c.block.NewCall(fn)
+		c.emitPanicCheck() // T1907
 		c.trackGetterResult(e, getter, targetType, result)
 		return result
 	}
@@ -498,6 +505,7 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 	}
 
 	result := c.block.NewCall(fn, args...)
+	c.emitPanicCheck() // T1907
 	c.trackGetterResult(e, getter, targetType, result)
 	return result
 }
@@ -548,6 +556,7 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 
 	result := c.block.NewCall(fnTyped, instance)
+	c.emitPanicCheck() // T1907
 	c.trackGetterResult(e, getter, targetType, result)
 	return result
 }

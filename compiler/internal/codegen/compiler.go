@@ -633,17 +633,16 @@ type Compiler struct {
 	// noinline wrappers around coro.resume/done/destroy — used by generator consumers
 	// to hide the pattern from LLVM's coro-elide pass (which incorrectly stack-allocates
 	// generator frames when it sees ramp+resume+done+destroy in the same function).
-	genResume         *ir.Func             // @__promise_gen_resume(i8*) → void [noinline]
-	genDone           *ir.Func             // @__promise_gen_done(i8*) → i1 [noinline]
-	genDestroy        *ir.Func             // @__promise_gen_destroy(i8*) → void [noinline]
-	iterCleanup       *ir.Func             // @__promise_iter_cleanup(i8*) → void (T0088: free env + instance)
-	structuralDrop    *ir.Func             // @__promise_structural_drop(i8*) → void (B0270: RTTI-based drop for structural iface instances)
-	structuralClone   *ir.Func             // @__promise_structural_clone(i8*) → i8* (T1284: RTTI-based deep clone for structural iface instances)
-	noValueTypeInfo   *ir.Global           // @promise_typeinfo_novalue: shared null-drop typeinfo for primitive structural boxes (T1276)
-	stringBoxTypeInfo *ir.Global           // @promise_typeinfo_stringbox: typeinfo whose drop_fn frees the cloned string + box (T1280)
-	stringBoxDrop     *ir.Func             // @__promise_string_box_drop(i8*): drops the boxed string clone then frees the box (T1280)
-	stringBoxClone    *ir.Func             // @__promise_string_box_clone(i8*)→i8*: deep-copies a boxed string for structural clone/slice (T1284)
-	flatBoxTypeInfos  map[int64]*ir.Global // per-size null-drop typeinfo carrying a flat malloc+memcpy clone_fn for primitive/value structural boxes (T1284)
+	genResume       *ir.Func              // @__promise_gen_resume(i8*) → void [noinline]
+	genDone         *ir.Func              // @__promise_gen_done(i8*) → i1 [noinline]
+	genDestroy      *ir.Func              // @__promise_gen_destroy(i8*) → void [noinline]
+	iterCleanup     *ir.Func              // @__promise_iter_cleanup(i8*) → void (T0088: free env + instance)
+	structuralDrop  *ir.Func              // @__promise_structural_drop(i8*) → void (B0270: RTTI-based drop for structural iface instances)
+	structuralClone *ir.Func              // @__promise_structural_clone(i8*) → i8* (T1284: RTTI-based deep clone for structural iface instances)
+	noValueTypeInfo *ir.Global            // @promise_typeinfo_novalue: shared null-drop typeinfo for primitive structural boxes (T1276)
+	stringBoxDrop   *ir.Func              // @__promise_string_box_drop(i8*): drops the boxed string clone then frees the box (T1280)
+	stringBoxClone  *ir.Func              // @__promise_string_box_clone(i8*)→i8*: deep-copies a boxed string for structural clone/slice (T1284)
+	boxTypeInfos    map[string]*ir.Global // per-(concrete, drop, clone) structural-box typeinfo: box behaviour + the payload's RTTI identity (T1284, T1902)
 
 	// T1887: per-concrete-type RTTI header + drop thunk for an opaque native
 	// handle (MutexGuard, Mutex, Channel, Task, Arc, Weak, Vector) boxed into a
@@ -652,10 +651,9 @@ type Compiler struct {
 	// per-concrete clone thunk for the handles that CAN be duplicated (Vector,
 	// Channel, Ref, Weak), so __promise_structural_clone deep-copies a boxed
 	// container instead of aliasing it; a single-owner handle keeps a null clone_fn.
-	containerBoxTypeInfos map[string]*ir.Global
-	containerBoxDrops     map[string]*ir.Func
-	containerBoxClones    map[string]*ir.Func
-	flatBoxClones         map[int64]*ir.Func // per-size @__promise_flat_box_clone_<size>(i8*)→i8* (T1284)
+	containerBoxDrops  map[string]*ir.Func
+	containerBoxClones map[string]*ir.Func
+	flatBoxClones      map[int64]*ir.Func // per-size @__promise_flat_box_clone_<size>(i8*)→i8* (T1284)
 
 	// Target triple and platform flags
 	target                string     // LLVM target triple

@@ -834,7 +834,13 @@ func (c *Compiler) genStringFromBytes(e *ast.CallExpr) value.Value {
 // genStringLen loads the length field from a string instance struct.
 // String instance layout: { i8* _variant, i64 len, [0 x i8] data }
 func (c *Compiler) genStringLen(e *ast.MemberExpr) value.Value {
-	strPtr := c.genExprAutoPropagate(e.Target) // B0323
+	return c.emitStringLen(c.genExprAutoPropagate(e.Target)) // B0323
+}
+
+// emitStringLen is the value-level core of the `len` getter on string. The AST site
+// above and the synthesized `native` shim a view vtable slot needs (T1881) both call
+// it, so there is one implementation of the operation.
+func (c *Compiler) emitStringLen(strPtr value.Value) value.Value {
 	instType := strInstanceType()
 	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(instType))
 	return loadStringLen(c.block, typedPtr, instType)
@@ -843,7 +849,12 @@ func (c *Compiler) genStringLen(e *ast.MemberExpr) value.Value {
 // genStringIsLiteral checks the sign bit of the string length field.
 // Literal strings (in .rodata) have bit 63 set; heap strings do not.
 func (c *Compiler) genStringIsLiteral(e *ast.MemberExpr) value.Value {
-	strPtr := c.genExprAutoPropagate(e.Target) // B0323
+	return c.emitStringIsLiteral(c.genExprAutoPropagate(e.Target)) // B0323
+}
+
+// emitStringIsLiteral is the value-level core of the `is_literal` getter — see
+// emitStringLen for why it is split out.
+func (c *Compiler) emitStringIsLiteral(strPtr value.Value) value.Value {
 	instType := strInstanceType()
 	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(instType))
 	rawLen := loadStringLenRaw(c.block, typedPtr, instType)

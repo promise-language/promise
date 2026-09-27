@@ -1,0 +1,97 @@
+// T1910: cloning a container whose element is a user type with a structural-interface
+// field killed the process.
+//
+// Two dup walks existed: emitVariantFieldDup (enum variant fields) and
+// dupHeapValueFields (user-type fields). The second carried its own copy of the
+// per-field dispatch and the copy was missing three arms — structural-interface, enum
+// and tuple fields fell through every branch and kept the shallow memcpy. The clone
+// and the original then held the same box, the same variant payload, the same tuple
+// element, and the second drop ran on freed memory. The walks are now one, so the
+// field walk gained every arm the variant walk had.
+//
+// Both the static dup path and the synthesized per-type clone go through that walk,
+// so `.clone()` and an implicit deep copy are covered by the same fix.
+type Show `structural {
+  to_string() string `abstract;
+}
+
+type Wrap {
+  Show s;
+  int n;
+}
+
+structural_field_survives_a_vector_clone() `test {
+  string b = "p" + "q";
+  Wrap w = Wrap(s: move b, n: 1);
+  Wrap[] ws = [w];
+  Wrap[] copy = ws.clone();
+  assert(copy[0].s.to_string() == "pq", "the clone's structural field reads back");
+  assert(copy[0].n == 1, "the plain field survives too");
+}
+
+// The clone must OWN its box, not alias the original's: reading both after the clone
+// proves neither was freed out from under the other.
+structural_field_clone_is_independent() `test {
+  string b = "p" + "q";
+  Wrap w = Wrap(s: move b, n: 1);
+  Wrap[] ws = [w];
+  Wrap[] copy = ws.clone();
+  assert(ws[0].s.to_string() == "pq", "the original still owns its box");
+  assert(copy[0].s.to_string() == "pq", "the clone owns an independent box");
+}
+
+enum Payload {
+  Text(string t),
+  Num(int n),
+}
+
+type WithEnum {
+  Payload p;
+  int n;
+}
+
+enum_field_survives_a_vector_clone() `test {
+  WithEnum w = WithEnum(p: Payload.Text("a" + "b"), n: 1);
+  WithEnum[] ws = [w];
+  WithEnum[] copy = ws.clone();
+  match copy[0].p {
+    Text(t) => assert(t == "ab", "the enum field's payload was deep-cloned"),
+    Num(n) => assert(false, "wrong variant after clone"),
+  }
+}
+
+type WithTuple {
+  (string, int) t;
+  int n;
+}
+
+tuple_field_survives_a_vector_clone() `test {
+  WithTuple w = WithTuple(t: ("a" + "b", 2), n: 1);
+  WithTuple[] ws = [w];
+  WithTuple[] copy = ws.clone();
+  (s, k) := copy[0].t;
+  assert(s == "ab", "the tuple field's string element was deep-cloned");
+  assert(k == 2, "the tuple field's scalar element survived");
+}
+
+// The arms the field walk already had must keep working after the unification.
+type Inner {
+  string s;
+}
+
+type Outer {
+  string s;
+  string[] v;
+  Inner i;
+  int n;
+}
+
+existing_field_arms_still_deep_clone() `test {
+  Outer o = Outer(s: "a" + "b", v: ["c" + "d"], i: Inner(s: "e" + "f"), n: 1);
+  Outer[] os = [o];
+  Outer[] copy = os.clone();
+  assert(copy[0].s == "ab", "string field");
+  assert(copy[0].v[0] == "cd", "vector field");
+  assert(copy[0].i.s == "ef", "nested heap user type field");
+  assert(os[0].v[0] == "cd", "the original's vector is untouched");
+}

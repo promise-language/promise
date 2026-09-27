@@ -1107,7 +1107,14 @@ func (c *Compiler) genAutoPropagate(expr ast.Expr) {
 // propagateIfFailable wraps a setter-style call result in auto-propagation when
 // the call returns a failable result struct ({i1, ...}). For non-failable void
 // returns this is a no-op. T0708.
+//
+// Every caller reaches here immediately after emitting a setter / index-assign
+// call, and none of those is an *ast.CallExpr, so this is where their panic check
+// belongs (T1907 — see emitPanicCheck). It runs FIRST: a callee that panicked
+// returned the zero result struct, whose ok bit reads as an error, and propagating
+// that would report a bogus error instead of the panic.
 func (c *Compiler) propagateIfFailable(result value.Value) {
+	c.emitPanicCheck() // T1907
 	if _, isStruct := result.Type().(*irtypes.StructType); isStruct {
 		c.emitFailableResultPropagation(result)
 	}

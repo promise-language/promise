@@ -3214,12 +3214,18 @@ func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
 				if c.rejectValueTypeIdentity(e.Pos(), subjectType, resolved, "'is' type check") {
 					break
 				}
+				if c.recordStructuralIs(e, subjectType, resolved) {
+					break
+				}
 				c.info.IsPatternTypes[p] = resolved
 			}
 			break
 		}
 		obj := c.lookup(p.Name)
 		if tn, ok := obj.(*types.TypeName); ok && c.rejectValueTypeIdentity(e.Pos(), subjectType, tn.Type(), "'is' type check") {
+			break
+		}
+		if tn, ok := obj.(*types.TypeName); ok && c.recordStructuralIs(e, subjectType, tn.Type()) {
 			break
 		}
 		if obj != nil {
@@ -3398,6 +3404,11 @@ func (c *Checker) checkCastExpr(e *ast.CastExpr) types.Type {
 
 	// T1527: a cast between two value types has no runtime identity to test.
 	if c.rejectValueTypeIdentity(e.Pos(), srcType, target, "'as' cast") {
+		return nil
+	}
+
+	// T1562: a cast TO a `structural interface is a widening, decided statically.
+	if c.rejectUnrepresentableStructuralUpcast(e.Pos(), srcType, target) {
 		return nil
 	}
 

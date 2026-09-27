@@ -18,6 +18,13 @@ import (
 
 // genIsExpr generates code for `expr is Pattern`.
 func (c *Compiler) genIsExpr(e *ast.IsExpr) value.Value {
+	// T1532: conformance to a `structural interface is a compile-time property, so
+	// sema decided this one. The RTTI walk below cannot answer it — typeinfo records
+	// only nominal `is` parents, so it returned false even for a subject DECLARED as
+	// the interface.
+	if info, ok := c.info.StructuralIs[e]; ok {
+		return c.genStructuralIs(e, info)
+	}
 	switch p := e.Pattern.(type) {
 	case *ast.IdentIsPattern:
 		return c.genIsIdentPattern(e.Expr, p)
@@ -26,6 +33,35 @@ func (c *Compiler) genIsExpr(e *ast.IsExpr) value.Value {
 	default:
 		panic(fmt.Sprintf("codegen: unhandled is-pattern type %T", e.Pattern))
 	}
+}
+
+// genStructuralIs emits `x is <structural interface>`. The subject is still
+// evaluated — it may have effects, and its temps still need statement-end cleanup —
+// but the answer is a constant. An optional subject additionally has to be present,
+// so there the answer is its presence flag.
+//
+// An undecided entry is a generic body sema checked with its type parameters
+// unbound; the substitution is known here, so the same predicate answers it now.
+func (c *Compiler) genStructuralIs(e *ast.IsExpr, info *sema.StructuralIsInfo) value.Value {
+	subject := c.genExpr(e.Expr)
+
+	satisfies := info.Result
+	if !info.Decided {
+		subjectType, targetType := info.Subject, info.Target
+		if c.typeSubst != nil {
+			subjectType = types.Substitute(subjectType, c.typeSubst)
+			targetType = types.Substitute(targetType, c.typeSubst)
+		}
+		satisfies, _ = sema.StructuralConformance(subjectType, targetType)
+	}
+
+	if _, isOpt := info.Subject.(*types.Optional); isOpt && satisfies {
+		return c.block.NewExtractValue(subject, 0)
+	}
+	if satisfies {
+		return constant.NewInt(irtypes.I1, 1)
+	}
+	return constant.NewInt(irtypes.I1, 0)
 }
 
 func (c *Compiler) genIsIdentPattern(expr ast.Expr, p *ast.IdentIsPattern) value.Value {
@@ -765,6 +801,21 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		return c.genStructuralDowncast(e, subject, srcNamed, targetNamed, targetType, targetIsBorrow)
 	}
 
+	// T1562: the other direction — a cast TO a structural interface — is a WIDENING,
+	// which sema accepted only because the subject's static type satisfies it. The
+	// RTTI walk below would answer false (typeinfo records only nominal `is` parents)
+	// and, worse, would hand back the subject's own representation unboxed: a value
+	// type then panicked codegen storing `%T_v` into a `{i8*, i8*}` slot, and a heap
+	// subject silently yielded `none`. Box it exactly as an implicit assignment does,
+	// so the two can never disagree about the box.
+	if isStructuralView(targetNamed) {
+		boxed := c.coerceToView(subject, srcType, targetType)
+		if e.Force {
+			return boxed
+		}
+		return c.wrapSome(boxed, c.resolveType(targetType))
+	}
+
 	targetID := c.assignTypeID(targetNamed)
 
 	// Extract instance pointer for RTTI query.
@@ -1294,6 +1345,14 @@ func (c *Compiler) genStructuralDowncast(e *ast.CastExpr, subject value.Value, s
 // fat value ({view_vtable, instance_ptr}). The extraction depends on how the
 // concrete type was boxed — see boxForStructuralView / boxValueTypeForStructuralView.
 func (c *Compiler) unboxStructuralCast(subject value.Value, targetNamed *types.Named, targetType types.Type) value.Value {
+	return c.unboxStructuralValue(subject, targetNamed, targetType, true)
+}
+
+// unboxStructuralValue is the shared unbox. ownResult distinguishes the two callers:
+// a downcast (true) produces an owned value, so a boxed string is duplicated — the
+// box still owns its own copy; an adapter's interface parameter (false, T1881) is a
+// borrow for the duration of the call, so duplicating it would leak.
+func (c *Compiler) unboxStructuralValue(subject value.Value, targetNamed *types.Named, targetType types.Type, ownResult bool) value.Value {
 	instancePtr := c.extractInstancePtr(subject) // field 1 of fat value
 
 	if isPrimitiveScalar(targetNamed) {
@@ -1315,6 +1374,9 @@ func (c *Compiler) unboxStructuralCast(subject value.Value, targetNamed *types.N
 		strField := c.block.NewGetElementPtr(boxType, typedBox,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 		strPtr := c.block.NewLoad(irtypes.I8Ptr, strField)
+		if !ownResult {
+			return strPtr
+		}
 		return c.dupString(strPtr)
 	}
 

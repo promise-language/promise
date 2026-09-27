@@ -354,6 +354,20 @@ func (c *Compiler) definePanicAtBody(fn *ir.Func) {
 // Loads the panic flag, branches to a cleanup block if set (panic in flight),
 // and sets c.block to the continuation block for normal execution.
 // The cleanup block calls emitPanicReturn() to perform scope cleanup and return.
+//
+// `promise_panic` does not unwind — it sets the flag and RETURNS, so every caller
+// of anything that may panic owes this check, and owes it before it looks at the
+// result. genExpr emits one after each *ast.CallExpr (T0147), but a getter read, a
+// setter write, an index assignment and a user-defined operator are calls that are
+// not CallExprs, so their callees' panics used to be swallowed: the flag stayed
+// set, the caller computed on the callee's zero return, and the next real panic
+// reported `fatal: panic during panic recovery` from the wrong site (T1907). Those
+// four dispatch points now call this too — placed immediately after the call and
+// before the result is tracked or interpreted, since after a panic the "result" is
+// a zero value that must not be registered as an owned temp or read as a failable
+// struct. Native operators and inline native index reads need no check: they have
+// no callee, and the emitter that raises their panic branches to the panic return
+// in this same frame.
 func (c *Compiler) emitPanicCheck() {
 	if c.block == nil || c.block.Term != nil {
 		return

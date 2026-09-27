@@ -638,10 +638,10 @@ func TestReturnedStringBoxHasStringBoxTypeInfo(t *testing.T) {
 		main() { Showable a = show_str("hi"); }
 	`)
 	// The typeinfo global exists and carries the box drop wrapper as its drop_fn.
-	codegentest.AssertContains(t, ir, "@promise_typeinfo_stringbox")
+	codegentest.AssertContains(t, ir, "@promise_typeinfo_box$string")
 	codegentest.AssertContains(t, ir, "@__promise_string_box_drop")
 	// The box stores the stringbox typeinfo into field 0.
-	codegentest.AssertContains(t, ir, "bitcast ({ i8*, i8*, i8*, i32, i32 }* @promise_typeinfo_stringbox to i8*)")
+	codegentest.AssertContains(t, ir, "bitcast ({ i8*, i8*, i8*, i32, i32 }* @promise_typeinfo_box$string to i8*)")
 }
 
 // T0357: string compound assignment must dispatch through genStringOp,

@@ -91,8 +91,15 @@ func TestShellJoinRoundTripsThroughSh(t *testing.T) {
 		"--body-file", "/tmp/a b/body.md",
 		"--label", "type:bug",
 	}
+	// Resolved, not spelled "/bin/sh": Windows has no such path, but a host with
+	// Git installed carries a POSIX sh, and that is where a quoting bug is least
+	// likely to be noticed otherwise (T2231).
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no POSIX sh on this host")
+	}
 	line := shellJoin(args)
-	out, err := exec.Command("/bin/sh", "-c", `printf '%s\0' `+line).Output()
+	out, err := exec.Command(sh, "-c", `printf '%s\0' `+line).Output()
 	if err != nil {
 		t.Fatalf("sh could not parse %q: %v", line, err)
 	}

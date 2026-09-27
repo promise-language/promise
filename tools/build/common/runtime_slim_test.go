@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -234,7 +235,7 @@ func TestEnsureWasmRuntime_ReturnsAnExecutablePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat staged runtime: %v", err)
 	}
-	if info.Mode().Perm()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
 		t.Errorf("staged runtime mode = %v, want the execute bit set", info.Mode().Perm())
 	}
 }
@@ -623,7 +624,7 @@ func TestEnsureRuntimeSignatureIsHarmless(t *testing.T) {
 	if string(got) != content {
 		t.Errorf("file = %q, want it left as %q", got, content)
 	}
-	if info, err := os.Stat(path); err == nil && info.Mode().Perm()&0o111 == 0 {
+	if info, err := os.Stat(path); err == nil && runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
 		t.Error("the hook cleared the execute bit")
 	}
 }

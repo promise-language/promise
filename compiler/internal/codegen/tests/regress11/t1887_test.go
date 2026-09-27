@@ -192,7 +192,7 @@ func TestT1887_BorrowedDuplicableHandleIsClonedIntoTheBox(t *testing.T) {
 	if !strings.Contains(body, "chdup.inc") {
 		t.Fatalf("a borrowed channel must be duplicated (refcount bump) into its box:\n%s", body)
 	}
-	if !strings.Contains(body, `promise_typeinfo_containerbox$Channel[int]`) {
+	if !strings.Contains(body, `promise_typeinfo_box$Channel[int]`) {
 		t.Fatalf("the box owns its duplicated channel, so it needs the owning header:\n%s", body)
 	}
 	// The original binding keeps its own release: two references, two drops.
@@ -217,10 +217,12 @@ func TestT1887_BorrowedSingleOwnerHandleBoxIsNotGivenOwnership(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected __user.t in IR")
 	}
-	if strings.Contains(body, `promise_typeinfo_containerbox$MutexGuard`) {
+	// The owning header is named for the concrete alone; the null-drop one carries
+	// the `$flat` suffix (T1902), so match the closing quote to tell them apart.
+	if strings.Contains(body, `promise_typeinfo_box$MutexGuard[int]"`) {
 		t.Fatalf("a borrowed guard was boxed with an owning header — its drop would run twice:\n%s", body)
 	}
-	if !strings.Contains(body, "promise_typeinfo_flatbox") {
+	if !strings.Contains(body, `promise_typeinfo_box$MutexGuard[int]$flat"`) {
 		t.Fatalf("expected the borrowed guard to get a null-drop flat header:\n%s", body)
 	}
 }

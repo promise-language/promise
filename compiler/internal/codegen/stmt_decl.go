@@ -569,7 +569,11 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// T0747: a user-type RTTI cast of a borrow (`d := x as!/as T`) is a
 	// non-consuming view — the subject keeps ownership. Clear the LHS drop flag
 	// so the cast local doesn't double-free the aliased instance at scope exit.
-	if c.isRttiCastBorrow(s.Value) {
+	// T1562: unless the cast ALLOCATED — a widening to a structural interface boxes
+	// a primitive/string/value type/handle subject, and claimHeapTemp just moved that
+	// fresh box into this binding. claimedOwnedBox is that signal, so the two sites
+	// agree on which coercions allocate without either restating coerceToView's arms.
+	if !claimedOwnedBox && c.isRttiCastBorrow(s.Value) {
 		c.clearDropFlag(s.Name)
 		c.markBorrowOptionalLocal(s.Name, dropType)
 	}
@@ -940,7 +944,8 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// T0747: a user-type RTTI cast of a borrow (`d := x as!/as T`) is a
 	// non-consuming view — the subject keeps ownership. Clear the LHS drop flag
 	// so the cast local doesn't double-free the aliased instance at scope exit.
-	if c.isRttiCastBorrow(s.Value) {
+	// T1562: unless the cast ALLOCATED — see the genTypedVarDecl site.
+	if !claimedOwnedBox && c.isRttiCastBorrow(s.Value) {
 		c.clearDropFlag(s.Name)
 		c.markBorrowOptionalLocal(s.Name, typ)
 	}

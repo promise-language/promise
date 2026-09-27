@@ -171,30 +171,52 @@ func TestConstIntFromRawUnparseable(t *testing.T) {
 	}
 }
 
-// TestTryConstantExprElemTypeMismatch covers the defensive `elemLLVM` fallbacks:
-// an int literal folded against a non-integer element type defaults to i64, and
-// a float literal against a non-float element type defaults to double. Not
-// reachable from well-typed source (sema checks each element against the
-// declared element type), so drive the fold directly.
+// TestTryConstantExprElemTypeMismatch covers the element-kind guard: a literal
+// whose LLVM kind does not match the element slot's must NOT fold, so the whole
+// vector literal falls back to the heap path.
+//
+// These fallbacks used to substitute i64 / double instead, and that WAS reachable
+// from well-typed source: an element destined for a `Vector[<structural interface>]`
+// slot has LLVM type `{i8*, i8*}` and must be boxed, which only the heap path can do.
+// A folded scalar went into the `.rodata` initializer and `opt` rejected the module
+// with `constant expression type mismatch` — after `promise check` had accepted the
+// program (T1475).
 func TestTryConstantExprElemTypeMismatch(t *testing.T) {
 	c := &Compiler{}
-	notAnInt := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+	viewPair := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
 
-	cv := c.tryConstantExpr(&ast.IntLit{Raw: "42"}, nil, notAnInt)
-	iv, ok := cv.(*constant.Int)
-	if !ok {
-		t.Fatalf("int literal with struct elem type = %T, want *constant.Int", cv)
+	if cv := c.tryConstantExpr(&ast.IntLit{Raw: "42"}, nil, viewPair); cv != nil {
+		t.Errorf("int literal with a boxed element slot folded to %v, want no fold", cv)
 	}
-	if iv.Typ != irtypes.I64 || iv.X.String() != "42" {
-		t.Errorf("int fallback = %v %s, want i64 42", iv.Typ, iv.X)
+	if cv := c.tryConstantExpr(&ast.FloatLit{Raw: "1.5"}, nil, irtypes.I64); cv != nil {
+		t.Errorf("float literal with an int element slot folded to %v, want no fold", cv)
+	}
+	// bool and char never consulted the element slot at all, so they are the arms
+	// most likely to regress.
+	if cv := c.tryConstantExpr(&ast.BoolLit{Value: true}, nil, viewPair); cv != nil {
+		t.Errorf("bool literal with a boxed element slot folded to %v, want no fold", cv)
+	}
+	if cv := c.tryConstantExpr(&ast.CharLit{Raw: "'a'"}, nil, viewPair); cv != nil {
+		t.Errorf("char literal with a boxed element slot folded to %v, want no fold", cv)
+	}
+	// A negated literal folds through the same arm, so it must bail the same way.
+	neg := &ast.UnaryExpr{Op: ast.UnaryNeg, Operand: &ast.IntLit{Raw: "42"}}
+	if cv := c.tryConstantExpr(neg, nil, viewPair); cv != nil {
+		t.Errorf("negated int literal with a boxed element slot folded to %v, want no fold", cv)
 	}
 
-	fv, ok := c.tryConstantExpr(&ast.FloatLit{Raw: "1.5"}, nil, irtypes.I64).(*constant.Float)
+	// A MATCHING kind must still fold — the guard rejects a mismatch, it does not
+	// disable constant folding.
+	iv, ok := c.tryConstantExpr(&ast.IntLit{Raw: "42"}, nil, irtypes.I64).(*constant.Int)
+	if !ok || iv.Typ != irtypes.I64 || iv.X.String() != "42" {
+		t.Errorf("int literal with an i64 element slot must still fold to i64 42")
+	}
+	fv, ok := c.tryConstantExpr(&ast.FloatLit{Raw: "1.5"}, nil, irtypes.Double).(*constant.Float)
 	if !ok {
-		t.Fatalf("float literal with int elem type did not fold to *constant.Float")
+		t.Fatalf("float literal with a double element slot must still fold")
 	}
 	if got, _ := fv.X.Float64(); fv.Typ != irtypes.Double || got != 1.5 {
-		t.Errorf("float fallback = %v %v, want double 1.5", fv.Typ, got)
+		t.Errorf("float fold = %v %v, want double 1.5", fv.Typ, got)
 	}
 }
 

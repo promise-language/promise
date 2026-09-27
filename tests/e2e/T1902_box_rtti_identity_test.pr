@@ -1,0 +1,90 @@
+// T1902: a structural box carries its payload's RTTI identity.
+//
+// `boxForStructuralView` gave every box a `{ i8* typeinfo, i8* payload }` header,
+// but the three headers it could pick all carried typeID 0 and no parents. So
+// `promise_type_is` — which reads field 3 of whatever field 0 points at — answered
+// false for every `is`/`as` whose subject was a boxed primitive, string or opaque
+// container, while the same question about the unboxed value answered correctly.
+// A heap user type and a pure value type already worked, because their boxes point
+// at (or copy in) the concrete's own typeinfo.
+//
+// The header is now built by one constructor whose identity fields come from the
+// same typeIdentityIDs the concrete's own typeinfo uses, so the answer no longer
+// depends on how the value reached the check.
+type Show `structural {
+  to_string() string `abstract;
+}
+
+type Named {
+  string n;
+  to_string() string => this.n;
+}
+
+type Vt {
+  int x `value;
+  to_string() string => "v";
+}
+
+boxed_primitive_keeps_its_identity() `test {
+  Format f = 3;
+  assert(f is int, "a boxed int is an int");
+}
+
+boxed_string_keeps_its_identity() `test {
+  Show s = "abc";
+  assert(s is string, "a boxed string is a string");
+}
+
+boxed_container_keeps_its_identity() `test {
+  Cloneable c = [1, 2, 3];
+  assert(c is Vector[int], "a boxed vector is a Vector[int]");
+}
+
+// The generic origin is listed as a parent, so the bare name matches too.
+boxed_container_matches_its_origin() `test {
+  Cloneable c = [1, 2, 3];
+  assert(c is Vector, "a boxed Vector[int] is a Vector");
+}
+
+boxed_heap_user_type_keeps_its_identity() `test {
+  Show s = Named(n: "a");
+  assert(s is Named, "a boxed heap user type keeps its identity");
+}
+
+boxed_value_type_keeps_its_identity() `test {
+  Show s = Vt(x: 1);
+  assert(s is Vt, "a boxed value type keeps its identity");
+}
+
+// A wrong target must still answer false — the header names one concrete, it does
+// not make every check succeed.
+boxed_primitive_rejects_a_different_concrete() `test {
+  Format f = 3;
+  assert(!(f is bool), "a boxed int is not a bool");
+}
+
+boxed_string_rejects_a_different_concrete() `test {
+  Show s = "abc";
+  assert(!(s is Named), "a boxed string is not a Named");
+}
+
+// Two primitives whose boxes are the same size must not answer each other's checks.
+// The header used to be keyed by box SIZE, so int and i64 shared one.
+same_sized_primitives_do_not_share_an_identity() `test {
+  Format a = 1;
+  Format b = 2i64;
+  assert(a is int, "the int box is an int");
+  assert(!(a is i64), "the int box is not an i64");
+  assert(b is i64, "the i64 box is an i64");
+  assert(!(b is int), "the i64 box is not an int");
+}
+
+// Identity survives the box being cloned: __promise_structural_clone copies the
+// header, so the copy answers what the original did. A primitive payload keeps this
+// case clear of the separate payload-ownership cluster (T1931), whose vector-literal
+// leak is about the boxed heap payload rather than the header.
+cloned_box_keeps_its_identity() `test {
+  Format[] v = [1];
+  Format[] copy = v.clone();
+  assert(copy[0] is int, "a cloned boxed int is still an int");
+}

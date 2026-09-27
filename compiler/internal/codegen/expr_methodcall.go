@@ -387,6 +387,7 @@ func (c *Compiler) genEnumGetterAccess(e *ast.MemberExpr, targetType types.Type,
 	// T0879: Register the getter result for cleanup at statement end, matching
 	// genGetterCall / genVirtualGetterCall. Without this, string/vector/etc.
 	// results used as unbound temporaries (inline ==, call arg) leak.
+	c.emitPanicCheck() // T1907
 	c.trackGetterResult(e, getter, targetType, result)
 	return result, true
 }

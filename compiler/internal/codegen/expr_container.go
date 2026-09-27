@@ -16,7 +16,13 @@ import (
 
 // genVectorLen loads the length from a vector/array header (masking off bit 63 static flag).
 func (c *Compiler) genVectorLen(e *ast.MemberExpr) value.Value {
-	slicePtr := c.genExprAutoPropagate(e.Target) // B0323
+	return c.emitVectorLen(c.genExprAutoPropagate(e.Target)) // B0323
+}
+
+// emitVectorLen is the value-level core of the `len` getter on Vector[T]. The AST
+// site above and the synthesized `native` shim a view vtable slot needs (T1881) both
+// call it, so there is one implementation of the operation.
+func (c *Compiler) emitVectorLen(slicePtr value.Value) value.Value {
 	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
 	return loadVectorLen(c.block, headerPtr)

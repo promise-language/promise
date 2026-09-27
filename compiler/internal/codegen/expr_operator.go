@@ -66,6 +66,7 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	if named == nil {
 		if en := extractEnum(leftType); en != nil {
 			// T0918: track the heap user-type result for inline (unbound) use.
+			// The panic check lives in genEnumBinaryOp (T1907).
 			return c.trackOperatorResult(e, c.genEnumBinaryOp(e, en, leftType, left, right))
 		}
 		panic(fmt.Sprintf("codegen: cannot resolve Named type from %s for operator %s", leftType, e.Op))
@@ -94,6 +95,7 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	// Virtual dispatch when the type has a vtable (abstract/structural type or type with children).
 	if c.needsVtable(named) {
 		// T0918: track the heap user-type result for inline (unbound) use.
+		// The panic check lives in genVirtualBinaryOpValues (T1907).
 		return c.trackOperatorResult(e, c.genVirtualBinaryOp(e, named, method, left, right))
 	}
 
@@ -126,6 +128,7 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	}
 	args = append(args, right)
 	result := value.Value(c.block.NewCall(fn, args...))
+	c.emitPanicCheck() // T1907 — before the failable unwrap below
 	if method.Sig().CanError() {
 		// T0984: failable operator returns {ok, value, err}; unwrap and propagate
 		// the error to the (sema-guaranteed failable) enclosing scope.
@@ -230,6 +233,7 @@ func (c *Compiler) genEnumBinaryOp(e *ast.BinaryExpr, en *types.Enum, leftType t
 	}
 	args = append(args, right)
 	result := value.Value(c.block.NewCall(fn, args...))
+	c.emitPanicCheck() // T1907 — before the failable unwrap below
 	if method.Sig().CanError() {
 		// T0984: unwrap the failable {ok, value, err} result and propagate the error.
 		result = c.genAutoPropagateValue(result)
@@ -285,6 +289,7 @@ func (c *Compiler) genNonNativeEnumCompoundOp(en *types.Enum, operandType types.
 	args = append(args, val)
 
 	result := value.Value(c.block.NewCall(fn, args...))
+	c.emitPanicCheck() // T1907 — before the failable unwrap below
 	if method.Sig().CanError() {
 		result = c.genAutoPropagateValue(result)
 	}
@@ -296,7 +301,7 @@ func (c *Compiler) genNonNativeEnumCompoundOp(en *types.Enum, operandType types.
 // Mirrors genVirtualMethodCall but uses pre-evaluated left/right operands.
 func (c *Compiler) genVirtualBinaryOp(e *ast.BinaryExpr, named *types.Named,
 	method *types.Method, left, right value.Value) value.Value {
-	result := c.genVirtualBinaryOpValues(named, e.Op.String(), method, left, right, isThisReceiver(e.Left), e.Right)
+	result := c.genVirtualBinaryOpValues(named, e.Op.String(), method, left, right, c.resolvedExprType(e.Right), isThisReceiver(e.Left), e.Right)
 	if method.Sig().CanError() {
 		// T0984: unwrap the failable {ok, value, err} result and propagate the
 		// error. Done here (not in genVirtualBinaryOpValues, which is shared with
@@ -314,7 +319,7 @@ func (c *Compiler) genVirtualBinaryOp(e *ast.BinaryExpr, named *types.Named,
 // genNonNativeCompoundOp (compound `a += b`, where neither operand is `this`), so
 // the vtable dispatch logic lives in one place (T0715).
 func (c *Compiler) genVirtualBinaryOpValues(named *types.Named, op string,
-	method *types.Method, left, right value.Value, leftIsThis bool, rightExpr ast.Expr) value.Value {
+	method *types.Method, left, right value.Value, rightType types.Type, leftIsThis bool, rightExpr ast.Expr) value.Value {
 
 	// Extract vtable and instance from left operand
 	var vtableRaw, instance value.Value
@@ -364,8 +369,21 @@ func (c *Compiler) genVirtualBinaryOpValues(named *types.Named, op string,
 	if rightExpr != nil && isThisReceiver(rightExpr) && len(paramTypes) > 0 {
 		right = c.coerceThisOperand(right, rightExpr, paramTypes[len(paramTypes)-1])
 	}
+	// T1881: a requirement written over `Self` — `Ordered.<(Self other)` — declares
+	// its parameter as the VIEW, so the slot's signature is `{i8*, i8*}` and the
+	// operand has to be boxed into it. The direct-dispatch path never needs this (the
+	// concrete's own parameter type is the concrete), so the coercion belongs here,
+	// beside the signature that demands it. The adapter unboxes it again on arrival.
+	if len(method.Sig().Params()) == 1 && rightType != nil {
+		right = c.coerceToView(right, rightType, method.Sig().Params()[0].Type())
+	}
 	args = append(args, right)
-	return c.block.NewCall(fnTyped, args...)
+	callResult := c.block.NewCall(fnTyped, args...)
+	// T1907: both callers unwrap a failable result right after this returns, so the
+	// flag must be read before the zero result a panicking callee left behind is
+	// interpreted as an error.
+	c.emitPanicCheck()
+	return callResult
 }
 
 // genNonNativeCompoundOp dispatches a user-defined (non-native) binary operator
@@ -385,7 +403,7 @@ func (c *Compiler) genNonNativeCompoundOp(named *types.Named, operandType types.
 	if c.needsVtable(named) {
 		// Virtual dispatch when the operand type is abstract / structural / has
 		// children. Neither operand is `this`.
-		result = c.genVirtualBinaryOpValues(named, op, method, current, val, false, nil)
+		result = c.genVirtualBinaryOpValues(named, op, method, current, val, operandType, false, nil)
 	} else {
 		// Direct dispatch: resolve the mangled name exactly as genBinaryExpr does
 		// (mono name for generic instances, structural-default synthesis under the
@@ -406,6 +424,7 @@ func (c *Compiler) genNonNativeCompoundOp(named *types.Named, operandType types.
 		}
 		args = append(args, val)
 		result = c.block.NewCall(fn, args...)
+		c.emitPanicCheck() // T1907 — the virtual arm checks inside genVirtualBinaryOpValues
 	}
 
 	if method.Sig().CanError() {
@@ -416,8 +435,19 @@ func (c *Compiler) genNonNativeCompoundOp(named *types.Named, operandType types.
 	return result
 }
 
+// stringBinaryOps is the set of string binary operators backed by a runtime
+// intrinsic. genStringOp gates on it, and the native shim factory (T1881) asks it
+// before creating a view-vtable shim whose body it could not fill — one authoritative
+// set, with genStringOp's own default arm left as a backstop.
+var stringBinaryOps = map[string]bool{
+	"+": true, "==": true, "!=": true, "<": true, ">": true, "<=": true, ">=": true,
+}
+
 // genStringOp dispatches a string binary operator to the appropriate runtime intrinsic.
 func (c *Compiler) genStringOp(op string, left, right value.Value) value.Value {
+	if !stringBinaryOps[op] {
+		panic(fmt.Sprintf("codegen: string operator %q not yet implemented", op))
+	}
 	switch op {
 	case "+":
 		return c.block.NewCall(c.funcs["promise_string_concat"], left, right)
@@ -522,6 +552,7 @@ func (c *Compiler) emitUnaryOpResult(op string, operandType types.Type, operand 
 			}
 		}
 		result = c.block.NewCall(fn, args...)
+		c.emitPanicCheck() // T1907 — the virtual arm checks inside genVirtualUnaryOp
 	}
 
 	if method.Sig().CanError() {
@@ -574,6 +605,7 @@ func (c *Compiler) genEnumUnaryOp(op string, en *types.Enum, operandType types.T
 		args = append(args, c.block.NewBitCast(alloca, irtypes.I8Ptr))
 	}
 	result := value.Value(c.block.NewCall(fn, args...))
+	c.emitPanicCheck() // T1907 — before the failable unwrap below
 	if method.Sig().CanError() {
 		// T0984: unwrap the failable {ok, value, err} result and propagate the error.
 		result = c.genAutoPropagateValue(result)
@@ -629,7 +661,11 @@ func (c *Compiler) genVirtualUnaryOp(op string, named *types.Named,
 	if method.Sig().Recv() != nil {
 		args = append(args, instance)
 	}
-	return c.block.NewCall(fnTyped, args...)
+	callResult := c.block.NewCall(fnTyped, args...)
+	// T1907: the caller unwraps a failable result right after this returns, so the
+	// flag must be read before a panicking callee's zero result is read as an error.
+	c.emitPanicCheck()
+	return callResult
 }
 
 // lookupUnaryMethod finds the 0-param variant of a method by name, walking

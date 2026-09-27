@@ -1397,62 +1397,17 @@ func (c *Compiler) dupHeapValueFields(named *types.Named, resolvedType types.Typ
 		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedNewPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 		fieldLLVMType := layout.Instance.Fields[fieldIdx].LLVMType
-
-		if _, isSig := fType.(*types.Signature); isSig {
-			// T0813: a closure env cannot be deep-cloned (the captured frame is
-			// opaque); null the cloned slot so the source keeps sole ownership of
-			// the env (dropped exactly once), mirroring emitVariantFieldDup's
-			// Signature case. Defense-in-depth — sema now rejects clone()/filled()
-			// of closure-containing aggregates, but residual implicit-dup paths
-			// (polymorphic slice, etc.) still reach here and would otherwise alias
-			// the env pointer between two droppable owners → double-free.
-			c.block.NewStore(constant.NewZeroInitializer(fieldLLVMType), fieldPtr)
-			continue
-		}
-
-		fNamed := extractNamed(fType)
-		if fNamed == nil {
-			continue
-		}
-
 		fieldVal := c.block.NewLoad(fieldLLVMType, fieldPtr)
 
-		if fNamed == types.TypString {
-			dup := c.dupString(fieldVal)
-			c.block.NewStore(dup, fieldPtr)
-		} else if elemType, isVec := types.AsVector(fType); isVec {
-			elemLLVM := c.resolveType(elemType)
-			elemSize := int64(c.typeSize(elemLLVM))
-			dup := c.dupVector(fieldVal, elemSize)
-			// B0276: Deep-clone droppable elements (strings, heap types, etc.)
-			// to prevent double-free when both original and dup are dropped.
-			c.emitVectorElementCloneLoop(dup, elemType)
-			c.block.NewStore(dup, fieldPtr)
-		} else if _, isChan := types.AsChannel(fType); isChan || fNamed == types.TypChannel {
-			dup := c.dupChannel(fieldVal)
-			c.block.NewStore(dup, fieldPtr)
-		} else if arcElem, isArc := types.AsArc(fType); isArc || fNamed == types.TypArc {
-			dup := c.dupArc(fieldVal, arcElem)
-			c.block.NewStore(dup, fieldPtr)
-		} else if _, isWeak := types.AsWeak(fType); isWeak || fNamed == types.TypWeak {
-			elemType := fType
-			if w, ok := types.AsWeak(fType); ok {
-				elemType = w
-			}
-			dup := c.dupWeak(fieldVal, elemType)
-			c.block.NewStore(dup, fieldPtr)
-		} else if h := singleOwnerHandleName(fType, fNamed); h != "" {
-			// T1113: The single-owner native handles (Task/Mutex/MutexGuard —
-			// Vector/Channel/Arc/Weak are handled above, and all satisfy
-			// isOpaqueContainerType) have NO dup semantics. The old T0387 no-op
-			// shallow copy aliased the source's handle and double-freed / UAF'd at
-			// drop. Panic backstop — see emitSingleOwnerHandleDupPanic.
-			c.emitSingleOwnerHandleDupPanic(h)
-		} else if !fNamed.IsValueType() && !fNamed.IsCopy() && !isPrimitiveScalar(fNamed) && !fNamed.IsStructural() {
-			// Nested heap user type — recursive dup
-			dup := c.dupHeapValue(fieldVal, fType)
-			c.block.NewStore(dup, fieldPtr)
-		}
+		// T1910: one dup walk. This used to carry its own copy of the per-field
+		// dispatch, and the copy was missing three of emitVariantFieldDup's arms —
+		// structural-interface, enum and tuple fields were left as the shallow
+		// memcpy, so a user type with a structural-interface field cloned into a
+		// box shared between two now-droppable owners and died on the second drop.
+		// The variant walk is the strictly more complete of the two, so it is the
+		// one that survives; the field index, the generic substitution and the
+		// layout lookup are all this loop keeps.
+		c.emitVariantFieldDup(fieldVal, fieldPtr, fType)
 	}
 }
 

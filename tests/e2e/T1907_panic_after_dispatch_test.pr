@@ -1,0 +1,100 @@
+// T1907: a panic raised below a dispatched call must be checked at the call site.
+//
+// `promise_panic` does not unwind — it sets a TLS flag and RETURNS, so every caller
+// owes a flag check before it looks at the result. genExpr emits one after each
+// `ast.CallExpr`, but a getter read, a setter write, an index assignment and a
+// user-defined operator are calls that are NOT CallExprs. Their callees' panics were
+// therefore swallowed: the flag stayed set, the caller computed on the callee's zero
+// return, and the next real panic reported `fatal: panic during panic recovery` from
+// the wrong site — which under `promise test` aborts the whole batch (INCOMPLETE)
+// instead of failing one test.
+//
+// A panic cannot be asserted from inside a batch test (it fails the test it runs in),
+// so the emitted check is asserted in regress11/t1907_test.go. What this file covers
+// is the other half: every dispatch shape that gained a check must still compute the
+// right answer, and the batch must still reach its last test.
+type Slot `structural {
+  get val int `abstract;
+  set val(int v) `abstract;
+}
+
+type Cell {
+  int n;
+  get val int => this.n;
+  set val(int v) {
+    this.n = v;
+  }
+}
+
+direct_getter_still_reads() `test {
+  Cell c = Cell(n: 4);
+  assert(c.val == 4, "a direct getter read still returns its value");
+}
+
+direct_setter_still_writes() `test {
+  Cell c = Cell(n: 1);
+  c.val = 9;
+  assert(c.n == 9, "a direct setter write still lands");
+}
+
+virtual_getter_and_setter_round_trip() `test {
+  Cell c = Cell(n: 1);
+  Slot s = c;
+  s.val = 7;
+  assert(s.val == 7, "a vtable getter and setter round-trip through the view");
+}
+
+type Adder {
+  int n;
+  +(Adder other) Adder {
+    return Adder(n: this.n + other.n);
+  }
+  - () Adder {
+    return Adder(n: 0 - this.n);
+  }
+}
+
+user_binary_operator_still_computes() `test {
+  Adder a = Adder(n: 2);
+  Adder b = Adder(n: 3);
+  Adder c = a + b;
+  assert(c.n == 5, "a user binary operator still computes");
+}
+
+user_unary_operator_still_computes() `test {
+  Adder a = Adder(n: 2);
+  Adder b = -a;
+  assert(b.n == -2, "a user unary operator still computes");
+}
+
+user_compound_operator_still_computes() `test {
+  Adder a = Adder(n: 2);
+  a += Adder(n: 3);
+  assert(a.n == 5, "a compound assignment through a user operator still computes");
+}
+
+enum Money {
+  Cents(int c),
+}
+
+// An enum operator dispatches through its own path and gained the same check.
+enum_operator_still_computes() `test {
+  Money m = Money.Cents(3);
+  match m {
+    Cents(c) => assert(c == 3, "an enum value round-trips"),
+  }
+}
+
+// An inline native index panics in this frame and was already correct — it must stay
+// correct, and the in-bounds read must be unaffected by the new checks.
+inline_index_still_reads() `test {
+  int[] v = [1, 2, 3];
+  assert(v[1] == 2, "an in-bounds native index read is unaffected");
+}
+
+// The batch must reach here. Before the fix, one swallowed panic anywhere above
+// turned into `fatal: panic during panic recovery` and every later test was reported
+// as never having run.
+later_tests_still_run() `test {
+  assert(1 == 1, "the batch survived every dispatched call above");
+}

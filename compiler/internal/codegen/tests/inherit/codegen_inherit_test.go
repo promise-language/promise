@@ -545,11 +545,13 @@ func TestPrimitiveIntToStructuralView(t *testing.T) {
 	// T1276: the primitive box is HEAP-allocated { i8* typeinfo, scalar } (not a
 	// stack alloca) so the escaping interface fat pointer stays valid; field 0
 	// carries a null-drop typeinfo header.
-	// T1284: the header is a per-size flat-box typeinfo whose clone_fn (field 2) is
-	// a flat malloc+memcpy clone — so a Vector[Showable] holding this box clones/
-	// slices to an independently-owned box (drop_fn stays null → pal_free on drop).
-	codegentest.AssertContains(t, ir, "@promise_typeinfo_flatbox_16")
-	codegentest.AssertContains(t, ir, "bitcast ({ i8*, i8*, i8*, i32, i32 }* @promise_typeinfo_flatbox_16 to i8*)")
+	// T1284: the header's clone_fn (field 2) is a flat malloc+memcpy clone — so a
+	// Vector[Showable] holding this box clones/slices to an independently-owned box
+	// (drop_fn stays null → pal_free on drop, hence the `$flat` name).
+	// T1902: the header is per-CONCRETE, not per-size, and carries int's own type ID
+	// — so `s is int` through the box answers what it would unboxed.
+	codegentest.AssertContains(t, ir, "@promise_typeinfo_box$int$flat")
+	codegentest.AssertContains(t, ir, "bitcast ({ i8*, i8*, i8*, i32, i32 }* @promise_typeinfo_box$int$flat to i8*)")
 	codegentest.AssertContains(t, ir, "@__promise_flat_box_clone_16")
 }
 
@@ -590,7 +592,7 @@ func TestStringToStructuralView(t *testing.T) {
 	// { i8* typeinfo, i8* string_ptr }, carries a dedicated typeinfo whose drop_fn
 	// frees the cloned string + box, and dispatches through an adapter thunk.
 	codegentest.AssertContains(t, ir, "string.to_string$view_adapt")
-	codegentest.AssertContains(t, ir, "@promise_typeinfo_stringbox")
+	codegentest.AssertContains(t, ir, "@promise_typeinfo_box$string")
 	codegentest.AssertContains(t, ir, "@__promise_string_box_drop")
 }
 

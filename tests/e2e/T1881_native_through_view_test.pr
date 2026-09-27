@@ -1,0 +1,112 @@
+// T1881: calling a `native` requirement through a boxed structural view.
+//
+// A `native` method has no LLVM body — it is open-coded at each AST call site — so a
+// view vtable slot for one could not be filled. T1885 solved that for `clone`; every
+// `Ordered`, `Equal`, `Hashable` and `Format` requirement on a primitive or a string
+// is `native` too, so `@promise_vtable_int_as_Ordered` was six panicking stubs and
+// `Ordered o = 3; o < 5` died reporting `fatal: panic during panic recovery` (the
+// stub's own message was swallowed — see T1907).
+//
+// Two defects had to go. Each unfillable slot now gets a shim that calls the SAME
+// value-level emitter the AST call site calls, so a `native` operation has one
+// implementation however it is reached. And the adapter unboxes the interface's
+// `Self` ARGUMENT, not just its receiver — `Ordered.<(Self other)` hands over a view
+// where `int.<` wants an i64.
+ordered_operators_through_a_boxed_int() `test {
+  Ordered o = 3;
+  assert(o < 5, "int.< through a boxed Ordered");
+  assert(!(o > 5), "int.> through a boxed Ordered");
+  assert(o <= 3, "int.<= through a boxed Ordered");
+  assert(o >= 3, "int.>= through a boxed Ordered");
+}
+
+equal_operators_through_a_boxed_int() `test {
+  Equal e = 3;
+  assert(e == 3, "int.== through a boxed Equal");
+  assert(e != 4, "int.!= through a boxed Equal");
+}
+
+ordered_operators_through_a_boxed_string() `test {
+  Ordered s = "abc";
+  assert(s < "abd", "string.< through a boxed Ordered");
+  assert(s == "abc", "string.== through a boxed Ordered");
+}
+
+// The shim must agree with the AST call site, not merely be non-null.
+hash_through_a_boxed_view_matches_the_direct_hash() `test {
+  int direct = 3.hash;
+  Hashable h = 3;
+  assert(h.hash == direct, "int.hash is the same hash boxed or not");
+}
+
+string_hash_through_a_boxed_view_matches_the_direct_hash() `test {
+  string s = "abc";
+  int direct = s.hash;
+  Hashable h = "abc";
+  assert(h.hash == direct, "string.hash is the same hash boxed or not");
+}
+
+format_through_a_boxed_view() `test {
+  Format f = 3;
+  assert("{f}" == "3", "int formats through a boxed Format");
+}
+
+clone_through_a_boxed_view() `test {
+  Cloneable c = [1, 2, 3];
+  assert(c is Vector[int], "the clone slot is filled and the box keeps its identity");
+}
+
+// `Vector[T].len` is a `native` GETTER — the exact slot whose stub T1907's repro used.
+type Counted `structural {
+  get len int `abstract;
+}
+
+native_getter_through_a_boxed_container() `test {
+  int[] v = [1, 2, 3];
+  Counted c = v;
+  assert(c.len == 3, "Vector[int].len through a boxed view");
+}
+
+native_getter_through_a_boxed_string() `test {
+  Counted c = "abcd";
+  assert(c.len == 4, "string.len through a boxed view");
+}
+
+// `Self` at a boxed call site IS the view, so nothing static stops two different
+// concrete types meeting in one operator: `Ordered a = 3; Ordered b = "x"; a < b`
+// type-checks. Reinterpreting the string box's payload pointer as an i64 would be
+// silent nonsense, so the adapter checks the argument's runtime type and panics
+// naming both sides (`Ordered.< expects both sides to be int, ...`). That case cannot
+// live in a batch test — a panic fails the test it runs in — so the emitted check is
+// asserted in regress11/t1881_test.go instead.
+
+// A SYNTHESIZED structural default with a `Self` parameter needs the adapter just as
+// a declared method does — the slot's signature is the interface's, so the call site
+// boxes the operand. A view pair and a `{vtable, int}` value struct are both 16 bytes
+// on a 64-bit host, so a slot pointed straight at the default "worked" there by ABI
+// coincidence; on wasm32 the same IR was rejected outright.
+type Cents is Ordered {
+  int v `value;
+  == (Self other) bool => this.v == other.v;
+  < (Self other) bool => this.v < other.v;
+}
+
+synthesized_defaults_with_a_self_param_dispatch_through_the_box() `test {
+  Ordered o = Cents(v: 3);
+  assert(o > Cents(v: 1), "the > default, declared on Ordered");
+  assert(o >= Cents(v: 3), "the >= default");
+  assert(o <= Cents(v: 3), "the <= default");
+  assert(o != Cents(v: 1), "the != default, inherited from Equal");
+  assert(o == Cents(v: 3), "the declared == still works alongside them");
+}
+
+// A concrete that satisfies the interface on both sides still works, which is what
+// the check must not break.
+matching_self_arguments_still_dispatch() `test {
+  Ordered a = 3;
+  Ordered b = 5;
+  assert(a < b, "two int boxes compare through the view");
+  Ordered s = "abc";
+  Ordered t = "abd";
+  assert(s < t, "two string boxes compare through the view");
+}

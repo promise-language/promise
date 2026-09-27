@@ -1393,7 +1393,7 @@ func TestMaterializeRuntimeFileIsExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat materialized runtime: %v", err)
 	}
-	if info.Mode().Perm()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
 		t.Errorf("materialized runtime mode = %v, want the execute bit set", info.Mode().Perm())
 	}
 	got, err := os.ReadFile(dst)

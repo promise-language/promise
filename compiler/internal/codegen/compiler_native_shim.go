@@ -102,49 +102,155 @@ func nativeShimName(key, method string) string {
 }
 
 // getOrEmitNativeMethodFunc emits (once) a real LLVM function with the CONCRETE
-// method's signature for a `native` method whose operation emitNativeDupValue
-// knows — today `clone() Self` on string, Vector[T], Ref[T] and Weak[T].
+// method's signature for a `native` method a view vtable slot needs to point at.
 //
 // T1885: a `native` method has no body, so getOrEmitViewVtable's c.funcs lookup
 // missed and the slot was emitted as null; calling `clone()` through a boxed
 // `Cloneable` then jumped to address 0. With a real function the slot is filled and
 // the ordinary adapter machinery (receiver unbox + covariant return re-box) applies
 // unchanged.
+//
+// T1881 widened it past `clone`: every `Ordered`, `Equal`, `Hashable` and `Format`
+// requirement on a primitive or string is `native` too, so `Ordered o = 3; o < 5`
+// dispatched to six panicking stubs. Each shim body calls the SAME value-level
+// emitter the AST call site calls — emitNativeOp / genStringOp for operators,
+// emitNativeHash / emitStringLen / emitVectorLen / emitStringIsLiteral for getters,
+// emitNativeDupValue for clone — so a `native` operation has exactly one
+// implementation however it is reached. A requirement no emitter covers keeps the
+// panicking stub, which since T1907 reports its own message.
 func (c *Compiler) getOrEmitNativeMethodFunc(key string, fromType types.Type, m *types.Method) (*ir.Func, bool) {
 	sig := m.Sig()
-	if m.Name() != "clone" || m.IsGetter() || m.IsSetter() ||
-		sig.Recv() == nil || len(sig.Params()) != 0 || sig.CanError() {
+	if m.IsSetter() || sig.Recv() == nil || sig.CanError() || len(sig.Params()) > 1 {
 		return nil, false
 	}
 	resolved := fromType
 	if c.typeSubst != nil {
 		resolved = types.Substitute(resolved, c.typeSubst)
 	}
-	if !nativeDupSupported(resolved) {
+	named := extractNamed(resolved)
+	if named == nil {
 		return nil, false
 	}
-	name := nativeShimName(key, m.Name())
+
+	// The concrete receiver's LLVM type: the scalar itself for a primitive, the
+	// opaque i8* handle for a string or container. Asking the representation rather
+	// than listing type names keeps this in step with the box site (annotations.md#the-one-declaration-rule).
+	recvType := irtypes.Type(irtypes.I8Ptr)
+	if isPrimitiveScalar(named) {
+		recvType = llvmNamedType(named)
+	}
+
+	// body emits the operation over the receiver (and operand, for a binary
+	// operator) and returns the result, or nil when this member has no emitter.
+	var body func(recv value.Value, operand value.Value) value.Value
+	var retType irtypes.Type
+
+	switch {
+	case m.Name() == "clone" && !m.IsGetter() && len(sig.Params()) == 0 && nativeDupSupported(resolved):
+		retType = irtypes.I8Ptr
+		body = func(recv, _ value.Value) value.Value {
+			dup, ok := c.emitNativeDupValue(recv, resolved)
+			if !ok {
+				return recv // nativeDupSupported vetted this; keep the IR well-formed
+			}
+			return dup
+		}
+	case m.IsGetter():
+		retType, body = c.nativeGetterShimBody(named, resolved, m)
+	case sig.Result() != nil && isOperatorShimName(m.Name()):
+		retType, body = c.nativeOperatorShimBody(named, m)
+	}
+	if body == nil {
+		return nil, false
+	}
+
+	name := nativeShimName(key, m.Name()+viewMemberTag(m))
 	if fn, ok := c.funcs[name]; ok {
 		return fn, true
 	}
-
-	// All four concretes are opaque i8* handles (string included), so the concrete
-	// signature is i8* (i8*).
-	recv := ir.NewParam("this", irtypes.I8Ptr)
-	fn := c.module.NewFunc(name, irtypes.I8Ptr, recv)
+	params := []*ir.Param{ir.NewParam("this", recvType)}
+	if len(sig.Params()) == 1 {
+		params = append(params, ir.NewParam("p0", c.resolveParamType(sig.Params()[0])))
+	}
+	fn := c.module.NewFunc(name, retType, params...)
 	c.funcs[name] = fn
 
 	saved := c.saveState()
 	defer c.restoreState(saved)
 	c.beginSynthesizedBody(fn)
 
-	dup, ok := c.emitNativeDupValue(recv, resolved)
-	if !ok {
-		// nativeDupSupported already vetted this; keep the IR well-formed regardless.
-		dup = recv
+	var operand value.Value
+	if len(params) > 1 {
+		operand = params[1]
 	}
-	c.block.NewRet(dup)
+	c.block.NewRet(body(params[0], operand))
 	return fn, true
+}
+
+// nativeGetterShimBody returns the return type and emitter for a `native` GETTER the
+// shim factory can fill, or (nil, nil) when none covers it.
+func (c *Compiler) nativeGetterShimBody(named *types.Named, resolved types.Type, m *types.Method) (irtypes.Type, func(value.Value, value.Value) value.Value) {
+	switch m.Name() {
+	case "hash":
+		// emitNativeHash covers exactly the primitive scalars and string.
+		if !isPrimitiveScalar(named) && named != types.TypString {
+			return nil, nil
+		}
+		return irtypes.I64, func(recv, _ value.Value) value.Value {
+			h, _ := c.emitNativeHash(named, recv)
+			return h
+		}
+	case "len":
+		if named == types.TypString {
+			return irtypes.I64, func(recv, _ value.Value) value.Value { return c.emitStringLen(recv) }
+		}
+		if _, ok := types.AsVector(resolved); ok || named == types.TypVector {
+			return irtypes.I64, func(recv, _ value.Value) value.Value { return c.emitVectorLen(recv) }
+		}
+	case "is_literal":
+		if named == types.TypString {
+			return irtypes.I1, func(recv, _ value.Value) value.Value { return c.emitStringIsLiteral(recv) }
+		}
+	}
+	return nil, nil
+}
+
+// nativeOperatorShimBody returns the return type and emitter for a `native` OPERATOR,
+// or (nil, nil) when the operator table has no entry for it.
+func (c *Compiler) nativeOperatorShimBody(named *types.Named, m *types.Method) (irtypes.Type, func(value.Value, value.Value) value.Value) {
+	op := m.Name()
+	if named == types.TypString {
+		if !stringBinaryOps[op] {
+			return nil, nil
+		}
+		return c.resolveType(m.Sig().Result()), func(recv, operand value.Value) value.Value {
+			return c.genStringOp(op, recv, operand)
+		}
+	}
+	cat := classify(named)
+	if cat == CatUnknown || lookupNativeOp(cat, op) == nil {
+		return nil, nil
+	}
+	return c.resolveType(m.Sig().Result()), func(recv, operand value.Value) value.Value {
+		return c.emitNativeOp(named, op, recv, operand)
+	}
+}
+
+// isOperatorShimName reports whether name is an operator symbol the value-level
+// native emitters (emitNativeOp / genStringOp) can fill a view-vtable slot with:
+// punctuation, minus the index/slice family, whose codegen is driven by an IndexExpr
+// rather than by a value-level emitter and so keeps the panicking stub. An operator
+// the emitters do not know is filtered by its own table lookup, not here.
+func isOperatorShimName(name string) bool {
+	if name == "" {
+		return false
+	}
+	switch name {
+	case "[]", "[]=", "[:]", "[:]=":
+		return false
+	}
+	first := name[0]
+	return !(first == '_' || (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z'))
 }
 
 // beginSynthesizedBody prepares the compiler to emit a fresh function body that is

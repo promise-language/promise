@@ -649,9 +649,9 @@ func TestStringBoxInStructFieldUsesStringBoxDrop(t *testing.T) {
 		type Holder { Showable item; }
 		main() { Holder h = Holder(item: show_str("x")); }
 	`)
-	codegentest.AssertContains(t, ir, "@promise_typeinfo_stringbox")
+	codegentest.AssertContains(t, ir, "@promise_typeinfo_box$string")
 	codegentest.AssertContains(t, ir, "@__promise_string_box_drop")
-	codegentest.AssertContains(t, ir, "bitcast ({ i8*, i8*, i8*, i32, i32 }* @promise_typeinfo_stringbox to i8*)")
+	codegentest.AssertContains(t, ir, "bitcast ({ i8*, i8*, i8*, i32, i32 }* @promise_typeinfo_box$string to i8*)")
 }
 
 // T0893: a borrowing method whose body is bare `return this` must clone the

@@ -328,56 +328,91 @@ func (c *Compiler) getFlatBoxClone(size int64) *ir.Func {
 	return fn
 }
 
-// getFlatBoxTypeInfo returns a per-size immutable typeinfo header (typeID 0, no
-// parents, null drop_fn so __promise_structural_drop pal_free's the box) whose
-// clone_fn (field 2) is a flat malloc+memcpy clone. Carried by primitive/value
-// structural boxes so structural clone/slice produces an independently-owned box
-// instead of aliasing the source (which the structural-aware element drop would
-// then double-free). Mirrors getNoValueTypeInfo but adds the clone_fn. T1284.
-func (c *Compiler) getFlatBoxTypeInfo(size int64) *ir.Global {
-	if c.flatBoxTypeInfos == nil {
-		c.flatBoxTypeInfos = map[int64]*ir.Global{}
+// getBoxTypeInfo returns the immutable typeinfo header a structural box carries in
+// field 0 — the one constructor for every boxed subject kind (primitive, string,
+// value type, opaque native handle). dropFn and cloneFn are the box's behaviour and
+// may be nil (null drop_fn makes __promise_structural_drop pal_free the box; null
+// clone_fn makes __promise_structural_clone alias it). Identity comes from
+// typeIdentityIDs, the same source the concrete type's own typeinfo uses.
+//
+// T1902: these headers used to carry typeID 0 and no parents, so `is`/`as` against a
+// boxed primitive, string or container answered false for every target — while the
+// same question about an unboxed value answered correctly. A box now stands in for
+// its payload's identity as well as for its drop, which is what lets one RTTI walk
+// serve both.
+//
+// A concrete has at most two box variants — one that owns its payload (non-nil
+// dropFn) and one flat/aliasing box that does not — because its box drop is resolved
+// per concrete. The global name encodes that distinction rather than the payload's
+// identity, so a third variant would collide loudly in `opt` rather than silently
+// share a header.
+func (c *Compiler) getBoxTypeInfo(fromType types.Type, dropFn, cloneFn *ir.Func) *ir.Global {
+	concreteKey := c.concreteViewKey(extractNamed(fromType), fromType)
+	dropName, cloneName := "", ""
+	if dropFn != nil {
+		dropName = dropFn.Name()
 	}
-	if g, ok := c.flatBoxTypeInfos[size]; ok {
+	if cloneFn != nil {
+		cloneName = cloneFn.Name()
+	}
+	cacheKey := concreteKey + "|" + dropName + "|" + cloneName
+	if c.boxTypeInfos == nil {
+		c.boxTypeInfos = map[string]*ir.Global{}
+	}
+	if g, ok := c.boxTypeInfos[cacheKey]; ok {
 		return g
 	}
-	cloneFn := c.getFlatBoxClone(size)
-	structType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32)
-	init := constant.NewStruct(structType,
+
+	asPtr := func(fn *ir.Func) constant.Constant {
+		if fn == nil {
+			return constant.NewNull(irtypes.I8Ptr)
+		}
+		return constant.NewBitCast(fn, irtypes.I8Ptr)
+	}
+	typeID, parentIDs := c.typeIdentityIDs(fromType)
+	numParents := len(parentIDs)
+
+	// Layout mirrors emitTypeInfo: { vtable, drop_fn, clone_fn, typeID, numParents,
+	// [N x parentIDs] }. A box never dispatches through field 0 (the view pair
+	// carries the view vtable), so the vtable slot stays null.
+	fields := []constant.Constant{
 		constant.NewNull(irtypes.I8Ptr),
-		constant.NewNull(irtypes.I8Ptr),
-		constant.NewBitCast(cloneFn, irtypes.I8Ptr),
-		constant.NewInt(irtypes.I32, 0),
-		constant.NewInt(irtypes.I32, 0))
-	g := c.module.NewGlobalDef(fmt.Sprintf("promise_typeinfo_flatbox_%d", size), init)
+		asPtr(dropFn),
+		asPtr(cloneFn),
+		constant.NewInt(irtypes.I32, int64(typeID)),
+		constant.NewInt(irtypes.I32, int64(numParents)),
+	}
+	var structType *irtypes.StructType
+	if numParents > 0 {
+		arrayType := irtypes.NewArray(uint64(numParents), irtypes.I32)
+		structType = irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr,
+			irtypes.I32, irtypes.I32, arrayType)
+		parentConsts := make([]constant.Constant, 0, numParents)
+		for _, pid := range parentIDs {
+			parentConsts = append(parentConsts, constant.NewInt(irtypes.I32, int64(pid)))
+		}
+		fields = append(fields, constant.NewArray(arrayType, parentConsts...))
+	} else {
+		structType = irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr,
+			irtypes.I32, irtypes.I32)
+	}
+
+	name := "promise_typeinfo_box$" + concreteKey
+	if dropFn == nil {
+		name += "$flat"
+	}
+	g := c.module.NewGlobalDef(name, constant.NewStruct(structType, fields...))
 	g.Immutable = true
-	c.flatBoxTypeInfos[size] = g
+	c.boxTypeInfos[cacheKey] = g
 	return g
 }
 
-// getStringBoxTypeInfo returns a shared immutable typeinfo global whose drop_fn (field 1)
-// points to @__promise_string_box_drop, used as the RTTI header for heap-boxed strings
-// coerced to a structural interface (T1280). __promise_structural_drop reads the
-// non-null drop_fn and dispatches the wrapper, which frees the cloned string then the
-// box. Emitted once on the main module; module/instance IRs reference it as an extern.
+// getStringBoxTypeInfo returns the typeinfo header for a heap-boxed string coerced
+// to a structural interface (T1280). Its drop_fn (@__promise_string_box_drop) frees
+// the cloned string then the box, so every RTTI drop site works uniformly; its
+// clone_fn deep-copies both (T1284).
 func (c *Compiler) getStringBoxTypeInfo() *ir.Global {
-	if c.stringBoxTypeInfo != nil {
-		return c.stringBoxTypeInfo
-	}
-	dropFn := c.getStringBoxDrop()
-	cloneFn := c.getStringBoxClone() // T1284: field 2 clone_fn for structural clone/slice
-	// Layout mirrors a no-parent typeinfo: { vtable, drop_fn, clone_fn, typeID, numParents }.
-	structType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32)
-	init := constant.NewStruct(structType,
-		constant.NewNull(irtypes.I8Ptr),
-		constant.NewBitCast(dropFn, irtypes.I8Ptr),
-		constant.NewBitCast(cloneFn, irtypes.I8Ptr),
-		constant.NewInt(irtypes.I32, 0),
-		constant.NewInt(irtypes.I32, 0))
-	g := c.module.NewGlobalDef("promise_typeinfo_stringbox", init)
-	g.Immutable = true
-	c.stringBoxTypeInfo = g
-	return g
+	return c.getBoxTypeInfo(types.TypString, c.getStringBoxDrop(), c.getStringBoxClone())
 }
 
 // containerBoxKey names the per-concrete-type opaque-handle box thunks, and
@@ -513,28 +548,7 @@ func (c *Compiler) getContainerBoxTypeInfo(fromNamed *types.Named, fromType type
 		return nil
 	}
 	key, payloadType := c.containerBoxKey(fromNamed, fromType)
-	if c.containerBoxTypeInfos == nil {
-		c.containerBoxTypeInfos = map[string]*ir.Global{}
-	}
-	if g, ok := c.containerBoxTypeInfos[key]; ok {
-		return g
-	}
-	var cloneFn constant.Constant = constant.NewNull(irtypes.I8Ptr)
-	if fn := c.getContainerBoxClone(key, payloadType); fn != nil {
-		cloneFn = constant.NewBitCast(fn, irtypes.I8Ptr)
-	}
-	// Layout mirrors a no-parent typeinfo: { vtable, drop_fn, clone_fn, typeID, numParents }.
-	structType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32)
-	init := constant.NewStruct(structType,
-		constant.NewNull(irtypes.I8Ptr),
-		constant.NewBitCast(dropFn, irtypes.I8Ptr),
-		cloneFn,
-		constant.NewInt(irtypes.I32, 0),
-		constant.NewInt(irtypes.I32, 0))
-	g := c.module.NewGlobalDef(fmt.Sprintf("promise_typeinfo_containerbox$%s", key), init)
-	g.Immutable = true
-	c.containerBoxTypeInfos[key] = g
-	return g
+	return c.getBoxTypeInfo(payloadType, dropFn, c.getContainerBoxClone(key, payloadType))
 }
 
 // lookupTypeInfoGlobal finds the typeinfo global for a type, handling Instance and monoCtx.

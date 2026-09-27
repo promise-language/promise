@@ -1,0 +1,74 @@
+// T1475: a vector literal whose element type is a structural interface.
+//
+// The heap path (any non-constant element) was fixed earlier; the all-constant path
+// was not. tryConstantElements folded the elements to bare scalars and wrote them
+// into a `[N x { i8*, i8* }]` .rodata initializer, which `opt` rejected outright —
+// `promise check` accepted the program, so the disagreement only showed at build.
+// The element slot's LLVM kind is now checked before folding, so a literal that needs
+// boxing falls back to the heap path that can box it.
+//
+// Compiling this file at all is the regression test; the assertions then check that
+// each element really dispatches through its box.
+type Tag `structural {
+  label() string `abstract;
+}
+
+type Word {
+  string w;
+  label() string => this.w;
+}
+
+all_constant_int_elements() `test {
+  Format[] v = [1, 2, 3];
+  assert(v.len == 3, "constant int elements box into a Format vector");
+  assert("{v[0]}" == "1", "the first boxed element dispatches");
+  assert("{v[2]}" == "3", "the last boxed element dispatches");
+}
+
+all_constant_bool_elements() `test {
+  Format[] v = [true, false];
+  assert("{v[0]}" == "true", "constant bool elements box and dispatch");
+  assert("{v[1]}" == "false", "the second boxed bool dispatches");
+}
+
+all_constant_char_elements() `test {
+  Format[] v = ['a', 'b'];
+  assert("{v[0]}" == "a", "constant char elements box and dispatch");
+}
+
+all_constant_float_elements() `test {
+  Format[] v = [1.5, 2.5];
+  assert("{v[0]}" == "1.5", "constant float elements box and dispatch");
+}
+
+non_constant_elements_still_box() `test {
+  int q = 7;
+  Format[] v = [q];
+  assert("{v[0]}" == "7", "a non-constant element still boxes");
+}
+
+mixed_constant_and_non_constant_elements() `test {
+  int q = 9;
+  Format[] v = [1, q, 3];
+  assert(v.len == 3, "a mixed literal boxes every element");
+  assert("{v[1]}" == "9", "the non-constant element dispatches");
+}
+
+user_interface_element_type() `test {
+  Tag[] v = [Word(w: "x"), Word(w: "y")];
+  assert(v[0].label() == "x", "a user structural interface element type boxes too");
+  assert(v[1].label() == "y", "the second element dispatches to its own concrete");
+}
+
+// The guard must reject a mismatched element kind, not disable constant folding —
+// an ordinary scalar vector still takes the static path and still reads back right.
+scalar_vector_literals_are_unaffected() `test {
+  int[] ints = [1, 2, 3];
+  bool[] bools = [true, false];
+  char[] chars = ['a', 'b'];
+  f64[] floats = [1.5, 2.5];
+  assert(ints[2] == 3, "int vector literal still works");
+  assert(bools[0], "bool vector literal still works");
+  assert(chars[1] == 'b', "char vector literal still works");
+  assert(floats[0] == 1.5, "float vector literal still works");
+}

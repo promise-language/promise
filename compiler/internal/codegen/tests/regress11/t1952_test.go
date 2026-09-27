@@ -178,6 +178,11 @@ func TestT1952GenericParentExactMatchNeedsNoViewVtable(t *testing.T) {
 // against the view's SUBSTITUTED signature — `int?` is `{ i1, i64 }`, not the
 // unbound `T?`'s i8* — which is what T1735's typeSubst in getOrEmitViewVtable
 // provides. A raw `T?` here would emit a slot the call site cannot read.
+//
+// T1759 spells the adapter's view half as the view's CACHE KEY rather than its bare
+// name, so a generic view carries its type args here exactly as the vtable global
+// already did — `Holder[int]`, which LLVM then quotes. A non-generic view is
+// unaffected, which is why the sibling test above still reads `_as_Q`.
 func TestT1952GenericParentRelaxationAdaptsToTheSubstitutedShape(t *testing.T) {
 	ir := codegentest.GenerateIR(t, `
 		type Holder[T] `+"`structural `public"+` { peek(~this) T? `+"`abstract"+`; }
@@ -185,7 +190,7 @@ func TestT1952GenericParentRelaxationAdaptsToTheSubstitutedShape(t *testing.T) {
 		main() { Holder[int] a = IntBox(v: 7); a.peek(); }
 	`)
 	codegentest.AssertContains(t, ir, "define i64 @IntBox.peek(i8* %this)")
-	codegentest.AssertContains(t, ir, "define { i1, i64 } @IntBox.peek$view_adapt_as_Holder(i8* %this)")
+	codegentest.AssertContains(t, ir, `define { i1, i64 } @"IntBox.peek$view_adapt_as_Holder[int]"(i8* %this)`)
 	codegentest.AssertContainsMatch(t,
-		ir, `@"promise_vtable_IntBox_as_Holder\[int\]" = constant \[1 x i8\*\] \[i8\* bitcast \(\{ i1, i64 \} \(i8\*\)\* @IntBox\.peek\$view_adapt_as_Holder`)
+		ir, `@"promise_vtable_IntBox_as_Holder\[int\]" = constant \[1 x i8\*\] \[i8\* bitcast \(\{ i1, i64 \} \(i8\*\)\* @"IntBox\.peek\$view_adapt_as_Holder\[int\]"`)
 }

@@ -101,7 +101,7 @@ func TestT1885_OpaqueContainerBoxCarriesTypeInfoHeader(t *testing.T) {
 	ir := codegentest.GenerateIR(t, t1885VectorSrc)
 	// The box header exists, with a real drop_fn and clone_fn (not the raw-pointer
 	// shape this replaces, which had no header at all).
-	if !strings.Contains(ir, `@"promise_typeinfo_containerbox$Vector[int]" = constant`) {
+	if !strings.Contains(ir, `@"promise_typeinfo_box$Vector[int]" = constant`) {
 		t.Fatalf("expected a per-concrete box typeinfo for Vector[int]")
 	}
 	if !strings.Contains(ir, `define void @"__promise_container_box_drop$Vector[int]"(i8* %box)`) {
@@ -110,8 +110,11 @@ func TestT1885_OpaqueContainerBoxCarriesTypeInfoHeader(t *testing.T) {
 	if !strings.Contains(ir, `define i8* @"__promise_container_box_clone$Vector[int]"(i8* %box)`) {
 		t.Fatalf("expected a box clone function for Vector[int]")
 	}
-	// The header must actually be stored into field 0 of the box at the coercion site.
-	if !strings.Contains(ir, `store i8* bitcast ({ i8*, i8*, i8*, i32, i32 }* @"promise_typeinfo_containerbox$Vector[int]" to i8*)`) {
+	// The header must actually be stored into field 0 of the box at the coercion
+	// site. Match the store's operands rather than the header's struct shape: since
+	// T1902 the shape trails a [N x i32] parent-ID array whose length is the
+	// concrete's, so pinning it here would re-break on every inheritance change.
+	if !strings.Contains(ir, `@"promise_typeinfo_box$Vector[int]" to i8*), i8**`) {
 		t.Fatalf("box typeinfo header is never stored into the box")
 	}
 	// The drop must free the payload and then the box itself.
@@ -122,27 +125,32 @@ func TestT1885_OpaqueContainerBoxCarriesTypeInfoHeader(t *testing.T) {
 }
 
 // A view vtable slot that nothing can fill must become a panicking stub, not a null
-// that jumps to address 0. `Vector[T].len` is a `native GETTER — outside this fix
-// (T1881) — so it is the live example.
+// that jumps to address 0. The live example moved with T1881: `Vector[T].len` used to
+// be unfillable and is now a shim, so the example is `string.trim` — a `native`
+// method no value-level emitter covers yet. The slot beside it (`clone`) is filled,
+// which keeps the test honest about the stub being per-slot rather than per-vtable.
 const t1885UnfillableSrc = `
-	type Counted ` + "`" + `structural { clone() Self ` + "`" + `abstract; get len int ` + "`" + `abstract; }
-	main() { int[] v = [1, 2, 3]; Counted c = v; }
+	type Counted ` + "`" + `structural { clone() Self ` + "`" + `abstract; trim() string ` + "`" + `abstract; }
+	main() { Counted c = "abc"; }
 `
 
 func TestT1885_UnfillableViewSlotPanicsInsteadOfNull(t *testing.T) {
 	ir := codegentest.GenerateIR(t, t1885UnfillableSrc)
-	slots := vtableSlots(t, ir, "promise_vtable_Vector[int]_as_Counted")
+	slots := vtableSlots(t, ir, "promise_vtable_string_as_Counted")
 	if strings.Contains(slots, "i8* null") {
 		t.Fatalf("unfillable slot was left null: %s", slots)
 	}
-	if !strings.Contains(slots, "Vector[int].len$view_stub_as_Counted") {
+	if !strings.Contains(slots, "string.trim$view_stub_as_Counted") {
 		t.Fatalf("expected a panicking stub in the unfillable slot, got: %s", slots)
 	}
-	stub := codegentest.FindDefinedFunc(ir, `@"Vector[int].len$view_stub_as_Counted"(`)
+	if !strings.Contains(slots, "string.clone$view_adapt_as_Counted") {
+		t.Fatalf("the fillable slot beside it must still be a real adapter, got: %s", slots)
+	}
+	stub := codegentest.FindDefinedFunc(ir, "@string.trim$view_stub_as_Counted(")
 	if !strings.Contains(stub, "@promise_panic") {
 		t.Fatalf("stub must panic, got:\n%s", stub)
 	}
-	if !strings.Contains(ir, "no implementation of Counted.len for Vector[int]") {
+	if !strings.Contains(ir, "no implementation of Counted.trim for string") {
 		t.Fatalf("stub panic message must name the view, method and concrete type")
 	}
 }
@@ -197,12 +205,12 @@ func TestT1885_FailableUnfillableSlotStubReturnsTheFailableTuple(t *testing.T) {
 	}
 
 	valueIR := codegentest.GenerateIR(t, `
-		type LenF `+"`"+`structural { get len! int `+"`"+`abstract; }
-		main() { int[] v = [1]; LenF p = v; }
+		type ByteF `+"`"+`structural { byte_at!(int index) u8 `+"`"+`abstract; }
+		main() { ByteF p = "abc"; }
 	`)
-	stub = codegentest.FindDefinedFunc(valueIR, `@"Vector[int].len$view_stub_as_LenF"(`)
-	if !strings.Contains(stub, `define { i1, i64, i8* } @"Vector[int].len$view_stub_as_LenF"(i8* %this)`) {
-		t.Fatalf("failable int-getter stub must return {i1, i64, i8*}, got:\n%s", stub)
+	stub = codegentest.FindDefinedFunc(valueIR, "@string.byte_at$view_stub_as_ByteF(")
+	if !strings.Contains(stub, `define { i1, i8, i8* } @string.byte_at$view_stub_as_ByteF(i8* %this, i64 %p0)`) {
+		t.Fatalf("failable value stub must return the three-field tuple, got:\n%s", stub)
 	}
 	if !strings.Contains(stub, "@promise_panic") {
 		t.Fatalf("failable stub must still panic, got:\n%s", stub)
@@ -233,8 +241,8 @@ const t1885GenericBoxSrc = `
 func TestT1885_GenericBodyBoxesPerInstanceNotPerGeneric(t *testing.T) {
 	ir := codegentest.GenerateIR(t, t1885GenericBoxSrc)
 	for _, name := range []string{
-		`@"promise_typeinfo_containerbox$Vector[int]" = constant`,
-		`@"promise_typeinfo_containerbox$Vector[string]" = constant`,
+		`@"promise_typeinfo_box$Vector[int]" = constant`,
+		`@"promise_typeinfo_box$Vector[string]" = constant`,
 		`define i8* @"Vector[int].clone$native"(i8* %this)`,
 		`define i8* @"Vector[string].clone$native"(i8* %this)`,
 	} {
@@ -245,7 +253,7 @@ func TestT1885_GenericBodyBoxesPerInstanceNotPerGeneric(t *testing.T) {
 	// Nothing may be keyed on the unbound type parameter — that is the shared-and-wrong
 	// pair the substitution exists to prevent.
 	for _, unbound := range []string{
-		`promise_typeinfo_containerbox$Vector[T]`,
+		`promise_typeinfo_box$Vector[T]`,
 		`Vector[T].clone$native`,
 		`promise_vtable_Vector[T]_as_ShowClone`,
 	} {
@@ -321,7 +329,7 @@ func TestT1885_BoxCloneDeepCopiesThePayload(t *testing.T) {
 
 	// The clone_fn must actually be published in the typeinfo header, or
 	// __promise_structural_clone falls back to the shallow copy this replaces.
-	if !strings.Contains(ir, `@"promise_typeinfo_containerbox$Vector[string]" = constant`) ||
+	if !strings.Contains(ir, `@"promise_typeinfo_box$Vector[string]" = constant`) ||
 		!strings.Contains(ir, `@"__promise_container_box_clone$Vector[string]" to i8*`) {
 		t.Fatalf("box clone_fn is never referenced from the box typeinfo")
 	}

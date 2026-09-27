@@ -2,7 +2,7 @@
 // { i8* typeinfo, i8* string_ptr } holding an OWNED deep clone. The box must survive
 // escape (return/binding, moved param, struct/enum field) and drop cleanly without a
 // segfault ("field 0 misread as typeinfo") or leaks. Field 0 carries a dedicated
-// typeinfo (@promise_typeinfo_stringbox) whose drop_fn (@__promise_string_box_drop)
+// typeinfo (@promise_typeinfo_box$string) whose drop_fn (@__promise_string_box_drop)
 // drops the cloned string via promise_string_drop then frees the box.
 type Showable `structural {
   to_string() string `abstract;

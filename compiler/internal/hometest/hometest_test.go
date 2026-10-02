@@ -63,13 +63,17 @@ func TestSharedHomeListing(t *testing.T) {
 // fakeM stands in for *testing.M: it records the environment its tests would
 // have run under, and can act like a test that writes the shared home.
 type fakeM struct {
-	run  func()
-	code int
-	home string
+	run    func()
+	code   int
+	home   string
+	pinned string // Home() as the package's tests would see it
+	ran    bool
 }
 
 func (f *fakeM) Run() int {
+	f.ran = true
 	f.home = os.Getenv("PROMISE_HOME")
+	f.pinned = Home()
 	if f.run != nil {
 		f.run()
 	}
@@ -108,5 +112,55 @@ func TestPin(t *testing.T) {
 	}}
 	if code := Pin(leaky); code != 1 {
 		t.Errorf("a package whose test wrote ~/.promise exited %d, want 1", code)
+	}
+}
+
+// TestPinReplacesAnAmbientHome: the private home is the package's whatever the
+// caller exported — under bin/test that is the worktree's .promise-home, and
+// under a bare `go test` it may be ~/.promise spelled out. The caller's home is
+// left untouched, and Home() names the private one only while the package runs.
+func TestPinReplacesAnAmbientHome(t *testing.T) {
+	userHome := t.TempDir()
+	t.Setenv("HOME", userHome)
+	t.Setenv("USERPROFILE", userHome)
+	ambient := t.TempDir()
+	t.Setenv("PROMISE_HOME", ambient)
+
+	m := &fakeM{run: func() {
+		if err := os.WriteFile(filepath.Join(os.Getenv("PROMISE_HOME"), "written"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if code := Pin(m); code != 0 {
+		t.Fatalf("Pin exited %d, want 0", code)
+	}
+	if m.home == ambient {
+		t.Errorf("the package ran in the caller's home %s, want a private one", ambient)
+	}
+	if m.pinned != m.home {
+		t.Errorf("Home() = %q while the package ran, want its PROMISE_HOME %q", m.pinned, m.home)
+	}
+	if got := Home(); got != "" {
+		t.Errorf("Home() = %q after Pin returned, want \"\"", got)
+	}
+	if entries, _ := os.ReadDir(ambient); len(entries) != 0 {
+		t.Errorf("the caller's home %s was written", ambient)
+	}
+}
+
+// TestPinWithoutAPrivateHomeRunsNothing: a package that cannot be given a home
+// of its own fails without running a single test, rather than running them in
+// the home it would otherwise inherit.
+func TestPinWithoutAPrivateHomeRunsNothing(t *testing.T) {
+	absent := filepath.Join(t.TempDir(), "absent")
+	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} { // os.TempDir, per platform
+		t.Setenv(name, absent)
+	}
+	m := &fakeM{}
+	if code := Pin(m); code != 1 {
+		t.Errorf("Pin exited %d with no temp directory to make a home in, want 1", code)
+	}
+	if m.ran {
+		t.Error("the package's tests ran without a private home")
 	}
 }

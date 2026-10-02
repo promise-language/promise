@@ -43,8 +43,10 @@ func Pin(m interface{ Run() int }) int {
 	}
 	os.Setenv("PROMISE_HOME", home)
 	os.Unsetenv("PROMISE_CACHE")
+	pinned = home
 
 	code := m.Run()
+	pinned = ""
 	os.RemoveAll(home)
 
 	if report := damage(before, sharedHomeListing()); report != "" {
@@ -53,6 +55,14 @@ func Pin(m interface{ Run() int }) int {
 	}
 	return code
 }
+
+// pinned is the private home Pin set, while its package runs.
+var pinned string
+
+// Home is the private PROMISE_HOME Pin gave this package, or "" outside Pin —
+// so a package can assert that its tests really run under it, and a TestMain
+// dropped later reddens the package rather than quietly reopening ~/.promise.
+func Home() string { return pinned }
 
 // sharedHomeListing is the sorted top-level entry names of ~/.promise,
 // "absent" when there is none, or "unavailable" when the host cannot name its

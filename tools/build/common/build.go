@@ -42,6 +42,9 @@ func binarySHA256(path string) (string, error) {
 // Flags: -release, -generate, -local (the default, no-op).
 func RunBuild(root string, args []string) error {
 	start := time.Now()
+	// Decided before NormalizeArgs, which returns nil for an empty argv: a bare
+	// `bin/build` passes os.Args[1:], empty but not nil, and is the CLI entry.
+	cli := args != nil
 	args = NormalizeArgs(args)
 	release := slices.Contains(args, "-release")
 	generate := slices.Contains(args, "-generate")
@@ -61,11 +64,11 @@ func RunBuild(root string, args []string) error {
 	announceToolchainOverrides()
 
 	// The worktree's own Promise home, whenever bin/build is the entry point
-	// (args != nil). An in-process caller (args == nil) has already pinned it —
+	// (cli). An in-process caller (args == nil) has already pinned it —
 	// verify's stepCache, bin/test, and the gate's own build, which pins before
 	// it calls this (gate_build.go) — so nothing run from a worktree builds into
 	// the machine-global ~/.promise (#102).
-	if args != nil {
+	if cli {
 		if err := SetupLocalCache(root); err != nil {
 			return fmt.Errorf("setup local cache: %w", err)
 		}

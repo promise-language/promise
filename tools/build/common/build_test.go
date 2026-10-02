@@ -49,6 +49,46 @@ func TestRunBuild_RejectsUnknownFlags(t *testing.T) {
 	}
 }
 
+// TestRunBuild_RejectsSharedFlag (#102): --shared built into the machine-global
+// ~/.promise. It is gone, so it is a usage error that no longer names it — not
+// a silent no-op that would leave its caller believing they built shared.
+func TestRunBuild_RejectsSharedFlag(t *testing.T) {
+	for _, flag := range []string{"--shared", "-shared"} {
+		t.Run(flag, func(t *testing.T) {
+			err := RunBuild("/nonexistent", []string{flag})
+			if err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+				t.Fatalf("RunBuild(%q) = %v, want the usage error", flag, err)
+			}
+			if strings.Contains(err.Error(), "shared") {
+				t.Errorf("the usage error still offers the flag: %v", err)
+			}
+		})
+	}
+}
+
+// TestRunBuild_CLIAlwaysPinsTheWorktreeHome (#102): invoked as bin/build, with
+// any accepted flags, the build pins the worktree's home before doing anything
+// else — there is no flag left that skips it. The root's .promise-home is a
+// regular file, so the pin cannot succeed and the build stops there, naming it;
+// a build that skipped the pin would get past it and fail somewhere else.
+//
+// The empty argv is a bare `bin/build` (os.Args[1:], empty but not nil), and
+// the case that regressed: NormalizeArgs turns it into nil, which read as the
+// in-process caller, so the most common invocation never pinned at all.
+func TestRunBuild_CLIAlwaysPinsTheWorktreeHome(t *testing.T) {
+	isolateLocalCacheEnv(t)
+	for _, args := range [][]string{{}, {"--local"}} {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, ".promise-home"), []byte("not a directory\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := RunBuild(root, args)
+		if err == nil || !strings.HasPrefix(err.Error(), "setup local cache:") {
+			t.Errorf("RunBuild(%q) = %v, want it to stop at pinning the worktree home", args, err)
+		}
+	}
+}
+
 // TestBundleLLVM_NoEntry covers the manifest sanity-check branches in
 // BundleLLVM that fire when the manifest is malformed for the running target.
 // These are reachable from `bin/build --release` via FetchAll producing a

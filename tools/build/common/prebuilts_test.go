@@ -12,11 +12,66 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// TestPrebuiltsCacheRootResolution pins where the download cache lives — and,
+// through hostCacheDir, the host verify lock beside it (#102). The compiler
+// mirrors this rule in another Go module (prebuiltsCacheRoot in
+// compiler/cmd/promise/llvm_cas.go) to find the toolchain the build staged, so a
+// drift here leaves every compiler looking in the wrong place.
+func TestPrebuiltsCacheRootResolution(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	t.Setenv("LOCALAPPDATA", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("PROMISE_PREBUILTS_CACHE", "")
+
+	resolve := func() string {
+		t.Helper()
+		got, err := PrebuiltsCacheRoot()
+		if err != nil {
+			t.Fatalf("PrebuiltsCacheRoot: %v", err)
+		}
+		return got
+	}
+	byOS := map[string]string{
+		"darwin":  filepath.Join(home, "Library", "Caches", "promise", "prebuilts"),
+		"windows": filepath.Join(home, "AppData", "Local", "promise", "prebuilts"),
+	}
+	want, ok := byOS[runtime.GOOS]
+	if !ok {
+		want = filepath.Join(home, ".cache", "promise", "prebuilts")
+	}
+	if got := resolve(); got != want {
+		t.Errorf("default = %q, want %q", got, want)
+	}
+
+	xdg := filepath.Join(home, "xdg")
+	t.Setenv("XDG_CACHE_HOME", xdg)
+	if got, want := resolve(), filepath.Join(xdg, "promise", "prebuilts"); got != want {
+		t.Errorf("with XDG_CACHE_HOME = %q, want %q — on every platform", got, want)
+	}
+
+	override := filepath.Join(home, "override")
+	t.Setenv("PROMISE_PREBUILTS_CACHE", override)
+	if got := resolve(); got != override {
+		t.Errorf("with PROMISE_PREBUILTS_CACHE = %q, want the override %q", got, override)
+	}
+
+	t.Setenv("PROMISE_PREBUILTS_CACHE", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	if got, err := PrebuiltsCacheRoot(); err == nil {
+		t.Errorf("with no home = %q, want an error rather than a relative cache root", got)
+	}
+}
 
 // TestLoadPrebuiltsManifest_Real parses the actual tools/build/prebuilts.toml
 // from the repo and verifies its structure matches expectations. This guards

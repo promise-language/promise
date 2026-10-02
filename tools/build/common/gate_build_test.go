@@ -257,6 +257,41 @@ func TestContractGate_PinsWorktreeHome(t *testing.T) {
 	}
 }
 
+// A worktree home that cannot be pinned is not built into (#102): the build
+// would otherwise run, and every child after it measure, in whatever home the
+// caller exported. The build stub SUCCEEDS here, so the only thing that can
+// stop it is the pin — and the envelope names the pin as why nothing was
+// measured, rather than reporting a clean sweep of a tree it never built.
+func TestContractGate_UnpinnableHomeIsNotBuiltInto(t *testing.T) {
+	fake := &fakeBuild{}
+	stubGateBuild(t, fake)
+	ambient := t.TempDir()
+	t.Setenv("PROMISE_HOME", ambient)
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".promise-home"), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runContractGate(root, []string{"builds", "--envelope"}, &out); err != nil {
+		t.Fatalf("runContractGate: %v", err)
+	}
+	var env Envelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("the envelope does not parse: %v\n%s", err, out.String())
+	}
+
+	if len(fake.roots) != 0 {
+		t.Errorf("the build ran %d time(s) with PROMISE_HOME=%q, in a home that was never pinned", len(fake.roots), fake.env[0]["PROMISE_HOME"])
+	}
+	if !strings.Contains(env.Incomplete, "pin the worktree Promise home") {
+		t.Errorf("incomplete = %q, want it to name the failed pin", env.Incomplete)
+	}
+	if entries, err := os.ReadDir(ambient); err != nil || len(entries) != 0 {
+		t.Errorf("the caller's home %s was written (%d entries, %v)", ambient, len(entries), err)
+	}
+}
+
 // The build is bin/build's own RunBuild, called in this process. Spawning
 // bin/build would measure whichever bin/build is on disk — the same staleness
 // this fixes, one level up — and bin/gate's own staleness is already CheckStale's

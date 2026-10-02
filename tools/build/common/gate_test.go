@@ -3,6 +3,7 @@ package common
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -183,6 +184,33 @@ func TestRunGate_CoverageBadFlag(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "usage") {
 		t.Errorf("error %q does not contain 'usage'", err.Error())
+	}
+}
+
+// TestRunGate_LegacySubcommandsRefuseShared (#102): -shared used to skip the
+// worktree home and run the suite, the build and the toolchain in the
+// machine-global ~/.promise. Every legacy subcommand that took it now refuses it
+// as a usage error, in either spelling, before pinning a home or building —
+// so the root gains no .promise-home and the refusal does not advertise the flag.
+func TestRunGate_LegacySubcommandsRefuseShared(t *testing.T) {
+	t.Setenv("PROMISE_GATE", os.Getenv("PROMISE_GATE")) // RunGate sets it
+	isolateLocalCacheEnv(t)
+	for _, sub := range []string{"test", "wasm-test", "wasm-web-test", "wasm-size", "go-test", "coverage"} {
+		for _, flag := range []string{"--shared", "-shared"} {
+			t.Run(sub+" "+flag, func(t *testing.T) {
+				root := t.TempDir()
+				err := RunGate(root, []string{sub, flag})
+				if err == nil || !strings.HasPrefix(err.Error(), "usage: bin/gate "+sub) {
+					t.Fatalf("RunGate(%s %s) = %v, want the usage error", sub, flag, err)
+				}
+				if strings.Contains(err.Error(), "shared") {
+					t.Errorf("the usage error still offers the flag: %v", err)
+				}
+				if Exists(filepath.Join(root, ".promise-home")) {
+					t.Errorf("a refused %s pinned a home before refusing", sub)
+				}
+			})
+		}
 	}
 }
 

@@ -265,6 +265,25 @@ func TestCASWindowUnopenedReportsNothing(t *testing.T) {
 	}
 }
 
+// TestCASWindowUnreadableLedgerReportsNothing: an opened window whose ledger
+// cannot be read measured nothing, so both folds — the tracker gates' Values
+// and the contract Metrics, which share one read — report no numbers and say
+// why. Zeros (an empty fold) would read as a clean run that reached no home at
+// all, and would pass the foreign-home check without having looked.
+func TestCASWindowUnreadableLedgerReportsNothing(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(casLedgerPath(root), 0o755); err != nil { // a directory cannot be read as a file
+		t.Fatal(err)
+	}
+	w := casWindow{root: root, open: true}
+	if vals, why := w.Values(); vals != nil || !strings.Contains(why, "could not be read") {
+		t.Errorf("Values() = %v / %q, want nothing and the read failure", vals, why)
+	}
+	if metrics, why := w.Metrics(); len(metrics) != 0 || !strings.Contains(why, "could not be read") {
+		t.Errorf("Metrics() = %v / %q, want nothing and the read failure", metrics, why)
+	}
+}
+
 // TestCASWindowMetricsAreTheTwoWithAnAbsoluteEndState: docs/gate-system.md
 // requires every metric `integration` reports to carry an enforced term on every
 // target, and a byte or population count is legitimately non-zero the first time

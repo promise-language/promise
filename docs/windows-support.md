@@ -91,9 +91,10 @@ The import libs are generated at build time from license-clean **symbol-list
 mappings are not copyrightable, so the generated `.lib`s are freely re-hostable.
 The `.def` files are the committed source of truth; the generated `.lib` files
 are gitignored build artifacts. The `.lib` files are then embedded (`go:embed`)
-into the compiler binary (~21 KiB total), then extracted to
-`<PROMISE_HOME>/cache/winlink/<arch>/` at link time (mirroring the embedded musl
-CRT objects). Regenerate with `bin/release winlink`.
+into the compiler binary (~21 KiB total), then extracted to `winlink/<arch>/`
+under the compiler's derived-cache root ([module-system.md](module-system.md#cache-layout))
+at link time (mirroring the embedded musl CRT objects). Regenerate with
+`bin/release winlink`.
 
 The embed is **unconditional, not host-gated** — a Linux or macOS compiler
 carries the same import libs as the Windows one. That is what makes [Overview](#overview)'s

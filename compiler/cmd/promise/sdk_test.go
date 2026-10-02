@@ -393,3 +393,28 @@ func TestEnsureBundledSDKReplacesNonSymlinkAtLinkPath(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsureBundledSDKUnderPromiseCache: the SDK stub is written from the
+// binary's own bytes, so it is a derived cache and PROMISE_CACHE relocates it
+// (#99) — it lands under the cache root, and nothing is created under the
+// home's cache for it.
+func TestEnsureBundledSDKUnderPromiseCache(t *testing.T) {
+	home := t.TempDir()
+	cache := filepath.Join(t.TempDir(), "derived")
+	t.Setenv("PROMISE_HOME", home)
+	t.Setenv("PROMISE_CACHE", cache)
+
+	info, err := ensureBundledSDK()
+	if err != nil {
+		t.Fatalf("ensureBundledSDK failed: %v", err)
+	}
+	if want := filepath.Join(cache, "sdk", "macos"); info.sysroot != want {
+		t.Errorf("sysroot = %q, want %q", info.sysroot, want)
+	}
+	if _, err := os.Stat(filepath.Join(info.sysroot, "usr", "lib", "libSystem.B.tbd")); err != nil {
+		t.Errorf("TBD stub not written under PROMISE_CACHE: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "cache")); !os.IsNotExist(err) {
+		t.Errorf("<home>/cache was created (stat err %v); the SDK stub belongs under PROMISE_CACHE", err)
+	}
+}

@@ -393,13 +393,21 @@ func sharedHome(m interface{ Run() int }, keepAmbient bool) int {
 		// its parent's temp directory — measured at 21 extra homes across one
 		// sweep of cmd/promise, which is the cost T2150 exists to remove. The
 		// package's own home is warmed by the branch below, and by the three
-		// per-area packages that share it.
+		// per-area packages that share it. A PROMISE_CACHE the caller set is
+		// kept with it, for the same reason.
 		return m.Run()
 	}
 	home, cleanup := resolveHome()
 	if err := os.Setenv("PROMISE_HOME", home); err != nil {
 		panic("clitest: cannot set PROMISE_HOME: " + err.Error())
 	}
+	// An inherited PROMISE_CACHE is cleared, as bin/test's SetupLocalCache
+	// clears it: the whole cache — derived caches included — then lives under
+	// the home chosen here, so a bare `go test` caches where bin/test does
+	// instead of in a cold root the caller (forge sets one for every child)
+	// pointed at, and a test that builds a fixture home finds its caches where
+	// it put them.
+	os.Unsetenv("PROMISE_CACHE")
 	warmToolchain(warmupBin())
 	code := m.Run()
 	cleanup()

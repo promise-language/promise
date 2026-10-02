@@ -394,15 +394,47 @@ func TestWarmToolchainSurvivesABinaryThatFails(t *testing.T) {
 // sees while it runs and what it returns afterwards, and both are observable
 // without a real suite.
 type suiteStub struct {
-	code     int
-	ran      bool
-	homeSeen string
+	code      int
+	ran       bool
+	homeSeen  string
+	cacheSeen string // PROMISE_CACHE as the suite saw it
+	cacheSet  bool   // whether it was set at all
 }
 
 func (s *suiteStub) Run() int {
 	s.ran = true
 	s.homeSeen = os.Getenv("PROMISE_HOME")
+	s.cacheSeen, s.cacheSet = os.LookupEnv("PROMISE_CACHE")
 	return s.code
+}
+
+// TestSharedHomeClearsInheritedPromiseCache: the package home's cache is the
+// whole cache. A PROMISE_CACHE inherited from the caller — forge sets one for
+// every child — would send a bare `go test`'s derived caches to a cold root
+// while bin/test, whose SetupLocalCache clears it, keeps them warm, and would
+// move a fixture home's caches out from under the tests that assert on them.
+// SharedHome clears it as SetupLocalCache does. A kept ambient home keeps its
+// PROMISE_CACHE too: both are the caller's choice.
+func TestSharedHomeClearsInheritedPromiseCache(t *testing.T) {
+	t.Setenv("PROMISE_HOME", filepath.Join(t.TempDir(), "ambient"))
+	t.Setenv("PROMISE_CACHE", filepath.Join(t.TempDir(), "inherited"))
+
+	suite := &suiteStub{}
+	SharedHome(suite)
+	if suite.cacheSet {
+		t.Errorf("the suite ran with PROMISE_CACHE=%q, want it unset — the package home's cache is the whole cache", suite.cacheSeen)
+	}
+
+	chosen := filepath.Join(t.TempDir(), "chosen")
+	inherited := filepath.Join(t.TempDir(), "inherited")
+	t.Setenv("PROMISE_HOME", chosen)
+	t.Setenv("PROMISE_CACHE", inherited)
+	suite = &suiteStub{}
+	SharedHomeKeepingAmbient(suite)
+	if suite.cacheSeen != inherited {
+		t.Errorf("a kept ambient home ran the suite with PROMISE_CACHE=%q (set=%v), want the caller's %q kept with it",
+			suite.cacheSeen, suite.cacheSet, inherited)
+	}
 }
 
 // TestSharedHomeRunsTheSuiteUnderTheWorktreeHome pins the whole TestMain

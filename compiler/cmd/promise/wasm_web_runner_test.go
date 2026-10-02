@@ -91,3 +91,24 @@ func TestMaterializeWebHarnessReuses(t *testing.T) {
 		t.Errorf("expected .js suffix, got %q", first)
 	}
 }
+
+// TestMaterializeWebHarnessUnderPromiseCache: the harness is written from the
+// binary's embedded copy, so PROMISE_CACHE relocates it (#99) — it lands under
+// the cache root's wasm/, and nothing is created under the home's cache for it.
+func TestMaterializeWebHarnessUnderPromiseCache(t *testing.T) {
+	home := t.TempDir()
+	cache := filepath.Join(t.TempDir(), "derived")
+	t.Setenv("PROMISE_HOME", home)
+	t.Setenv("PROMISE_CACHE", cache)
+
+	path, err := materializeWebHarness()
+	if err != nil {
+		t.Fatalf("materializeWebHarness: %v", err)
+	}
+	if wantPrefix := filepath.Join(cache, "wasm") + string(os.PathSeparator); !strings.HasPrefix(path, wantPrefix) {
+		t.Errorf("harness path %q does not start with %q", path, wantPrefix)
+	}
+	if _, err := os.Stat(filepath.Join(home, "cache")); !os.IsNotExist(err) {
+		t.Errorf("<home>/cache was created (stat err %v); the harness belongs under PROMISE_CACHE", err)
+	}
+}

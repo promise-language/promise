@@ -5258,7 +5258,7 @@ func buildLinuxLinkArgs(target, objFile, outputFile string, useLTO bool) []strin
 //
 // All three Linux target dependencies are staged identically: a flat set of
 // files under a per-arch directory, found through the same five-step ladder
-// (exe sibling -> <PROMISE_HOME>/lib -> <PROMISE_HOME>/cache -> CAS view ->
+// (exe sibling -> <PROMISE_HOME>/lib -> the derived cache root -> CAS view ->
 // embedded extraction). The two predicates that ladder is built from live here
 // so there is one implementation rather than one per dependency. The ladders
 // themselves stay separate: their "not available" errors differ, and so does
@@ -5336,7 +5336,7 @@ func muslCRTValid(dir string) bool {
 // Discovery order:
 // 1. Sibling of promise binary: {exe_dir}/crt/{arch}/
 // 2. Installed location: <PROMISE_HOME>/lib/crt/{arch}/
-// 3. Cache dir: <PROMISE_HOME>/cache/crt/{arch}/
+// 3. Cache dir: <cache root>/crt/{arch}/ (module.CacheRoot)
 // 4. Extract embedded CRT to cache (first build only)
 func findMuslCRT(target string) (string, error) {
 	// Ensure stale caches from a different compiler binary are cleared first.
@@ -5441,7 +5441,7 @@ func openSSLValid(dir string) bool {
 // TLS static link (T1596 / #28). Exact mirror of findMuslCRT's discovery ladder:
 //  1. Sibling of promise binary: {exe_dir}/openssl/{arch}/
 //  2. Installed location: <PROMISE_HOME>/lib/openssl/{arch}/
-//  3. Cache dir: <PROMISE_HOME>/cache/openssl/{arch}/
+//  3. Cache dir: <cache root>/openssl/{arch}/ (module.CacheRoot)
 //  4. Content-addressed store view (when the manifest carries openssl blobs)
 //  5. Extract the embedded archives to cache (full builds with real archives)
 //
@@ -5546,7 +5546,7 @@ func compilerRTValid(dir string) bool {
 // link (T1676). Exact mirror of findMuslCRT's discovery ladder:
 //  1. Sibling of promise binary: {exe_dir}/compiler-rt/{arch}/
 //  2. Installed location: <PROMISE_HOME>/lib/compiler-rt/{arch}/
-//  3. Cache dir: <PROMISE_HOME>/cache/compiler-rt/{arch}/
+//  3. Cache dir: <cache root>/compiler-rt/{arch}/ (module.CacheRoot)
 //  4. Content-addressed store view (when the manifest carries compiler-rt blobs)
 //  5. Extract the embedded archive to cache (the working path today)
 //

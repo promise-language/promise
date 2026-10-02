@@ -322,7 +322,7 @@ rather than to a phase they have to identify first:
 | `lock` | Serialize concurrent verify runs across the host (see below) |
 | `clear` | Delete `.workspace/verified-tree` — drop any previous blessing (see below) |
 | `clean` | `--clean` only: wipe `.promise-home/` so the run starts cold |
-| `cache` | Point `PROMISE_HOME` at the repo-local `.promise-home/` |
+| `cache` | Point `PROMISE_HOME` at the repo-local `.promise-home/`, and clear any inherited `PROMISE_CACHE` so the whole cache lives there |
 | `build` | The full build pipeline (see above) |
 | `format go` | `gofmt -w .` |
 | `format promise` | `promise format` on all `.pr` files |

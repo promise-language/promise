@@ -412,7 +412,7 @@ func doctorCheckBuildCache() doctorCheck {
 		c.Status = doctorWarn.String()
 		c.Summary = "Cannot access build cache"
 		c.Details = append(c.Details, err.Error())
-		c.Fix = "Check PROMISE_HOME permissions"
+		c.Fix = "Check PROMISE_HOME permissions, or PROMISE_CACHE when it is set"
 		return c
 	}
 

@@ -379,6 +379,7 @@ func TestFindCompilerRTCacheRung(t *testing.T) {
 	}
 	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	target := "x86_64-unknown-linux-musl"
 	if runtime.GOARCH == "arm64" {
@@ -419,6 +420,7 @@ func TestFindCompilerRTStaleCacheIsRejected(t *testing.T) {
 	}
 	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
+	t.Setenv("PROMISE_CACHE", "") // the stale archive is seeded under the fixture home
 
 	target := "x86_64-unknown-linux-musl"
 	if runtime.GOARCH == "arm64" {
@@ -713,6 +715,7 @@ func TestFindCompilerRTConcurrentColdCache(t *testing.T) {
 func TestDoctorCheckCompilerRTMissing(t *testing.T) {
 	home := clitest.TempDir(t)
 	t.Setenv("PROMISE_HOME", home)
+	t.Setenv("PROMISE_CACHE", "") // the blocking file is placed under the fixture home
 
 	arch := "x86_64-linux-musl"
 	if runtime.GOARCH == "arm64" {

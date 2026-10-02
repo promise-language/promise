@@ -1659,3 +1659,33 @@ func TestResolveWasmRuntimeUsesAPopulatedCASView(t *testing.T) {
 		})
 	}
 }
+
+// A view is materialized from the store, not computed from the compiler's
+// inputs, so it is the home's: PROMISE_CACHE must not move it (#99 — copying
+// the toolchain into every checkout's cache is exactly the cost the variable
+// exists to avoid). depViewDir is where every dependency's view path is
+// decided, so one assertion covers crt-view, openssl-view, compiler-rt-view
+// and runtime-view alike. Skips on a build whose manifest pins no runtime, as
+// the view path is undefined there.
+func TestDepViewDirIgnoresPromiseCache(t *testing.T) {
+	home := clitest.TempDir(t)
+	cache := filepath.Join(clitest.TempDir(t), "derived")
+	t.Setenv("PROMISE_HOME", home)
+	t.Setenv("PROMISE_CACHE", cache)
+
+	view, err := depViewDir("runtime-view", runtime.GOOS+"-"+runtime.GOARCH,
+		[]string{runtimeExeName("wasmtime")}, func(string) string { return runtimeManifestName("wasmtime") })
+	if err != nil {
+		t.Fatalf("depViewDir: %v", err)
+	}
+	if view.Dir == "" {
+		t.Skip("this build's manifest pins no wasmtime, so the view path is not defined")
+	}
+	wantPrefix := filepath.Join(home, "cache", "runtime-view") + string(filepath.Separator)
+	if !strings.HasPrefix(view.Dir, wantPrefix) {
+		t.Errorf("view dir %q is not under the home's cache %q — a view is the home's, not PROMISE_CACHE's", view.Dir, wantPrefix)
+	}
+	if strings.HasPrefix(view.LockPath, cache+string(filepath.Separator)) {
+		t.Errorf("view lock %q moved under PROMISE_CACHE with nothing to lock there", view.LockPath)
+	}
+}

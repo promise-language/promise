@@ -40,18 +40,31 @@ func TestCacheRootAbsoluteOverride(t *testing.T) {
 	}
 }
 
-// The override needs no home at all: with PROMISE_HOME unset the home would be
-// ~/.promise, and the cache root must not be derived from it.
-func TestCacheRootOverrideIgnoresDefaultHome(t *testing.T) {
+// The override needs no home at all. With PROMISE_HOME unset and no user home
+// to fall back on, PromiseHome cannot answer — and CacheRoot must not ask it
+// when PROMISE_CACHE already says where the derived caches go. Without the
+// override the same state is an error, never a cache rooted at "".
+func TestCacheRootOverrideNeedsNoHome(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "derived") // before the env is blanked: TempDir may read it
 	t.Setenv("PROMISE_HOME", "")
-	cache := filepath.Join(t.TempDir(), "derived")
+	t.Setenv("HOME", "")        // os.UserHomeDir on Unix
+	t.Setenv("USERPROFILE", "") // and on Windows
+	if home, err := PromiseHome(); err == nil {
+		t.Fatalf("the fixture still resolves a home (%q); the test would prove nothing", home)
+	}
+
 	t.Setenv("PROMISE_CACHE", cache)
 	got, err := CacheRoot()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("CacheRoot() with no home: %v", err)
 	}
 	if got != cache {
 		t.Errorf("CacheRoot() = %q, want %q", got, cache)
+	}
+
+	t.Setenv("PROMISE_CACHE", "")
+	if root, err := CacheRoot(); err == nil {
+		t.Errorf("CacheRoot() with no home and no override = %q, want an error", root)
 	}
 }
 
@@ -102,6 +115,36 @@ func TestPromiseCacheRelocatesDerivedCaches(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "cache")); !os.IsNotExist(err) {
 		t.Errorf("<home>/cache was created (stat err %v); derived caches belong under PROMISE_CACHE", err)
+	}
+}
+
+// CleanBuildCache empties the relocated build cache and never reaches into the
+// home's: a `promise clean` under PROMISE_CACHE must not take a build cache it
+// is not using with it.
+func TestCleanBuildCacheUnderPromiseCache(t *testing.T) {
+	home := t.TempDir()
+	cache := filepath.Join(t.TempDir(), "derived")
+	t.Setenv("PROMISE_HOME", home)
+	t.Setenv("PROMISE_CACHE", cache)
+
+	relocated := filepath.Join(cache, "build", "ab", "abc.o")
+	homes := filepath.Join(home, "cache", "build", "cd", "cde.o")
+	for _, f := range []string{relocated, homes} {
+		if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f, []byte("obj"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := CleanBuildCache(); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(cache, "build")); len(entries) != 0 {
+		t.Errorf("PROMISE_CACHE/build still holds %d entries after the clean", len(entries))
+	}
+	if _, err := os.Stat(homes); err != nil {
+		t.Errorf("the clean reached into <home>/cache/build: %v", err)
 	}
 }
 

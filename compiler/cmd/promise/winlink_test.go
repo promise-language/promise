@@ -184,6 +184,35 @@ func TestFindWindowsLinkSurfaceExtractsEmbedded(t *testing.T) {
 	}
 }
 
+// TestFindWindowsLinkSurfaceUnderPromiseCache: the extracted import libs are a
+// derived cache, so PROMISE_CACHE relocates them (#99) — rung 3 and the
+// extraction behind it both use the cache root, and nothing is created under
+// the home's cache. The musl CRT, OpenSSL and compiler-rt ladders carry the
+// same substitution; this is the one that embeds on every host.
+func TestFindWindowsLinkSurfaceUnderPromiseCache(t *testing.T) {
+	if !hasEmbeddedWinLink {
+		t.Skip("no embedded Windows link surface in this binary")
+	}
+	home := t.TempDir()
+	cache := filepath.Join(t.TempDir(), "derived")
+	t.Setenv("PROMISE_HOME", home)
+	t.Setenv("PROMISE_CACHE", cache)
+
+	dir, err := findWindowsLinkSurface("x86_64-pc-windows-msvc")
+	if err != nil {
+		t.Fatalf("findWindowsLinkSurface: %v", err)
+	}
+	if want := filepath.Join(cache, "winlink", "windows-amd64"); dir != want {
+		t.Errorf("link surface dir = %q, want %q under PROMISE_CACHE", dir, want)
+	}
+	if !winLinkComplete(dir) {
+		t.Errorf("extracted dir %q is missing import libs", dir)
+	}
+	if _, err := os.Stat(filepath.Join(home, "cache")); !os.IsNotExist(err) {
+		t.Errorf("<home>/cache was created (stat err %v); the extraction belongs under PROMISE_CACHE", err)
+	}
+}
+
 func TestFindWindowsLinkSurfacePrefersSibling(t *testing.T) {
 	// The first discovery step is a winlink/ dir sitting next to the promise
 	// binary (os.Executable()). It must win over the installed location and the

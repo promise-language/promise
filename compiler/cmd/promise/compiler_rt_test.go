@@ -782,3 +782,49 @@ func TestResolveTargetDepViewsFallThroughWhenUnhosted(t *testing.T) {
 		}
 	}
 }
+
+// TestFindCompilerRTCacheRungUnderPromiseCache is TestFindCompilerRTCacheRung
+// with the cache relocated (#99): rung 3 reads the cache root, so an archive
+// staged under PROMISE_CACHE is the one accepted, and the home's cache is
+// neither consulted nor created. Linux hosts only, like its sibling —
+// compiler-rt is embedded there alone. The musl CRT and OpenSSL ladders are the
+// same code with other file lists, so this one stands for all three.
+func TestFindCompilerRTCacheRungUnderPromiseCache(t *testing.T) {
+	if !hasEmbeddedCompilerRT {
+		t.Skip("no embedded compiler-rt on this platform")
+	}
+	home := clitest.TempDir(t)
+	cache := filepath.Join(clitest.TempDir(t), "derived")
+	t.Setenv("PROMISE_HOME", home)
+	t.Setenv("PROMISE_CACHE", cache)
+
+	target := "x86_64-unknown-linux-musl"
+	if runtime.GOARCH == "arm64" {
+		target = "aarch64-unknown-linux-musl"
+	}
+	arch := compilerRTArchDir(target)
+	cacheDir := filepath.Join(cache, "compiler-rt", arch)
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range compilerRTFiles {
+		data, err := embeddedCompilerRT.ReadFile("resources/compiler-rt/" + arch + "/" + name)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(cacheDir, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := findCompilerRT(target)
+	if err != nil {
+		t.Fatalf("findCompilerRT: %v", err)
+	}
+	if got != cacheDir {
+		t.Errorf("findCompilerRT = %q, want the archive staged under PROMISE_CACHE at %q", got, cacheDir)
+	}
+	if _, err := os.Stat(filepath.Join(home, "cache")); !os.IsNotExist(err) {
+		t.Errorf("<home>/cache was created (stat err %v); rung 3 must read PROMISE_CACHE alone", err)
+	}
+}

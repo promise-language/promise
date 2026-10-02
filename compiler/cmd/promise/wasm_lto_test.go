@@ -1,9 +1,43 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestWasmCRTObjectsLandUnderPromiseCache: the allocator and math objects every
+// wasm32 link pulls in are written from the binary's embedded copies, so they
+// are derived caches and PROMISE_CACHE relocates them (#99). Each lands under
+// the cache root's crt/wasm32/, and nothing is created under the home's cache.
+func TestWasmCRTObjectsLandUnderPromiseCache(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		extract func() (string, error)
+	}{
+		{"wasm_alloc.o", ensureWasmAllocObj},
+		{"wasm_math.o", ensureWasmMathObj},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			cache := filepath.Join(t.TempDir(), "derived")
+			t.Setenv("PROMISE_HOME", home)
+			t.Setenv("PROMISE_CACHE", cache)
+
+			got, err := tc.extract()
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if want := filepath.Join(cache, "crt", "wasm32", tc.name); got != want {
+				t.Errorf("%s extracted to %q, want %q under PROMISE_CACHE", tc.name, got, want)
+			}
+			if _, err := os.Stat(filepath.Join(home, "cache")); !os.IsNotExist(err) {
+				t.Errorf("<home>/cache was created (stat err %v); the object belongs under PROMISE_CACHE", err)
+			}
+		})
+	}
+}
 
 // TestWasmLinkUsesLtoO1 verifies that WASM linking uses --lto-O1, not --lto-O2.
 // T0333: --lto-O2 + LLVM 23 miscompiles `icmp samesign ult` in loop exit

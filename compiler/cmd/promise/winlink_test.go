@@ -158,6 +158,7 @@ func TestFindWindowsLinkSurfaceExtractsEmbedded(t *testing.T) {
 	}
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	dir, err := findWindowsLinkSurface("x86_64-pc-windows-msvc")
 	if err != nil {

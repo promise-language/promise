@@ -151,9 +151,9 @@ func docModuleFrontend(modName, modDir string, sourceFiles []string) (*ast.File,
 	var merged *ast.File
 
 	// T0244: Binary AST cache for all modules — skip ANTLR parsing on cache hit.
-	home, homeErr := module.PromiseHome()
-	if homeErr == nil {
-		astCacheDir := filepath.Join(home, "cache", "astcache")
+	cacheRoot, cacheErr := module.CacheRoot()
+	if cacheErr == nil {
+		astCacheDir := filepath.Join(cacheRoot, "astcache")
 		// Read all files for content hashing
 		fileContents := make([][]byte, len(sourceFiles))
 		for i, sf := range sourceFiles {

@@ -33,9 +33,9 @@ func materializeWebHarness() (string, error) {
 	sum := sha256.Sum256(embeddedWasmWebHarness)
 	hash := hex.EncodeToString(sum[:8]) // 16 hex chars
 
-	promiseHome, err := module.PromiseHome()
+	cacheRoot, err := module.CacheRoot()
 	if err != nil {
-		// Fall back to a per-process tempfile if PROMISE_HOME is unavailable.
+		// Fall back to a per-process tempfile if the cache root is unavailable.
 		f, ferr := os.CreateTemp("", "promise-wasm-web-harness-*.js")
 		if ferr != nil {
 			return "", fmt.Errorf("materialize harness: %w (and %v)", err, ferr)
@@ -49,7 +49,7 @@ func materializeWebHarness() (string, error) {
 		return f.Name(), nil
 	}
 
-	cacheDir := filepath.Join(promiseHome, "cache", "wasm")
+	cacheDir := filepath.Join(cacheRoot, "wasm")
 	harnessPath := filepath.Join(cacheDir, "web_harness_"+hash+".js")
 
 	// Reuse if size matches — content-hashed name guarantees identical bytes.

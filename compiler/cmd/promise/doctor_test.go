@@ -708,6 +708,7 @@ func TestDoctorCheckBuildCacheError(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PROMISE_HOME", f)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 	c := doctorCheckBuildCache()
 	if c.Status != "warning" {
 		t.Errorf("expected warning when build cache cannot be created, got %s: %s", c.Status, c.Summary)

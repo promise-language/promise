@@ -508,14 +508,14 @@ func compilerIdentityOf(path string) (string, error) {
 }
 
 // BuildCacheDir returns the build cache directory (~/.promise/cache/build/ by default).
-// Uses PromiseHome() which respects PROMISE_HOME env var.
+// Rooted at CacheRoot(), which respects PROMISE_CACHE and PROMISE_HOME.
 // Creates it if it doesn't exist.
 func BuildCacheDir() (string, error) {
-	home, err := PromiseHome()
+	root, err := CacheRoot()
 	if err != nil {
-		return "", fmt.Errorf("cannot determine Promise home: %w", err)
+		return "", fmt.Errorf("cannot determine Promise cache: %w", err)
 	}
-	dir := filepath.Join(home, "cache", "build")
+	dir := filepath.Join(root, "build")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("cannot create build cache: %w", err)
 	}
@@ -656,17 +656,17 @@ func ReadBuildCacheMeta(cacheDir, cacheKey string) *CacheMeta {
 
 // --- Compiler stamp: tracks which binary populated the extraction caches ---
 
-// compilerStampFile is the filename within ~/.promise/cache/ that records which
+// compilerStampFile is the filename within CacheRoot() (~/.promise/cache/ by default) that records which
 // compiler binary last extracted embedded resources (LLVM tools, CRT).
 const compilerStampFile = ".compiler_hash"
 
 // CompilerStampPath returns the path to the compiler stamp file.
 func CompilerStampPath() (string, error) {
-	home, err := PromiseHome()
+	root, err := CacheRoot()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "cache", compilerStampFile), nil
+	return filepath.Join(root, compilerStampFile), nil
 }
 
 // WriteCompilerStamp records the current compiler identity as the one that
@@ -731,11 +731,11 @@ func CompilerChanged() (changed bool, identity string) {
 // CompilerHash is memoized and reads a sidecar written by the build, so this
 // costs nothing per call.
 func EmbeddedModuleCacheDir(name string) (string, error) {
-	home, err := PromiseHome()
+	root, err := CacheRoot()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "cache", "embedded_modules", CompilerIdentity(), name), nil
+	return filepath.Join(root, "embedded_modules", CompilerIdentity(), name), nil
 }
 
 // CleanEmbeddedModuleCache removes all cached embedded catalog modules, for
@@ -747,12 +747,12 @@ func EmbeddedModuleCacheDir(name string) (string, error) {
 // exists but is half-empty; after an atomic rename the tree either is at that
 // path or is not (T1616).
 func CleanEmbeddedModuleCache() error {
-	home, err := PromiseHome()
+	root, err := CacheRoot()
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(home, "cache", "embedded_modules")
-	trash := filepath.Join(home, "cache", fmt.Sprintf(".embedded_modules.trash.%d.%d",
+	dir := filepath.Join(root, "embedded_modules")
+	trash := filepath.Join(root, fmt.Sprintf(".embedded_modules.trash.%d.%d",
 		os.Getpid(), tmpTrashSeq.Add(1)))
 	if err := os.Rename(dir, trash); err != nil {
 		if os.IsNotExist(err) {
@@ -797,14 +797,26 @@ func CleanLLVMCache() error {
 // binary, so a compiler change must be able to invalidate it. (Its cache dir is
 // additionally size-validated against the embedded copy — this is belt and
 // braces, matching the musl CRT.)
+//
+// The extractions live under CacheRoot(); the views are materialized from the
+// store and stay under <PromiseHome>/cache with it.
 func CleanCRTCache() error {
 	home, err := PromiseHome()
 	if err != nil {
 		return err
 	}
+	root, err := CacheRoot()
+	if err != nil {
+		return err
+	}
 	var firstErr error
-	for _, dir := range []string{"crt", "crt-view", "compiler-rt", "compiler-rt-view"} {
-		if e := os.RemoveAll(filepath.Join(home, "cache", dir)); e != nil && firstErr == nil {
+	for _, dir := range []string{
+		filepath.Join(root, "crt"),
+		filepath.Join(home, "cache", "crt-view"),
+		filepath.Join(root, "compiler-rt"),
+		filepath.Join(home, "cache", "compiler-rt-view"),
+	} {
+		if e := os.RemoveAll(dir); e != nil && firstErr == nil {
 			firstErr = e
 		}
 	}

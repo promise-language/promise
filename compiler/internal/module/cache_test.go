@@ -494,6 +494,7 @@ func TestCleanAllNonexistent(t *testing.T) {
 func TestCleanBuildCache(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmpHome)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	// Create some cached files
 	buildDir := filepath.Join(tmpHome, "cache", "build", "ab")
@@ -514,6 +515,7 @@ func TestCleanBuildCache(t *testing.T) {
 func TestBuildCacheDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmpHome)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	dir, err := BuildCacheDir()
 	if err != nil {
@@ -921,6 +923,7 @@ func TestTestBinaryMetaRoundTrip(t *testing.T) {
 func TestLockBuildDirShared(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmpHome)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	// First shared lock should succeed immediately.
 	unlock1 := LockBuildDirShared()
@@ -1418,6 +1421,7 @@ func TestHashEmbedGlobSkipsDirs(t *testing.T) {
 func TestCleanCRTCache(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmpHome)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	crtDirs := []string{
 		filepath.Join("crt", "aarch64-linux-musl"),

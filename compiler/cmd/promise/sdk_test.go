@@ -55,6 +55,7 @@ func TestBundledLibSystemTBDContent(t *testing.T) {
 func TestEnsureBundledSDKFresh(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	info, err := ensureBundledSDK()
 	if err != nil {
@@ -112,6 +113,7 @@ func TestEnsureBundledSDKIdempotent(t *testing.T) {
 func TestEnsureBundledSDKRewritesOnSizeMismatch(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	// Pre-create the TBD file with wrong content (different size).
 	libDir := filepath.Join(tmp, "cache", "sdk", "macos", "usr", "lib")
@@ -140,6 +142,7 @@ func TestEnsureBundledSDKRewritesOnSizeMismatch(t *testing.T) {
 func TestEnsureBundledSDKSkipsWriteWhenCurrent(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	// First call writes the file.
 	if _, err := ensureBundledSDK(); err != nil {
@@ -178,6 +181,7 @@ func TestEnsureBundledSDKSkipsWriteWhenCurrent(t *testing.T) {
 func TestFindMacOSSDKNeverConsultsXcrun(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	if runtime.GOOS != "windows" {
 		fakeDir := t.TempDir()
@@ -246,6 +250,7 @@ func TestEnsureBundledSDKConcurrentCallers(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Setenv("PROMISE_HOME", home) // forbids t.Parallel
+		t.Setenv("PROMISE_CACHE", "")  // asserts paths under the fixture home
 		tbdPath := filepath.Join(home, "cache", "sdk", "macos", "usr", "lib", "libSystem.B.tbd")
 
 		// Readers stand in for a concurrent linker opening the stub: any read that
@@ -324,6 +329,7 @@ func TestEnsureBundledSDKConcurrentCallers(t *testing.T) {
 func TestEnsureBundledSDKReplacesWrongSymlink(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	libDir := filepath.Join(tmp, "cache", "sdk", "macos", "usr", "lib")
 	if err := os.MkdirAll(libDir, 0755); err != nil {
@@ -354,6 +360,7 @@ func TestEnsureBundledSDKReplacesWrongSymlink(t *testing.T) {
 func TestEnsureBundledSDKReplacesNonSymlinkAtLinkPath(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	libDir := filepath.Join(tmp, "cache", "sdk", "macos", "usr", "lib")
 	if err := os.MkdirAll(libDir, 0755); err != nil {

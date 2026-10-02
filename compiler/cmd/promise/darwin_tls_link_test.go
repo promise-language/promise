@@ -165,6 +165,7 @@ func TestEnsureBundledSDKWritesFrameworkTBDs(t *testing.T) {
 func TestEnsureBundledSDKRewritesCorruptFrameworkTBD(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	fwDir := filepath.Join(tmp, "cache", "sdk", "macos", "System", "Library",
 		"Frameworks", "Security.framework")

@@ -5015,12 +5015,12 @@ exports:
 // concurrent processes never abort on an EEXIST they caused themselves, and a
 // concurrent ld64.lld never reads a half-written stub.
 func ensureBundledSDK() (*macOSSDKInfo, error) {
-	home, err := module.PromiseHome()
+	cacheRoot, err := module.CacheRoot()
 	if err != nil {
-		return nil, fmt.Errorf("cannot determine Promise home: %w", err)
+		return nil, fmt.Errorf("cannot determine Promise cache: %w", err)
 	}
 
-	sdkDir := filepath.Join(home, "cache", "sdk", "macos")
+	sdkDir := filepath.Join(cacheRoot, "sdk", "macos")
 	libDir := filepath.Join(sdkDir, "usr", "lib")
 	tbdPath := filepath.Join(libDir, "libSystem.B.tbd")
 	symlinkPath := filepath.Join(libDir, "libSystem.tbd")
@@ -5363,8 +5363,12 @@ func findMuslCRT(target string) (string, error) {
 		return installDir, nil
 	}
 
-	// 3. Cache dir (<PROMISE_HOME>/cache/crt/{arch}/)
-	cacheDir := filepath.Join(promiseHome, "cache", "crt", arch)
+	// 3. Cache dir (<CacheRoot>/crt/{arch}/)
+	cacheRoot, err := module.CacheRoot()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine Promise cache: %v", err)
+	}
+	cacheDir := filepath.Join(cacheRoot, "crt", arch)
 
 	if muslCRTValid(cacheDir) {
 		return cacheDir, nil
@@ -5468,8 +5472,12 @@ func findOpenSSL(target string) (string, error) {
 		return installDir, nil
 	}
 
-	// 3. Cache dir (<PROMISE_HOME>/cache/openssl/{arch}/)
-	cacheDir := filepath.Join(promiseHome, "cache", "openssl", arch)
+	// 3. Cache dir (<CacheRoot>/openssl/{arch}/)
+	cacheRoot, err := module.CacheRoot()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine Promise cache: %v", err)
+	}
+	cacheDir := filepath.Join(cacheRoot, "openssl", arch)
 	if openSSLValid(cacheDir) {
 		return cacheDir, nil
 	}
@@ -5569,8 +5577,12 @@ func findCompilerRT(target string) (string, error) {
 		return installDir, nil
 	}
 
-	// 3. Cache dir (<PROMISE_HOME>/cache/compiler-rt/{arch}/)
-	cacheDir := filepath.Join(promiseHome, "cache", "compiler-rt", arch)
+	// 3. Cache dir (<CacheRoot>/compiler-rt/{arch}/)
+	cacheRoot, err := module.CacheRoot()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine Promise cache: %v", err)
+	}
+	cacheDir := filepath.Join(cacheRoot, "compiler-rt", arch)
 	if compilerRTValid(cacheDir) {
 		return cacheDir, nil
 	}
@@ -5811,11 +5823,11 @@ func ensureWasmAllocObj() (string, error) {
 	// Ensure stale caches from a different compiler binary are cleared first.
 	ensureCacheValid()
 
-	promiseHome, err := module.PromiseHome()
+	cacheRoot, err := module.CacheRoot()
 	if err != nil {
-		return "", fmt.Errorf("cannot determine Promise home: %v", err)
+		return "", fmt.Errorf("cannot determine Promise cache: %v", err)
 	}
-	cacheDir := filepath.Join(promiseHome, "cache", "crt", "wasm32")
+	cacheDir := filepath.Join(cacheRoot, "crt", "wasm32")
 	objPath := filepath.Join(cacheDir, "wasm_alloc.o")
 
 	// Check if cached version matches embedded (by size)
@@ -5845,11 +5857,11 @@ func ensureWasmAllocObj() (string, error) {
 func ensureWasmMathObj() (string, error) {
 	ensureCacheValid()
 
-	promiseHome, err := module.PromiseHome()
+	cacheRoot, err := module.CacheRoot()
 	if err != nil {
-		return "", fmt.Errorf("cannot determine Promise home: %v", err)
+		return "", fmt.Errorf("cannot determine Promise cache: %v", err)
 	}
-	cacheDir := filepath.Join(promiseHome, "cache", "crt", "wasm32")
+	cacheDir := filepath.Join(cacheRoot, "crt", "wasm32")
 	objPath := filepath.Join(cacheDir, "wasm_math.o")
 
 	if info, err := os.Stat(objPath); err == nil {
@@ -5929,11 +5941,11 @@ func ensureWasiAdapter() (string, error) {
 	}
 
 	ensureCacheValid()
-	promiseHome, err := module.PromiseHome()
+	cacheRoot, err := module.CacheRoot()
 	if err != nil {
 		return "", err
 	}
-	cacheDir := filepath.Join(promiseHome, "cache", "crt", "wasm32")
+	cacheDir := filepath.Join(cacheRoot, "crt", "wasm32")
 	adapterPath := filepath.Join(cacheDir, "wasi_snapshot_preview1.command.wasm")
 
 	// Check if cached version matches embedded (by size)
@@ -6432,8 +6444,12 @@ func findWindowsLinkSurface(target string) (string, error) {
 		return installDir, nil
 	}
 
-	// 3. Cache dir (<PROMISE_HOME>/cache/winlink/{arch}/)
-	cacheDir := filepath.Join(promiseHome, "cache", "winlink", arch)
+	// 3. Cache dir (<CacheRoot>/winlink/{arch}/)
+	cacheRoot, err := module.CacheRoot()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine Promise cache: %v", err)
+	}
+	cacheDir := filepath.Join(cacheRoot, "winlink", arch)
 	if winLinkValid(cacheDir, arch) {
 		return cacheDir, nil
 	}
@@ -6620,8 +6636,8 @@ func compileProjectFrontend(projectDir string, files []string, triple string) (*
 
 	tParse := time.Now()
 	var merged *ast.File
-	if home, homeErr := module.PromiseHome(); homeErr == nil {
-		cacheDir := filepath.Join(home, "cache", "astcache")
+	if cacheRoot, cacheErr := module.CacheRoot(); cacheErr == nil {
+		cacheDir := filepath.Join(cacheRoot, "astcache")
 		fileContents := make([][]byte, len(files))
 		for i, f := range files {
 			data, err := os.ReadFile(f)
@@ -6739,8 +6755,8 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 		exitFrontend(1)
 	}
 	source := strings.ReplaceAll(string(data), "\r\n", "\n")
-	if home, homeErr := module.PromiseHome(); homeErr == nil {
-		cacheDir := filepath.Join(home, "cache", "astcache")
+	if cacheRoot, cacheErr := module.CacheRoot(); cacheErr == nil {
+		cacheDir := filepath.Join(cacheRoot, "astcache")
 		contentHash := astcache.ContentHash([]string{filename}, [][]byte{[]byte(source)})
 		key := astcache.Key(module.CompilerIdentity(), contentHash)
 		if cached, _ := astcache.Load(cacheDir, key); cached != nil {
@@ -7812,9 +7828,9 @@ func (ml *moduleLoader) load(modPath, baseDir string) (*sema.ModuleInfo, error) 
 	astCacheHit := false
 	astCacheDir := ""
 	astCacheKey := ""
-	home, homeErr := module.PromiseHome()
-	if homeErr == nil {
-		astCacheDir = filepath.Join(home, "cache", "astcache")
+	cacheRoot, cacheErr := module.CacheRoot()
+	if cacheErr == nil {
+		astCacheDir = filepath.Join(cacheRoot, "astcache")
 		// Read all files for content hashing
 		fileContents := make([][]byte, len(srcFiles))
 		for i, f := range srcFiles {

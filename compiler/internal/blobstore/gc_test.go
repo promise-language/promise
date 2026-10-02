@@ -664,3 +664,14 @@ func TestListBlobsIgnoresTempResidue(t *testing.T) {
 		t.Error("the committed blob is missing from the listing")
 	}
 }
+
+// TestNewStoreIgnoresPromiseCache: PROMISE_CACHE relocates only what the
+// compiler computes. The content-addressed store holds what it acquires, so it
+// stays under <PROMISE_HOME>/cache whatever PROMISE_CACHE says.
+func TestNewStoreIgnoresPromiseCache(t *testing.T) {
+	t.Setenv("PROMISE_CACHE", filepath.Join(t.TempDir(), "derived"))
+	home, s := homeStore(t)
+	if want := filepath.Join(home, "cache"); s.Root() != want {
+		t.Errorf("NewStore().Root() = %q, want %q", s.Root(), want)
+	}
+}

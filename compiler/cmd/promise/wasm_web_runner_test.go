@@ -49,6 +49,7 @@ func TestMaterializeWebHarnessReuses(t *testing.T) {
 	// Use a temp PROMISE_HOME so we don't pollute the user's cache.
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("PROMISE_CACHE", "") // asserts paths under the fixture home
 
 	first, err := materializeWebHarness()
 	if err != nil {

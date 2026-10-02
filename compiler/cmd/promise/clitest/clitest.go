@@ -364,8 +364,8 @@ func GitRun(t *testing.T, dir string, args ...string) string {
 // immediately.
 //
 // It resolves to <root>/.promise-home rather than to the ambient PROMISE_HOME so
-// that a bare `go test ./...`, and a --shared run that leaves PROMISE_HOME
-// unset, can never write the machine-global ~/.promise (docs/build-tools.md
+// that a bare `go test ./...`, or any caller that leaves PROMISE_HOME unset,
+// can never write the machine-global ~/.promise (docs/build-tools.md
 // §"Test Sandboxing"). Only the no-checkout fallback creates and removes a temp
 // home; the worktree home is never deleted.
 func SharedHome(m interface{ Run() int }) int { return sharedHome(m, false) }

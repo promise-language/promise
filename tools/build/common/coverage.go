@@ -23,6 +23,13 @@ func RunCoverage(root string, args []string) error {
 		}
 	}
 
+	// The worktree's own Promise home and temp directory, whatever the caller
+	// exported: the Promise half compiles every test it runs into a home, and
+	// nothing run from a worktree may compile into ~/.promise (#102).
+	if err := SetupLocalCache(root); err != nil {
+		return fmt.Errorf("setup local cache: %w", err)
+	}
+
 	compilerDir := filepath.Join(root, "compiler")
 	promiseBin := filepath.Join(root, "bin", BinaryName())
 

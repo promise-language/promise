@@ -444,18 +444,18 @@ func acquireVerifyLock(root string, lockTimeout time.Duration) (func(), error) {
 	return acquireVerifyLockIn(lockPath, root, lockTimeout)
 }
 
-// verifyLockPath is where the host verify lock lives: promise/verify.lock under
-// the user cache directory, beside the download cache's default root
-// (PrebuiltsCacheRoot) — the one host-shared location a worktree command may
-// reach (docs/build-tools.md §"Test Sandboxing"). The lock is host-wide by
-// purpose, so it cannot live in a worktree; it is never under ~/.promise, which
-// belongs to the installed CLI (#102). Who holds the exclusion is #96's.
+// verifyLockPath is where the host verify lock lives: verify.lock in
+// hostCacheDir, beside the download cache's default root (PrebuiltsCacheRoot) —
+// the one host-shared location a worktree command may reach
+// (docs/build-tools.md §"Test Sandboxing"). The lock is host-wide by purpose, so
+// it cannot live in a worktree; it is never under ~/.promise, which belongs to
+// the installed CLI (#102). Who holds the exclusion is #96's.
 func verifyLockPath() (string, error) {
-	dir, err := os.UserCacheDir()
+	dir, err := hostCacheDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "promise", "verify.lock"), nil
+	return filepath.Join(dir, "verify.lock"), nil
 }
 
 // acquireVerifyLockIn takes the host verify lock. lockTimeout <= 0 waits

@@ -579,9 +579,9 @@ func TestAcquireVerifyLock_NoHomeRunsUnserialized(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("USERPROFILE", "") // os.UserHomeDir on Windows
 	t.Setenv("XDG_CACHE_HOME", "")
-	t.Setenv("LocalAppData", "") // os.UserCacheDir on Windows
-	if dir, err := os.UserCacheDir(); err == nil {
-		t.Skipf("this host still resolves a user cache dir (%s) with every variable blanked", dir)
+	t.Setenv("LocalAppData", "") // the Windows user cache directory
+	if path, err := verifyLockPath(); err == nil {
+		t.Skipf("this host still resolves a lock path (%s) with every variable blanked", path)
 	}
 
 	unlock, err := acquireVerifyLock(t.TempDir(), 100*time.Millisecond)
@@ -620,6 +620,22 @@ func TestVerifyLock_CreatesNothingUnderTheSharedHome(t *testing.T) {
 	if filepath.Base(filepath.Dir(lockPath)) != "promise" {
 		t.Errorf("verifyLockPath = %q, want it in the user cache dir's promise/ directory", lockPath)
 	}
+	// Beside the download cache, by the same rule — with XDG_CACHE_HOME set
+	// too, which os.UserCacheDir ignores on macOS and Windows while the download
+	// cache honours it everywhere.
+	t.Setenv("PROMISE_PREBUILTS_CACHE", "")
+	for _, xdg := range []string{"", filepath.Join(home, "xdg")} {
+		t.Setenv("XDG_CACHE_HOME", xdg)
+		lock, lerr := verifyLockPath()
+		prebuilts, perr := PrebuiltsCacheRoot()
+		if lerr != nil || perr != nil {
+			t.Fatalf("XDG_CACHE_HOME=%q: verifyLockPath: %v, PrebuiltsCacheRoot: %v", xdg, lerr, perr)
+		}
+		if filepath.Dir(lock) != filepath.Dir(prebuilts) {
+			t.Errorf("XDG_CACHE_HOME=%q: the lock %s is not beside the download cache %s", xdg, lock, prebuilts)
+		}
+	}
+	t.Setenv("XDG_CACHE_HOME", "")
 
 	unlock, err := acquireVerifyLock(t.TempDir(), time.Second)
 	if err != nil {

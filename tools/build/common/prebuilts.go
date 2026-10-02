@@ -194,8 +194,21 @@ func PrebuiltsCacheRoot() (string, error) {
 	if v := strings.TrimSpace(os.Getenv("PROMISE_PREBUILTS_CACHE")); v != "" {
 		return v, nil
 	}
+	dir, err := hostCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "prebuilts"), nil
+}
+
+// hostCacheDir is the one host-shared directory a worktree command may reach
+// (docs/build-tools.md §"Test Sandboxing"): promise/ under $XDG_CACHE_HOME when
+// it is set, else under the per-OS user cache directory. The download cache's
+// default root and the host verify lock (verifyLockPath) both live in it, so
+// both resolve it here, by one rule.
+func hostCacheDir() (string, error) {
 	if v := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); v != "" {
-		return filepath.Join(v, "promise", "prebuilts"), nil
+		return filepath.Join(v, "promise"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -203,16 +216,16 @@ func PrebuiltsCacheRoot() (string, error) {
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		return filepath.Join(home, "Library", "Caches", "promise", "prebuilts"), nil
+		return filepath.Join(home, "Library", "Caches", "promise"), nil
 	case "windows":
 		// Prefer LOCALAPPDATA when it's set; fall back to ~/AppData/Local.
 		if v := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); v != "" {
-			return filepath.Join(v, "promise", "prebuilts"), nil
+			return filepath.Join(v, "promise"), nil
 		}
-		return filepath.Join(home, "AppData", "Local", "promise", "prebuilts"), nil
+		return filepath.Join(home, "AppData", "Local", "promise"), nil
 	default:
 		// linux + everything else (BSDs, etc.) — XDG default.
-		return filepath.Join(home, ".cache", "promise", "prebuilts"), nil
+		return filepath.Join(home, ".cache", "promise"), nil
 	}
 }
 

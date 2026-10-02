@@ -15,9 +15,9 @@ const cleanUsage = "usage: bin/clean [--local] [--quiet]"
 // cleanTestHome points the user home — and the user cache directory under it,
 // where the host verify lock lives — at a fresh temp directory for one test and
 // returns it, so any ~/.promise or lock a clean or verify resolves is the
-// test's own and the host's are never touched. os.UserCacheDir reads HOME on
-// macOS, XDG_CACHE_HOME (else HOME) on Linux and LocalAppData on Windows, so
-// all of them are redirected.
+// test's own and the host's are never touched. hostCacheDir reads
+// XDG_CACHE_HOME on every platform, else the user home (HOME, or USERPROFILE and
+// LocalAppData on Windows), so all of them are redirected.
 func cleanTestHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()

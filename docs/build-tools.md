@@ -123,8 +123,9 @@ build, and a run that reached a home outside the worktree anyway is refused by
 name ([gate-system.md](gate-system.md#store-metrics)).
 
 There is one exception: the host-shared directory under the user cache
-directory (`~/Library/Caches/promise` on macOS, `$XDG_CACHE_HOME/promise` or
-`~/.cache/promise` on Linux, `%LOCALAPPDATA%\promise` on Windows). It holds the
+directory (`$XDG_CACHE_HOME/promise` when that is set, else
+`~/Library/Caches/promise` on macOS, `~/.cache/promise` on Linux,
+`%LOCALAPPDATA%\promise` on Windows). It holds the
 download cache for external artifacts (the LLVM, musl, OpenSSL and compiler-rt
 blobs), every write to which is made under a lock that coordinates concurrent
 processes, and the host verify lock ([Global lock](#global-lock)). The installed
@@ -557,7 +558,7 @@ unaffected: JSONL on stdout, human progress on stderr, exactly as before.
 
 ### Global lock
 
-Concurrent verify runs from different worktrees are serialized via a file lock, preventing resource contention. The lock is host-wide, so it lives in the one host-shared directory a worktree command may reach: `promise/verify.lock` under the user cache directory (`os.UserCacheDir`), beside the download cache — never under `~/.promise` ([Test Sandboxing](#test-sandboxing)). `bin/clean` takes the same lock.
+Concurrent verify runs from different worktrees are serialized via a file lock, preventing resource contention. The lock is host-wide, so it lives in the one host-shared directory a worktree command may reach: `promise/verify.lock` under the user cache directory, beside the download cache and resolved by the same rule — never under `~/.promise` ([Test Sandboxing](#test-sandboxing)). `bin/clean` takes the same lock.
 
 ## Pre Commit Hook
 

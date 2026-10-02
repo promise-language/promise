@@ -13,7 +13,7 @@ import (
 )
 
 // testUsage is the one spelling of what this tool accepts.
-const testUsage = "usage: bin/test [go|promise|tools|all] [--local|--shared] [--wasm] [--wasm-web] [--clean]"
+const testUsage = "usage: bin/test [go|promise|tools|all] [--local] [--wasm] [--wasm-web] [--clean]"
 
 // testOptions is one bin/test run's command line, parsed.
 type testOptions struct {
@@ -21,9 +21,6 @@ type testOptions struct {
 	// (Promise tests), "tools" (tools/build Go tests), "all" (all three), or
 	// "default" — no mode given — which is the CI set: go + promise, no tools.
 	suite string
-	// shared uses the shared ~/.promise instead of the repo-local
-	// .promise-home/. Off by default; -local says the default out loud.
-	shared bool
 	// wasm and wasmWeb add the wasm32-wasi and wasm32-web Promise suites to the
 	// host one, under wasmtime and Node respectively.
 	wasm    bool
@@ -65,9 +62,8 @@ func parseTestArgs(args []string) (testOptions, error) {
 		case "go", "promise", "tools", "all":
 			opts.suite = arg
 		case "-local":
-			// explicit local — no-op (the default)
-		case "-shared":
-			opts.shared = true
+			// explicit local — no-op: the repo-local .promise-home/ is the only
+			// home a test run uses (#102)
 		case "-wasm":
 			opts.wasm = true
 		case "-wasm-web":
@@ -77,12 +73,6 @@ func parseTestArgs(args []string) (testOptions, error) {
 		default:
 			return testOptions{}, errors.New(testUsage)
 		}
-	}
-	// After the loop, not inside it: an unknown argument means the command line
-	// was mistyped, and answering a mistype with a complaint about a flag
-	// combination sends its author past the mistake they actually made.
-	if opts.shared && opts.clean {
-		return testOptions{}, errCleanWithShared
 	}
 	return opts, nil
 }
@@ -110,11 +100,8 @@ func RunTest(root string, args []string) error {
 		}
 	}
 
-	// Default to local cache; -shared opts into ~/.promise
-	if !opts.shared {
-		if err := SetupLocalCache(root); err != nil {
-			return fmt.Errorf("setup local cache: %w", err)
-		}
+	if err := SetupLocalCache(root); err != nil {
+		return fmt.Errorf("setup local cache: %w", err)
 	}
 
 	// Build first

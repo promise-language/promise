@@ -1,7 +1,6 @@
 package common
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,46 +8,21 @@ import (
 
 // CleanOptions configures what Clean removes.
 type CleanOptions struct {
-	// Shared targets the shared ~/.promise/cache instead of the repo-local
-	// .promise-home/. Off by default — Clean leaves the shared home alone unless
-	// the operator asks, and even then removes only its cache.
-	Shared bool
 	// Quiet suppresses informational progress lines.
 	Quiet bool
 }
 
-// errCleanWithShared refuses --clean combined with --shared on bin/test. A test
-// run never clears the shared home — clearing ~/.promise/cache is an operator's
-// explicit `bin/clean --shared` — and --clean clears only the repo-local
-// .promise-home, which a --shared run does not use.
-//
-// bin/verify no longer has the pair to refuse: it takes no --shared, because a
-// flag that moved where a run measured while the blessing it wrote said nothing
-// about it made "blessed" mean two things (T2170).
-var errCleanWithShared = errors.New("--clean cannot be combined with --shared: bin/test never clears the shared ~/.promise (run bin/clean --shared for that), and --clean clears only the repo-local .promise-home, which a --shared run does not use")
-
-// CleanTarget returns the directory Clean removes: <root>/.promise-home by
-// default, ~/.promise/cache with shared.
-//
-// The shared target is the cache subtree, never ~/.promise itself. The shared
-// home is also the install root — epochs/, bin/ and active are the installed
-// toolchain (T1925) — and it holds the verify lock Clean takes, which Windows
-// will not let the holder delete while it has it open (T2095).
-func CleanTarget(root string, shared bool) (string, error) {
-	if shared {
-		h, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(h, ".promise", "cache"), nil
-	}
-	return filepath.Join(root, ".promise-home"), nil
+// CleanTarget returns the directory Clean removes: <root>/.promise-home, the
+// worktree's own Promise home. It is the only home a worktree command uses, so
+// it is the only one Clean addresses — the machine-global ~/.promise belongs to
+// the installed CLI, and nothing run from a worktree touches it (#102).
+func CleanTarget(root string) string {
+	return filepath.Join(root, ".promise-home")
 }
 
-// Clean puts build state back to pristine. By default it removes the repo-local
-// .promise-home/ — tmp/, cache/ and anything else under it. With opts.Shared it
-// removes ~/.promise/cache instead, leaving the installed toolchain and the
-// verify lock in place; the next build re-fetches and re-extracts what it needs.
+// Clean puts build state back to pristine: it removes the repo-local
+// .promise-home/ — tmp/, cache/ and anything else under it. The next build
+// re-fetches and re-extracts what it needs.
 //
 // It never runs `go clean -testcache`: that stamps the host-global
 // $GOCACHE/testexpire.txt and expires every saved Go test result in every clone.
@@ -70,10 +44,7 @@ func Clean(root string, opts CleanOptions) error {
 // cleanLocked performs the clean without acquiring the verify lock.
 // Must only be called by callers that already hold it.
 func cleanLocked(root string, opts CleanOptions) error {
-	target, err := CleanTarget(root, opts.Shared)
-	if err != nil {
-		return fmt.Errorf("resolve promise home: %w", err)
-	}
+	target := CleanTarget(root)
 
 	log := func(format string, args ...any) {
 		if !opts.Quiet {
@@ -94,28 +65,25 @@ func cleanLocked(root string, opts CleanOptions) error {
 
 // parseCleanArgs parses bin/clean's flags and does nothing else — no lock, no
 // filesystem, no subprocess. It is separate from RunClean so that flag coverage
-// can be a pure unit test rather than a real clean: `--shared` resolves to the
-// host's ~/.promise/cache and removes it (T2084).
+// can be a pure unit test rather than a real clean, which removes a home
+// (T2084).
 func parseCleanArgs(args []string) (CleanOptions, error) {
 	args = NormalizeArgs(args)
 	var opts CleanOptions
 	for _, arg := range args {
 		switch arg {
-		case "-shared":
-			opts.Shared = true
 		case "-local":
-			// explicit local — no-op (default)
+			// explicit local — no-op: .promise-home/ is the only target
 		case "-quiet":
 			opts.Quiet = true
 		default:
-			return CleanOptions{}, fmt.Errorf("usage: bin/clean [--local|--shared] [--quiet]")
+			return CleanOptions{}, fmt.Errorf("usage: bin/clean [--local] [--quiet]")
 		}
 	}
 	return opts, nil
 }
 
-// RunClean is the bin/clean CLI entry. Defaults to the repo-local
-// .promise-home/. Pass --shared to clear ~/.promise/cache instead.
+// RunClean is the bin/clean CLI entry. It clears the repo-local .promise-home/.
 func RunClean(root string, args []string) error {
 	opts, err := parseCleanArgs(args)
 	if err != nil {

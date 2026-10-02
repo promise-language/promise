@@ -25,7 +25,7 @@ func TestNormalizeArgs(t *testing.T) {
 		{"first colon only", []string{"-o:C:\\path"}, []string{"-o", "C:\\path"}},
 		{"bare dash unchanged", []string{"-"}, []string{"-"}},
 		{"bare double dash unchanged", []string{"--"}, []string{"--"}},
-		{"mixed args", []string{"--wasm", "go", "-shared", "--timeout=5s"}, []string{"-wasm", "go", "-shared", "-timeout", "5s"}},
+		{"mixed args", []string{"--wasm", "go", "-local", "--timeout=5s"}, []string{"-wasm", "go", "-local", "-timeout", "5s"}},
 		{"idempotent", []string{"-flag", "value"}, []string{"-flag", "value"}},
 	}
 	for _, tt := range tests {

@@ -39,7 +39,7 @@ func binarySHA256(path string) (string, error) {
 // RunBuild executes the full compiler build pipeline.
 // This is the main implementation — called by bin/build and internally
 // by other tools (e.g., verify, test) without spawning a subprocess.
-// Flags: -release, -generate, -shared (use ~/.promise), -local (default, no-op).
+// Flags: -release, -generate, -local (the default, no-op).
 func RunBuild(root string, args []string) error {
 	start := time.Now()
 	args = NormalizeArgs(args)
@@ -48,9 +48,9 @@ func RunBuild(root string, args []string) error {
 
 	for _, arg := range args {
 		switch arg {
-		case "-release", "-generate", "-local", "-shared":
+		case "-release", "-generate", "-local":
 		default:
-			return fmt.Errorf("usage: bin/build [-release] [-generate] [-shared]")
+			return fmt.Errorf("usage: bin/build [-release] [-generate]")
 		}
 	}
 
@@ -60,14 +60,14 @@ func RunBuild(root string, args []string) error {
 	// always the pinned blobs.
 	announceToolchainOverrides()
 
-	// Default to local cache when called as CLI (args != nil).
-	// When called internally by verify/test (args == nil), caller handles cache.
+	// The worktree's own Promise home, whenever bin/build is the entry point
+	// (args != nil). An in-process caller (args == nil) has already pinned it —
+	// verify's stepCache, bin/test, and the gate's own build, which pins before
+	// it calls this (gate_build.go) — so nothing run from a worktree builds into
+	// the machine-global ~/.promise (#102).
 	if args != nil {
-		shared := slices.Contains(args, "-shared")
-		if !shared {
-			if err := SetupLocalCache(root); err != nil {
-				return fmt.Errorf("setup local cache: %w", err)
-			}
+		if err := SetupLocalCache(root); err != nil {
+			return fmt.Errorf("setup local cache: %w", err)
 		}
 	}
 

@@ -20,7 +20,7 @@ The only prerequisite is Go 1.26.1+ — the floor `tools/build` inherits from th
 |--------|---------|
 | `bin/build` | Build the compiler binary (`bin/promise`). Handles ANTLR parser generation, resource embedding, LLVM detection, and Go compilation. |
 | `bin/verify` | Pre-commit verification: build, repair, check, then the `integration` gate, measured in-process and judged. Supports `--clean`, `--push`, `--lock-timeout`. No variant flags. |
-| `bin/test` | Run test suites. Modes: `go`, `promise`, `tools`, `all`; with no mode, the CI set (`go` + `promise`, no tools). Supports `--local`/`--shared`, `--wasm`, `--wasm-web`, `--clean` — and refuses `--clean` with `--shared`, since a test run never clears the shared home. |
+| `bin/test` | Run test suites. Modes: `go`, `promise`, `tools`, `all`; with no mode, the CI set (`go` + `promise`, no tools). Supports `--wasm`, `--wasm-web`, `--clean`. |
 | `bin/format` | Format Go code (`gofmt`) and Promise code (`promise format`). |
 | `bin/check` | Run `go vet` over every Go module, reporting the findings this project's authors can act on — diagnostics in the generated parser are excluded. The same implementation the `checked:go` gate measures; `go vet` has no general `-fix`, so this is the check-only form of the pair. |
 | `bin/coverage` | Test coverage analysis for Go packages and Promise tests. |
@@ -112,17 +112,25 @@ killed, naming the backstop and that lever, on every path that can observe one.
 ## Test Sandboxing
 
 **No test, and no command run from the worktree** (`bin/*` and the tests they
-drive), **writes a shared, machine-global location** — not the shared Promise
-home (`~/.promise`), not the host Go caches. There are two exceptions, both
-explicit. One is the download cache for external artifacts (the LLVM, musl,
-OpenSSL and compiler-rt blobs), and every write to it is made under a lock that
-coordinates concurrent processes. The other is `bin/clean --shared`, which an
-operator runs by hand and which removes only `~/.promise/cache` — never the
-installed toolchain (`epochs/`, `bin/`, `active`) or the verify lock. Nothing
-that runs tests clears the shared home: `--clean` combined with `--shared` on
-`bin/test` or `bin/verify` is refused before any side effect. The installed
-`promise` CLI's own cache management (`promise clean` on a user's machine) is a
-product feature, not a worktree command, and is outside this rule.
+drive), **reads or writes a shared, machine-global location — whatever
+environment it is started from** — not the shared Promise home (`~/.promise`),
+not the system temp directory, not the host Go caches. Every such command pins
+the worktree's own home (`.promise-home/`) and points the temp directory inside
+it, under every name a platform reads it by (`TMPDIR`, `TMP`, `TEMP`); there is
+no flag that selects `~/.promise` instead. A gate pins it as part of the build
+it performs before measuring, so a gate added later inherits the pin with the
+build, and a run that reached a home outside the worktree anyway is refused by
+name ([gate-system.md](gate-system.md#store-metrics)).
+
+There is one exception: the host-shared directory under the user cache
+directory (`~/Library/Caches/promise` on macOS, `$XDG_CACHE_HOME/promise` or
+`~/.cache/promise` on Linux, `%LOCALAPPDATA%\promise` on Windows). It holds the
+download cache for external artifacts (the LLVM, musl, OpenSSL and compiler-rt
+blobs), every write to which is made under a lock that coordinates concurrent
+processes, and the host verify lock ([Global lock](#global-lock)). The installed
+`promise` CLI's own use of `~/.promise` — including `promise clean` on a user's
+machine — is a product feature, not a worktree command, and is outside this
+rule.
 
 A tools test builds its own world — a temp root, a redirected `HOME`, a
 redirected `GOCACHE` — and touches neither the host's Promise home nor the
@@ -141,6 +149,13 @@ assert on a flag.
   `~/.promise` and the expiry stamp — and fails the package if either moved, even
   when every test passed. A test that reaches machine-global state reddens
   immediately instead of silently costing every clone on the host its caches.
+- **The compiler's packages that resolve a Promise home pin one.** `cmd/promise`
+  and its per-area test packages share the worktree's `.promise-home` through
+  `clitest.SharedHome`; `internal/module` and `internal/blobstore` give
+  themselves a private temp home through `internal/hometest`, which also fails
+  the package if the top-level listing of `~/.promise` moved — so a bare
+  `go test ./...` with no `PROMISE_HOME` set reaches no machine-global home
+  either.
 
 `HOME` and `GOCACHE` are deliberately not redirected for the whole package: the
 tests that shell out to `go` would lose the warm build and module caches, which
@@ -480,7 +495,9 @@ Verify takes **no variant flags**. `--wasm`, `--wasm-web`, `--shared` and
 run measured or where, while the record it wrote said none of it, so
 `bin/verify` and `bin/verify --shared --wasm` blessed the same tree id for two
 different measurements. The WASM suites remain their own gates
-([gate-system.md](gate-system.md)), asked for by name.
+([gate-system.md](gate-system.md)), asked for by name. `--shared` is gone from
+every other tool as well: no worktree command addresses `~/.promise`
+([Test Sandboxing](#test-sandboxing)).
 
 What survives cannot change what is measured or what a blessing means:
 
@@ -540,7 +557,7 @@ unaffected: JSONL on stdout, human progress on stderr, exactly as before.
 
 ### Global lock
 
-Concurrent verify runs from different worktrees are serialized via a file lock (`~/.promise/verify.lock`), preventing resource contention.
+Concurrent verify runs from different worktrees are serialized via a file lock, preventing resource contention. The lock is host-wide, so it lives in the one host-shared directory a worktree command may reach: `promise/verify.lock` under the user cache directory (`os.UserCacheDir`), beside the download cache — never under `~/.promise` ([Test Sandboxing](#test-sandboxing)). `bin/clean` takes the same lock.
 
 ## Pre Commit Hook
 

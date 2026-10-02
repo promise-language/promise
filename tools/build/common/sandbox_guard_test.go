@@ -111,9 +111,10 @@ func TestMain(m *testing.M) {
 //
 // Depth 1 is the deliberate sensitivity/noise trade-off: it catches a RemoveAll
 // of the home or of any top-level subtree, while another clone writing inside
-// cache/ cannot redden this package. verify.lock and its .owner sibling are
-// excluded — a concurrent bin/verify creates and removes them at any moment, and
-// they are the one thing the lock protocol is allowed to touch.
+// cache/ cannot redden this package. Nothing is exempt: the verify lock used to
+// live here and was excluded, but it moved to the user cache directory (#102),
+// so no worktree command — a concurrent bin/verify included — has any business
+// in ~/.promise at all.
 func promiseHomeListing() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -125,10 +126,6 @@ func promiseHomeListing() string {
 	}
 	var names []string
 	for _, e := range entries {
-		switch e.Name() {
-		case "verify.lock", "verify.lock.owner":
-			continue
-		}
 		names = append(names, e.Name())
 	}
 	sort.Strings(names)
@@ -259,15 +256,21 @@ func TestSandboxGuardSeesWhatItWatches(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		// A concurrent bin/verify holds the lock while this package runs, so the
-		// lock pair is the one thing the listing must stay blind to.
-		for _, f := range []string{"verify.lock", "verify.lock.owner"} {
-			if err := os.WriteFile(filepath.Join(promise, f), nil, 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
 		if got, want := promiseHomeListing(), "bin cache"; got != want {
-			t.Errorf("listing = %q, want %q (sorted, verify lock excluded)", got, want)
+			t.Errorf("listing = %q, want %q (sorted)", got, want)
+		}
+
+		// The verify lock no longer lives here (#102), so it is no longer
+		// exempt: a lock file appearing in ~/.promise is a worktree command
+		// writing the shared home, and the listing has to see it.
+		if err := os.WriteFile(filepath.Join(promise, "verify.lock"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := promiseHomeListing(), "bin cache verify.lock"; got != want {
+			t.Errorf("listing = %q, want %q — a verify lock in the shared home is damage, not noise", got, want)
+		}
+		if err := os.Remove(filepath.Join(promise, "verify.lock")); err != nil {
+			t.Fatal(err)
 		}
 
 		// Losing a top-level subtree is what a RemoveAll aimed at the home does.

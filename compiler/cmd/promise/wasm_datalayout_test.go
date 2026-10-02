@@ -97,7 +97,9 @@ func TestDetectWasmDataLayoutProbeFailureFallsBack(t *testing.T) {
 	const triple = "wasm32-t1544-probe-failure"
 	resetWasmDataLayoutCacheKey(triple)
 
-	t.Setenv("PROMISE_HOME", "")
+	// A home of its own: blanking the variable resolved the machine-global
+	// ~/.promise, which no test may reach (#102).
+	t.Setenv("PROMISE_HOME", t.TempDir())
 	t.Setenv("PROMISE_OPT", "/nonexistent/definitely-not-opt")
 
 	if got := detectWasmDataLayout(triple); got != "" {

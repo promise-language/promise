@@ -43,7 +43,6 @@ bin/verify                 # build + repair + check + the integration gate (pre-
 bin/verify --clean         # same, from a wiped .promise-home/
 bin/verify --push          # same, then git push if the run blessed the tree
 bin/clean                  # wipe .promise-home/ (pristine state)
-bin/clean --shared         # wipe ~/.promise/cache instead (keeps installed epochs/, bin/, active)
 bin/format                 # format Go + Promise code
 bin/check                  # go vet (generated parser excluded)
 bin/coverage               # Go + Promise test coverage

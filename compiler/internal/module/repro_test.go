@@ -23,7 +23,7 @@ func TestResolveRemoteModuleSurvivesUpstreamDeletion(t *testing.T) {
 	bareRepo, commitHash := createTestRepo(t, "survivor")
 
 	t.Setenv("HOME", t.TempDir())
-	os.Unsetenv("PROMISE_HOME")
+	t.Setenv("PROMISE_HOME", t.TempDir())
 
 	// First resolve fetches + checks out into the cache.
 	dir1, err := ResolveRemoteModule(bareRepo, commitHash, "")

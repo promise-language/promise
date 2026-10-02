@@ -65,7 +65,7 @@ const verifyUsage = "usage: bin/verify [--clean] [--push] [--lock-timeout=<dur>]
 var retiredVerifyFlags = map[string]string{
 	"wasm":     "The wasm32-wasi suite is its own gate: `bin/gate wasm-test`, or `bin/test --wasm` by hand.",
 	"wasm-web": "The wasm32-web suite is its own gate: `bin/gate wasm-web-test`, or `bin/test --wasm-web` by hand.",
-	"shared":   "Verify measures against the repo-local .promise-home/ and nothing else; `bin/clean --shared` is what still addresses ~/.promise.",
+	"shared":   "Verify measures against the repo-local .promise-home/ and nothing else; no command run from a worktree addresses ~/.promise.",
 	"local":    "The repo-local .promise-home/ is the only cache verify uses, so there is nothing left to select.",
 }
 
@@ -432,17 +432,30 @@ func (r *verifyRun) summary(failed string) verifySummary {
 // verify runs. The lock is automatically released by the OS if the process
 // dies, so there is no risk of orphaned locks.
 // Returns an unlock function that must be deferred.
+//
+// A host with no user cache directory has nowhere to put the lock, and runs
+// unserialized rather than refusing to run.
 func acquireVerifyLock(root string, lockTimeout time.Duration) (func(), error) {
-	home, err := os.UserHomeDir()
+	lockPath, err := verifyLockPath()
 	if err != nil {
 		return func() {}, nil
 	}
-
-	lockDir := filepath.Join(home, ".promise")
-	os.MkdirAll(lockDir, 0o755)
-	lockPath := filepath.Join(lockDir, "verify.lock")
-
+	os.MkdirAll(filepath.Dir(lockPath), 0o755)
 	return acquireVerifyLockIn(lockPath, root, lockTimeout)
+}
+
+// verifyLockPath is where the host verify lock lives: promise/verify.lock under
+// the user cache directory, beside the download cache's default root
+// (PrebuiltsCacheRoot) — the one host-shared location a worktree command may
+// reach (docs/build-tools.md §"Test Sandboxing"). The lock is host-wide by
+// purpose, so it cannot live in a worktree; it is never under ~/.promise, which
+// belongs to the installed CLI (#102). Who holds the exclusion is #96's.
+func verifyLockPath() (string, error) {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "promise", "verify.lock"), nil
 }
 
 // acquireVerifyLockIn takes the host verify lock. lockTimeout <= 0 waits

@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,11 +24,22 @@ type fakeBuild struct {
 	// print is written to os.Stdout when the build runs, which is how the
 	// stdout-redirect pin proves the redirect is real.
 	print string
+	// env is what the home and temp variables held when the build ran, one map
+	// per call — the environment the build and every later child of the gate
+	// inherit. Unset is recorded as absent, not as "".
+	env []map[string]string
 }
 
 func (f *fakeBuild) run(root string, args []string) error {
 	f.roots = append(f.roots, root)
 	f.args = append(f.args, args)
+	seen := map[string]string{}
+	for _, name := range append([]string{"PROMISE_HOME", "PROMISE_CACHE"}, tempDirVars...) {
+		if v, ok := os.LookupEnv(name); ok {
+			seen[name] = v
+		}
+	}
+	f.env = append(f.env, seen)
 	if f.print != "" {
 		fmt.Println(f.print)
 	}
@@ -51,8 +63,14 @@ func init() {
 // stubGateBuild installs fake as the build for one test and resets the
 // once-per-process state around it, so the order tests run in cannot decide
 // what any of them measures.
+//
+// The gate's build pins the measured root's Promise home and temp directory
+// into this process's environment (#102), and the root is the test's own temp
+// dir — so the variables are restored around the test too, or every later test
+// would inherit a home and a TMPDIR that no longer exist.
 func stubGateBuild(t *testing.T, fake *fakeBuild) {
 	t.Helper()
+	isolateLocalCacheEnv(t)
 	savedFunc, savedState := runGateBuild, gateBuild
 	runGateBuild, gateBuild = fake.run, &onceBuild{}
 	t.Cleanup(func() { runGateBuild, gateBuild = savedFunc, savedState })
@@ -126,18 +144,114 @@ func TestContractGate_EveryTreeGateBuilds(t *testing.T) {
 
 			stubMachineGates(t)
 
-			if _, err := MeasureContractGate(t.TempDir(), name); err != nil {
+			// A home the caller exported, which no tree gate may measure in.
+			ambient := t.TempDir()
+			t.Setenv("PROMISE_HOME", ambient)
+
+			root := t.TempDir()
+			if _, err := MeasureContractGate(root, name); err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
 			// Derived from the registry, not spelled: measuresMachine IS the
 			// declaration that a gate's subject is not the tree, so a gate
 			// added later is covered here without anyone remembering to.
 			want := 1
+			wantHome := filepath.Join(root, ".promise-home")
 			if contractGates[name].measuresMachine {
 				want = 0
+				wantHome = ambient
 			}
 			if gateBuild.runs != want {
 				t.Errorf("%s built %d times, want %d", name, gateBuild.runs, want)
+			}
+			// Every tree gate pins the worktree's home — the pin rides on the
+			// build — and a machine gate leaves the caller's alone (#102).
+			if got := os.Getenv("PROMISE_HOME"); got != wantHome {
+				t.Errorf("%s measured with PROMISE_HOME=%q, want %q", name, got, wantHome)
+			}
+		})
+	}
+}
+
+// A gate measures in the worktree's Promise home whatever environment it is
+// started from (#102). `bin/run` and the flow's runner both start `bin/gate
+// <name> --envelope` with their caller's environment; a caller with no
+// PROMISE_HOME made the gate's compilers resolve the machine-global ~/.promise,
+// and a caller with one made them use that — so the verdict on one tree
+// depended on the shell it was asked from.
+//
+// Pinned at the build, which is the first thing a tree gate does: the build saw
+// the worktree home and temp dir, so the warm-up and every suite after it — all
+// children of this process — inherit them. Nothing here runs a suite.
+func TestContractGate_PinsWorktreeHome(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// set prepares the caller's environment; it returns the directories the
+		// caller pointed at, which the run must leave untouched.
+		set func(t *testing.T) []string
+	}{
+		{"home unset", func(t *testing.T) []string {
+			os.Unsetenv("PROMISE_HOME") // restored by stubGateBuild's isolation
+			return nil
+		}},
+		{"home set to an unrelated directory", func(t *testing.T) []string {
+			dir := t.TempDir()
+			t.Setenv("PROMISE_HOME", dir)
+			return []string{dir}
+		}},
+		{"home and cache both set elsewhere", func(t *testing.T) []string {
+			home, cache := t.TempDir(), t.TempDir()
+			t.Setenv("PROMISE_HOME", home)
+			t.Setenv("PROMISE_CACHE", cache)
+			return []string{home, cache}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := buildFails()
+			stubGateBuild(t, fake)
+			untouched := tc.set(t)
+			// The caller's temp directory too: a gate run leaves nothing there.
+			callerTemp := t.TempDir()
+			for _, name := range tempDirVars {
+				t.Setenv(name, callerTemp)
+			}
+			untouched = append(untouched, callerTemp)
+
+			root := t.TempDir()
+			var out bytes.Buffer
+			if err := runContractGate(root, []string{"builds", "--envelope"}, &out); err != nil {
+				t.Fatalf("runContractGate: %v", err)
+			}
+			var env Envelope
+			if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+				t.Fatalf("the envelope does not parse: %v\n%s", err, out.String())
+			}
+
+			if len(fake.env) != 1 {
+				t.Fatalf("the build ran %d times, want 1", len(fake.env))
+			}
+			seen := fake.env[0]
+			home := filepath.Join(root, ".promise-home")
+			if got := seen["PROMISE_HOME"]; got != home {
+				t.Errorf("the build saw PROMISE_HOME=%q, want the worktree home %q", got, home)
+			}
+			if v, ok := seen["PROMISE_CACHE"]; ok {
+				t.Errorf("the build saw PROMISE_CACHE=%q, want it unset — the whole cache lives in the worktree home", v)
+			}
+			tmp := filepath.Join(home, "tmp")
+			for _, name := range tempDirVars {
+				if got := seen[name]; got != tmp {
+					t.Errorf("the build saw %s=%q, want %q", name, got, tmp)
+				}
+			}
+			for _, dir := range untouched {
+				entries, err := os.ReadDir(dir)
+				if err != nil {
+					t.Fatalf("read %s: %v", dir, err)
+				}
+				if len(entries) != 0 {
+					t.Errorf("the run wrote %d entries into %s, which the caller pointed at and the gate must not use", len(entries), dir)
+				}
 			}
 		})
 	}

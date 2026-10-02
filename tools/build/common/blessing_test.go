@@ -66,9 +66,7 @@ func recordedTree(t *testing.T, dir string) string {
 }
 
 func TestRunVerifyRedRunLeavesNothingBlessed(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	cleanTestHome(t) // the verify lock lands in this test's own cache dir
 
 	dir := t.TempDir()
 	writeFile(t, dir, ".workspace/verified-tree", "stale-blessing\n")
@@ -100,9 +98,7 @@ func TestRunVerifyRefusesWhenTheStaleBlessingCannotBeCleared(t *testing.T) {
 	// record it does not control — that record would then describe content
 	// this run has already rewritten. The failure is named so the reader knows
 	// which of verify's many steps refused.
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	cleanTestHome(t) // the verify lock lands in this test's own cache dir
 
 	dir := t.TempDir()
 	writeFile(t, dir, ".workspace/verified-tree/occupied", "x\n")

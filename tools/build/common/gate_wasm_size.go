@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -16,20 +15,17 @@ import (
 // Canaries are discovered by globbing tests/size/canary_*.pr.
 func runGateWasmSize(root string, args []string) error {
 	args = NormalizeArgs(args)
-	shared := slices.Contains(args, "-shared")
 
 	for _, arg := range args {
 		switch arg {
-		case "-shared", "-local":
+		case "-local":
 		default:
-			return fmt.Errorf("usage: bin/gate wasm-size [-shared]")
+			return fmt.Errorf("usage: bin/gate wasm-size")
 		}
 	}
 
-	if !shared {
-		if err := SetupLocalCache(root); err != nil {
-			return fmt.Errorf("setup local cache: %w", err)
-		}
+	if err := SetupLocalCache(root); err != nil {
+		return fmt.Errorf("setup local cache: %w", err)
 	}
 
 	// Build compiler first. Redirect stdout→stderr so build progress lines

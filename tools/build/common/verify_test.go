@@ -98,10 +98,10 @@ func TestParseVerifyArgs_VariantOptionsAreRefused(t *testing.T) {
 	}{
 		{[]string{"--wasm"}, "bin/gate wasm-test"},
 		{[]string{"--wasm-web"}, "bin/gate wasm-web-test"},
-		{[]string{"--shared"}, "bin/clean --shared"},
+		{[]string{"--shared"}, "no command run from a worktree addresses ~/.promise"},
 		{[]string{"--local"}, ".promise-home/"},
 		{[]string{"--clean", "--wasm"}, "bin/gate wasm-test"},
-		{[]string{"--shared", "--clean"}, "bin/clean --shared"},
+		{[]string{"--shared", "--clean"}, "no command run from a worktree addresses ~/.promise"},
 		{[]string{"-wasm"}, "bin/gate wasm-test"},
 	} {
 		got, err := parseVerifyArgs(tc.args)
@@ -400,19 +400,22 @@ func TestRunVerifySteps_InterruptStopsBeforeTheNextStep(t *testing.T) {
 // fail anything visibly — it would wait forever, which is exactly how the bug
 // this test guards against would present.
 //
-// The lock is this test's own: HOME is redirected, so acquireVerifyLock resolves
-// to a private ~/.promise rather than the host's, which an outer bin/verify
-// holds while these tests run.
+// The lock is this test's own: the user dirs are redirected, so
+// acquireVerifyLock resolves to a private cache dir rather than the host's,
+// whose lock an outer bin/verify holds while these tests run. The holder takes
+// it at verifyLockPath — the same function the run resolves — so this test
+// keeps no second spelling of where the lock lives.
 func TestRunVerify_HonoursTheParsedLockTimeout(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	cleanTestHome(t)
 
-	lockDir := filepath.Join(home, ".promise")
-	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+	lockPath, err := verifyLockPath()
+	if err != nil {
 		t.Fatal(err)
 	}
-	unlock, err := acquireVerifyLockIn(filepath.Join(lockDir, "verify.lock"), "/holder", 0)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireVerifyLockIn(lockPath, "/holder", 0)
 	if err != nil {
 		t.Fatalf("acquireVerifyLockIn: %v", err)
 	}
@@ -563,9 +566,9 @@ func TestNoTestDrivesRunVerifyWithPush(t *testing.T) {
 }
 
 // TestAcquireVerifyLock_NoHomeRunsUnserialized covers the branch that gives up
-// on locking entirely: with no user home there is nowhere to put the lock file,
-// and acquireVerifyLock returns a no-op unlock and no error rather than
-// refusing to run.
+// on locking entirely: with no user cache directory there is nowhere to put the
+// lock file, and acquireVerifyLock returns a no-op unlock and no error rather
+// than refusing to run.
 //
 // That is a deliberate degradation, and worth a test precisely because it is
 // silent — on such a host two concurrent verifies interleave over the same
@@ -575,6 +578,11 @@ func TestNoTestDrivesRunVerifyWithPush(t *testing.T) {
 func TestAcquireVerifyLock_NoHomeRunsUnserialized(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("USERPROFILE", "") // os.UserHomeDir on Windows
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("LocalAppData", "") // os.UserCacheDir on Windows
+	if dir, err := os.UserCacheDir(); err == nil {
+		t.Skipf("this host still resolves a user cache dir (%s) with every variable blanked", dir)
+	}
 
 	unlock, err := acquireVerifyLock(t.TempDir(), 100*time.Millisecond)
 	if err != nil {
@@ -591,4 +599,43 @@ func TestAcquireVerifyLock_NoHomeRunsUnserialized(t *testing.T) {
 	}
 	second()
 	unlock()
+}
+
+// TestVerifyLock_CreatesNothingUnderTheSharedHome (#102): the host verify lock
+// lives under the user cache directory, beside the download cache, and taking
+// it — by bin/verify or by bin/clean — creates nothing under ~/.promise, which
+// belongs to the installed CLI. A fresh, redirected home makes "nothing" exact:
+// ~/.promise must not even exist afterwards.
+func TestVerifyLock_CreatesNothingUnderTheSharedHome(t *testing.T) {
+	home := cleanTestHome(t)
+	shared := filepath.Join(home, ".promise")
+
+	lockPath, err := verifyLockPath()
+	if err != nil {
+		t.Fatalf("verifyLockPath: %v", err)
+	}
+	if rel, err := filepath.Rel(shared, lockPath); err == nil && !strings.HasPrefix(rel, "..") {
+		t.Fatalf("verifyLockPath = %q, which is under the shared home %q", lockPath, shared)
+	}
+	if filepath.Base(filepath.Dir(lockPath)) != "promise" {
+		t.Errorf("verifyLockPath = %q, want it in the user cache dir's promise/ directory", lockPath)
+	}
+
+	unlock, err := acquireVerifyLock(t.TempDir(), time.Second)
+	if err != nil {
+		t.Fatalf("acquireVerifyLock: %v", err)
+	}
+	if !Exists(lockPath) {
+		t.Errorf("the lock was not taken at %s", lockPath)
+	}
+	unlock()
+
+	// bin/clean takes the same lock around its removal.
+	if err := Clean(t.TempDir(), CleanOptions{Quiet: true}); err != nil {
+		t.Fatalf("Clean: %v", err)
+	}
+
+	if Exists(shared) {
+		t.Errorf("taking the verify lock created %s; nothing run from a worktree may write the shared home", shared)
+	}
 }

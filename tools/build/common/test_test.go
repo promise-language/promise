@@ -1,7 +1,6 @@
 package common
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -139,7 +138,6 @@ func TestParseTestArgs_EveryFlagAndSuiteSetsItsOption(t *testing.T) {
 		{"promise", []string{"promise"}, testOptions{suite: "promise"}},
 		{"tools", []string{"tools"}, testOptions{suite: "tools"}},
 		{"all", []string{"all"}, testOptions{suite: "all"}},
-		{"shared", []string{"--shared"}, testOptions{suite: "default", shared: true}},
 		{"wasm", []string{"--wasm"}, testOptions{suite: "default", wasm: true}},
 		{"wasm-web", []string{"--wasm-web"}, testOptions{suite: "default", wasmWeb: true}},
 		{"clean", []string{"--clean"}, testOptions{suite: "default", clean: true}},
@@ -147,15 +145,10 @@ func TestParseTestArgs_EveryFlagAndSuiteSetsItsOption(t *testing.T) {
 		{"single dash", []string{"-wasm"}, testOptions{suite: "default", wasm: true}},
 		{"repeated flag", []string{"--clean", "--clean"}, testOptions{suite: "default", clean: true}},
 		{"last suite wins", []string{"go", "promise"}, testOptions{suite: "promise"}},
-		// --local is a no-op, not the opposite of --shared: it does not unset a
-		// --shared given alongside it. Pinned rather than left to be
-		// rediscovered by someone who writes the pair expecting the last one to
-		// win, as it does for the positional mode one line above.
-		{"local does not unset shared", []string{"--shared", "--local"}, testOptions{suite: "default", shared: true}},
 		{
 			"all together",
-			[]string{"all", "--shared", "--wasm", "--wasm-web"},
-			testOptions{suite: "all", shared: true, wasm: true, wasmWeb: true},
+			[]string{"all", "--local", "--wasm", "--wasm-web"},
+			testOptions{suite: "all", wasm: true, wasmWeb: true},
 		},
 		{
 			"all together, cleaning",
@@ -175,37 +168,9 @@ func TestParseTestArgs_EveryFlagAndSuiteSetsItsOption(t *testing.T) {
 	}
 }
 
-// TestParseTestArgs_CleanWithSharedIsRefused is the pure-parse half of the
-// refusal: no lock, no filesystem, no build reached before it is decided.
-//
-// The message must NAME `bin/clean --shared`, as every other refusal in this
-// tree names its replacement. Someone who typed `--shared --clean` wanted the
-// shared cache cleared, and that is still a thing they can have — by an
-// operator's explicit command rather than as a side effect of a test run. A
-// bare "cannot be combined" leaves them to discover that on their own.
-func TestParseTestArgs_CleanWithSharedIsRefused(t *testing.T) {
-	for _, args := range [][]string{
-		{"--shared", "--clean"},
-		{"go", "--clean", "--shared"},
-	} {
-		got, err := parseTestArgs(args)
-		if !errors.Is(err, errCleanWithShared) {
-			t.Errorf("parseTestArgs(%v) = %v, want errCleanWithShared", args, err)
-			continue
-		}
-		if !strings.Contains(err.Error(), "bin/clean --shared") {
-			t.Errorf("parseTestArgs(%v) = %q, want it to name bin/clean --shared", args, err)
-		}
-		if got != (testOptions{}) {
-			t.Errorf("a rejected command line must yield zero options, got %+v", got)
-		}
-	}
-}
-
-// TestParseTestArgs_Rejections covers the error paths. The last case is an
-// ordering pin: a mistyped argument is reported as a mistype even when the rest
-// of the line also happens to be a refused combination, so the message names
-// the mistake its author actually made.
+// TestParseTestArgs_Rejections covers the error paths. --shared is one of them:
+// it used to run the suites in the machine-global ~/.promise, which nothing run
+// from a worktree may reach (#102), so it is refused rather than ignored.
 func TestParseTestArgs_Rejections(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -217,7 +182,9 @@ func TestParseTestArgs_Rejections(t *testing.T) {
 		// NormalizeArgs splits --wasm=1 into "-wasm" "1"; bin/test has no
 		// valued flag, so the value is left over as an unknown argument.
 		{"value on a boolean flag", []string{"--wasm=1"}},
-		{"a typo is not a refused combination", []string{"--shared", "--clean", "--bogus"}},
+		{"shared", []string{"--shared"}},
+		{"shared, single dash", []string{"-shared"}},
+		{"shared with clean", []string{"--shared", "--clean"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parseTestArgs(tc.args)
@@ -264,19 +231,18 @@ func TestTestOptions_SuiteSelectsItsPhases(t *testing.T) {
 	}
 }
 
-// TestRunTest_CleanWithSharedIsRefused is the wiring pin for the refusal
-// parseTestArgs decides: RunTest parses before the clean, the cache setup and
-// the build, so a refused command line has no side effect. HOME is redirected,
-// so a regression that took the verify lock or touched ~/.promise shows up in
-// this test's own home.
-func TestRunTest_CleanWithSharedIsRefused(t *testing.T) {
+// TestRunTest_SharedIsRefused is the wiring pin for the refusal parseTestArgs
+// decides: RunTest parses before the clean, the cache setup and the build, so a
+// refused --shared has no side effect. HOME is redirected, so a regression that
+// took the verify lock or touched ~/.promise shows up in this test's own home.
+func TestRunTest_SharedIsRefused(t *testing.T) {
 	home := cleanTestHome(t)
 	for _, args := range [][]string{
-		{"--shared", "--clean"},
+		{"--shared"},
 		{"go", "--clean", "--shared"},
 	} {
-		if err := RunTest(t.TempDir(), args); !errors.Is(err, errCleanWithShared) {
-			t.Errorf("RunTest(%v) = %v, want errCleanWithShared", args, err)
+		if err := RunTest(t.TempDir(), args); err == nil || err.Error() != testUsage {
+			t.Errorf("RunTest(%v) = %v, want the usage error", args, err)
 		}
 	}
 	if promise := filepath.Join(home, ".promise"); Exists(promise) {
@@ -287,8 +253,7 @@ func TestRunTest_CleanWithSharedIsRefused(t *testing.T) {
 // TestRunTest_UnknownFlagReturnsUsageError is the wiring pin for the refusal's
 // other half, the shape bin/clean already has: a mistyped command line returns
 // the usage error without cleaning, staging a cache or building a compiler.
-// Without it, only the --shared --clean pair was pinned as reaching RunTest's
-// parse-first early return, and a typo is by far the likelier way in.
+// A typo is by far the likelier way into RunTest's parse-first early return.
 func TestRunTest_UnknownFlagReturnsUsageError(t *testing.T) {
 	home := cleanTestHome(t)
 	root := t.TempDir()

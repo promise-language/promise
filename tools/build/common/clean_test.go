@@ -10,16 +10,21 @@ import (
 	"time"
 )
 
-const cleanUsage = "usage: bin/clean [--local|--shared] [--quiet]"
+const cleanUsage = "usage: bin/clean [--local] [--quiet]"
 
-// cleanTestHome points the user home at a fresh temp directory for one test and
-// returns it, so the ~/.promise any clean or lock resolves is the test's own and
-// the real one is never touched.
+// cleanTestHome points the user home — and the user cache directory under it,
+// where the host verify lock lives — at a fresh temp directory for one test and
+// returns it, so any ~/.promise or lock a clean or verify resolves is the
+// test's own and the host's are never touched. os.UserCacheDir reads HOME on
+// macOS, XDG_CACHE_HOME (else HOME) on Linux and LocalAppData on Windows, so
+// all of them are redirected.
 func cleanTestHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("LocalAppData", filepath.Join(home, "AppData", "Local"))
 	return home
 }
 
@@ -58,16 +63,11 @@ func TestParseCleanArgs_EveryFlagSetsItsOption(t *testing.T) {
 		want CleanOptions
 	}{
 		{"local", []string{"--local"}, CleanOptions{}},
-		{"shared", []string{"--shared"}, CleanOptions{Shared: true}},
 		{"quiet", []string{"--quiet"}, CleanOptions{Quiet: true}},
-		{"shared and quiet", []string{"--shared", "--quiet"}, CleanOptions{Shared: true, Quiet: true}},
-		{"single dash", []string{"-shared"}, CleanOptions{Shared: true}},
+		{"local and quiet", []string{"--local", "--quiet"}, CleanOptions{Quiet: true}},
+		{"single dash", []string{"-quiet"}, CleanOptions{Quiet: true}},
 		{"none", nil, CleanOptions{}},
 		{"repeated flag", []string{"--quiet", "--quiet"}, CleanOptions{Quiet: true}},
-		// --local is the default rather than an opposite: a later --local does
-		// not undo an earlier --shared. Pinned because the usage string spells
-		// them as alternatives, which reads like it would.
-		{"local does not cancel shared", []string{"--shared", "--local"}, CleanOptions{Shared: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parseCleanArgs(tc.args)
@@ -96,63 +96,31 @@ func TestParseCleanArgs_UnknownFlagReturnsUsageError(t *testing.T) {
 	}
 }
 
-// TestCleanTarget pins what each mode removes: the repo-local home, or the
-// shared home's cache subtree — never the shared home itself, which is also the
-// install root and the verify lock's directory. HOME is redirected, so the
-// shared answer is checked against a value chosen here.
-func TestCleanTarget(t *testing.T) {
-	home := cleanTestHome(t)
-	root := filepath.Join(home, "some", "repo")
-
-	local, err := CleanTarget(root, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(root, ".promise-home"); local != want {
-		t.Errorf("CleanTarget(local) = %q, want %q", local, want)
-	}
-
-	shared, err := CleanTarget(root, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(home, ".promise", "cache"); shared != want {
-		t.Errorf("CleanTarget(shared) = %q, want %q", shared, want)
-	}
-	if shared == filepath.Join(home, ".promise") {
-		t.Error("--shared must never target ~/.promise itself — it holds the installed toolchain and the verify lock")
+// TestParseCleanArgs_SharedIsRefused: --shared used to clear the
+// machine-global ~/.promise/cache. Nothing run from a worktree addresses that
+// home any more (#102), so the flag is a usage error in either spelling — not
+// a silent no-op that would leave its caller believing the shared cache was
+// cleared.
+func TestParseCleanArgs_SharedIsRefused(t *testing.T) {
+	for _, args := range [][]string{{"--shared"}, {"-shared"}, {"--shared", "--quiet"}} {
+		got, err := parseCleanArgs(args)
+		if err == nil || err.Error() != cleanUsage {
+			t.Errorf("parseCleanArgs(%v) = %+v, %v; want the usage error", args, got, err)
+		}
 	}
 }
 
-// TestCleanTarget_UnresolvableHomeIsAnError covers the one branch of CleanTarget
-// that does not return a path. The value being computed is the argument to
-// os.RemoveAll: a CleanTarget that swallowed the error and returned a relative
-// ".promise/cache" would delete whatever that names in the working directory.
-// So an unnameable home fails the clean, having removed nothing.
-func TestCleanTarget_UnresolvableHomeIsAnError(t *testing.T) {
+// TestCleanTarget pins what a clean removes: the worktree's own home, a pure
+// function of the root. It does not consult the user home at all — with none
+// set it still names the same directory — because the machine-global
+// ~/.promise is not a worktree command's to clear (#102).
+func TestCleanTarget(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("USERPROFILE", "") // os.UserHomeDir on Windows
+	root := filepath.Join(t.TempDir(), "some", "repo")
 
-	root := t.TempDir()
-	sentinel := filepath.Join(root, ".promise-home", "keep")
-	cleanTestFile(t, sentinel)
-
-	if got, err := CleanTarget(root, true); err == nil {
-		t.Errorf("CleanTarget(shared) with no home = %q, want an error", got)
-	}
-	if _, err := CleanTarget(root, false); err != nil {
-		t.Fatalf("CleanTarget(local) must not depend on the user home: %v", err)
-	}
-
-	err := cleanLocked(root, CleanOptions{Shared: true, Quiet: true})
-	if err == nil {
-		t.Fatal("cleanLocked(shared) with no home should fail")
-	}
-	if !strings.Contains(err.Error(), "resolve promise home") {
-		t.Errorf("the error must name the step that failed, got: %v", err)
-	}
-	if !Exists(sentinel) {
-		t.Error("a clean that could not name its target must remove nothing")
+	if got, want := CleanTarget(root), filepath.Join(root, ".promise-home"); got != want {
+		t.Errorf("CleanTarget = %q, want %q", got, want)
 	}
 }
 
@@ -160,7 +128,7 @@ func TestCleanTarget_UnresolvableHomeIsAnError(t *testing.T) {
 // requires: a caller holding the verify lock blocks any concurrent acquirer
 // until the lock is released. This exercises acquireVerifyLockIn — the same
 // mechanism Clean uses via acquireVerifyLock. Using a temp lock path avoids
-// interference with real verify runs on the global ~/.promise/verify.lock.
+// interference with real verify runs on the host verify lock.
 func TestClean_AcquiresVerifyLock(t *testing.T) {
 	lockDir := t.TempDir()
 	lockPath := filepath.Join(lockDir, "verify.lock")
@@ -205,64 +173,28 @@ func TestClean_AcquiresVerifyLock(t *testing.T) {
 	wg.Wait()
 }
 
-// TestRunClean_SharedClearsOnlyTheCache drives the real entry point with
-// --shared against a redirected HOME seeded like an installed machine, and pins
-// both bugs this mode used to have:
-//
-//   - T2095: Clean holds ~/.promise/verify.lock open while it cleans. When the
-//     target was ~/.promise itself, Windows refused to delete the open lock and
-//     the clean failed. The lock now sits outside the target, so the clean must
-//     succeed on every platform.
-//   - T1925: ~/.promise is also the install root. epochs/, bin/ and active are
-//     the installed toolchain and must survive; only cache/ goes.
-//
-// It also pins that the options reach the work as parsed — the repo-local home
-// is left alone — and that nothing stamps the Go test cache.
-func TestRunClean_SharedClearsOnlyTheCache(t *testing.T) {
+// TestRunClean_SharedIsRefusedBeforeAnySideEffect drives the real entry point
+// with --shared against a redirected HOME seeded like an installed machine.
+// The flag is gone (#102): it is refused at parse time, so neither the shared
+// home's cache nor the repo-local home is touched, and no lock is taken.
+func TestRunClean_SharedIsRefusedBeforeAnySideEffect(t *testing.T) {
 	home := cleanTestHome(t)
-	goCache := t.TempDir()
-	t.Setenv("GOCACHE", goCache)
-
-	shared := filepath.Join(home, ".promise")
-	cache := filepath.Join(shared, "cache")
-	cleanTestFile(t, filepath.Join(cache, "llvm-view", "opt"))
-	cleanTestFile(t, filepath.Join(cache, "blobs", "abc"))
-	installed := []string{
-		filepath.Join(shared, "epochs", "2026.9", "bin", "promise"),
-		filepath.Join(shared, "bin", "promise"),
-		filepath.Join(shared, "active"),
-	}
-	for _, f := range installed {
-		cleanTestFile(t, f)
-	}
+	sharedCache := filepath.Join(home, ".promise", "cache", "llvm-view", "opt")
+	cleanTestFile(t, sharedCache)
 
 	root := t.TempDir()
 	localMarker := filepath.Join(root, ".promise-home", "keep")
 	cleanTestFile(t, localMarker)
 
-	// No --quiet: the path it prints is the only record of what a clean took.
-	var err error
-	out := captureStdout(t, func() { err = RunClean(root, []string{"--shared"}) })
-	if err != nil {
-		t.Fatalf("RunClean(--shared): %v", err)
+	err := RunClean(root, []string{"--shared"})
+	if err == nil || err.Error() != cleanUsage {
+		t.Fatalf("RunClean(--shared) = %v, want the usage error", err)
 	}
-
-	if Exists(cache) {
-		t.Errorf("--shared must clear %s", cache)
-	}
-	for _, f := range installed {
-		if !Exists(f) {
-			t.Errorf("--shared must leave the installed toolchain alone; %s is gone", f)
-		}
+	if !Exists(sharedCache) {
+		t.Errorf("a refused clean removed %s", sharedCache)
 	}
 	if !Exists(localMarker) {
-		t.Errorf("--shared must not touch the repo-local home; %s is gone", localMarker)
-	}
-	if !strings.Contains(out, cache) {
-		t.Errorf("a non-quiet clean must name what it cleared; got:\n%s", out)
-	}
-	if stamp := filepath.Join(goCache, "testexpire.txt"); Exists(stamp) {
-		t.Errorf("a clean must not expire the Go test cache; %s was stamped", stamp)
+		t.Errorf("a refused clean removed %s", localMarker)
 	}
 }
 
@@ -374,23 +306,25 @@ func TestCleanLocked_RemoveAllError(t *testing.T) {
 // safety property behind it: the lock is taken before anything is removed, so a
 // clean that cannot serialize itself removes nothing at all.
 //
-// HOME is redirected to a fresh temp directory first; the real ~/.promise is
-// never touched. Inside that temp home the test puts a regular file named
-// .promise where the lock's directory belongs, so acquireVerifyLock cannot
-// create .promise/verify.lock beneath it — on any platform, as any user. Making
-// the directory read-only, the earlier induction, is ignored by Windows and by
-// root, which then took the lock and cleaned.
+// The user dirs are redirected to a fresh temp directory first; the host's lock
+// is never touched. Inside that temp home the test puts a regular file where the
+// lock's directory belongs, so acquireVerifyLock cannot create verify.lock
+// beneath it — on any platform, as any user. Making the directory read-only, the
+// earlier induction, is ignored by Windows and by root, which then took the lock
+// and cleaned.
 func TestClean_LockFailureCleansNothing(t *testing.T) {
-	home := cleanTestHome(t)
-	if err := os.WriteFile(filepath.Join(home, ".promise"), []byte("not a directory\n"), 0o644); err != nil {
+	cleanTestHome(t)
+	lockPath, err := verifyLockPath()
+	if err != nil {
 		t.Fatal(err)
 	}
+	cleanTestFile(t, filepath.Dir(lockPath))
 
 	root := t.TempDir()
 	keep := filepath.Join(root, ".promise-home", "keep")
 	cleanTestFile(t, keep)
 
-	err := Clean(root, CleanOptions{Quiet: true})
+	err = Clean(root, CleanOptions{Quiet: true})
 	if err == nil {
 		t.Fatal("Clean should fail when the verify lock cannot be taken")
 	}

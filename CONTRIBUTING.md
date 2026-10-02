@@ -141,18 +141,15 @@ keeps you from running outdated tooling.
 
 ## 8. Caches and a clean slate
 
-Build artifacts and test caches live in `.promise-home/` (per clone, the
-default) or `~/.promise` (shared, via `--shared`). To get back to a pristine
+Build artifacts and test caches live in `.promise-home/`, per clone. Nothing
+run from the clone — `bin/build`, `bin/test`, `bin/verify`, `bin/gate`,
+`bin/run` or the tests they drive — reads or writes the machine-global
+`~/.promise`, which belongs to an installed `promise`. To get back to a pristine
 state:
 
 ```sh
 bin/clean                # wipe .promise-home/
-bin/clean --shared       # wipe ~/.promise/cache instead
 ```
-
-`bin/clean --shared` removes only the shared cache — never the installed
-toolchain (`epochs/`, `bin/`, `active`). `bin/test` and `bin/verify` never clear
-the shared home: `--clean` together with `--shared` is refused.
 
 ## 9. Repository layout
 

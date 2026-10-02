@@ -744,6 +744,11 @@ func TestMeasureContractGateParts_AgreeWithTheEnvelope(t *testing.T) {
 // of it from a verdict on content that no longer exists (T2008).
 func TestRunContractGate_StampsTheTreeItMeasured(t *testing.T) {
 	root := vtRepo(t)
+	// The gate pins its Promise home and temp directory inside the root it
+	// measures (#102), and git's scratch for the tree identity lands in that temp
+	// directory — so the fixture ignores .promise-home/, as this project's own
+	// .gitignore does, or the identity would see its own scratch file.
+	writeFile(t, root, ".gitignore", ".workspace/\n/.promise-home/\n")
 	writeFile(t, root, "a.txt", "a\n")
 	vtGit(t, root, "add", "-A")
 	vtGit(t, root, "commit", "-q", "-m", "base")

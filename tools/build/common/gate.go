@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -96,22 +95,19 @@ func RunGate(root string, args []string) error {
 // Test progress is written to stderr so stdout is clean JSON.
 func runGateTest(root string, args []string) error {
 	args = NormalizeArgs(args)
-	shared := slices.Contains(args, "-shared")
 
 	// bin/gate test is host-only. wasm tests are `bin/gate wasm-test` — a
 	// separate single-target gate. Reject any unknown argument (incl. -wasm).
 	for _, arg := range args {
 		switch arg {
-		case "-shared", "-local":
+		case "-local":
 		default:
-			return fmt.Errorf("usage: bin/gate test [-shared] (use `bin/gate wasm-test` for wasm)")
+			return fmt.Errorf("usage: bin/gate test (use `bin/gate wasm-test` for wasm)")
 		}
 	}
 
-	if !shared {
-		if err := SetupLocalCache(root); err != nil {
-			return fmt.Errorf("setup local cache: %w", err)
-		}
+	if err := SetupLocalCache(root); err != nil {
+		return fmt.Errorf("setup local cache: %w", err)
 	}
 
 	// Build compiler first. Redirect stdout→stderr so build progress lines
@@ -174,13 +170,12 @@ func runGateTest(root string, args []string) error {
 // Unlike "test --wasm", this does not run host-target tests.
 func runGateWasmTests(root string, args []string) error {
 	args = NormalizeArgs(args)
-	shared := slices.Contains(args, "-shared")
 
 	for _, arg := range args {
 		switch arg {
-		case "-shared", "-local":
+		case "-local":
 		default:
-			return fmt.Errorf("usage: bin/gate wasm-test [-shared]")
+			return fmt.Errorf("usage: bin/gate wasm-test")
 		}
 	}
 
@@ -196,10 +191,8 @@ func runGateWasmTests(root string, args []string) error {
 			"  (note that a gate refuses to measure under an override)", err)
 	}
 
-	if !shared {
-		if err := SetupLocalCache(root); err != nil {
-			return fmt.Errorf("setup local cache: %w", err)
-		}
+	if err := SetupLocalCache(root); err != nil {
+		return fmt.Errorf("setup local cache: %w", err)
 	}
 
 	// Build compiler first. Redirect stdout→stderr so build progress lines
@@ -261,13 +254,12 @@ func runGateWasmTests(root string, args []string) error {
 // structured JSON gate values to stdout.
 func runGateWasmWebTests(root string, args []string) error {
 	args = NormalizeArgs(args)
-	shared := slices.Contains(args, "-shared")
 
 	for _, arg := range args {
 		switch arg {
-		case "-shared", "-local":
+		case "-local":
 		default:
-			return fmt.Errorf("usage: bin/gate wasm-web-test [-shared]")
+			return fmt.Errorf("usage: bin/gate wasm-web-test")
 		}
 	}
 
@@ -279,10 +271,8 @@ func runGateWasmWebTests(root string, args []string) error {
 			"  (note that a gate refuses to measure under an override)", err)
 	}
 
-	if !shared {
-		if err := SetupLocalCache(root); err != nil {
-			return fmt.Errorf("setup local cache: %w", err)
-		}
+	if err := SetupLocalCache(root); err != nil {
+		return fmt.Errorf("setup local cache: %w", err)
 	}
 
 	// Build compiler first. Redirect stdout→stderr so build progress lines
@@ -365,20 +355,17 @@ func gateCoverageArgv(covPkgs []string, covFile string) []string {
 // runGateGoTest runs Go unit tests and writes structured JSON gate values to stdout.
 func runGateGoTest(root string, args []string) error {
 	args = NormalizeArgs(args)
-	shared := slices.Contains(args, "-shared")
 
 	for _, arg := range args {
 		switch arg {
-		case "-shared", "-local":
+		case "-local":
 		default:
-			return fmt.Errorf("usage: bin/gate go-test [-shared]")
+			return fmt.Errorf("usage: bin/gate go-test")
 		}
 	}
 
-	if !shared {
-		if err := SetupLocalCache(root); err != nil {
-			return fmt.Errorf("setup local cache: %w", err)
-		}
+	if err := SetupLocalCache(root); err != nil {
+		return fmt.Errorf("setup local cache: %w", err)
 	}
 
 	// Build compiler first (stdout→stderr).
@@ -498,20 +485,17 @@ func runGateStress(root string, args []string) error {
 // runGateCoverage runs Go and Promise coverage analysis and writes structured JSON gate values.
 func runGateCoverage(root string, args []string) error {
 	args = NormalizeArgs(args)
-	shared := slices.Contains(args, "-shared")
 
 	for _, arg := range args {
 		switch arg {
-		case "-shared", "-local":
+		case "-local":
 		default:
-			return fmt.Errorf("usage: bin/gate coverage [-shared]")
+			return fmt.Errorf("usage: bin/gate coverage")
 		}
 	}
 
-	if !shared {
-		if err := SetupLocalCache(root); err != nil {
-			return fmt.Errorf("setup local cache: %w", err)
-		}
+	if err := SetupLocalCache(root); err != nil {
+		return fmt.Errorf("setup local cache: %w", err)
 	}
 
 	// Build compiler first (stdout→stderr).

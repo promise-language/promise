@@ -28,8 +28,20 @@ package common
 //
 // fit is the only gate that skips it, because it measures the machine rather
 // than the tree and must be answerable on a machine that cannot build.
+//
+// THE BUILD ALSO PINS THE WORKTREE'S PROMISE HOME (#102). A gate is run as
+// `bin/gate <name> --envelope` with whatever environment its caller had, and a
+// caller with no PROMISE_HOME made every compiler the gate started resolve the
+// machine-global ~/.promise — the warm-up, `promise check`, the whole Promise
+// suite — while the Go CLI suites pinned themselves to .promise-home: one run,
+// two homes, and a verdict that depended on the caller's shell. Pinning here,
+// rather than in each entry point, ties it to the step every tree-measuring
+// gate already takes: a gate added later builds by default, and so pins by
+// default. The machine gates, which do not build, are the ones whose subject is
+// not this tree's home.
 
 import (
+	"fmt"
 	"os"
 	"sync"
 )
@@ -52,6 +64,16 @@ type onceBuild struct {
 
 func (b *onceBuild) ensure(root string) error {
 	b.once.Do(func() {
+		// Before the build, so the build itself — its compiler stamp and
+		// embedded-module extraction — and every process the gate starts after
+		// it resolve this worktree's home and temp directory, whatever the
+		// caller exported. A home that cannot be pinned is not built into:
+		// every measurement that needs the build then reports it as not
+		// completed, rather than measuring in a home that is not this tree's.
+		if err := SetupLocalCache(root); err != nil {
+			b.err = fmt.Errorf("pin the worktree Promise home: %w", err)
+			return
+		}
 		b.runs++
 		// RunBuild prints progress with fmt.Println to stdout, which carries
 		// the envelope and nothing else — one JSON object, or a runner reads

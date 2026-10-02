@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -178,12 +179,9 @@ func isContractStoreMetric(name string) bool {
 // An unopened window contributes nothing at all rather than four zeros, and
 // says why — numbers about nothing read exactly like a clean run.
 func (w casWindow) Values() (map[string]float64, string) {
-	if !w.open {
-		return nil, w.why
-	}
-	l, err := readCASLedger(w.root)
-	if err != nil {
-		return nil, "the store ledger could not be read (" + firstRealLine(err.Error()) + "), so the store's cost was not measured"
+	l, why := w.fold()
+	if l == nil {
+		return nil, why
 	}
 	return map[string]float64{
 		"cas_network_bytes":      float64(l.NetworkBytes),
@@ -208,21 +206,92 @@ func (w casWindow) AddTo(values map[string]float64) {
 	}
 }
 
+// fold reads the window's ledger: the one read Values and Metrics both start
+// from. Nil, with the reason, when the window was never opened or the ledger
+// cannot be read.
+func (w casWindow) fold() (*casLedgerFold, string) {
+	if !w.open {
+		return nil, w.why
+	}
+	l, err := readCASLedger(w.root)
+	if err != nil {
+		return nil, "the store ledger could not be read (" + firstRealLine(err.Error()) + "), so the store's cost was not measured"
+	}
+	return &l, ""
+}
+
 // Metrics folds the window into contract-gate metrics. Only the two whose end
 // state is an absolute are reported here — no bytes over the wire, one home per
 // run — because docs/gate-system.md requires every metric `integration` reports
 // to carry an enforced term on every target, and a byte or population count is
 // legitimately non-zero the first time a clone builds. The other two go to the
 // tracker gates and to `promise test`, where no term is owed.
+//
+// A run that reached a Promise home outside the worktree reports both numbers
+// AND an incomplete reason naming that home (#102). The count alone caught
+// ~/.promise only when it happened to be the second home; a run whose every
+// compiler used ~/.promise counted one and passed, having measured the
+// machine's shared state rather than this tree's.
 func (w casWindow) Metrics() ([]Metric, string) {
-	vals, incomplete := w.Values()
-	if vals == nil {
-		return nil, incomplete
+	l, why := w.fold()
+	if l == nil {
+		return nil, why
 	}
 	return []Metric{
-		Size("cas_network_bytes", int64(vals["cas_network_bytes"]), "bytes"),
-		Count("cas_home_count", int(vals["cas_home_count"])),
-	}, ""
+		Size("cas_network_bytes", l.NetworkBytes, "bytes"),
+		Count("cas_home_count", len(l.Homes)),
+	}, foreignHomesReason(w.root, l.Homes)
+}
+
+// foreignHomesReason is the incomplete reason for a run that reached a home
+// outside root, or "" when every home it reached is inside it.
+func foreignHomesReason(root string, homes []string) string {
+	foreign := foreignHomes(root, homes)
+	if len(foreign) == 0 {
+		return ""
+	}
+	return "the run reached Promise home(s) outside this worktree (" + strings.Join(foreign, ", ") +
+		"): its numbers describe this machine's state, not only the tree"
+}
+
+// foreignHomes is foreignHomesOn for this host, with one allowance the pure
+// comparison cannot make: a home spelled through a symlink to somewhere inside
+// root is the worktree's own, so it is not reported as foreign.
+func foreignHomes(root string, homes []string) []string {
+	var foreign []string
+	for _, home := range foreignHomesOn(runtime.GOOS, root, homes) {
+		realRoot, rerr := filepath.EvalSymlinks(root)
+		realHome, herr := filepath.EvalSymlinks(home)
+		if rerr == nil && herr == nil && len(foreignHomesOn(runtime.GOOS, realRoot, []string{realHome})) == 0 {
+			continue
+		}
+		foreign = append(foreign, home)
+	}
+	return foreign
+}
+
+// foreignHomesOn returns the homes that are neither root nor inside it, in the
+// order given. A sibling that merely shares root's prefix (`<root>-other`) is
+// outside, and so is a relative path, which no compiler records. Windows
+// compares case-insensitively, since one directory answers to several
+// spellings there.
+func foreignHomesOn(goos, root string, homes []string) []string {
+	base := filepath.Clean(root)
+	if goos == "windows" {
+		base = strings.ToLower(base)
+	}
+	var foreign []string
+	for _, home := range homes {
+		path := filepath.Clean(home)
+		if goos == "windows" {
+			path = strings.ToLower(path)
+		}
+		rel, err := filepath.Rel(base, path)
+		if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			foreign = append(foreign, home)
+		}
+	}
+	return foreign
 }
 
 // AddToEnvelope appends the window's contract metrics to an envelope, carrying

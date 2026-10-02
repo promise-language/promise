@@ -24,6 +24,17 @@ func writeLedger(t *testing.T, root, contents string) {
 	}
 }
 
+// homeEvent is one ledger line recording a home, JSON-encoded so a Windows path's
+// backslashes survive the round trip.
+func homeEvent(t *testing.T, path string) string {
+	t.Helper()
+	line, err := json.Marshal(casEvent{Event: "home", Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(line) + "\n"
+}
+
 // TestCASLedgerFormat pins the on-disk format this module parses. The compiler
 // writes it and lives in a DIFFERENT Go module, so the shape is spelled twice
 // by necessity — the same case as MuslManifestName. This test and
@@ -262,8 +273,7 @@ func TestCASWindowUnopenedReportsNothing(t *testing.T) {
 func TestCASWindowMetricsAreTheTwoWithAnAbsoluteEndState(t *testing.T) {
 	root := t.TempDir()
 	writeLedger(t, root, `{"event":"materialize","name":"llvm-view","bytes":400,"count":1}
-{"event":"home","path":"/w/.promise-home"}
-`)
+`+homeEvent(t, filepath.Join(root, ".promise-home")))
 	metrics, incomplete := casWindow{root: root, open: true}.Metrics()
 	if incomplete != "" {
 		t.Errorf("incomplete = %q, want none", incomplete)
@@ -288,10 +298,11 @@ func TestCASWindowMetricsAreTheTwoWithAnAbsoluteEndState(t *testing.T) {
 // other path rejects, so what is pinned here is the append itself.
 func TestCASWindowAddToEnvelopeIsWhatBothJudgedPathsUse(t *testing.T) {
 	root := t.TempDir()
+	// Both homes inside the worktree — the second a private fixture home in its
+	// temp dir — so the count alone is what this run is judged on.
 	writeLedger(t, root, `{"event":"network","bytes":64}
-{"event":"home","path":"/w/.promise-home"}
-{"event":"home","path":"/tmp/private-home"}
-`)
+`+homeEvent(t, filepath.Join(root, ".promise-home"))+
+		homeEvent(t, filepath.Join(root, ".promise-home", "tmp", "private-home")))
 	env := Envelope{Metrics: []Metric{Count("vet_findings", 0)}}
 	casWindow{root: root, open: true}.AddToEnvelope(&env)
 
@@ -330,6 +341,104 @@ func TestCASWindowAddToEnvelopeSaysWhyWhenUnmeasured(t *testing.T) {
 	}
 	if !strings.Contains(env.Incomplete, "no ledger here") {
 		t.Errorf("incomplete = %q, want the window's reason", env.Incomplete)
+	}
+}
+
+// TestForeignHomesOn: a home is the worktree's when it is the root or anywhere
+// under it — .promise-home itself, or a fixture home in its temp dir — and
+// foreign otherwise, including a sibling that only shares the root's prefix.
+// Windows answers to several spellings of one directory, so it compares
+// case-insensitively; nowhere else does.
+func TestForeignHomesOn(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator)+"work", "tree")
+	home := filepath.Join(root, ".promise-home")
+	fixture := filepath.Join(home, "tmp", "TestX123", "001")
+	global := filepath.Join(string(filepath.Separator)+"Users", "dev", ".promise")
+	sibling := root + "-other"
+	upper := strings.ToUpper(home)
+
+	for _, tc := range []struct {
+		name  string
+		goos  string
+		homes []string
+		want  []string
+	}{
+		{"none", "linux", nil, nil},
+		{"the root itself", "linux", []string{root}, nil},
+		{"the worktree home", "linux", []string{home}, nil},
+		{"a fixture home under it", "linux", []string{fixture}, nil},
+		{"the machine-global home", "darwin", []string{home, global}, []string{global}},
+		{"a sibling sharing the prefix", "linux", []string{sibling}, []string{sibling}},
+		{"a relative path", "linux", []string{".promise-home"}, []string{".promise-home"}},
+		{"another case on windows is the same directory", "windows", []string{upper}, nil},
+		{"another case elsewhere is a different one", "linux", []string{upper}, []string{upper}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := foreignHomesOn(tc.goos, root, tc.homes)
+			if strings.Join(got, "|") != strings.Join(tc.want, "|") {
+				t.Errorf("foreignHomesOn(%s, %q, %q) = %q, want %q", tc.goos, root, tc.homes, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCASWindowRefusesAForeignHomeByName (#102): a run whose compilers reached
+// a home outside the worktree measured the machine's shared state, not only
+// the tree. The count caught that only when ~/.promise happened to be a SECOND
+// home; a run that used ~/.promise throughout counted one and passed. So the
+// envelope says so by name, whatever the count — and keeps both numbers, which
+// were measured.
+func TestCASWindowRefusesAForeignHomeByName(t *testing.T) {
+	root := t.TempDir()
+	foreign := filepath.Join(t.TempDir(), ".promise")
+	for _, tc := range []struct {
+		name  string
+		homes []string
+	}{
+		{"the only home", []string{foreign}},
+		{"beside the worktree's own", []string{filepath.Join(root, ".promise-home"), foreign}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger := ""
+			for _, h := range tc.homes {
+				ledger += homeEvent(t, h)
+			}
+			writeLedger(t, root, ledger)
+
+			env := Envelope{Metrics: []Metric{Count("vet_findings", 0)}}
+			casWindow{root: root, open: true}.AddToEnvelope(&env)
+
+			got := map[string]float64{}
+			for _, m := range env.Metrics {
+				got[m.Name] = m.Number()
+			}
+			if got["cas_home_count"] != float64(len(tc.homes)) {
+				t.Errorf("cas_home_count = %v, want %d — the count is still reported", got["cas_home_count"], len(tc.homes))
+			}
+			if !strings.Contains(env.Incomplete, "outside this worktree") || !strings.Contains(env.Incomplete, foreign) {
+				t.Errorf("incomplete = %q, want it to name %q as a home outside the worktree", env.Incomplete, foreign)
+			}
+			if strings.Contains(env.Incomplete, filepath.Join(root, ".promise-home")) {
+				t.Errorf("incomplete = %q names the worktree's own home", env.Incomplete)
+			}
+		})
+	}
+}
+
+// TestCASWindowAcceptsAHomeReachedThroughASymlink: a home spelled through a
+// symlink that resolves inside the worktree is the worktree's own, and is not
+// refused for its spelling.
+func TestCASWindowAcceptsAHomeReachedThroughASymlink(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skip("symlinks unavailable here:", err)
+	}
+	if got := foreignHomes(root, []string{filepath.Join(link, ".promise-home")}); len(got) != 0 {
+		t.Errorf("foreignHomes = %q, want none — the link resolves inside the worktree", got)
 	}
 }
 

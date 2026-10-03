@@ -3,6 +3,7 @@ package common
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -132,8 +133,8 @@ func TestRunList_GatesMatchGateListAndCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Gates    []string `json:"gates"`
-		Commands []string `json:"commands"`
+		Gates    []string    `json:"gates"`
+		Commands listedNames `json:"commands"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("bin/run --list --json is not one JSON object: %v\n%s", err, out.String())
@@ -173,6 +174,85 @@ func TestRunList_GatesMatchGateListAndCommands(t *testing.T) {
 	// One namespace: `bin/run <name>` dispatches commands and gates alike.
 	if both := CommandGateCollisions("../../.."); len(both) > 0 {
 		t.Errorf("%v are both a command and a gate, so `bin/run %s` means one of two things", both, both[0])
+	}
+}
+
+// listedNames reads the `commands` half of `bin/run --list --json` the way its
+// readers do — flow's DiscoverCommands and the workspace's build-set probe: an
+// element is either a bare name or a row naming one, and anything else is not
+// a listing.
+type listedNames []string
+
+func (n *listedNames) UnmarshalJSON(data []byte) error {
+	var elems []json.RawMessage
+	if err := json.Unmarshal(data, &elems); err != nil {
+		return err
+	}
+	for i, elem := range elems {
+		var name string
+		if err := json.Unmarshal(elem, &name); err != nil {
+			var row struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(elem, &row); err != nil {
+				return fmt.Errorf("commands[%d] is %s, neither a name nor a row naming one", i, elem)
+			}
+			name = row.Name
+		}
+		if name == "" {
+			return fmt.Errorf("commands[%d] names nothing", i)
+		}
+		*n = append(*n, name)
+	}
+	return nil
+}
+
+// verify declares the host-scope exclusion on its row of the JSON listing,
+// exactly as flow's DiscoverCommands reads it, so a runner takes the exclusion
+// before spawning verify and counts the queue as waiting, outside the run's
+// allowance (#96). Every other command declares nothing and stays a bare name.
+// The text listing is for a person and carries names only.
+func TestRunList_VerifyDeclaresHostScope(t *testing.T) {
+	var out bytes.Buffer
+	if err := writeRunList("../../..", &out, true); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Commands []json.RawMessage `json:"commands"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("bin/run --list --json is not one JSON object: %v\n%s", err, out.String())
+	}
+	var sawVerify bool
+	for _, raw := range got.Commands {
+		var name string
+		if json.Unmarshal(raw, &name) == nil {
+			if name == "verify" {
+				t.Errorf("verify is listed as a bare name, declaring no exclusion")
+			}
+			continue
+		}
+		if want := `{"name":"verify","serialize":"host"}`; string(raw) != want {
+			t.Errorf("command row = %s, want %s — only verify declares an exclusion", raw, want)
+			continue
+		}
+		sawVerify = true
+	}
+	if !sawVerify {
+		t.Errorf("no verify row in %s", out.String())
+	}
+
+	out.Reset()
+	if err := writeRunList("../../..", &out, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "\n  verify\n") || strings.Contains(out.String(), "serialize") {
+		t.Errorf("the text listing must name verify and nothing else about it:\n%s", out.String())
+	}
+
+	// An empty command set is an empty list, never null.
+	if rows, err := json.Marshal(commandRows(nil)); err != nil || string(rows) != "[]" {
+		t.Errorf("commandRows(nil) = %s, %v; want []", rows, err)
 	}
 }
 

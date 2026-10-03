@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/promise-language/promise/tools/build/internal/hostscope"
 )
 
 // TestRunVerify_UnknownFlagReturnsUsageError verifies that passing an unknown
@@ -53,7 +56,7 @@ func TestParseVerifyArgs_EveryFlagSetsItsOption(t *testing.T) {
 		{"single dash", []string{"-clean"}, verifyOptions{clean: true}},
 		{"none", nil, verifyOptions{}},
 		// 0 is not "do not wait" — it is the zero value the absent flag leaves
-		// behind, which acquireVerifyLockIn reads as "wait indefinitely". Anyone
+		// behind, which acquireVerifyLock reads as "wait indefinitely". Anyone
 		// reaching for --lock-timeout=0 to make verify give up immediately gets
 		// the opposite, so the collision is pinned rather than left to be
 		// rediscovered.
@@ -160,44 +163,57 @@ func TestParseVerifyArgs_Rejections(t *testing.T) {
 	}
 }
 
-func TestAcquireVerifyLock_WritesRepoDir(t *testing.T) {
-	// Override lock dir to a temp directory so we don't conflict with real runs.
-	lockDir := t.TempDir()
-	lockPath := filepath.Join(lockDir, "verify.lock")
+// arenaRoot is a checkout this test owns, provisioned as the arena id names:
+// the same .workspace/arena.json a flow runner reads to name its holder.
+func arenaRoot(t *testing.T, id string) string {
+	t.Helper()
+	root := t.TempDir()
+	writeFile(t, root, ".workspace/arena.json", `{"id":"`+id+`","label":"test"}`+"\n")
+	return root
+}
 
-	unlock, err := acquireVerifyLockIn(lockPath, "/home/user/my-repo", 0)
+const (
+	testArenaID = "a-00000000000000000000000000000001"
+	peerArenaID = "a-00000000000000000000000000000002"
+)
+
+// TestAcquireVerifyLock_NamesThisCheckoutsArena: the record a refused party
+// reads names the arena this checkout is, so a runner of the same arena can
+// recognise it — and nothing else, since the arena is what the exclusion is
+// re-entered on.
+func TestAcquireVerifyLock_NamesThisCheckoutsArena(t *testing.T) {
+	cleanTestHome(t)
+	root := arenaRoot(t, testArenaID)
+
+	unlock, err := acquireVerifyLock(root, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer unlock()
 
-	// Holder metadata is recorded in the sibling .owner file (see
-	// acquireVerifyLockIn — lockPath itself carries a mandatory byte-0 lock on
-	// Windows and cannot be read while held).
-	data, err := os.ReadFile(lockPath + ".owner")
-	if err != nil {
-		t.Fatal(err)
+	got, ok := hostscope.Holder()
+	want, aerr := hostscope.ArenaAt(root)
+	if aerr != nil {
+		t.Fatal(aerr)
 	}
-	got := strings.TrimSpace(string(data))
-	if got != "/home/user/my-repo" {
-		t.Errorf("owner file = %q, want %q", got, "/home/user/my-repo")
+	if !ok || got != want {
+		t.Errorf("the exclusion names %v (%v), want this checkout's arena %v", got, ok, want)
 	}
 }
 
-// TestAcquireVerifyLock_TimesOutWhenHeld holds the lock, then a second bounded
-// acquire on the same path returns ErrLockTimeout (not a verification failure).
-func TestAcquireVerifyLock_TimesOutWhenHeld(t *testing.T) {
-	lockDir := t.TempDir()
-	lockPath := filepath.Join(lockDir, "verify.lock")
-
-	unlock, err := acquireVerifyLockIn(lockPath, "/holder", 0)
+// TestAcquireVerifyLock_TimesOutWhenAPeerHoldsIt: another checkout holds the
+// exclusion, and a bounded acquire returns ErrLockTimeout (not a verification
+// failure) once its bound elapses.
+func TestAcquireVerifyLock_TimesOutWhenAPeerHoldsIt(t *testing.T) {
+	cleanTestHome(t)
+	unlock, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer unlock()
 
 	start := time.Now()
-	_, err = acquireVerifyLockIn(lockPath, "/waiter", 150*time.Millisecond)
+	_, err = acquireVerifyLock(arenaRoot(t, testArenaID), 150*time.Millisecond)
 	if !errors.Is(err, ErrLockTimeout) {
 		t.Fatalf("err = %v, want ErrLockTimeout", err)
 	}
@@ -207,27 +223,31 @@ func TestAcquireVerifyLock_TimesOutWhenHeld(t *testing.T) {
 }
 
 // TestAcquireVerifyLock_UnboundedAcquiresAfterRelease confirms lockTimeout=0
-// waits (does not time out) and succeeds once the holder releases.
+// waits (does not time out) and succeeds once the holder releases. The waiter
+// has no arena record — a contributor clone — and still queues like any party.
 func TestAcquireVerifyLock_UnboundedAcquiresAfterRelease(t *testing.T) {
-	lockDir := t.TempDir()
-	lockPath := filepath.Join(lockDir, "verify.lock")
-
-	unlock, err := acquireVerifyLockIn(lockPath, "/holder", 0)
+	cleanTestHome(t)
+	unlock, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	acquired := make(chan error, 1)
 	go func() {
-		inner, ierr := acquireVerifyLockIn(lockPath, "/waiter", 0)
+		inner, ierr := acquireVerifyLock(t.TempDir(), 0)
 		if ierr == nil {
 			inner()
 		}
 		acquired <- ierr
 	}()
 
-	// Give the waiter a moment to start blocking, then release.
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case ierr := <-acquired:
+		unlock()
+		t.Fatalf("the waiter was answered (%v) while a peer held the exclusion", ierr)
+	case <-time.After(100 * time.Millisecond):
+		// Still waiting, as it must be.
+	}
 	unlock()
 
 	select {
@@ -240,20 +260,55 @@ func TestAcquireVerifyLock_UnboundedAcquiresAfterRelease(t *testing.T) {
 	}
 }
 
-func TestAcquireVerifyLock_ClearsOnUnlock(t *testing.T) {
-	lockDir := t.TempDir()
-	lockPath := filepath.Join(lockDir, "verify.lock")
-
-	unlock, err := acquireVerifyLockIn(lockPath, "/home/user/my-repo", 0)
+// TestAcquireVerifyLock_LetsTheHoldingArenaStraightThrough is the runner case
+// (#96): a flow runner holds the exclusion for this checkout's arena and spawns
+// bin/verify, which must be let straight through rather than queue behind its
+// own parent inside the run's allowance. Its release must not hand the machine
+// to a peer while the runner still holds it.
+func TestAcquireVerifyLock_LetsTheHoldingArenaStraightThrough(t *testing.T) {
+	cleanTestHome(t)
+	root := arenaRoot(t, testArenaID)
+	holder, err := hostscope.ArenaAt(root)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The runner's acquisition: flow takes it as hostscope.Acquire(ctx,
+	// flow.ArenaAt(worktree)), which names the same pair.
+	runner, _, err := hostscope.Acquire(context.Background(), holder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner()
 
-	// Unlock should clear the holder metadata.
-	unlock()
+	nested, err := acquireVerifyLock(root, 5*time.Second)
+	if err != nil {
+		t.Fatalf("a verify in the holding arena could not enter the exclusion its arena holds: %v", err)
+	}
+	nested()
 
-	if _, err := os.Stat(lockPath + ".owner"); !os.IsNotExist(err) {
-		t.Errorf("owner file should be removed after unlock, stat err = %v", err)
+	if _, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 150*time.Millisecond); !errors.Is(err, ErrLockTimeout) {
+		t.Fatalf("a peer was not excluded after the nested release (err = %v); the runner still holds it", err)
+	}
+}
+
+// TestAcquireVerifyLock_ABadArenaRecordIsRefused: a record that exists and does
+// not name an arena is refused, never read around — reading around it would
+// give the checkout a second identity, one its runner would not recognise.
+func TestAcquireVerifyLock_ABadArenaRecordIsRefused(t *testing.T) {
+	cleanTestHome(t)
+	root := t.TempDir()
+	writeFile(t, root, ".workspace/arena.json", `{"id":"not-an-arena"}`)
+
+	unlock, err := acquireVerifyLock(root, 100*time.Millisecond)
+	if err == nil {
+		unlock()
+		t.Fatal("a malformed arena record was read around")
+	}
+	if !strings.Contains(err.Error(), "arena.json") {
+		t.Errorf("the refusal must name the record, got: %v", err)
+	}
+	if path, ok := hostscope.Path(); ok && Exists(path) {
+		t.Errorf("a refused acquire still took the exclusion at %s", path)
 	}
 }
 
@@ -400,24 +455,17 @@ func TestRunVerifySteps_InterruptStopsBeforeTheNextStep(t *testing.T) {
 // fail anything visibly — it would wait forever, which is exactly how the bug
 // this test guards against would present.
 //
-// The lock is this test's own: the user dirs are redirected, so
+// The exclusion is this test's own: the user dirs are redirected, so
 // acquireVerifyLock resolves to a private cache dir rather than the host's,
-// whose lock an outer bin/verify holds while these tests run. The holder takes
-// it at verifyLockPath — the same function the run resolves — so this test
-// keeps no second spelling of where the lock lives.
+// whose exclusion an outer bin/verify holds while these tests run. The holder
+// is a peer checkout taking it through acquireVerifyLock — the same function
+// the run reaches — so this test keeps no second spelling of where it lives.
 func TestRunVerify_HonoursTheParsedLockTimeout(t *testing.T) {
 	cleanTestHome(t)
 
-	lockPath, err := verifyLockPath()
+	unlock, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 0)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	unlock, err := acquireVerifyLockIn(lockPath, "/holder", 0)
-	if err != nil {
-		t.Fatalf("acquireVerifyLockIn: %v", err)
+		t.Fatalf("acquireVerifyLock: %v", err)
 	}
 
 	// A stale blessing to watch: clearBlessing is RunVerify's first step
@@ -565,88 +613,61 @@ func TestNoTestDrivesRunVerifyWithPush(t *testing.T) {
 	}
 }
 
-// TestAcquireVerifyLock_NoHomeRunsUnserialized covers the branch that gives up
-// on locking entirely: with no user cache directory there is nowhere to put the
-// lock file, and acquireVerifyLock returns a no-op unlock and no error rather
-// than refusing to run.
-//
-// That is a deliberate degradation, and worth a test precisely because it is
-// silent — on such a host two concurrent verifies interleave over the same
-// caches with nothing to say so. The contract pinned here is narrow: the caller
-// still gets a usable unlock function (calling it must not panic), so the
-// deferred release at every call site stays safe.
-func TestAcquireVerifyLock_NoHomeRunsUnserialized(t *testing.T) {
+// TestAcquireVerifyLock_NoCacheDirectoryRefuses covers a host with no user
+// cache directory: there is nowhere to hold the host-scope exclusion, and
+// acquireVerifyLock refuses rather than running unserialized. A silent free pass
+// would let two verifies interleave over the same machine with nothing to say
+// so, and a runner's measurement beside them would report the load as much as
+// the code (flow docs/gates-and-commands.md § Two scopes).
+func TestAcquireVerifyLock_NoCacheDirectoryRefuses(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("USERPROFILE", "") // os.UserHomeDir on Windows
 	t.Setenv("XDG_CACHE_HOME", "")
 	t.Setenv("LocalAppData", "") // the Windows user cache directory
-	if path, err := verifyLockPath(); err == nil {
-		t.Skipf("this host still resolves a lock path (%s) with every variable blanked", path)
+	if path, ok := hostscope.Path(); ok {
+		t.Skipf("this host still resolves the exclusion (%s) with every variable blanked", path)
 	}
 
 	unlock, err := acquireVerifyLock(t.TempDir(), 100*time.Millisecond)
-	if err != nil {
-		t.Fatalf("a host with no home must still run, got: %v", err)
+	if err == nil {
+		unlock()
+		t.Fatal("a host with nowhere to hold the exclusion ran unserialized")
 	}
-	if unlock == nil {
-		t.Fatal("unlock must never be nil — every caller defers it")
+	if errors.Is(err, ErrLockTimeout) {
+		t.Errorf("err = %v; a missing directory is a refusal, not a wait that timed out", err)
 	}
-	// A second acquire proves nothing was actually taken: on a host with a home
-	// this would block or time out.
-	second, err := acquireVerifyLock(t.TempDir(), 100*time.Millisecond)
-	if err != nil {
-		t.Fatalf("second acquire: %v", err)
-	}
-	second()
-	unlock()
 }
 
-// TestVerifyLock_CreatesNothingUnderTheSharedHome (#102): the host verify lock
-// lives under the user cache directory, beside the download cache, and taking
-// it — by bin/verify or by bin/clean — creates nothing under ~/.promise, which
-// belongs to the installed CLI. A fresh, redirected home makes "nothing" exact:
-// ~/.promise must not even exist afterwards.
+// TestVerifyLock_CreatesNothingUnderTheSharedHome (#102): taking the host-scope
+// exclusion — by bin/verify or by bin/clean — creates nothing under ~/.promise,
+// which belongs to the installed CLI. The exclusion is the orchestrator's and
+// lives where flow keeps it (hostscope.Path). A fresh, redirected home makes
+// "nothing" exact: ~/.promise must not even exist afterwards.
 func TestVerifyLock_CreatesNothingUnderTheSharedHome(t *testing.T) {
 	home := cleanTestHome(t)
 	shared := filepath.Join(home, ".promise")
 
-	lockPath, err := verifyLockPath()
-	if err != nil {
-		t.Fatalf("verifyLockPath: %v", err)
+	lockPath, ok := hostscope.Path()
+	if !ok {
+		t.Fatal("hostscope.Path: no directory for the exclusion under the redirected home")
+	}
+	if rel, err := filepath.Rel(home, lockPath); err != nil || strings.HasPrefix(rel, "..") {
+		t.Fatalf("hostscope.Path = %q, outside the redirected home %q — the test would take the host's exclusion", lockPath, home)
 	}
 	if rel, err := filepath.Rel(shared, lockPath); err == nil && !strings.HasPrefix(rel, "..") {
-		t.Fatalf("verifyLockPath = %q, which is under the shared home %q", lockPath, shared)
+		t.Fatalf("hostscope.Path = %q, which is under the shared home %q", lockPath, shared)
 	}
-	if filepath.Base(filepath.Dir(lockPath)) != "promise" {
-		t.Errorf("verifyLockPath = %q, want it in the user cache dir's promise/ directory", lockPath)
-	}
-	// Beside the download cache, by the same rule — with XDG_CACHE_HOME set
-	// too, which os.UserCacheDir ignores on macOS and Windows while the download
-	// cache honours it everywhere.
-	t.Setenv("PROMISE_PREBUILTS_CACHE", "")
-	for _, xdg := range []string{"", filepath.Join(home, "xdg")} {
-		t.Setenv("XDG_CACHE_HOME", xdg)
-		lock, lerr := verifyLockPath()
-		prebuilts, perr := PrebuiltsCacheRoot()
-		if lerr != nil || perr != nil {
-			t.Fatalf("XDG_CACHE_HOME=%q: verifyLockPath: %v, PrebuiltsCacheRoot: %v", xdg, lerr, perr)
-		}
-		if filepath.Dir(lock) != filepath.Dir(prebuilts) {
-			t.Errorf("XDG_CACHE_HOME=%q: the lock %s is not beside the download cache %s", xdg, lock, prebuilts)
-		}
-	}
-	t.Setenv("XDG_CACHE_HOME", "")
 
 	unlock, err := acquireVerifyLock(t.TempDir(), time.Second)
 	if err != nil {
 		t.Fatalf("acquireVerifyLock: %v", err)
 	}
 	if !Exists(lockPath) {
-		t.Errorf("the lock was not taken at %s", lockPath)
+		t.Errorf("the exclusion was not taken at %s", lockPath)
 	}
 	unlock()
 
-	// bin/clean takes the same lock around its removal.
+	// bin/clean takes the same exclusion around its removal.
 	if err := Clean(t.TempDir(), CleanOptions{Quiet: true}); err != nil {
 		t.Fatalf("Clean: %v", err)
 	}

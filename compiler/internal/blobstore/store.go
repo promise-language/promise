@@ -137,8 +137,8 @@ func (s *Store) StageBlob(data []byte) (string, error) {
 }
 
 // Lock takes the CAS-wide exclusive lock (cache/.lock), shared with
-// install/fetch/gc. Mirrors prebuilts.acquireCacheLock and the canonical
-// acquireVerifyLockIn (tools/build/common/verify.go). Delegates to the
+// install/fetch/gc. Mirrors prebuilts.acquireCacheLock (tools/build/common/
+// prebuilts.go). Delegates to the
 // path-targeted Lock helper; the OS releases the lock on process death, so stale
 // locks are impossible. Returns an unlock func.
 func (s *Store) Lock(identityHint string) (func(), error) {

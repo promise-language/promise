@@ -204,8 +204,8 @@ func PrebuiltsCacheRoot() (string, error) {
 // hostCacheDir is the one host-shared directory a worktree command may reach
 // (docs/build-tools.md §"Test Sandboxing"): promise/ under $XDG_CACHE_HOME when
 // it is set, else under the per-OS user cache directory. The download cache's
-// default root and the host verify lock (verifyLockPath) both live in it, so
-// both resolve it here, by one rule.
+// default root lives in it. (Verify's host-wide exclusion does not: it is the
+// orchestrator's, kept where the orchestrator keeps it — acquireVerifyLock.)
 func hostCacheDir() (string, error) {
 	if v := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); v != "" {
 		return filepath.Join(v, "promise"), nil
@@ -544,10 +544,8 @@ func copyFilePreservingMode(src, dst string) error {
 	return os.Rename(tmp, dst)
 }
 
-// acquireCacheLock takes an OS file lock at <cacheDir>/.lock. Mirrors the
-// stale-safe pattern in acquireVerifyLockIn (verify.go, the canonical reference
-// for this idiom): TryLock first, on contention print "Waiting for ..." then
-// block on Lock. The OS releases the lock on process death so stale locks are
+// acquireCacheLock takes an OS file lock at <cacheDir>/.lock. Stale-safe:
+// TryLock first, on contention print "Waiting for ..." then block on Lock. The OS releases the lock on process death so stale locks are
 // impossible.
 //
 // Holder metadata lives in a sibling <lock>.owner file, NOT lockPath itself: on

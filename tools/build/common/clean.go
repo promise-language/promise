@@ -29,9 +29,11 @@ func CleanTarget(root string) string {
 // A run that must not reuse saved results asks its own `go test` for that
 // instead (goTestFlags).
 //
-// Clean acquires the verify lock before removing anything. Callers that
-// already hold the lock (e.g. RunVerify with --clean) must use cleanLocked
-// instead to avoid a same-process flock deadlock.
+// Clean takes the host-scope exclusion (acquireVerifyLock) before removing
+// anything, so it never clears a home a verify is measuring in. Callers that
+// already hold it (e.g. RunVerify with --clean) must use cleanLocked instead: a
+// second acquisition re-enters only when the checkout has an arena record, and
+// in a checkout with none it queues behind its own holder forever.
 func Clean(root string, opts CleanOptions) error {
 	unlock, err := acquireVerifyLock(root, 0)
 	if err != nil {
@@ -41,7 +43,7 @@ func Clean(root string, opts CleanOptions) error {
 	return cleanLocked(root, opts)
 }
 
-// cleanLocked performs the clean without acquiring the verify lock.
+// cleanLocked performs the clean without taking the host-scope exclusion.
 // Must only be called by callers that already hold it.
 func cleanLocked(root string, opts CleanOptions) error {
 	target := CleanTarget(root)

@@ -5,19 +5,21 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
+
+	"github.com/promise-language/promise/tools/build/internal/hostscope"
 )
 
 const cleanUsage = "usage: bin/clean [--local] [--quiet]"
 
 // cleanTestHome points the user home — and the user cache directory under it,
-// where the host verify lock lives — at a fresh temp directory for one test and
-// returns it, so any ~/.promise or lock a clean or verify resolves is the
-// test's own and the host's are never touched. hostCacheDir reads
-// XDG_CACHE_HOME on every platform, else the user home (HOME, or USERPROFILE and
-// LocalAppData on Windows), so all of them are redirected.
+// where the download cache and the host-scope exclusion live — at a fresh temp
+// directory for one test and returns it, so any ~/.promise or exclusion a clean
+// or verify resolves is the test's own and the host's are never touched. The
+// download cache reads XDG_CACHE_HOME on every platform and os.UserCacheDir (the
+// exclusion's) reads it on Linux, else both use the user home (HOME, or
+// USERPROFILE and LocalAppData on Windows), so all of them are redirected.
 func cleanTestHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -124,53 +126,50 @@ func TestCleanTarget(t *testing.T) {
 	}
 }
 
-// TestClean_AcquiresVerifyLock verifies the lock serialization that T0328
-// requires: a caller holding the verify lock blocks any concurrent acquirer
-// until the lock is released. This exercises acquireVerifyLockIn — the same
-// mechanism Clean uses via acquireVerifyLock. Using a temp lock path avoids
-// interference with real verify runs on the host verify lock.
-func TestClean_AcquiresVerifyLock(t *testing.T) {
-	lockDir := t.TempDir()
-	lockPath := filepath.Join(lockDir, "verify.lock")
-
-	unlock, err := acquireVerifyLockIn(lockPath, "/holder", 0)
+// TestClean_WaitsForTheHostScopeExclusion verifies the serialization T0328
+// requires: while another checkout holds the host-scope exclusion, Clean
+// removes nothing, and it proceeds once the exclusion is released. The user dirs
+// are redirected, so the exclusion is this test's own.
+func TestClean_WaitsForTheHostScopeExclusion(t *testing.T) {
+	cleanTestHome(t)
+	unlock, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	cleanDone := make(chan struct{})
-	go func() {
-		defer wg.Done()
-		inner, err := acquireVerifyLockIn(lockPath, "/waiter", 0)
-		if err != nil {
-			t.Errorf("acquireVerifyLockIn: %v", err)
-			return
-		}
-		defer inner()
-		close(cleanDone)
-	}()
+	root := t.TempDir()
+	local := filepath.Join(root, ".promise-home")
+	cleanTestFile(t, filepath.Join(local, "keep"))
 
-	// Goroutine must block while we hold the lock.
+	done := make(chan error, 1)
+	go func() { done <- Clean(root, CleanOptions{Quiet: true}) }()
+
+	// Clean must block while the peer holds the exclusion.
 	select {
-	case <-cleanDone:
+	case err := <-done:
 		unlock()
-		t.Fatal("goroutine acquired lock before it was released")
+		t.Fatalf("Clean returned (%v) while a peer held the exclusion", err)
 	case <-time.After(50 * time.Millisecond):
 		// Good — blocked as expected.
+	}
+	if !Exists(local) {
+		unlock()
+		t.Fatal("Clean removed the home before it held the exclusion")
 	}
 
 	unlock()
 
 	select {
-	case <-cleanDone:
-		// Passed.
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Clean: %v", err)
+		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("goroutine did not acquire lock within 5s after release")
+		t.Fatal("Clean did not take the exclusion within 5s after release")
 	}
-
-	wg.Wait()
+	if Exists(local) {
+		t.Errorf("Clean took the exclusion but left %s in place", local)
+	}
 }
 
 // TestRunClean_SharedIsRefusedBeforeAnySideEffect drives the real entry point
@@ -306,17 +305,17 @@ func TestCleanLocked_RemoveAllError(t *testing.T) {
 // safety property behind it: the lock is taken before anything is removed, so a
 // clean that cannot serialize itself removes nothing at all.
 //
-// The user dirs are redirected to a fresh temp directory first; the host's lock
-// is never touched. Inside that temp home the test puts a regular file where the
-// lock's directory belongs, so acquireVerifyLock cannot create verify.lock
-// beneath it — on any platform, as any user. Making the directory read-only, the
-// earlier induction, is ignored by Windows and by root, which then took the lock
-// and cleaned.
+// The user dirs are redirected to a fresh temp directory first; the host's
+// exclusion is never touched. Inside that temp home the test puts a regular file
+// where the exclusion's directory belongs, so acquireVerifyLock cannot create
+// the lock file beneath it — on any platform, as any user. Making the directory
+// read-only, the earlier induction, is ignored by Windows and by root, which
+// then took the lock and cleaned.
 func TestClean_LockFailureCleansNothing(t *testing.T) {
 	cleanTestHome(t)
-	lockPath, err := verifyLockPath()
-	if err != nil {
-		t.Fatal(err)
+	lockPath, ok := hostscope.Path()
+	if !ok {
+		t.Fatal("hostscope.Path: no directory for the exclusion under the redirected home")
 	}
 	cleanTestFile(t, filepath.Dir(lockPath))
 
@@ -324,9 +323,9 @@ func TestClean_LockFailureCleansNothing(t *testing.T) {
 	keep := filepath.Join(root, ".promise-home", "keep")
 	cleanTestFile(t, keep)
 
-	err = Clean(root, CleanOptions{Quiet: true})
+	err := Clean(root, CleanOptions{Quiet: true})
 	if err == nil {
-		t.Fatal("Clean should fail when the verify lock cannot be taken")
+		t.Fatal("Clean should fail when the host-scope exclusion cannot be taken")
 	}
 	if !strings.Contains(err.Error(), "acquire verify lock") {
 		t.Errorf("the error must name the step that failed, got: %v", err)

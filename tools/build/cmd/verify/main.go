@@ -11,7 +11,7 @@ import (
 var sourceHash = "dev"
 
 // exitLockTimeout (EX_TEMPFAIL) signals that --lock-timeout elapsed before the
-// host verify lock could be acquired. It is distinct from exit code 1 (verify
+// host-scope exclusion could be taken. It is distinct from exit code 1 (verify
 // ran and failed) so callers can retry for a turn instead of treating the run
 // as a verification failure.
 const exitLockTimeout = 75

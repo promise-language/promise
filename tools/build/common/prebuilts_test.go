@@ -19,8 +19,8 @@ import (
 	"time"
 )
 
-// TestPrebuiltsCacheRootResolution pins where the download cache lives — and,
-// through hostCacheDir, the host verify lock beside it (#102). The compiler
+// TestPrebuiltsCacheRootResolution pins where the download cache lives, through
+// hostCacheDir (#102). The compiler
 // mirrors this rule in another Go module (prebuiltsCacheRoot in
 // compiler/cmd/promise/llvm_cas.go) to find the toolchain the build staged, so a
 // drift here leaves every compiler looking in the wrong place.
@@ -1217,7 +1217,7 @@ func readGzipped(path string) (string, error) {
 
 // TestAcquireCacheLock_WritesOwner verifies holder identity is recorded in the
 // sibling <lock>.owner file (NOT the flock'd lock file itself — see
-// acquireCacheLock and the canonical acquireVerifyLockIn for why; T0830).
+// acquireCacheLock for why; T0830).
 func TestAcquireCacheLock_WritesOwner(t *testing.T) {
 	cacheDir := t.TempDir()
 

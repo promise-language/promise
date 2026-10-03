@@ -128,10 +128,17 @@ directory (`$XDG_CACHE_HOME/promise` when that is set, else
 `%LOCALAPPDATA%\promise` on Windows). It holds the
 download cache for external artifacts (the LLVM, musl, OpenSSL and compiler-rt
 blobs), every write to which is made under a lock that coordinates concurrent
-processes, and the host verify lock ([Global lock](#global-lock)). The installed
+processes. The installed
 `promise` CLI's own use of `~/.promise` — including `promise clean` on a user's
 machine — is a product feature, not a worktree command, and is outside this
 rule.
+
+The rule governs the project's own tools and the data they keep, which is what
+two checkouts would otherwise step on. It does not reach the orchestrator's
+mechanisms. The host-scope exclusion that serializes verify across checkouts
+([Global lock](#global-lock)) is the orchestrator's: a project tool joins it
+through the orchestrator's contract, and where the orchestrator keeps it is the
+orchestrator's business, not shared state the tool owns.
 
 A tools test builds its own world — a temp root, a redirected `HOME`, a
 redirected `GOCACHE` — and touches neither the host's Promise home nor the
@@ -455,8 +462,8 @@ is always the formatted tree and unformatted content cannot be blessed at all.
 
 Three details are load-bearing:
 
-- **The `clear` step runs before anything else**, immediately after the host lock
-  is taken. A run that dies mid-way — a red step, a Ctrl+C, a crash — must leave
+- **The `clear` step runs before anything else**, immediately after the
+  host-scope exclusion is taken. A run that dies mid-way — a red step, a Ctrl+C, a crash — must leave
   nothing blessed, or the gate would honour a record describing content the dead
   run had already begun changing.
 - **The tree is computed over a temp index seeded from a copy of the real index**,
@@ -506,8 +513,10 @@ What survives cannot change what is measured or what a blessing means:
   Colder caches, identical suites: `integration` spells its own commands, and a
   verify flag may not redefine them.
 - `--push` — `git push`, after the blessing is recorded and never before.
-- `--lock-timeout=<dur>` — bound the wait for the host lock, which happens before
-  any measurement. Absent, the wait is unbounded.
+- `--lock-timeout=<dur>` — bound the wait for the host-scope exclusion, which
+  happens before any measurement. Absent, the wait is unbounded. A verify whose
+  checkout's arena already holds the exclusion never waits, so the bound never
+  fires under a flow runner.
 
 ### Progress rendering
 
@@ -558,7 +567,32 @@ unaffected: JSONL on stdout, human progress on stderr, exactly as before.
 
 ### Global lock
 
-Concurrent verify runs from different worktrees are serialized via a file lock, preventing resource contention. The lock is host-wide, so it lives in the one host-shared directory a worktree command may reach: `promise/verify.lock` under the user cache directory, beside the download cache and resolved by the same rule — never under `~/.promise` ([Test Sandboxing](#test-sandboxing)). `bin/clean` takes the same lock.
+Concurrent verify runs from different worktrees are serialized by the
+orchestrator's **host-scope exclusion** — the one slot per machine that a run too
+heavy to share it holds (flow `docs/gates-and-commands.md` § Two scopes) — never
+by a lock of the project's own. `bin/clean` takes the same exclusion.
+
+- **Verify declares it.** Its row of `bin/run --list --json` is
+  `{"name":"verify","serialize":"host"}`, so a flow runner takes the exclusion
+  before it spawns `bin/verify` and records the queue as waiting, outside the
+  run's time allowance. Every other command declares nothing and is listed by
+  bare name.
+- **Verify joins it, so the queue is the runner's alone.** The exclusion is held
+  by an *arena* — the machine's host name and the id in the checkout's
+  `.workspace/arena.json` — and is re-entrant to the arena that holds it. A
+  verify a runner spawned is in the arena that already holds it and walks
+  straight in; a verify run by hand queues behind any other arena's, runner and
+  person alike. A checkout with no arena record still queues, as a party nothing
+  re-enters; one whose record does not parse is refused.
+- **It is flow's exclusion, copied rather than imported.** This project may not
+  depend on flow as a Go module, so `tools/build/internal/hostscope` is a 1:1
+  copy of flow's acquisition, under the same rules as `internal/verifiedtree`:
+  same file (`host-scope.lock` in flow's directory under `os.UserCacheDir()`),
+  same kernel lock, same holder record, same re-entry rule. A paraphrase would
+  be a second exclusion.
+- **It refuses rather than degrading.** A machine with nowhere to hold the
+  exclusion gets an error, never an unserialized run. The kernel releases it
+  when the holder dies.
 
 ## Pre Commit Hook
 

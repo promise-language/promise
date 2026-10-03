@@ -467,6 +467,40 @@ func CommandGateCollisions(root string) []string {
 	return both
 }
 
+// commandSerialize is the exclusion each command declares it must hold while
+// it runs, by command name; a command absent here declares none. Only the
+// project can say what its commands cost, so the declaration is the project's
+// (flow docs/gates-and-commands.md § Two scopes). verify holds the host-scope
+// exclusion: a runner takes it before spawning verify and reports the queue as
+// waiting, outside the run's allowance — and acquireVerifyLock joins that same
+// exclusion rather than a lock of its own, so the runner's queue is the only
+// one (#96).
+var commandSerialize = map[string]string{"verify": "host"}
+
+// commandRow is a command that declares an exclusion, as `bin/run --list
+// --json` writes it.
+type commandRow struct {
+	Name      string `json:"name"`
+	Serialize string `json:"serialize"`
+}
+
+// commandRows is the `commands` half of the JSON listing: a row for a command
+// that declares an exclusion, the bare name for one that declares none — the
+// two forms flow's DiscoverCommands and the workspace's build-set probe both
+// read. An absent list is an empty one rather than null: a reader asking what
+// this project provides gets an answer.
+func commandRows(commands []string) []any {
+	rows := make([]any, 0, len(commands))
+	for _, c := range commands {
+		if s, ok := commandSerialize[c]; ok {
+			rows = append(rows, commandRow{Name: c, Serialize: s})
+			continue
+		}
+		rows = append(rows, c)
+	}
+	return rows
+}
+
 // writeRunList prints what this project provides: the gates — the same list
 // `bin/gate --list` prints, from the same registry, so the two cannot drift —
 // and the commands, which the gate entry point knows nothing about.
@@ -475,8 +509,8 @@ func writeRunList(root string, w io.Writer, jsonOut bool) error {
 	if jsonOut {
 		return writeJSONLine(w, struct {
 			Gates    []string `json:"gates"`
-			Commands []string `json:"commands"`
-		}{Gates: gates, Commands: orEmpty(commands)})
+			Commands []any    `json:"commands"`
+		}{Gates: gates, Commands: commandRows(commands)})
 	}
 	fmt.Fprintln(w, "gates:")
 	for _, g := range gates {
@@ -487,16 +521,6 @@ func writeRunList(root string, w io.Writer, jsonOut bool) error {
 		fmt.Fprintf(w, "  %s\n", c)
 	}
 	return nil
-}
-
-// orEmpty keeps an absent list from marshalling as null: a reader asking what
-// this project provides gets an empty list, which is an answer, rather than
-// null, which is not one.
-func orEmpty(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
-	return s
 }
 
 // RunRun is the bin/run CLI entry.

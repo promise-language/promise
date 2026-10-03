@@ -9,23 +9,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofrs/flock"
+	"github.com/promise-language/promise/tools/build/internal/hostscope"
 	"github.com/promise-language/promise/tools/build/internal/verifiedtree"
 )
 
 var errInterrupted = fmt.Errorf("interrupted by Ctrl+C")
 
 // ErrLockTimeout is returned by RunVerify when --lock-timeout elapses before the
-// host verify lock could be acquired. It is NOT a verification failure — it
-// means another verify held the lock for the whole wait. Callers (the tracker
-// runner) detect it (via errors.Is, or the EX_TEMPFAIL exit code / the
+// host-scope exclusion could be taken. It is NOT a verification failure — it
+// means another party held the exclusion for the whole wait. Callers (the
+// tracker runner) detect it (via errors.Is, or the EX_TEMPFAIL exit code / the
 // VERIFY_LOCK_TIMEOUT stderr marker the verify binary prints) to retry for a
 // turn rather than treating the run as failed.
 var ErrLockTimeout = errors.New("verify lock acquisition timed out")
-
-// lockRetryDelay is how often acquireVerifyLockIn re-polls for the lock while
-// waiting under a bounded --lock-timeout.
-const lockRetryDelay = 500 * time.Millisecond
 
 // verifyOptions is bin/verify's command line, parsed.
 //
@@ -41,7 +37,7 @@ const lockRetryDelay = 500 * time.Millisecond
 type verifyOptions struct {
 	clean bool
 	push  bool
-	// lockTimeout bounds how long to wait for the host verify lock. 0 (the
+	// lockTimeout bounds how long to wait for the host-scope exclusion. 0 (the
 	// default, flag absent) waits UNBOUNDED — bin/verify is run on a variety of
 	// machines where any hardcoded timeout would be wrong; bounding the wait is
 	// the caller's choice via --lock-timeout (the tracker runner sets it so a
@@ -242,7 +238,7 @@ func runVerifySteps(steps []verifyStep) (failed string, err error) {
 	return "", nil
 }
 
-// stepLock serializes concurrent verify runs across the host.
+// stepLock serializes concurrent verify runs across the host (acquireVerifyLock).
 func (r *verifyRun) stepLock() error {
 	unlock, err := acquireVerifyLock(r.root, r.opts.lockTimeout)
 	if err != nil {
@@ -255,7 +251,7 @@ func (r *verifyRun) stepLock() error {
 	return nil
 }
 
-// release drops the host lock however the run ended.
+// release drops the host-scope exclusion however the run ended.
 func (r *verifyRun) release() {
 	if r.unlock != nil {
 		r.unlock()
@@ -428,82 +424,62 @@ func (r *verifyRun) summary(failed string) verifySummary {
 	}
 }
 
-// acquireVerifyLock acquires an OS-level file lock to serialize concurrent
-// verify runs. The lock is automatically released by the OS if the process
-// dies, so there is no risk of orphaned locks.
-// Returns an unlock function that must be deferred.
+// acquireVerifyLock takes the host-scope exclusion, which serializes verify
+// (and clean) runs across every checkout on the machine. It is the
+// orchestrator's exclusion, not one of this project's own (flow
+// docs/gates-and-commands.md § Two scopes): bin/verify declares it on its
+// `bin/run --list --json` row, so a flow runner takes it before spawning verify
+// and reports the queue as waiting, outside the run's allowance. Taking the
+// same exclusion here is what keeps that queue the only one (#96):
 //
-// A host with no user cache directory has nowhere to put the lock, and runs
-// unserialized rather than refusing to run.
+//   - under a runner, this checkout's arena already holds it, so verify is
+//     let straight through and its release does nothing;
+//   - run by hand, verify queues on the same file as every runner and every
+//     other hand-run verify on the machine.
+//
+// The holder is the arena that root's .workspace/arena.json names. A checkout with
+// no arena record (a contributor clone, a CI runner) still takes the
+// exclusion, as a party nothing can re-enter; a record that does not parse is
+// refused rather than read around, as flow refuses it.
+//
+// It refuses rather than degrading: a machine with nowhere to hold the
+// exclusion gets an error, never an unserialized run. The kernel releases it if
+// the process dies. lockTimeout <= 0 waits indefinitely (the default); a
+// positive lockTimeout bounds the wait and returns ErrLockTimeout when it
+// elapses. The returned release must be deferred.
 func acquireVerifyLock(root string, lockTimeout time.Duration) (func(), error) {
-	lockPath, err := verifyLockPath()
-	if err != nil {
-		return func() {}, nil
+	holder, err := hostscope.ArenaAt(root)
+	if err != nil && !errors.Is(err, hostscope.ErrArenaUnknown) {
+		return nil, err
 	}
-	os.MkdirAll(filepath.Dir(lockPath), 0o755)
-	return acquireVerifyLockIn(lockPath, root, lockTimeout)
+	ctx := context.Background()
+	if lockTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, lockTimeout)
+		defer cancel()
+	}
+	// Said once, when — and only when — this run is about to block behind
+	// another arena: a free exclusion and a re-entered one print nothing.
+	ctx = hostscope.OnQueue(ctx, func(hostscope.Scope) func() {
+		fmt.Println(hostScopeWaitMessage())
+		return nil
+	})
+	release, _, err := hostscope.Acquire(ctx, holder)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, ErrLockTimeout
+	}
+	if err != nil {
+		return nil, err
+	}
+	return release, nil
 }
 
-// verifyLockPath is where the host verify lock lives: verify.lock in
-// hostCacheDir, beside the download cache's default root (PrebuiltsCacheRoot) —
-// the one host-shared location a worktree command may reach
-// (docs/build-tools.md §"Test Sandboxing"). The lock is host-wide by purpose, so
-// it cannot live in a worktree; it is never under ~/.promise, which belongs to
-// the installed CLI (#102). Who holds the exclusion is #96's.
-func verifyLockPath() (string, error) {
-	dir, err := hostCacheDir()
-	if err != nil {
-		return "", err
+// hostScopeWaitMessage names who this run is waiting for, as far as the
+// exclusion's record says. The record is a reading, not a check — it can lag the
+// lock — so it only ever feeds this line.
+func hostScopeWaitMessage() string {
+	if holder, ok := hostscope.Holder(); ok {
+		return fmt.Sprintf("Waiting for the host-scope exclusion, held by arena %s on %s...", holder.Id, holder.Host)
 	}
-	return filepath.Join(dir, "verify.lock"), nil
-}
-
-// acquireVerifyLockIn takes the host verify lock. lockTimeout <= 0 waits
-// indefinitely (the default); a positive lockTimeout bounds the wait and
-// returns ErrLockTimeout if the lock is still held when it elapses.
-func acquireVerifyLockIn(lockPath, root string, lockTimeout time.Duration) (func(), error) {
-	fl := flock.New(lockPath)
-	// Holder metadata lives in a sibling file, NOT lockPath itself: on Windows
-	// flock takes a mandatory byte-range lock on byte 0 of lockPath, so a
-	// concurrent read/write of lockPath while the lock is held fails (the
-	// repo-dir write would be silently lost and waiters couldn't read it). The
-	// .owner sibling is unaffected by the lock and readable on every platform.
-	ownerPath := lockPath + ".owner"
-
-	// Try non-blocking first to detect contention.
-	locked, err := fl.TryLock()
-	if err != nil {
-		return nil, fmt.Errorf("acquire lock: %w", err)
-	}
-	if !locked {
-		// Read the lock holder's repo directory before blocking.
-		msg := "Waiting for another verify run to finish..."
-		if data, err := os.ReadFile(ownerPath); err == nil {
-			if dir := strings.TrimSpace(string(data)); dir != "" {
-				msg = fmt.Sprintf("Waiting for verify run in %s to finish...", dir)
-			}
-		}
-		fmt.Println(msg)
-		if lockTimeout > 0 {
-			ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
-			defer cancel()
-			ok, lerr := fl.TryLockContext(ctx, lockRetryDelay)
-			if lerr != nil && !errors.Is(lerr, context.DeadlineExceeded) {
-				return nil, fmt.Errorf("acquire lock: %w", lerr)
-			}
-			if !ok {
-				return nil, ErrLockTimeout
-			}
-		} else if err := fl.Lock(); err != nil {
-			return nil, fmt.Errorf("acquire lock: %w", err)
-		}
-	}
-
-	// Record our repo directory for other waiters.
-	os.WriteFile(ownerPath, []byte(root+"\n"), 0o644)
-
-	return func() {
-		os.Remove(ownerPath)
-		fl.Unlock()
-	}, nil
+	return "Waiting for the host-scope exclusion, held by another verify or flow run..."
 }

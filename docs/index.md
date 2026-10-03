@@ -100,3 +100,4 @@ mcp__tracker__list --tag <basename>     # --tag large-integers, for large-intege
 - [archive/generic-inheritance-method-generics.md](archive/generic-inheritance-method-generics.md) — Generic inheritance and method-level generics.
 - [archive/phase3-remote-modules.md](archive/phase3-remote-modules.md) — Remote module fetching via git.
 - [archive/subscript-slice-operators.md](archive/subscript-slice-operators.md) — Operator method dispatch expansion for subscript and slice.
+- [archive/tracker-ids.md](archive/tracker-ids.md) — Which GitHub issue each retired tracker ID (`T0001`, `B0001`, `D0001`) became, for following the IDs that code comments and commit messages cite.

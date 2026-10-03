@@ -291,6 +291,122 @@ func TestAcquireVerifyLock_LetsTheHoldingArenaStraightThrough(t *testing.T) {
 	}
 }
 
+// TestAcquireVerifyLock_AHandRunVerifyHoldsOffARunner is the other direction of
+// #96: a verify run by hand in one checkout holds the exclusion, and a runner of
+// another arena — taking it exactly as flow does, before it spawns its own verify
+// — queues behind it and is granted when it ends, with the queue reported as a
+// wait (what the SDK files as CommandRun.Waited, outside the allowance). The
+// defect this replaced was a hand-run verify holding a lock of its own that the
+// runner's acquisition never saw.
+func TestAcquireVerifyLock_AHandRunVerifyHoldsOffARunner(t *testing.T) {
+	cleanTestHome(t)
+	hand, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerArena, err := hostscope.ArenaAt(arenaRoot(t, testArenaID))
+	if err != nil {
+		hand()
+		t.Fatal(err)
+	}
+
+	queued := make(chan struct{}, 1)
+	ctx := hostscope.OnQueue(context.Background(), func(hostscope.Scope) func() {
+		queued <- struct{}{}
+		return nil
+	})
+	type result struct {
+		release func()
+		waited  time.Duration
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		release, waited, err := hostscope.Acquire(ctx, runnerArena)
+		done <- result{release, waited, err}
+	}()
+
+	select {
+	case <-queued:
+		// Refused by the kernel and not re-entered: it is behind the hand run.
+	case r := <-done:
+		hand()
+		if r.err == nil {
+			r.release()
+		}
+		t.Fatalf("the runner was answered (%v) while a hand-run verify held the exclusion", r.err)
+	case <-time.After(10 * time.Second):
+		hand()
+		t.Fatal("the runner never queued behind the hand-run verify")
+	}
+	hand()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("the runner was not granted the exclusion after the hand-run verify ended: %v", r.err)
+		}
+		r.release()
+		if r.waited <= 0 {
+			t.Errorf("waited = %s, but the runner queued behind the hand-run verify", r.waited)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the runner was not granted the exclusion within 10s of the hand-run verify ending")
+	}
+}
+
+// TestAcquireVerifyLock_CheckoutsWithNoArenaRecordExcludeEachOther: a checkout no
+// flow provisioned (a contributor clone, a CI runner) has no arena to re-enter
+// on, so it is a party like any other — two of them exclude each other, and so
+// does a second acquisition from the same one, which is why `verify --clean`
+// calls cleanLocked rather than Clean.
+func TestAcquireVerifyLock_CheckoutsWithNoArenaRecordExcludeEachOther(t *testing.T) {
+	cleanTestHome(t)
+	root := t.TempDir()
+	unlock, err := acquireVerifyLock(root, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	if _, err := acquireVerifyLock(t.TempDir(), 150*time.Millisecond); !errors.Is(err, ErrLockTimeout) {
+		t.Errorf("another checkout with no arena record: err = %v, want ErrLockTimeout", err)
+	}
+	if _, err := acquireVerifyLock(root, 150*time.Millisecond); !errors.Is(err, ErrLockTimeout) {
+		t.Errorf("the same checkout again: err = %v, want ErrLockTimeout — nothing re-enters an unnamed holder", err)
+	}
+}
+
+// TestAcquireVerifyLock_SaysWhoItWaitsForOnlyWhenItWaits: the line a queued
+// verify prints names the arena it is behind, and a verify that is not queued —
+// the exclusion was free, or its runner's arena already holds it — prints
+// nothing, so a runner's verify never claims to be waiting.
+func TestAcquireVerifyLock_SaysWhoItWaitsForOnlyWhenItWaits(t *testing.T) {
+	cleanTestHome(t)
+	root := arenaRoot(t, testArenaID)
+
+	var err error
+	var unlock func()
+	if out := captureStdout(t, func() { unlock, err = acquireVerifyLock(root, 0) }); err != nil || out != "" {
+		t.Fatalf("a free exclusion: err = %v, printed %q, want nothing", err, out)
+	}
+	defer unlock()
+
+	var nested func()
+	if out := captureStdout(t, func() { nested, err = acquireVerifyLock(root, 5*time.Second) }); err != nil || out != "" {
+		t.Fatalf("re-entering this arena's own exclusion: err = %v, printed %q, want nothing", err, out)
+	}
+	nested()
+
+	out := captureStdout(t, func() { _, err = acquireVerifyLock(arenaRoot(t, peerArenaID), 150*time.Millisecond) })
+	if !errors.Is(err, ErrLockTimeout) {
+		t.Fatalf("a peer: err = %v, want ErrLockTimeout", err)
+	}
+	if !strings.Contains(out, "Waiting") || !strings.Contains(out, testArenaID) {
+		t.Errorf("a queued verify printed %q, want a waiting line naming the holder's arena %s", out, testArenaID)
+	}
+}
+
 // TestAcquireVerifyLock_ABadArenaRecordIsRefused: a record that exists and does
 // not name an arena is refused, never read around — reading around it would
 // give the checkout a second identity, one its runner would not recognise.
@@ -306,6 +422,11 @@ func TestAcquireVerifyLock_ABadArenaRecordIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "arena.json") {
 		t.Errorf("the refusal must name the record, got: %v", err)
+	}
+	// Not the timeout: bin/verify maps ErrLockTimeout to "retry later", and a
+	// broken record is broken on every retry.
+	if errors.Is(err, ErrLockTimeout) {
+		t.Errorf("err = %v; a malformed record is a refusal, not a wait that timed out", err)
 	}
 	if path, ok := hostscope.Path(); ok && Exists(path) {
 		t.Errorf("a refused acquire still took the exclusion at %s", path)

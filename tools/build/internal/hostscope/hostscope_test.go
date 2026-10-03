@@ -1,15 +1,54 @@
 package hostscope
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
+
+// childVerb is the first argument that makes this test binary a holder process
+// rather than a test run: `<test binary> hostscope-hold <dir> <test|peer>`. The
+// exclusion's whole subject is two processes — a runner and the verify it
+// spawns, or two checkouts' verifies — and flock is held per open file
+// description, so only a second process is the case the mechanism must survive.
+const childVerb = "hostscope-hold"
+
+func TestMain(m *testing.M) {
+	if len(os.Args) == 4 && os.Args[1] == childVerb {
+		os.Exit(holdAsChild(os.Args[2], os.Args[3]))
+	}
+	os.Exit(m.Run())
+}
+
+// holdAsChild takes the exclusion in dir as the named arena, says "held" once it
+// has it, and keeps it until its stdin closes or it is killed.
+func holdAsChild(dir, which string) int {
+	machineDir = func() (string, bool) { return dir, true }
+	arena := testArena()
+	if which == "peer" {
+		arena = peerArena()
+	}
+	release, _, err := Acquire(context.Background(), arena)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "child: Acquire: %v\n", err)
+		return 1
+	}
+	defer release()
+	fmt.Println("held")
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	return 0
+}
 
 // useTempDir points the exclusion at a directory this test owns. Every test
 // takes it: the machine's real exclusion is held by real runs, and a test that
@@ -108,6 +147,77 @@ func TestAcquire_TheSameArenaIsAlreadyInsideIt(t *testing.T) {
 	}
 }
 
+// ANOTHER PROCESS HOLDS IT UNTIL IT DIES. The runner's case across the process
+// boundary it really crosses: a holder process in this arena lets a second
+// process of the same arena straight in (the verify a runner spawns), keeps a
+// peer arena out, and — killed, which is how a wedged verify ends — gives the
+// exclusion back by dying, because the kernel releases it. A lock the holder had
+// to remove itself would disable the machine after every crash.
+func TestAcquire_AHolderProcessKeepsPeersOutUntilItDies(t *testing.T) {
+	requireFlock(t)
+	dir := useTempDir(t)
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, childVerb, dir, "test")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reaped := false
+	reap := func() {
+		if !reaped {
+			reaped = true
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}
+	defer reap()
+
+	// The child prints only once it holds the exclusion, and the read returns
+	// the moment it does — or at EOF, if it died trying.
+	if line, err := bufio.NewReader(stdout).ReadString('\n'); line != "held\n" {
+		reap()
+		t.Fatalf("the holder process never took the exclusion (read %q, %v):\n%s", line, err, stderr.String())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	nested, waited, err := Acquire(ctx, testArena())
+	cancel()
+	if err != nil {
+		t.Fatalf("a process in the holding process's arena could not enter: %v", err)
+	}
+	if waited != 0 {
+		t.Errorf("waited = %s entering an exclusion this arena already holds", waited)
+	}
+	nested()
+
+	if !stillHeld(t) {
+		t.Fatal("a peer was granted the exclusion while another process held it")
+	}
+
+	reap()
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	after, _, err := Acquire(ctx, peerArena())
+	if err != nil {
+		t.Fatalf("Acquire after the holder process was killed: %v — a dead process still holds it", err)
+	}
+	after()
+}
+
 // A peer arena queues: it is announced as queued before it blocks, is granted
 // when the holder releases, and reports the time it spent waiting.
 func TestAcquire_APeerQueuesAndIsGrantedOnRelease(t *testing.T) {
@@ -173,7 +283,10 @@ func TestAcquire_APeerQueuesAndIsGrantedOnRelease(t *testing.T) {
 }
 
 // A peer that gives up waiting returns its context's error, so a caller can
-// tell "the deadline passed" from "the exclusion could not be taken at all".
+// tell "the deadline passed" from "the exclusion could not be taken at all" —
+// and leaves nothing held. The flock request it abandoned is still outstanding
+// and is granted once the holder lets go; a grant nobody unlocked would wedge
+// every arena on the machine behind a caller that had already left.
 func TestAcquire_APeerGivesUpAtItsDeadline(t *testing.T) {
 	requireFlock(t)
 	useTempDir(t)
@@ -182,21 +295,77 @@ func TestAcquire_APeerGivesUpAtItsDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("holder Acquire: %v", err)
 	}
-	defer holder()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	release, waited, err := Acquire(ctx, peerArena())
 	if err == nil {
 		release()
+		holder()
 		t.Fatal("a peer was granted an exclusion another arena held")
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("err = %v, want it to wrap context.DeadlineExceeded", err)
 	}
+	if release != nil {
+		t.Error("a failed Acquire returned a release — a caller that defers it would unlock something it never held")
+	}
 	if waited <= 0 {
 		t.Errorf("waited = %s, but the peer queued until its deadline", waited)
 	}
+
+	holder()
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+	next, _, err := Acquire(ctx2, testArena())
+	if err != nil {
+		t.Fatalf("Acquire after an abandoned wait: %v — the abandoned request kept the exclusion", err)
+	}
+	next()
+}
+
+// held names the holder as part of the acquire, so a holder that cannot write
+// its name gives the exclusion back rather than keeping a lock its own arena
+// could never recognise and re-enter. A read-only descriptor reaches that state
+// portably: the lock is granted on it, and the truncate that clears the previous
+// record is refused.
+func TestHeld_AnExclusionItCannotNameIsGivenBack(t *testing.T) {
+	requireFlock(t)
+	dir := useTempDir(t)
+
+	path := filepath.Join(dir, ScopeHost.file())
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if granted, err := tryLockExclusive(f); err != nil || !granted {
+		f.Close()
+		t.Fatalf("tryLockExclusive on a free exclusion = (%v, %v), want granted", granted, err)
+	}
+
+	release, err := held(f, testArena())
+	if err == nil {
+		release()
+		t.Fatal("held reported an exclusion it could not name a holder for")
+	}
+	if release != nil {
+		t.Error("a refused acquire returned a release")
+	}
+	if !strings.Contains(err.Error(), "holder") {
+		t.Errorf("err = %v, want it to name what it could not record", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	next, _, err := Acquire(ctx, peerArena())
+	if err != nil {
+		t.Fatalf("Acquire after a refused one: %v — the refusal left the exclusion held", err)
+	}
+	next()
 }
 
 // THE RECORD IS READABLE WHILE THE LOCK IS HELD, through any handle but the

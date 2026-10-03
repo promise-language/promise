@@ -137,10 +137,10 @@ func (s *Store) StageBlob(data []byte) (string, error) {
 }
 
 // Lock takes the CAS-wide exclusive lock (cache/.lock), shared with
-// install/fetch/gc. Mirrors prebuilts.acquireCacheLock (tools/build/common/
-// prebuilts.go). Delegates to the
-// path-targeted Lock helper; the OS releases the lock on process death, so stale
-// locks are impossible. Returns an unlock func.
+// install/fetch/gc. Mirrors prebuilts.acquireCacheLock
+// (tools/build/common/prebuilts.go). Delegates to the path-targeted Lock helper;
+// the OS releases the lock on process death, so stale locks are impossible.
+// Returns an unlock func.
 func (s *Store) Lock(identityHint string) (func(), error) {
 	return Lock(filepath.Join(s.root, ".lock"), identityHint,
 		fmt.Sprintf("Waiting for dependency cache lock at %s...", s.root))

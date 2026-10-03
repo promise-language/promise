@@ -125,10 +125,9 @@ name ([gate-system.md](gate-system.md#store-metrics)).
 There is one exception: the host-shared directory under the user cache
 directory (`$XDG_CACHE_HOME/promise` when that is set, else
 `~/Library/Caches/promise` on macOS, `~/.cache/promise` on Linux,
-`%LOCALAPPDATA%\promise` on Windows). It holds the
-download cache for external artifacts (the LLVM, musl, OpenSSL and compiler-rt
-blobs), every write to which is made under a lock that coordinates concurrent
-processes. The installed
+`%LOCALAPPDATA%\promise` on Windows). It holds the download cache for external
+artifacts (the LLVM, musl, OpenSSL and compiler-rt blobs), every write to which
+is made under a lock that coordinates concurrent processes. The installed
 `promise` CLI's own use of `~/.promise` — including `promise clean` on a user's
 machine — is a product feature, not a worktree command, and is outside this
 rule.
@@ -463,9 +462,9 @@ is always the formatted tree and unformatted content cannot be blessed at all.
 Three details are load-bearing:
 
 - **The `clear` step runs before anything else**, immediately after the
-  host-scope exclusion is taken. A run that dies mid-way — a red step, a Ctrl+C, a crash — must leave
-  nothing blessed, or the gate would honour a record describing content the dead
-  run had already begun changing.
+  host-scope exclusion is taken. A run that dies mid-way — a red step, a Ctrl+C,
+  a crash — must leave nothing blessed, or the gate would honour a record
+  describing content the dead run had already begun changing.
 - **The tree is computed over a temp index seeded from a copy of the real index**,
   so it is exactly what `git add -A` would stage, and the real index is untouched.
   Ignore rules apply only to untracked paths, so any other seed gets the

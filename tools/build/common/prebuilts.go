@@ -545,8 +545,8 @@ func copyFilePreservingMode(src, dst string) error {
 }
 
 // acquireCacheLock takes an OS file lock at <cacheDir>/.lock. Stale-safe:
-// TryLock first, on contention print "Waiting for ..." then block on Lock. The OS releases the lock on process death so stale locks are
-// impossible.
+// TryLock first, on contention print "Waiting for ..." then block on Lock. The
+// OS releases the lock on process death so stale locks are impossible.
 //
 // Holder metadata lives in a sibling <lock>.owner file, NOT lockPath itself: on
 // Windows flock takes a mandatory byte-range lock on byte 0 of lockPath, so a

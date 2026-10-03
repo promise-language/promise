@@ -20,10 +20,10 @@ import (
 )
 
 // TestPrebuiltsCacheRootResolution pins where the download cache lives, through
-// hostCacheDir (#102). The compiler
-// mirrors this rule in another Go module (prebuiltsCacheRoot in
-// compiler/cmd/promise/llvm_cas.go) to find the toolchain the build staged, so a
-// drift here leaves every compiler looking in the wrong place.
+// hostCacheDir (#102). The compiler mirrors this rule in another Go module
+// (prebuiltsCacheRoot in compiler/cmd/promise/llvm_cas.go) to find the
+// toolchain the build staged, so a drift here leaves every compiler looking in
+// the wrong place.
 func TestPrebuiltsCacheRootResolution(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

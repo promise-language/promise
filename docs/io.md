@@ -1,6 +1,6 @@
 # File I/O
 
-> **Tag:** `io` — remaining work to complete this document: `mcp__tracker__list --tag io`
+> **Tag:** `io` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 > The contract for `modules/io`: what a Promise program may *rely on* when it reads and writes files,
 > across POSIX and Windows. Most of that contract is unremarkable and is covered by the API

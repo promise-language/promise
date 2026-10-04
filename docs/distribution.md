@@ -1,6 +1,6 @@
 # Distribution & Installation
 
-> **Tag:** `distribution` — remaining work to complete this document: `mcp__tracker__list --tag distribution`
+> **Tag:** `distribution` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 ---
 

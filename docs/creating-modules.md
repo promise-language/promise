@@ -1,6 +1,6 @@
 # Creating New Modules for Promise
 
-> **Tag:** `creating-modules` — remaining work to complete this document: `mcp__tracker__list --tag creating-modules`
+> **Tag:** `creating-modules` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 A step-by-step guide to proposing, implementing, and shipping new catalog modules.
 
@@ -507,7 +507,7 @@ for promise_io_test_create_exists_remove). Always clean up temp files at the end
 If you hit a compiler bug, language limitation, or missing feature while implementing:
 
 1. **Stop** — do not hack around it in module code
-2. **File a bug** in the `tracker` MCP server (type: `bug`)
+2. **File a GitHub issue** (label: `bug`)
 3. **Include**: what the bug is, a minimal reproducer, any workaround, and the priority
 4. **Wait** for the compiler fix before continuing
 
@@ -629,7 +629,7 @@ bin/promise test -coverage modules/<name>/
 ```
 
 Review the coverage report. Ensure all public API methods have at least one test. File
-tasks in the tracker for any coverage gaps.
+GitHub issues for any coverage gaps.
 
 ### Update documentation
 
@@ -653,7 +653,7 @@ Before committing:
 - [ ] Error types follow convention (`is error`, `int code` field, strerror helper)
 - [ ] Platform-specific APIs use `\`target` conditions
 - [ ] `docs/standard-library.md` is updated
-- [ ] No workarounds for compiler bugs (all filed in tracker)
+- [ ] No workarounds for compiler bugs (all filed as GitHub issues)
 
 ---
 

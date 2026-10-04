@@ -1,6 +1,6 @@
 # Promise Formatter (`promise format`)
 
-> **Tag:** `formatting` — remaining work to complete this document: `mcp__tracker__list --tag formatting`
+> **Tag:** `formatting` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 > Canonical formatter for Promise source code. No configuration. No options. One input produces one output. An AI agent can match `promise format` output without running the tool because the rules are simple and deterministic.
 

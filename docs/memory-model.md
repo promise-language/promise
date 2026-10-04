@@ -1,6 +1,6 @@
 # Memory Model
 
-> **Tag:** `memory-model` — remaining work to complete this document: `mcp__tracker__list --tag memory-model`
+> **Tag:** `memory-model` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 What may allocate, who owns what is allocated, and how every other type is built from a small closed
 set of primitives that can.

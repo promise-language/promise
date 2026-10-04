@@ -1,6 +1,6 @@
 # Platform Modules Layout
 
-> **Tag:** `platform-modules` — remaining work to complete this document: `mcp__tracker__list --tag platform-modules`
+> **Tag:** `platform-modules` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 Design document for Promise's platform-facing standard library: the boundary between `modules/std/`
 and other `modules/`, what each platform module contains, and why the layout is what it is. This

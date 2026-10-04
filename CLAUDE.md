@@ -426,14 +426,14 @@ by people who may not know the project's direction.
 
 **Never add a status section to a root doc.** Status is not a property of a specification. Each
 root doc declares a tag on the line under its title, and the gap between the end state and today
-is the set of open tracker items carrying it:
+is the set of open GitHub issues carrying it as a label:
 
-> **Tag:** `large-integers` — remaining work to complete this document: `mcp__tracker__list --tag large-integers`
+> **Tag:** `large-integers` — remaining work to complete this document: the query named in [docs/index.md](docs/index.md)
 
-So progress lives in the tracker, and `mcp__tracker__list --tag <doc>` **is** the doc's status
-section. When you finish work described by a root doc, close the tracker item — do not write
-"implemented" into the doc. When you find work a root doc implies but nobody has filed, file it
-with that doc's tag.
+So progress lives in GitHub issues, and the label query stated once in `docs/index.md` **is** the
+doc's status section. When you finish work described by a root doc, close the issue — do not write
+"implemented" into the doc. When you find work a root doc implies but nobody has filed, file an
+issue carrying that doc's label.
 
 The tag is always the file's basename (`docs/module-system.md` → `module-system`); the
 vocabulary is the directory listing, so `docs/tags.md` deliberately does not duplicate it.
@@ -443,11 +443,11 @@ wherever it lives (enforced by `checkDocIndex` in `tools/build/common/docscheck.
 The one exception to "no status prose": a **language-semantics** marker where the gap changes
 what compiles today (`docs/language-design.md` says hybrid types fit the four-struct model *and*
 that mixing `` `value `` and instance fields is currently a compile error). Such a marker must
-name its tracker item so it stays a pointer. It is never for how far along an internal migration is.
+name its issue (`tracked as #NNN`) so it stays a pointer. It is never for how far along an internal migration is.
 
-**When you close an item that a marker names, delete the marker in the same change.** A marker
-outliving its item tells the reader the compiler rejects something it now accepts — strictly worse
-than no marker. `grep -rn 'tracked as T[0-9]' docs/*.md` lists them all.
+**When you close an issue that a marker names, delete the marker in the same change.** A marker
+outliving its issue tells the reader the compiler rejects something it now accepts — strictly worse
+than no marker. `grep -rn 'tracked as #' docs/*.md` lists them all.
 
 ## Important Files
 

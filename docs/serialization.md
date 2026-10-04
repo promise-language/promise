@@ -1,6 +1,6 @@
 # Serialization Architecture
 
-> **Tag:** `serialization` — remaining work to complete this document: `mcp__tracker__list --tag serialization`
+> **Tag:** `serialization` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 Promise needs a serialization system that lets AI agents produce correct serialization code in one shot without memorizing framework-specific APIs. This document proposes an architecture, surveys how other languages handle serialization, and identifies the compiler features needed.
 

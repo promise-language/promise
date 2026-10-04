@@ -1,6 +1,6 @@
 # Installing Promise
 
-> **Tag:** `installing` — remaining work to complete this document: `mcp__tracker__list --tag installing`
+> **Tag:** `installing` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 Promise installs as a single self-contained binary (compiler + standard library +
 catalog modules + runtime). The install script detects your platform, downloads

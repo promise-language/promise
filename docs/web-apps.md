@@ -1,6 +1,6 @@
 # Web Applications
 
-> **Tag:** `web-apps` — remaining work to complete this document: `mcp__tracker__list --tag web-apps`
+> **Tag:** `web-apps` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 > This document owns **Promise on the web**: what it takes to build a browser
 > application in Promise, compiled to `wasm32-web`. Sections 1 through 17

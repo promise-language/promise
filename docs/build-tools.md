@@ -1,6 +1,6 @@
 # Build Tools
 
-> **Tag:** `build-tools` — remaining work to complete this document: `mcp__tracker__list --tag build-tools`
+> **Tag:** `build-tools` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 This document describes the Promise compiler's build tooling system. All build tools live under `tools/` as a single Go module, compiled to `bin/` via a meta-builder.
 
@@ -398,10 +398,11 @@ The `check structure` step runs `common.RunStructuralChecks` — every check nam
 | `test-sleeps` | `sleep()` as synchronization in a test `.pr` without a `// sleep-ok:` reason ([code-style.md](code-style.md)) |
 | `test-temp-paths` | a scratch path built from `temp_dir` without `process_id` in a test `.pr` or an example, without a `// temp-dir-ok:` reason ([code-style.md](code-style.md)) |
 | `host-tool-lookups` | a tracked Go line resolving a toolchain binary through `PATH` without a `// path-ok:` reason ([LLVM staging](#llvm-staging) above) |
+| `tracker-pointers` | a tracked line, outside `docs/archive/` and the vendored `docs/org/`, naming a tool of the retired tracker MCP server — work items are GitHub issues, and the status query is stated once in [index.md](index.md) |
 
 No sweep reads a **staged set**. Each one reads the working tree, scoped by
 `git ls-files` where it needs to skip untracked and generated output (the two
-`.pr` sweeps, the host-tool sweep, and the link and index halves of `docs`;
+`.pr` sweeps, the host-tool sweep, the tracker sweep, and the link and index halves of `docs`;
 catalog and annotation coverage read their directories directly). That is what
 lets them run outside a commit at all — they answer "is this tree clean", not
 "is this commit clean" — and it means a violation committed on a previous turn
@@ -409,7 +410,7 @@ is still caught on the next run. For an index-scoped sweep, a brand-new file is
 in scope from the moment it is `git add`ed and not before.
 
 **They are one list because a check's caller is the thing that goes missing.**
-All four were written as pre-commit checks; the hook then stopped naming the tool
+The first four were written as pre-commit checks; the hook then stopped naming the tool
 that ran them, and two of them held by review alone until someone read the hook
 (T2160). A sweep named in `structuralChecks` gets both its `bin/verify` caller
 and its real-tree test in the tools suite; one absent from it gets neither, and
@@ -417,7 +418,7 @@ that is now a single place to look rather than two. The two callers are
 deliberate redundancy, not duplication: verify fails the run in seconds, and the
 test still fails if the verify call is ever removed.
 
-All four run even when one fails, so a run reports every structural problem it
+All five run even when one fails, so a run reports every structural problem it
 found rather than the first. They are text sweeps over tracked files —
 milliseconds against a suite measured in minutes — so they are unconditional,
 and placed ahead of the test phases so a dangling link does not cost a build and
@@ -617,7 +618,7 @@ the trampoline stopped naming it; what it checked now lives in three places:
   [standard-library.md](standard-library.md) — and `test-sleeps`, the
   `sleep()`-as-synchronization guard ([code-style.md](code-style.md)).
 - **`bin/verify`'s structural phase**, for the sweeps that need no staged set —
-  the four in [The structural sweeps](#the-structural-sweeps) above.
+  the five in [The structural sweeps](#the-structural-sweeps) above.
 
 The split is not arbitrary: a check that needs the **staged set** can only run
 inside the hook, and a sweep that reads the **index** has no reason to wait for

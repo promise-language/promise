@@ -1,6 +1,6 @@
 # Promise Language Guide
 
-> **Tag:** `language-guide` — remaining work to complete this document: `mcp__tracker__list --tag language-guide`
+> **Tag:** `language-guide` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 Concise reference for writing correct Promise code.
 

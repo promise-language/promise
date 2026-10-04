@@ -1,6 +1,6 @@
 # Large Integer Types
 
-> **Tag:** `large-integers` — remaining work to complete this document: `mcp__tracker__list --tag large-integers`
+> **Tag:** `large-integers` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 ---
 
@@ -314,9 +314,9 @@ Verification step before committing: a single test program performing `i128`, `i
 ## Open Questions
 
 1. **Should `parse` on wide types support a leading `+` sign?** Existing `int.parse` does not. Keep consistent (no leading `+`).
-2. **Should we expose `wrapping_add` / `checked_add` / `overflowing_add` (Rust-style)?** Out of scope for this plan. The current Promise position is "arithmetic wraps silently for unsigned, traps for signed in debug" (matching Rust `Wrapping` / debug-overflow conventions); wide types follow the same rule. A future tracker task can introduce a checked-arithmetic family across all integer widths uniformly.
+2. **Should we expose `wrapping_add` / `checked_add` / `overflowing_add` (Rust-style)?** Out of scope for this plan. The current Promise position is "arithmetic wraps silently for unsigned, traps for signed in debug" (matching Rust `Wrapping` / debug-overflow conventions); wide types follow the same rule. A separate issue can introduce a checked-arithmetic family across all integer widths uniformly.
 3. **Constant-time operations for crypto?** Out of scope. LLVM's `iN` div/mul are not constant-time. Crypto code that needs constant-time must hand-craft routines using bitwise ops on `u64[]` or `u32[]` arrays — that pattern remains valid even after this plan lands. Document this clearly in the language guide.
-4. **Atomic operations on wide types?** Out of scope. Atomics on `i128` are platform-specific (x86 has `cmpxchg16b`, ARM64 has `casp`); 256/512 generally lack hardware atomics. If atomics on wide types become necessary, file a separate tracker task.
+4. **Atomic operations on wide types?** Out of scope. Atomics on `i128` are platform-specific (x86 has `cmpxchg16b`, ARM64 has `casp`); 256/512 generally lack hardware atomics. If atomics on wide types become necessary, file a separate issue.
 
 (The earlier draft included "default base 16 vs 10 for `to_string`/`parse`" here; that's now a settled decision — see [Format and parse](#format-and-parse).)
 

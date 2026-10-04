@@ -1,6 +1,6 @@
 # Promise Programming Language — Design
 
-> **Tag:** `language-design` — remaining work to complete this document: `mcp__tracker__list --tag language-design`
+> **Tag:** `language-design` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 ## Overview
 
@@ -1056,7 +1056,7 @@ Structural satisfaction uses **relaxed signature matching**: the concrete type's
 - **Failable**: a non-failable concrete method satisfies a failable interface method (but not vice versa). The adapter wraps the result in a success failable struct.
 - **Optional return**: a concrete method returning `T` satisfies an interface requiring `T?`. The adapter wraps the result as `some`.
 - **Covariant return**: a concrete method returning `U` satisfies an interface requiring `T` (or `T?`) when `T` is a structural interface and `U` satisfies `T`. The adapter thunk coerces the return value's vtable to the target interface's view. This applies to both non-generic (`Writer`) and generic (`Iterator[int]`) structural return types. Overriding an inherited method ([How Inheritance Maps to Vtables](#how-inheritance-maps-to-vtables)) admits the **nominal** form too: `U` may be any type that widens to `T` by subtyping, which is what lets `Sub[T].clone() Sub[T]` override `Base[T].clone() Base[T]`. The permitted widenings are exactly those the view-box coercion can realize — inheritance and structural satisfaction, never a reference decay or an optional unwrap, whose representations differ from the slot's.
-- **Receiver**: the concrete receiver may be **less** demanding than the requirement's, never more — a `this` (shared) method satisfies a `~this` requirement, but a `~this` method never satisfies a `this` one, which would let a shared borrow of the view mutate through it ([Borrowing and Moving](#borrowing-and-moving)). An explicitly declared `is` is stricter still: it requires the borrow kinds to match exactly, so a requirement written `close!(~this)` implemented as `close(this)` is a declaration error naming both. (The explicit-`is` half is enforced today; implicit structural satisfaction does not yet compare receivers at all — tracked as T2185.)
+- **Receiver**: the concrete receiver may be **less** demanding than the requirement's, never more — a `this` (shared) method satisfies a `~this` requirement, but a `~this` method never satisfies a `this` one, which would let a shared borrow of the view mutate through it ([Borrowing and Moving](#borrowing-and-moving)). An explicitly declared `is` is stricter still: it requires the borrow kinds to match exactly, so a requirement written `close!(~this)` implemented as `close(this)` is a declaration error naming both. (The explicit-`is` half is enforced today; implicit structural satisfaction does not yet compare receivers at all — tracked as #559.)
 
 Structural interfaces can also declare **abstract factory methods** — static constructors that enable generic factory patterns:
 

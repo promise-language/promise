@@ -1,6 +1,6 @@
 # WASM Runtime Binding Architecture
 
-> **Tag:** `wasm-bindings` — remaining work to complete this document: `mcp__tracker__list --tag wasm-bindings`
+> **Tag:** `wasm-bindings` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 > This document covers the guest→host direction. For host→guest calls — WebIDL `callback` types, `addEventListener`, timers, and the `wasm32-web` reactor execution model they require — see [web-apps.md](web-apps.md).
 

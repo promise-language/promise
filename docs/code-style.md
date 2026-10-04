@@ -1,6 +1,6 @@
 # Promise Code Style
 
-> **Tag:** `code-style` — remaining work to complete this document: `mcp__tracker__list --tag code-style`
+> **Tag:** `code-style` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 Conventions for Promise source code (`.pr` files). These rules apply to standard library, catalog modules, examples, and tests.
 

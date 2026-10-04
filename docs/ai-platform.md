@@ -1,6 +1,6 @@
 # AI Platform Support
 
-> **Tag:** `ai-platform` — remaining work to complete this document: `mcp__tracker__list --tag ai-platform`
+> **Tag:** `ai-platform` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 Promise is designed for AI agents. This document defines the modules, types, and conventions
 that make Promise a complete AI-centric platform — not just a language that AI can generate,

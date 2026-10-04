@@ -1,6 +1,6 @@
 # Module System — Global Catalog with Mono-Versioning
 
-> **Tag:** `module-system` — remaining work to complete this document: `mcp__tracker__list --tag module-system`
+> **Tag:** `module-system` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 This document describes the module system model: a **mono-versioned global catalog** where every module exists at exactly one version per catalog release, and all modules are guaranteed to work together.
 

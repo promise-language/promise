@@ -1,6 +1,6 @@
 # Schema — Type-Driven Schema Generation
 
-> **Tag:** `schema` — remaining work to complete this document: `mcp__tracker__list --tag schema`
+> **Tag:** `schema` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 `modules/schema` provides a compile-time descriptor for any Promise declaration:
 its fields, methods, generic arguments, optionality, defaults, and a stable 128-bit

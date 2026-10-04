@@ -1,6 +1,6 @@
 # Normative Documents
 
-> **Tag:** `normative` — remaining work to complete this document: `mcp__tracker__list --tag normative`
+> **Tag:** `normative` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 [org/normative.md](org/normative.md) defines what makes a document in this repository binding, the
 header every specification carries, why none of them contains a status section, and the
@@ -15,10 +15,10 @@ than restated ([What a gap is filed as](#what-a-gap-is-filed-as) there).
 
 ## Where a gap is recorded
 
-Items live in this project's `tracker` MCP server. GitHub Issues is the public inbound surface: an
-issue filed there is imported and becomes a tracker item, and the item is what the tag query
-returns. The query's exact spelling is stated once, in [index.md](index.md), which is the home
-[The header](org/normative.md#the-header) designates for it.
+Items are GitHub issues on promise-language/promise, and a document's tag is a label there; the
+open issues carrying it are what the tag query returns. The query's exact spelling is stated once,
+in [index.md](index.md), which is the home [The header](org/normative.md#the-header) designates
+for it.
 
 Which tags an item carries is [tags.md](tags.md), where a document tag never satisfies the
 subsystem requirement ([Rules](tags.md#rules) item 3, and [Document](tags.md#document) there).

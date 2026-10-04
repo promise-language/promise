@@ -1,6 +1,6 @@
 # Standard Library
 
-> **Tag:** `standard-library` — remaining work to complete this document: `mcp__tracker__list --tag standard-library`
+> **Tag:** `standard-library` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 Promise's standard library design: module inventory, implementation phases, PAL extensions needed, and testing strategy.
 
@@ -63,7 +63,7 @@ The stdlib provides:
 | `time` | `modules/time/time.pr` | 406 | wall-clock `DateTime` (`now`, Unix-epoch conversions, component accessors, `Duration` arithmetic, comparison, UTC offsets, ISO-8601 `to_string`/`format_rfc3339`, and `parse!(Reader ~r)` conforming to `Parse` — use `scan[DateTime](s)` to parse from a string), `Date` (`today`, `add_days`, `at`), `Time` (`midnight`/`noon`, wrapping arithmetic). All three declare `is Ordered, Format, Parse`. Native `promise_wallclock` (CLOCK_REALTIME / GetSystemTimePreciseAsFileTime); calendar math in Promise. 56 tests. |
 | `http` | `modules/http/http.pr` | 1678 | client + server, http and https — `Request`/`Response`, `Method`, headers, `http_get`/`http_post`/`http_post_json`; `Client` (redirect following with 301/302/303/307/308 method-rewrite policy, keep-alive connection pooling with stale-connection retry, automatic gzip response decoding via the `gzip` module (sends `Accept-Encoding: gzip`, honors `Content-Encoding: gzip`), cross-origin credential stripping, `set_tls_config` for custom CAs / mutual TLS); `Server.bind` (HTTP) and `Server.bind_tls` (HTTPS) with `Handler`, `ServerRequest`, `ServerResponse`, per-connection goroutines with keep-alive and bounded concurrency (`max_connections`, `max_keep_alive_requests`), and draining graceful shutdown. https support (T0079) is a private `_Transport` interface with a plaintext and a TLS implementation, so client framing and the server's keep-alive loop have exactly one implementation; each connection's TLS handshake runs on that connection's own goroutine. Importing `http` links a TLS backend (the vendored static OpenSSL on Linux) even for a program that only speaks http://. A request the server cannot parse is answered with `400 Bad Request` + `Connection: close` before the close; an idle keep-alive close and the shutdown wake connection are closed silently. 172 tests. |
 | `tls` | `modules/tls/tls.pr` | 544 | client + server — `TlsConfig` (`create`/`insecure`, `add_root_certificate`, `set_client_certificate`, `set_min_version`, `set_handshake_timeout`/`handshake_timeout`), `TlsServerConfig` (`create` from a PEM certificate chain + key, shared across connections, `set_handshake_timeout`/`handshake_timeout`), `TlsVersion`, `TlsStream` (satisfies `Reader`/`Writer`: `read`/`write`/`read_all`/`read_line`/`write_string`/`close`/`close_gracefully`, `version`/`cipher_suite`, plus the `accept` factory that upgrades an already-accepted `net.TcpStream`), `TlsListener` (bind with certificate chain + key, `accept`), `TlsError`/`TlsErrorKind`. Memory-BIO design — all socket I/O and reactor parking stay in Promise over `net.TcpStream`. Both handshake directions are bounded by their config's `handshake_timeout` (default 10s), raising `TlsErrorKind.handshake` when a peer stalls, so neither `connect` nor `accept` can park a goroutine forever; read and write deadlines the caller had set on the `net.TcpStream` are restored before the handshake returns. `TlsListener.accept` handshakes inline; a server that must not let one slow peer stall its accept loop binds a plain `net.TcpListener` and calls `TlsStream.accept` on each connection's own goroutine (what `http.Server.bind_tls` does). Backends: Linux links the vendored musl-static OpenSSL (T1596), macOS uses Secure Transport (T1599), Windows uses SChannel (T1598); WASM raises `unsupported`. 32 tests. |
-| `encoding` | `modules/encoding/hex.pr`, `error.pr` | 53 | hex — `hex_encode(u8[]) string`, `hex_decode!(string) u8[]` (upper/lower case, raises on odd length or non-hex digit), `EncodingError` with `at_index`. base64/base64url tracked as T1569. 17 tests. |
+| `encoding` | `modules/encoding/hex.pr`, `error.pr` | 53 | hex — `hex_encode(u8[]) string`, `hex_decode!(string) u8[]` (upper/lower case, raises on odd length or non-hex digit), `EncodingError` with `at_index`. base64/base64url tracked as #286. 17 tests. |
 | `gzip` | `modules/gzip/` | 956 | RFC 1951 (DEFLATE) and RFC 1952 (gzip) in pure Promise: `gzip_encode`, `gunzip!`, `gunzip_from!(Reader)`, `deflate`, `inflate!`, `crc32`, `GzipWriter` (satisfies `Writer`), `GunzipReader` (satisfies `Reader`), `DecompressError`. 90 tests. |
 | `crypto` | `modules/crypto/` | 258 | SHA-256 — `sha256.pr`: `Sha256` streaming context (`update`/`finalize`), `Digest256` (`to_string` hex, `to_bytes`, `^`, `==`, `hash`), one-shot `sha256(u8[]) Digest256`; `constant_time.pr`: `constant_time_equal(u8[], u8[]) bool`; `random.pr`: `random_bytes!(int) u8[]` (CSPRNG via OS syscall — T1571), `CryptoError`. HMAC-SHA-256 (T1567) and PBKDF2 (T1568) remain to be built. 32 tests. |
 ### Protocol Conformance Is Declared and Not Inferred
@@ -75,11 +75,11 @@ The structural interfaces the platform publishes — `Format`, `Parse`, `Reader`
 
 Relying on structural satisfaction is still correct for user code composing with an interface it did not know about. It is not correct for a published platform type, where the conformance is part of the contract and should be checked at the declaration.
 
-**Exceptions.** Three sets of platform types satisfy a protocol but cannot say so yet. The first is a language rule; the other two are compiler limitations with tracker items, not a judgement that the conformance is unwanted — when an item closes, the clause goes in and its bullet comes out.
+**Exceptions.** Three sets of platform types satisfy a protocol but cannot say so yet. The first is a language rule; the other two are compiler limitations with open issues, not a judgement that the conformance is unwanted — when an issue closes, the clause goes in and its bullet comes out.
 
 - **Enums cannot declare `is` at all** (grammar). `json.JsonValue` therefore conforms to `Format` by signature only; the near-miss check accepts it via the explained-name gate. This is the one exception that is a language rule rather than a defect — see [Inheritance](language-design.md#inheritance) of `docs/language-design.md`.
-- **`Reader` / `Writer` on non-generic heap I/O types** — `io.File`, `io.BufferedReader`, `io.BufferedWriter`, `gzip.GunzipReader`, `gzip.GzipWriter`, `net.TcpStream`, `tls.TlsStream`, `os.ProcessInput`, `os.ProcessOutput`, `http._PlainTransport`, `http._TlsTransport` — is **T1882**.
-- **`Builder` cannot declare `is Writer` and `Scanner` cannot declare `is Reader`** — both implement the requirement non-failably, which an explicit `is` rejects on an interface carrying default methods — **T1933**.
+- **`Reader` / `Writer` on non-generic heap I/O types** — `io.File`, `io.BufferedReader`, `io.BufferedWriter`, `gzip.GunzipReader`, `gzip.GzipWriter`, `net.TcpStream`, `tls.TlsStream`, `os.ProcessInput`, `os.ProcessOutput`, `http._PlainTransport`, `http._TlsTransport` — tracked as #365.
+- **`Builder` cannot declare `is Writer` and `Scanner` cannot declare `is Reader`** — both implement the requirement non-failably, which an explicit `is` rejects on an interface carrying default methods — tracked as #388.
 
 ### Naming Conventions
 
@@ -1099,7 +1099,7 @@ released along with its P, so no other goroutine is delayed. The consequence is
 that a dead nameserver stalls the *calling goroutine* for as long as the
 resolver takes (~10s on musl); `connect`'s deadline (T1563) bounds the
 connection wait, not the resolution that precedes it (a caller-visible resolve
-timeout is tracked as T1736).
+timeout is tracked as #340).
 
 `ResolveError` inherits `NetError`, so code that already catches `NetError`
 keeps catching resolution failures unchanged, while callers that need to tell

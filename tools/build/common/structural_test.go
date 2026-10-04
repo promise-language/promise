@@ -805,6 +805,130 @@ func TestCheckTestTempPaths_ScansNonSuffixedTestsFile(t *testing.T) {
 	}
 }
 
+// --- #599: nothing in a tracked file sends a reader to the retired tracker ---
+
+// The needle is spelled by concatenation here for the same reason it is in
+// structural.go: this test file is itself in the sweep's scope.
+var trackerNeedleText = "mcp__" + "tracker__"
+
+func TestTrackerPointerLines_ReportsEveryLine(t *testing.T) {
+	data := []byte("clean\n" + trackerNeedleText + "list --tag x\nstill clean\nuse " + trackerNeedleText + "get\n")
+	got := trackerPointerLines(data)
+	if want := []int{2, 4}; !reflect.DeepEqual(got, want) {
+		t.Errorf("trackerPointerLines = %v, want %v", got, want)
+	}
+}
+
+func TestTrackerPointerLines_NilWhenAbsent(t *testing.T) {
+	// "tracker" alone is a word, not a pointer: docs/gate-system.md uses it,
+	// and ai-platform.md declares a UsageTracker type. The flow's own item
+	// server is named by the same mcp__<server>__ convention, and text sending
+	// a reader to mcp__items__get sends them to a store that answers — the
+	// needle is the retired server's prefix, never the convention.
+	if got := trackerPointerLines([]byte("the tracker schedules gates\ntype UsageTracker\nread it with mcp__items__get\n")); got != nil {
+		t.Errorf("expected nil for text without the tool prefix, got %v", got)
+	}
+}
+
+// The exemption is two directories, named with their trailing slash and
+// anchored at the repository root. A sibling that merely shares the prefix —
+// a root doc called archived.md or org-chart.md — is this project's text and
+// stays in scope, and so does a docs/archive/ nested under some other tree.
+func TestIsTrackerPointerScope_ExemptsExactlyTwoDirectories(t *testing.T) {
+	for _, tc := range []struct {
+		rel  string
+		want bool
+	}{
+		{"docs/archive/tracker-ids.md", false},
+		{"docs/archive/deeper/notes.md", false},
+		{"docs/org/normative.md", false},
+		{"docs/archived.md", true},
+		{"docs/org-chart.md", true},
+		{"docs/organization/plan.md", true},
+		{"tools/docs/archive/x.md", true},
+		{"CLAUDE.md", true},
+	} {
+		if got := isTrackerPointerScope(tc.rel); got != tc.want {
+			t.Errorf("isTrackerPointerScope(%q) = %v, want %v", tc.rel, got, tc.want)
+		}
+	}
+}
+
+// Every tracked kind is in scope — a doc, the agent instructions, and Go source
+// alike — and each hit is reported as path:line.
+func TestCheckTrackerPointers_RejectsAnyTrackedFile(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("docs/foo.md", []byte("# Foo\n\n> run `"+trackerNeedleText+"list --tag foo`\n"))
+	stage("CLAUDE.md", []byte(trackerNeedleText+"create files a bug\n"))
+	stage("tools/x/x.go", []byte("package x\n\n// see "+trackerNeedleText+"get\n"))
+	err := CheckTrackerPointers(root)
+	if err == nil {
+		t.Fatal("expected an error for tracked text naming a tracker tool, got nil")
+	}
+	for _, want := range []string{"docs/foo.md:3", "CLAUDE.md:1", "tools/x/x.go:3", "docs/index.md"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %q, got:\n%v", want, err)
+		}
+	}
+}
+
+// docs/archive/ keeps the ID map that must name the tracker, and docs/org/ is
+// vendored text this project does not edit. Neither is a finding.
+func TestCheckTrackerPointers_ExemptsArchiveAndOrg(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("docs/archive/tracker-ids.md", []byte("| T0001 | was `"+trackerNeedleText+"get T0001` |\n"))
+	stage("docs/org/normative.md", []byte("the query was `"+trackerNeedleText+"list --tag x`\n"))
+	if err := CheckTrackerPointers(root); err != nil {
+		t.Fatalf("expected no error for archive/ and org/ text, got: %v", err)
+	}
+}
+
+// Scope is the git index: an untracked file is not this project's text yet.
+func TestCheckTrackerPointers_IgnoresUntrackedFile(t *testing.T) {
+	root, _ := initGitRepoWithStager(t)
+	p := filepath.Join(root, "notes.md")
+	if err := os.WriteFile(p, []byte(trackerNeedleText+"list\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckTrackerPointers(root); err != nil {
+		t.Fatalf("expected no error for an untracked file, got: %v", err)
+	}
+}
+
+// A file tracked in the index but deleted from the worktree is skipped — the
+// staged-deletion case scanTracked documents.
+func TestCheckTrackerPointers_SkipsTrackedButAbsent(t *testing.T) {
+	root, stage := initGitRepoWithStager(t)
+	stage("docs/gone.md", []byte(trackerNeedleText+"list --tag gone\n"))
+	git := exec.Command("git", "commit", "-m", "add doc")
+	git.Dir = root
+	git.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=1+test@users.noreply.github.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=1+test@users.noreply.github.com",
+	)
+	if out, err := git.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+	if err := os.Remove(filepath.Join(root, "docs", "gone.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckTrackerPointers(root); err != nil {
+		t.Fatalf("expected no error for a tracked-but-absent file, got: %v", err)
+	}
+}
+
+// A missing root, for the reason TestCheckTestSleeps_ErrorsWhenGitCannotList
+// gives: a directory merely outside a repository can resolve to the real one.
+func TestCheckTrackerPointers_ErrorsWhenGitCannotList(t *testing.T) {
+	err := CheckTrackerPointers(filepath.Join(t.TempDir(), "no-such-dir"))
+	if err == nil {
+		t.Fatal("expected an error when git cannot list the index, got nil")
+	}
+	if !strings.Contains(err.Error(), "list tracked * files") {
+		t.Errorf("error should name the failing step, got: %v", err)
+	}
+}
+
 // --- the list itself ---
 
 // TestRunStructuralChecks_ThisTreeIsClean runs every sweep in structuralChecks
@@ -844,12 +968,16 @@ func TestRunStructuralChecks_ReportsEveryFailingSweep(t *testing.T) {
 	root, stage := initGitRepoWithStager(t)
 	stage("tests/a_test.pr", []byte("test_x() `test { sleep(10ms); }\n"))
 	stage("tests/b_test.pr", []byte("test_y() `test { string p = os.temp_dir + \"/fixed\"; }\n"))
+	stage("docs/foo.md", []byte("# Foo\n\n> run `"+trackerNeedleText+"list --tag foo`\n"))
 
 	err := RunStructuralChecks(root)
 	if err == nil {
-		t.Fatal("expected an error when two sweeps fail, got nil")
+		t.Fatal("expected an error when three sweeps fail, got nil")
 	}
-	for _, want := range []string{"test-sleeps:", "test-temp-paths:", "tests/a_test.pr:1", "tests/b_test.pr:1"} {
+	for _, want := range []string{
+		"test-sleeps:", "test-temp-paths:", "tracker-pointers:",
+		"tests/a_test.pr:1", "tests/b_test.pr:1", "docs/foo.md:3",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error should contain %q, got:\n%v", want, err)
 		}
@@ -888,6 +1016,7 @@ func TestStructuralChecks_PinsTheSet(t *testing.T) {
 		{"test-sleeps", CheckTestSleeps},
 		{"test-temp-paths", CheckTestTempPaths},
 		{"host-tool-lookups", CheckHostToolLookups},
+		{"tracker-pointers", CheckTrackerPointers},
 	}
 
 	var gotNames []string

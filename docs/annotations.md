@@ -1,6 +1,6 @@
 # Annotations
 
-> **Tag:** `annotations` — remaining work to complete this document: `mcp__tracker__list --tag annotations`
+> **Tag:** `annotations` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 An annotation is a backtick-prefixed modifier on a declaration: `` `public ``, `` `copy ``,
 `` `test(timeout: "5s") ``. This document is the **normative reference for what each one means**,

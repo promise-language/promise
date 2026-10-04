@@ -1,6 +1,6 @@
 # Platform Documentation (`promise doc`)
 
-> **Tag:** `platform-documentation` — remaining work to complete this document: `mcp__tracker__list --tag platform-documentation`
+> **Tag:** `platform-documentation` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 ## Motivation
 

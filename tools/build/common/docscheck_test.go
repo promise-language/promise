@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -763,5 +764,84 @@ func TestDocIndexCoversTheVendoredOrgCorpus(t *testing.T) {
 	}
 	if found == 0 {
 		t.Fatal("docs/org/ ships no Markdown; this test and the org half of checkDocIndex assert nothing")
+	}
+}
+
+// TestRootDocsPointAtTheOneStatusQuery pins the end state #599 established
+// across docs/ root, where nothing mechanical otherwise notices a drift:
+//
+//   - every specification's tag line names its own basename and points at the
+//     query in docs/index.md, rather than restating a spelling that then has
+//     to change in thirty places when the store does;
+//   - that spelling has one home — docs/index.md states it, and no other root
+//     doc does (docs/org/normative.md §"The header");
+//   - docs/index.md, the map, carries no tag;
+//   - a status marker names an issue, never a retired tracker ID, so a sweep
+//     that reads markers reads an issue's state (#338).
+//
+// The tracker-pointers sweep catches a tag line that regresses all the way back
+// to a tracker tool name; this catches the quieter drift — a new root doc whose
+// tag line spells the query itself, or a marker written `tracked as T1234` from
+// habit. Plain ID citations elsewhere in a doc are not markers and are not
+// checked: they stay as written, and docs/archive/tracker-ids.md resolves them.
+func TestRootDocsPointAtTheOneStatusQuery(t *testing.T) {
+	const (
+		tagPrefix = "> **Tag:** `"
+		tagTail   = "` — remaining work to complete this document: the query named in [docs/index.md](index.md)"
+		query     = "gh issue list --label"
+	)
+	trackerMarker := regexp.MustCompile(`tracked as [TBD][0-9]{4}`)
+
+	root := filepath.Join("..", "..", "..")
+	out, err := RunOutputIn(root, "git", "ls-files", "-z", "docs/*.md")
+	if err != nil {
+		t.Fatalf("list docs: %v", err)
+	}
+	rootDocs := 0
+	for rel := range strings.SplitSeq(out, "\x00") {
+		// docs/<name>.md only: proposals/, archive/, research/ and org/ carry
+		// no tag, by docs/org/normative.md §"The header".
+		if rel == "" || strings.Count(rel, "/") != 1 {
+			continue
+		}
+		rootDocs++
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		body := string(data)
+
+		if m := trackerMarker.FindString(body); m != "" {
+			t.Errorf("%s: status marker %q names a retired tracker ID; name the issue instead "+
+				"(`tracked as #NNN` — docs/archive/tracker-ids.md maps the ID)", rel, m)
+		}
+
+		var tagLines []string
+		for line := range strings.SplitSeq(body, "\n") {
+			if strings.HasPrefix(line, tagPrefix) {
+				tagLines = append(tagLines, line)
+			}
+		}
+		queries := strings.Count(body, query)
+
+		if rel == docIndex {
+			if len(tagLines) != 0 {
+				t.Errorf("%s is the map, not a specification, and carries no tag line; got %q", rel, tagLines)
+			}
+			if queries != 1 {
+				t.Errorf("%s must state the status query exactly once; found %d occurrences of %q", rel, queries, query)
+			}
+			continue
+		}
+		base := strings.TrimSuffix(strings.TrimPrefix(rel, "docs/"), ".md")
+		if want := tagPrefix + base + tagTail; len(tagLines) != 1 || tagLines[0] != want {
+			t.Errorf("%s: the tag line must read exactly\n  %s\ngot %q", rel, want, tagLines)
+		}
+		if queries != 0 {
+			t.Errorf("%s restates the status query; its one home is %s", rel, docIndex)
+		}
+	}
+	if rootDocs < 2 {
+		t.Fatalf("listed %d root docs under docs/; the pathspec no longer reaches the specifications", rootDocs)
 	}
 }

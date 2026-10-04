@@ -1,6 +1,6 @@
 # Regression Prevention Gate System
 
-> **Tag:** `gate-system` — remaining work to complete this document: `mcp__tracker__list --tag gate-system`
+> **Tag:** `gate-system` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 ## Overview
 

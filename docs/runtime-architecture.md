@@ -1,6 +1,6 @@
 # Runtime Architecture
 
-> **Tag:** `runtime-architecture` — remaining work to complete this document: `mcp__tracker__list --tag runtime-architecture`
+> **Tag:** `runtime-architecture` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 Promise's runtime infrastructure: PAL (platform abstraction), build pipeline (opt/llc/lld/musl), M:N scheduler (GMP model, LLVM coroutines), and multi-platform support.
 
@@ -9,7 +9,7 @@ Promise's runtime infrastructure: PAL (platform abstraction), build pipeline (op
 > **On the phase numbers below.** Sections further down still label parts of the runtime by the
 > implementation phase that introduced them ("Phase 5c — M:N Scheduler"). Those numbers are
 > historical ordering, not structure, and carry no meaning for the architecture being described —
-> reshaping the body around what the runtime *is* rather than how it was built is tracked as T1721.
+> reshaping the body around what the runtime *is* rather than how it was built is tracked as #335.
 
 ## Composition
 

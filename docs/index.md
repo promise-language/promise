@@ -7,10 +7,10 @@ everything else there is.
 
 A file's directory determines whether it binds: everything in the `docs/` root is a specification, while `proposals/`, `research/` and `archive/` are not. [org/normative.md](org/normative.md) has the rules — what makes a document binding, the header every specification carries, why none of them contains a status section, and the one-fact-one-home rule that keeps two of them from disagreeing. [normative.md](normative.md) carries this project's delta to them.
 
-**The status query.** A specification says what the project should be, never how far along it is — so its status section is the set of open items carrying its tag, which is always the file's basename. This project records items in its `tracker` MCP server, so the query is:
+**The status query.** A specification says what the project should be, never how far along it is — so its status section is the set of open items carrying its tag, which is always the file's basename. This project records items as GitHub issues, and a document's tag is a label there, so the query is:
 
 ```sh
-mcp__tracker__list --tag <basename>     # --tag large-integers, for large-integers.md
+gh issue list --label <basename> --state open     # --label large-integers, for large-integers.md
 ```
 
 ---
@@ -56,7 +56,7 @@ mcp__tracker__list --tag <basename>     # --tag large-integers, for large-intege
 - [build-tools.md](build-tools.md) — Build tooling architecture and the `bin/` tool inventory.
 - [gate-system.md](gate-system.md) — Four-class regression prevention gates (tests, memory, stability, size, performance).
 - [normative.md](normative.md) — This project's delta to [org/normative.md](org/normative.md): where a gap is recorded, one reconciliation item per document, forward-only scope, and what is actually machine-checked.
-- [tags.md](tags.md) — Canonical tag vocabulary and tagging rules for the `tracker` MCP server.
+- [tags.md](tags.md) — Canonical tag vocabulary and tagging rules for this repository's GitHub issue labels.
 - [platform-documentation.md](platform-documentation.md) — `promise doc` system for extracting `doc()` meta tags.
 
 ## Vision

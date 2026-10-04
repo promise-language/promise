@@ -1,6 +1,6 @@
 # Windows Support
 
-> **Tag:** `windows-support` — remaining work to complete this document: `mcp__tracker__list --tag windows-support`
+> **Tag:** `windows-support` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 > Native Windows support for the Promise compiler. No MinGW — full MSVC-compatible toolchain targeting the Windows SDK and UCRT, with a self-generated link surface that needs no Visual Studio Build Tools.
 
@@ -41,7 +41,7 @@ Windows is a first-class, fully-supported target. Core language, standard librar
 
 ### Known limitations
 
-- **No LTO in the link pipeline** — Windows uses `opt → llc → lld-link` (no cross-module LTO, unlike Linux/macOS which use bitcode → linker with `--lto-O1`). Deferred — **T0049**.
+- **No LTO in the link pipeline** — Windows uses `opt → llc → lld-link` (no cross-module LTO, unlike Linux/macOS which use bitcode → linker with `--lto-O1`). Deferred — tracked as #115.
 - **Cross-*building* is supported; cross-*testing* is not.** A non-Windows host links the `.exe` but cannot run it: `promise run`/`test`/`exec` refuse a non-host native target rather than reaching for an emulator, because what a build produces must not depend on which emulator a machine happens to carry. Running cross-built binaries is the cross-target matrix's job (T0537); CI's Wine job covers the smoke case only.
 - **POSIX-only signals are unsupported by design** — only SIGINT/SIGTERM map to Windows console control events; SIGHUP and other POSIX signals return an error.
 

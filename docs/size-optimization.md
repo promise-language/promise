@@ -1,6 +1,6 @@
 # Binary Size: Regression Prevention & Optimization
 
-> **Tag:** `size-optimization` — remaining work to complete this document: `mcp__tracker__list --tag size-optimization`
+> **Tag:** `size-optimization` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 This document owns **binary size across every target**. What is written below is
 the WASM half — the target where size is most acutely felt, and the one with

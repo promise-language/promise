@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -296,8 +297,56 @@ func CheckTestSleeps(root string) error {
 	return nil
 }
 
+// trackerNeedle is the spelling the tracker-pointers sweep rejects: the prefix
+// every tool of the retired tracker MCP server carried. It is assembled at
+// runtime because this file and its tests are tracked files inside the sweep's
+// own scope — written as one literal, the sweep would report itself.
+var trackerNeedle = []byte("mcp__" + "tracker__")
+
+// isTrackerPointerScope reports whether a tracked path is text this project
+// owes to its readers. docs/archive/ is history (docs/archive/tracker-ids.md
+// is the map from retired IDs to issues, and must keep naming the tracker), and
+// docs/org/ is vendored from promise-language/org and never edited here.
+func isTrackerPointerScope(rel string) bool {
+	return !strings.HasPrefix(rel, "docs/archive/") && !strings.HasPrefix(rel, "docs/org/")
+}
+
+// trackerPointerLines returns the 1-indexed line numbers of every line in data
+// that names a tracker MCP tool. A file without the needle is answered by one
+// bytes.Contains, which is what keeps a sweep over every tracked byte cheap.
+func trackerPointerLines(data []byte) []int {
+	if !bytes.Contains(data, trackerNeedle) {
+		return nil
+	}
+	var lines []int
+	for i, line := range bytes.Split(data, []byte("\n")) {
+		if bytes.Contains(line, trackerNeedle) {
+			lines = append(lines, i+1)
+		}
+	}
+	return lines
+}
+
+// CheckTrackerPointers scans every tracked file and returns an error naming
+// each line that sends a reader to the retired tracker MCP server (#599). Work
+// items are GitHub issues, and the one status query is stated in docs/index.md;
+// a tracker tool name anywhere else is a pointer to a store that no longer
+// answers.
+func CheckTrackerPointers(root string) error {
+	violations, err := scanTracked(root, "*", isTrackerPointerScope, trackerPointerLines)
+	if err != nil {
+		return err
+	}
+	if len(violations) > 0 {
+		return fmt.Errorf("tracked text sends readers to the retired tracker MCP server (#599 — "+
+			"work items are GitHub issues, and the status query is the one stated in docs/index.md):\n%s",
+			strings.Join(violations, "\n"))
+	}
+	return nil
+}
+
 // structuralChecks is the one list of structural sweeps this project enforces
-// over its own sources. It is a list rather than four call sites because a
+// over its own sources. It is a list rather than five call sites because a
 // check's caller is the thing that goes missing: every one of these was written
 // as a pre-commit check, the hook stopped naming the tool that ran them, and two
 // of them then held by review alone for as long as nobody noticed (T2160). A
@@ -315,6 +364,7 @@ var structuralChecks = []struct {
 	{"test-sleeps", CheckTestSleeps},
 	{"test-temp-paths", CheckTestTempPaths},
 	{"host-tool-lookups", CheckHostToolLookups},
+	{"tracker-pointers", CheckTrackerPointers},
 }
 
 // RunStructuralChecks runs every sweep in structuralChecks over the tracked
@@ -326,9 +376,9 @@ var structuralChecks = []struct {
 // not "is this commit clean", so a violation committed on a previous turn is
 // still caught on the next run.
 //
-// All four run even after one fails. They are independent sweeps over disjoint
-// file sets, and a run that stopped at the first would turn one fix-and-rerun
-// cycle into four — the same reason CheckDocs already aggregates its own halves.
+// All five run even after one fails. They are independent sweeps, and a run
+// that stopped at the first would turn one fix-and-rerun cycle into five — the
+// same reason CheckDocs already aggregates its own halves.
 func RunStructuralChecks(root string) error {
 	var problems []error
 	for _, c := range structuralChecks {

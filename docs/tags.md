@@ -1,6 +1,6 @@
 # Tag Namespace
 
-> **Tag:** `tags` — remaining work to complete this document: `mcp__tracker__list --tag tags`
+> **Tag:** `tags` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 > The canonical tag vocabulary for this repo's bugs, tasks, and issues, and the rules for applying it. **Consult this file before tagging or labelling an item.** Tags are how items are found later, so a consistent, low-cardinality vocabulary matters more than expressiveness. When in doubt, reuse an existing canonical tag rather than coin a new one.
 
@@ -56,7 +56,7 @@ ls docs/*.md          # every document tag, one per line, minus the .md
 
 Every such doc also declares its own tag on the line under its title. That line is a *pointer* for someone reading that doc — not a second registry — so there is nothing here to keep in sync: add a doc to `docs/` root and its tag exists; `git mv` it to `proposals/` or `archive/` and its tag ceases to exist. The other facets in [The namespace by facet](#the-namespace-by-facet) are enumerated because nothing else defines them; this one is not, because the filesystem already does.
 
-**What a document tag means.** A doc in `docs/` root states an *end state* — what the project should be — and never records how far along it is (see [index.md](index.md) for the folder rule). The gap between that end state and today is therefore not written in the doc; it is the set of open items carrying the doc's tag. `mcp__tracker__list --tag <doc>` **is** the doc's status section. Tag an item with a document tag when closing it moves the project measurably closer to what that document describes — not merely because the item touches a subsystem the doc mentions.
+**What a document tag means.** A doc in `docs/` root states an *end state* — what the project should be — and never records how far along it is (see [index.md](index.md) for the folder rule). The gap between that end state and today is therefore not written in the doc; it is the set of open issues carrying the doc's label — the query named in [index.md](index.md) **is** the doc's status section. Tag an item with a document tag when closing it moves the project measurably closer to what that document describes — not merely because the item touches a subsystem the doc mentions.
 
 **Scope.** Only `docs/` root files get a tag. Files under `docs/proposals/` describe an end state that has not been ratified, and files under `docs/archive/` describe one that has been superseded or delivered; neither is something the project owes work against, so neither takes a tag. A proposal earns its tag when it is ratified — `git mv` into `docs/` root, add the tag line under its title, and move its entry into the body of [index.md](index.md), all in the one change. Nothing in *this* file changes. `docs/index.md` is the map, not a spec, and has no tag.
 

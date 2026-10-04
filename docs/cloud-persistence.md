@@ -1,6 +1,6 @@
 # Cloud Persistence
 
-> **Tag:** `cloud-persistence` — remaining work to complete this document: `mcp__tracker__list --tag cloud-persistence`
+> **Tag:** `cloud-persistence` — remaining work to complete this document: the query named in [docs/index.md](index.md)
 
 `modules/cloud` (working name — see [Module Name](#module-name)) provides durable, schema-driven, multi-process
 shared state for Promise programs. A client defines `` `serializable `` types and

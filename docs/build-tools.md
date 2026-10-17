@@ -578,18 +578,21 @@ by a lock of the project's own. `bin/clean` takes the same exclusion.
   run's time allowance. Every other command declares nothing and is listed by
   bare name.
 - **Verify joins it, so the queue is the runner's alone.** The exclusion is held
-  by an *arena* — the machine's host name and the id in the checkout's
-  `.workspace/arena.json` — and is re-entrant to the arena that holds it. A
-  verify a runner spawned is in the arena that already holds it and walks
+  by an *arena* — the id in the machine's host identity record (the host home's
+  `identity.json`, written by `workspace setup`: a host's `h-` id, or in a guest
+  the guest's own `g-` id) and the id in the checkout's `.workspace/arena.json`
+  — and is re-entrant to the arena that holds it. A verify a runner spawned is in the arena that already holds it and walks
   straight in; a verify run by hand queues behind any other arena's, runner and
-  person alike. A checkout with no arena record still queues, as a party nothing
-  re-enters; one whose record does not parse is refused.
+  person alike. A checkout with no arena record, or on a machine with no host
+  record, still queues, as a party nothing re-enters; a record of either that
+  does not parse is refused.
 - **It is flow's exclusion, copied rather than imported.** This project may not
-  depend on flow as a Go module, so `tools/build/internal/hostscope` is a 1:1
-  copy of flow's acquisition, under the same rules as `internal/verifiedtree`:
+  depend on flow or forge as a Go module, so `tools/build/internal/hostscope` is
+  a 1:1 copy of flow's acquisition and of forge's host-record reader, under the
+  same rules as `internal/verifiedtree`:
   same file (`host-scope.lock` in flow's directory under `os.UserCacheDir()`),
-  same kernel lock, same holder record, same re-entry rule. A paraphrase would
-  be a second exclusion.
+  same kernel lock, same holder record, same arena identity, same re-entry
+  rule. A paraphrase would be a second exclusion.
 - **It refuses rather than degrading.** A machine with nowhere to hold the
   exclusion gets an error, never an unserialized run. The kernel releases it
   when the holder dies.

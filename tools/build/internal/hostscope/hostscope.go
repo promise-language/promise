@@ -1,13 +1,14 @@
 // Package hostscope is a copy of the half of flow's pkg/hostscope that TAKES
 // the host-scope exclusion, taken because this project may not depend on flow
-// as a Go module (internal/verifiedtree says why: both modules are private, and
-// importing one broke ./make on every machine without the maintainer's
-// credentials, T2240/T2241).
+// or forge as a Go module (internal/verifiedtree says why: both modules are
+// private, and importing one broke ./make on every machine without the
+// maintainer's credentials, T2240/T2241).
 //
 // WHY THE COPY EXISTS. The host-scope exclusion is the orchestrator's: one slot
 // per machine, held by an arena, re-entrant to the arena that holds it, and
 // joined by every party that runs a declared command — the flow's own runner and
-// a person at a terminal alike (flow docs/gates-and-commands.md § Two scopes).
+// a person at a terminal alike (flow docs/gates-and-commands.md § Two scopes for
+// two different reasons).
 // bin/verify declares it ("serialize": "host" on its `bin/run --list --json`
 // row), so a runner takes it before spawning verify and reports the queue as
 // waiting, outside the run's allowance. Verify must then take THE SAME exclusion
@@ -23,21 +24,39 @@
 // party re-enters by. A paraphrase that differed in any of them is an exclusion
 // of its own: two parties each believing they hold the machine, or a nested
 // verify queueing behind the runner that spawned it until its allowance kills
-// it. So this is flow's code, unchanged except as listed below.
+// it. The arena a party names itself by is part of that rule, so it is copied
+// too: a copy that derived the host half differently re-entered nothing, and
+// every verify a runner spawned queued behind its own parent (#642). So this is
+// flow's code, unchanged except as listed below.
 //
-// WHAT IS COPIED, from github.com/promise-language/flow at 283fc72:
-//   - pkg/hostscope/hostscope.go — Acquire, acquireAt, held, writeHolder,
-//     readHolder, parseHolder, parseRecord, holderRecord, maxHolderRecord,
-//     Holder, Path;
+// WHAT IS COPIED, from github.com/promise-language/flow at 91e5836 (v0.20.0):
+//   - pkg/hostscope/hostscope.go — Acquire, acquireAt, tryAt, held,
+//     writeHolder, readHolder, parseHolder, parseRecord, holderRecord,
+//     maxHolderRecord, Holder, Path;
 //   - pkg/hostscope/scope.go — Scope, ScopeHost, file, OnQueue, Queued;
 //   - pkg/hostscope/lock_flock.go, lock_windows.go, lock_noflock.go — verbatim;
 //   - pkg/machinecache.Dir — the body of machineDir;
-//   - identity.go — identity.go in this package.
+//   - identity.go — HostId, ArenaId, ArenaId.Valid, arenaIdHexLen,
+//     ArenaIdentity, ArenaIdentity.Empty, ArenaRecordPath, ErrArenaUnknown,
+//     ErrHostUnknown, ArenaAt, ArenaIdAt, HostIdAt — identity.go in this
+//     package;
+//
+// and from github.com/promise-language/forge at v0.13.0, the release that flow
+// revision requires, because HostIdAt reads the host record through it:
+//   - primitives/logging/home.go — HostHome, StateDir, HostRecordFile;
+//   - primitives/logging/identity.go — KindHost, KindGuest, HostRecord,
+//     GuestRecord, Ref, Record, ReadHostRecord, ValidID, readJSON —
+//     hostrecord.go in this package.
 //
 // THE MECHANICAL CHANGES, AND NO OTHERS: flow's types (ArenaIdentity, HostId,
 // ArenaId) become this package's; the scope set is reduced to ScopeHost, so
-// AcquireScope and ScopePath fold into Acquire and Path, and ScopeMemory, Held
-// and Break are not copied; machinecache.Dir is inlined as machineDir.
+// AcquireScope and ScopePath fold into Acquire and Path, and ScopeMemory,
+// ScopeDependencyStore, ScopeToolchainCache, Scopes, scopeLock,
+// TryAcquireScope, Held and Break are not copied; machinecache.Dir is inlined as
+// machineDir; HostId.Valid is not copied, because nothing copied calls it;
+// forge's names are unexported here except HostHome, which a caller passes to
+// ArenaAt, and primitives.IsWindows and command.HostDir are inlined as the
+// runtime.GOOS test and the literal they are.
 //
 // IF YOU CHANGE ANYTHING HERE, YOU HAVE FORKED THE EXCLUSION. The other parties
 // are in another repository and will not change with you.
@@ -59,7 +78,7 @@ type Scope string
 
 // ScopeHost is the host-scope exclusion: the one slot a measurement too heavy
 // to run beside another holds while it runs (flow docs/gates-and-commands.md
-// § Two scopes).
+// § Two scopes for two different reasons).
 const ScopeHost Scope = "host-scope"
 
 // file is the scope's lock file name. Derived from the scope and never
@@ -162,32 +181,68 @@ func Acquire(ctx context.Context, holder ArenaIdentity) (release func(), waited 
 // is where every property Acquire documents is implemented, and it is shared by
 // every scope so that no member of the set can drift into its own semantics.
 func acquireAt(ctx context.Context, s Scope, path string, holder ArenaIdentity) (release func(), waited time.Duration, err error) {
-	// 0o700 for the directory and 0o600 for the file: what an arena is named
-	// here carries a machine name, which nothing else on the machine has a
-	// reason to read. It never leaves the machine — docs/disclosure.md guards
-	// outward bytes, and this is why the claim's published half is the arena
-	// id alone while this one carries the host too.
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, 0, fmt.Errorf("hostscope: cannot create the directory for %s: %w", path, err)
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, 0, fmt.Errorf("hostscope: cannot open %s: %w", path, err)
-	}
-
 	// ZERO MEANS UNCONTENDED, NOT "TOO FAST TO SEE". The lock is asked for
 	// without blocking first, so a run that queued for nothing reports nothing —
 	// rather than the microseconds a clock around the syscall would report,
 	// which the ledger would then carry as contention and pay an orchestrator
 	// write for on every single run.
+	release, f, _, err := tryAt(path, holder)
+	if err != nil || release != nil {
+		return release, 0, err
+	}
+
+	// A real queue starts here and nowhere above: announced now, so whoever
+	// keeps this run's liveness record can say it is queued while it is, and
+	// ended the moment the kernel answers, on every path — granted, refused or
+	// given up.
+	dequeued := Queued(ctx, s)
+	started := time.Now()
+	err = waitLockExclusive(ctx, f)
+	dequeued()
+	if err != nil {
+		// waitLockExclusive owns f from here: the blocking lock may still be
+		// outstanding and only it can know when to close.
+		return nil, time.Since(started), err
+	}
+	release, err = held(f, holder)
+	if err != nil {
+		return nil, time.Since(started), err
+	}
+	return release, time.Since(started), nil
+}
+
+// tryAt is the half of an acquisition that never waits, shared by acquireAt and
+// TryAcquireScope so that the grant, the name and the re-entrancy rule are one
+// implementation whichever way the caller meets a held exclusion.
+//
+// It answers exactly one of three ways: an error; a release, for an exclusion
+// that was free or that holder's arena already holds; or contended, the still
+// open file another arena holds, with by the arena its record names — empty
+// when the record names nobody. contended holds no lock, because the kernel
+// refused it, and the caller owns it: acquireAt waits on it, TryAcquireScope
+// closes it.
+func tryAt(path string, holder ArenaIdentity) (release func(), contended *os.File, by ArenaIdentity, err error) {
+	// 0o700 for the directory and 0o600 for the file: what an arena is named
+	// here carries the host's id, which nothing else on the machine has a
+	// reason to read. It never leaves the machine — docs/disclosure.md guards
+	// outward bytes, and this is why the claim's published half is the arena
+	// id alone while this one carries the host too.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, nil, ArenaIdentity{}, fmt.Errorf("hostscope: cannot create the directory for %s: %w", path, err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, nil, ArenaIdentity{}, fmt.Errorf("hostscope: cannot open %s: %w", path, err)
+	}
+
 	granted, err := tryLockExclusive(f)
 	if err != nil {
 		f.Close()
-		return nil, 0, err
+		return nil, nil, ArenaIdentity{}, err
 	}
 	if granted {
 		release, err := held(f, holder)
-		return release, 0, err
+		return release, nil, ArenaIdentity{}, err
 	}
 
 	// CONTENDED — BUT BY WHOM? An exclusion this arena already holds is one
@@ -219,32 +274,15 @@ func acquireAt(ctx context.Context, s Scope, path string, holder ArenaIdentity) 
 	// one ftruncate, and closing it would take a lock-and-truncate the kernel
 	// does not offer. Writing the name is therefore the first thing a holder
 	// does, so the window is as narrow as the syscall.
-	if ours, ok := readHolder(f); ok && !holder.Empty() && ours == holder {
+	by, ok := readHolder(f)
+	if ok && !holder.Empty() && by == holder {
 		f.Close()
 		// A no-op release. The acquisition this call is nested inside owns the
 		// exclusion, and releasing it here would hand the machine away while
 		// the outer measurement is still running.
-		return func() {}, 0, nil
+		return func() {}, nil, ArenaIdentity{}, nil
 	}
-
-	// A real queue starts here and nowhere above: announced now, so whoever
-	// keeps this run's liveness record can say it is queued while it is, and
-	// ended the moment the kernel answers, on every path — granted, refused or
-	// given up.
-	dequeued := Queued(ctx, s)
-	started := time.Now()
-	err = waitLockExclusive(ctx, f)
-	dequeued()
-	if err != nil {
-		// waitLockExclusive owns f from here: the blocking lock may still be
-		// outstanding and only it can know when to close.
-		return nil, time.Since(started), err
-	}
-	release, err = held(f, holder)
-	if err != nil {
-		return nil, time.Since(started), err
-	}
-	return release, time.Since(started), nil
+	return nil, f, by, nil
 }
 
 // held names the holder in the now-locked f and returns the release.

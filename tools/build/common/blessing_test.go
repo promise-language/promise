@@ -175,8 +175,7 @@ func TestBlessIfPassed_RecordsOnlyAPassingIntegrationVerdictOnThisTree(t *testin
 // TestBlessIfPassed_OutsideAGitCheckoutIsANoOp: there is no commit to gate
 // there, so a run that passed reports rather than fails.
 func TestBlessIfPassed_OutsideAGitCheckoutIsANoOp(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	dir := nonRepoTempDir(t)
 	if id, err := treeIdentity(dir); err != nil || id != "" {
 		t.Fatalf("precondition: %s is still inside a git checkout (id %q, err %v)", dir, id, err)
 	}

@@ -194,12 +194,7 @@ func TestWorktreeHash_UnmergedPathCountsOnce(t *testing.T) {
 }
 
 func TestWorktreeHash_NotAGitRepo(t *testing.T) {
-	// Clear TMPDIR so t.TempDir() uses /tmp rather than .promise-home/tmp.
-	// bin/verify points TMPDIR inside the repo (SetupLocalCache), which would
-	// put this "repo" inside the real work tree and make git ls-files succeed
-	// — the same hazard as TestGitSHA_NotARepo.
-	t.Setenv("TMPDIR", "")
-	if _, err := WorktreeHash(t.TempDir()); err == nil {
+	if _, err := WorktreeHash(nonRepoTempDir(t)); err == nil {
 		t.Fatal("expected an error outside a git repository, got nil")
 	}
 }

@@ -175,7 +175,23 @@ func arenaRoot(t *testing.T, id string) string {
 const (
 	testArenaID = "a-00000000000000000000000000000001"
 	peerArenaID = "a-00000000000000000000000000000002"
+	testHostID  = "h-00000000000000000000000000000001"
 )
+
+// provisionHost writes the host identity record workspace setup writes, into
+// the host home under the home cleanTestHome redirected: the record a flow
+// runner reads the host half of its arena from.
+func provisionHost(t *testing.T, content string) {
+	t.Helper()
+	hostHome, ok := hostscope.HostHome()
+	if !ok {
+		t.Fatal("hostscope.HostHome: no host home under the redirected home")
+	}
+	writeFile(t, hostHome, "identity.json", content)
+}
+
+// provisionedHost is the record of the machine the test arenas are on.
+const provisionedHost = `{"kind":"host","id":"` + testHostID + `","label":"test"}`
 
 // TestAcquireVerifyLock_NamesThisCheckoutsArena: the record a refused party
 // reads names the arena this checkout is, so a runner of the same arena can
@@ -183,6 +199,7 @@ const (
 // re-entered on.
 func TestAcquireVerifyLock_NamesThisCheckoutsArena(t *testing.T) {
 	cleanTestHome(t)
+	provisionHost(t, provisionedHost)
 	root := arenaRoot(t, testArenaID)
 
 	unlock, err := acquireVerifyLock(root, 0)
@@ -192,10 +209,7 @@ func TestAcquireVerifyLock_NamesThisCheckoutsArena(t *testing.T) {
 	defer unlock()
 
 	got, ok := hostscope.Holder()
-	want, aerr := hostscope.ArenaAt(root)
-	if aerr != nil {
-		t.Fatal(aerr)
-	}
+	want := hostscope.ArenaIdentity{Host: testHostID, Id: testArenaID}
 	if !ok || got != want {
 		t.Errorf("the exclusion names %v (%v), want this checkout's arena %v", got, ok, want)
 	}
@@ -206,6 +220,7 @@ func TestAcquireVerifyLock_NamesThisCheckoutsArena(t *testing.T) {
 // failure) once its bound elapses.
 func TestAcquireVerifyLock_TimesOutWhenAPeerHoldsIt(t *testing.T) {
 	cleanTestHome(t)
+	provisionHost(t, provisionedHost)
 	unlock, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 0)
 	if err != nil {
 		t.Fatal(err)
@@ -265,16 +280,19 @@ func TestAcquireVerifyLock_UnboundedAcquiresAfterRelease(t *testing.T) {
 // bin/verify, which must be let straight through rather than queue behind its
 // own parent inside the run's allowance. Its release must not hand the machine
 // to a peer while the runner still holds it.
+//
+// The runner's holder is the pair flow.ArenaAt reads from the machine's host
+// record and the checkout's arena record, written here as those records' ids —
+// never as hostscope.ArenaAt's answer, which would derive both sides the same
+// way and pass however verify named itself (#642: the copy derived the host
+// from the host name, and every runner's verify queued behind its parent).
 func TestAcquireVerifyLock_LetsTheHoldingArenaStraightThrough(t *testing.T) {
 	cleanTestHome(t)
+	provisionHost(t, provisionedHost)
 	root := arenaRoot(t, testArenaID)
-	holder, err := hostscope.ArenaAt(root)
-	if err != nil {
-		t.Fatal(err)
-	}
 	// The runner's acquisition: flow takes it as hostscope.Acquire(ctx,
-	// flow.ArenaAt(worktree)), which names the same pair.
-	runner, _, err := hostscope.Acquire(context.Background(), holder)
+	// flow.ArenaAt(hostHome, worktree)).
+	runner, _, err := hostscope.Acquire(context.Background(), hostscope.ArenaIdentity{Host: testHostID, Id: testArenaID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,15 +318,13 @@ func TestAcquireVerifyLock_LetsTheHoldingArenaStraightThrough(t *testing.T) {
 // runner's acquisition never saw.
 func TestAcquireVerifyLock_AHandRunVerifyHoldsOffARunner(t *testing.T) {
 	cleanTestHome(t)
+	provisionHost(t, provisionedHost)
 	hand, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runnerArena, err := hostscope.ArenaAt(arenaRoot(t, testArenaID))
-	if err != nil {
-		hand()
-		t.Fatal(err)
-	}
+	// The runner of another arena on this machine, named as flow names it.
+	runnerArena := hostscope.ArenaIdentity{Host: testHostID, Id: testArenaID}
 
 	queued := make(chan struct{}, 1)
 	ctx := hostscope.OnQueue(context.Background(), func(hostscope.Scope) func() {
@@ -383,6 +399,7 @@ func TestAcquireVerifyLock_CheckoutsWithNoArenaRecordExcludeEachOther(t *testing
 // nothing, so a runner's verify never claims to be waiting.
 func TestAcquireVerifyLock_SaysWhoItWaitsForOnlyWhenItWaits(t *testing.T) {
 	cleanTestHome(t)
+	provisionHost(t, provisionedHost)
 	root := arenaRoot(t, testArenaID)
 
 	var err error
@@ -425,6 +442,59 @@ func TestAcquireVerifyLock_ABadArenaRecordIsRefused(t *testing.T) {
 	}
 	// Not the timeout: bin/verify maps ErrLockTimeout to "retry later", and a
 	// broken record is broken on every retry.
+	if errors.Is(err, ErrLockTimeout) {
+		t.Errorf("err = %v; a malformed record is a refusal, not a wait that timed out", err)
+	}
+	if path, ok := hostscope.Path(); ok && Exists(path) {
+		t.Errorf("a refused acquire still took the exclusion at %s", path)
+	}
+}
+
+// TestAcquireVerifyLock_NoHostRecordQueuesAsAnUnnamedParty: an arena checkout
+// on a machine with no host identity record cannot name its arena, so it takes
+// the exclusion as a party nothing re-enters — granted when it is free, never
+// refused for the missing record, and queued even behind a runner holding it
+// for the same arena id. No runner holds it for such a machine: flow refuses to
+// run without the host record, so the last case costs nothing real.
+func TestAcquireVerifyLock_NoHostRecordQueuesAsAnUnnamedParty(t *testing.T) {
+	cleanTestHome(t)
+	root := arenaRoot(t, testArenaID)
+
+	unlock, err := acquireVerifyLock(root, 5*time.Second)
+	if err != nil {
+		t.Fatalf("a machine with no host record was refused a free exclusion: %v", err)
+	}
+	if got, ok := hostscope.Holder(); ok {
+		t.Errorf("the exclusion names %v, want nobody — this machine has no host identity", got)
+	}
+	unlock()
+
+	runner, _, err := hostscope.Acquire(context.Background(), hostscope.ArenaIdentity{Host: testHostID, Id: testArenaID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner()
+	if _, err := acquireVerifyLock(root, 150*time.Millisecond); !errors.Is(err, ErrLockTimeout) {
+		t.Errorf("err = %v, want ErrLockTimeout — nothing re-enters on an arena with no host", err)
+	}
+}
+
+// TestAcquireVerifyLock_ABadHostRecordIsRefused: a host record that exists and
+// does not name a machine is refused, never read around — reading around it
+// would name the arena differently from its runner, which refuses it too.
+func TestAcquireVerifyLock_ABadHostRecordIsRefused(t *testing.T) {
+	cleanTestHome(t)
+	provisionHost(t, `{"kind":"host","id":"livingroom-ubuntu"}`)
+	root := arenaRoot(t, testArenaID)
+
+	unlock, err := acquireVerifyLock(root, 100*time.Millisecond)
+	if err == nil {
+		unlock()
+		t.Fatal("a malformed host record was read around")
+	}
+	if !strings.Contains(err.Error(), "identity.json") {
+		t.Errorf("the refusal must name the record, got: %v", err)
+	}
 	if errors.Is(err, ErrLockTimeout) {
 		t.Errorf("err = %v; a malformed record is a refusal, not a wait that timed out", err)
 	}

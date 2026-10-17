@@ -437,10 +437,14 @@ func (r *verifyRun) summary(failed string) verifySummary {
 //   - run by hand, verify queues on the same file as every runner and every
 //     other hand-run verify on the machine.
 //
-// The holder is the arena that root's .workspace/arena.json names. A checkout with
-// no arena record (a contributor clone, a CI runner) still takes the
-// exclusion, as a party nothing can re-enter; a record that does not parse is
-// refused rather than read around, as flow refuses it.
+// The holder is the arena a runner names itself by, read from the same two
+// records: the host id in the host home's identity.json and the arena id in
+// root's .workspace/arena.json. A checkout with no arena record, or on a
+// machine with no host record (a contributor clone, a CI runner), still takes
+// the exclusion, as a party nothing can re-enter — no runner ever holds it for
+// such a checkout, because flow refuses to run without both records. A record
+// of either kind that does not parse is refused rather than read around, as
+// flow refuses it.
 //
 // It refuses rather than degrading: a machine with nowhere to hold the
 // exclusion gets an error, never an unserialized run. The kernel releases it if
@@ -448,8 +452,9 @@ func (r *verifyRun) summary(failed string) verifySummary {
 // positive lockTimeout bounds the wait and returns ErrLockTimeout when it
 // elapses. The returned release must be deferred.
 func acquireVerifyLock(root string, lockTimeout time.Duration) (func(), error) {
-	holder, err := hostscope.ArenaAt(root)
-	if err != nil && !errors.Is(err, hostscope.ErrArenaUnknown) {
+	home, _ := hostscope.HostHome()
+	holder, err := hostscope.ArenaAt(home, root)
+	if err != nil && !errors.Is(err, hostscope.ErrArenaUnknown) && !errors.Is(err, hostscope.ErrHostUnknown) {
 		return nil, err
 	}
 	ctx := context.Background()

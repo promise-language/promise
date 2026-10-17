@@ -128,8 +128,13 @@ func TestArenaAt(t *testing.T) {
 		{"a guest id in a host record", `{"kind":"host","id":"` + guest + `"}`},
 		{"an arena id in a host record", `{"kind":"host","id":"` + id + `"}`},
 		{"uppercase hex", `{"kind":"host","id":"h-B2BAC7BA8491E4A608C478BBF2BACF55"}`},
+		{"a digit past f", `{"kind":"host","id":"h-b2bac7ba8491e4a608c478bbf2bacf5g"}`},
+		{"a truncated id", `{"kind":"host","id":"` + host[:len(host)-1] + `"}`},
 		{"an arena kind", `{"kind":"arena","id":"` + id + `"}`},
 		{"no kind", `{"id":"` + host + `"}`},
+		// In a guest the id is the guest's own: a host id there names the
+		// parent, which is not the machine the arena's processes run on.
+		{"a host id in a guest record", `{"kind":"guest","id":"` + host + `","host":{"id":"` + host + `"}}`},
 		{"a guest with no host", `{"kind":"guest","id":"` + guest + `"}`},
 		{"a guest whose host is not a host id", `{"kind":"guest","id":"` + guest + `","host":{"id":"` + guest + `"}}`},
 	} {
@@ -172,6 +177,19 @@ func TestHostHome_IsForgesHostHome(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("HostHome() = %q, want %q", got, want)
+	}
+}
+
+// An account the platform reports no home for has no host home — not one
+// relative to wherever the process runs, which would read a record out of the
+// working directory and name the arena after it.
+func TestHostHome_NoHomeIsNoHostHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Setenv("LocalAppData", "")
+
+	if got, ok := HostHome(); ok || got != "" {
+		t.Errorf("HostHome() = %q, %v with no home; want \"\", false", got, ok)
 	}
 }
 

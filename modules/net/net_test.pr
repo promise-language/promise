@@ -301,7 +301,9 @@ test_listener_accept() `test(exclude: wasm) {
 
 // _closed_port returns a 127.0.0.1 port this process held a listener on a moment
 // ago and has released, so nothing listens there and a connect to it is refused.
-// Every test that needs a refused connection connects here (#631).
+// Every test that waits for 127.0.0.1 to refuse a connection connects here
+// (#631). The fixed 127.0.0.1 ports still named below are only probed or raced
+// against a deadline already past, so no test waits on their answer.
 //
 // A fixed port is not refused on every host. Under WSL2 mirrored networking a
 // SYN to a closed well-known IPv4 loopback port (0, 1, 9) is dropped instead of

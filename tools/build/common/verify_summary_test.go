@@ -154,10 +154,7 @@ func TestWriteReadGateValues(t *testing.T) {
 // would be worse than none — ReadGateValues would have to either trust it or
 // explain itself, and the commit gate would be back to guessing.
 func TestWriteGateValues_NotAGitRepo(t *testing.T) {
-	// Clear TMPDIR for the same reason as TestWorktreeHash_NotAGitRepo: under
-	// bin/verify it points inside the real work tree, where git ls-files works.
-	t.Setenv("TMPDIR", "")
-	root := t.TempDir()
+	root := nonRepoTempDir(t)
 	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
 
 	gv := &GateValues{Platform: "linux-amd64", Values: map[string]float64{"host_test_count": 1}}

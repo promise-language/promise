@@ -71,14 +71,18 @@ func requireFlock(t *testing.T) {
 	}
 }
 
+// testHost is the host the test arenas are on, in the form flow's runner names
+// it: the id the host home's identity record carries.
+const testHost HostId = "h-00000000000000000000000000000001"
+
 func testArena() ArenaIdentity {
-	return ArenaIdentity{Host: "build01", Id: "a-00000000000000000000000000000001"}
+	return ArenaIdentity{Host: testHost, Id: "a-00000000000000000000000000000001"}
 }
 
 // peerArena is a SECOND arena on the same host — another checkout on the same
 // machine, which is the party the exclusion exists to keep out.
 func peerArena() ArenaIdentity {
-	return ArenaIdentity{Host: "build01", Id: "a-00000000000000000000000000000002"}
+	return ArenaIdentity{Host: testHost, Id: "a-00000000000000000000000000000002"}
 }
 
 // stillHeld reports whether a peer is refused within a short bound — the
@@ -144,6 +148,88 @@ func TestAcquire_TheSameArenaIsAlreadyInsideIt(t *testing.T) {
 
 	if !stillHeld(t) {
 		t.Fatal("a nested release freed the exclusion its outer acquire still holds")
+	}
+}
+
+// THE RUNNER'S RECORD, NAMED FROM THE SAME TWO RECORDS (#642). A flow runner
+// holds the exclusion as flow.ArenaAt(hostHome, checkout) and writes that pair
+// into the exclusion's record; the verify it spawns names itself ArenaAt(hostHome,
+// checkout) here, and must walk straight in. The runner's record is written as
+// literal bytes built from the fixtures — never from this package's ArenaAt — so
+// a copy that derived either half its own way (the host name, as #642's did)
+// reads a stranger in its own parent's record and queues behind it.
+func TestAcquire_ReentersTheHolderARunnerNamesFromTheSameRecords(t *testing.T) {
+	requireFlock(t)
+	useTempDir(t)
+	const (
+		host  = "h-b2bac7ba8491e4a608c478bbf2bacf55"
+		arena = "a-04776738f44de96f3e125088932ea821"
+	)
+	hostHome, root := t.TempDir(), t.TempDir()
+	writeHostRecord(t, hostHome, `{"kind":"host","id":"`+host+`","label":"livingroom_ubuntu"}`)
+	writeArenaRecord(t, root, `{"id":"`+arena+`","label":"promise_3"}`)
+
+	// The runner: the lock on a handle of its own, and its name as flow renders it.
+	path, _ := Path()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.Close()
+	if granted, err := tryLockExclusive(runner); err != nil || !granted {
+		t.Fatalf("the runner's tryLockExclusive on a free exclusion = (%v, %v), want granted", granted, err)
+	}
+	defer unlock(runner)
+	runnerRecord := `{"arena":{"host":"` + host + `","id":"` + arena + `"},"pid":4242,"since":"2026-10-16T16:23:30Z"}`
+	if _, err := runner.WriteAt([]byte(runnerRecord), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// acquire takes the exclusion as the checkout's own arena, and reports
+	// whether it queued for it.
+	acquire := func(bound time.Duration) (release func(), waited time.Duration, queued bool, err error) {
+		t.Helper()
+		self, err := ArenaAt(hostHome, root)
+		if err != nil {
+			t.Fatalf("ArenaAt: %v", err)
+		}
+		ctx := OnQueue(context.Background(), func(Scope) func() {
+			queued = true
+			return nil
+		})
+		ctx, cancel := context.WithTimeout(ctx, bound)
+		defer cancel()
+		release, waited, err = Acquire(ctx, self)
+		return release, waited, queued, err
+	}
+
+	// Bounded, because the regression is a deadlock: without re-entry this
+	// queues behind the runner and never returns.
+	nested, waited, queued, err := acquire(5 * time.Second)
+	if err != nil {
+		t.Fatalf("the runner's own arena was not let in: %v — it queued behind its own parent", err)
+	}
+	if waited != 0 || queued {
+		t.Errorf("waited = %s, queued = %v entering the exclusion the runner's arena holds; want neither", waited, queued)
+	}
+	nested()
+	if !stillHeld(t) {
+		t.Fatal("the nested release freed the exclusion the runner still holds")
+	}
+
+	// The host half is compared, not only the arena id: the same checkout on a
+	// machine whose record names another host is not the runner's arena.
+	writeHostRecord(t, hostHome, `{"kind":"host","id":"h-ffffffffffffffffffffffffffffffff"}`)
+	release, _, queued, err := acquire(200 * time.Millisecond)
+	if err == nil {
+		release()
+		t.Fatal("an arena on another host walked into the runner's exclusion")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || !queued {
+		t.Errorf("err = %v, queued = %v; want it to queue behind the runner until its deadline", err, queued)
 	}
 }
 
@@ -573,13 +659,13 @@ func TestRecord_IsFlowsShape(t *testing.T) {
 	if err := json.Unmarshal(b, &rec); err != nil {
 		t.Fatalf("the record does not parse as flow's: %v\n%s", err, b)
 	}
-	if rec.Arena.Host != "build01" || rec.Arena.Id != string(testArena().Id) || rec.PID != os.Getpid() || rec.Since.IsZero() {
+	if rec.Arena.Host != "h-00000000000000000000000000000001" || rec.Arena.Id != string(testArena().Id) || rec.PID != os.Getpid() || rec.Since.IsZero() {
 		t.Errorf("record = %+v, want arena %v, this pid and an instant", rec, testArena())
 	}
 	release()
 
 	// What flow's runner writes, byte for byte as flow renders it.
-	flowWritten := []byte(`{"arena":{"host":"build01","id":"a-00000000000000000000000000000001"},"pid":4242,"since":"2026-10-02T12:00:00Z"}`)
+	flowWritten := []byte(`{"arena":{"host":"h-00000000000000000000000000000001","id":"a-00000000000000000000000000000001"},"pid":4242,"since":"2026-10-02T12:00:00Z"}`)
 	if got, ok := parseHolder(flowWritten); !ok || got != testArena() {
 		t.Errorf("parseHolder(flow's record) = %v, %v; want %v", got, ok, testArena())
 	}

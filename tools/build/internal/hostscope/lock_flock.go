@@ -11,13 +11,14 @@ import (
 )
 
 // THE KERNEL IS WHAT RELEASES IT. That is the reason this is flock and not a
-// lockfile with a timestamp: docs/gates-and-commands.md § Two scopes requires
-// that a process which dies releases the exclusion, and a holder that has
-// crashed, been killed, or gone quiet is exactly the holder that cannot keep a
-// promise to release. An advisory lock on an open descriptor is released when
-// the descriptor closes, which the kernel does for every process it reaps — so
-// the release is an authority independent of the holder, which is what the rule
-// asks for and what no amount of care inside the holder could provide.
+// lockfile with a timestamp: docs/gates-and-commands.md § Two scopes for two
+// different reasons requires that a process which dies releases the exclusion,
+// and a holder that has crashed, been killed, or gone quiet is exactly the
+// holder that cannot keep a promise to release. An advisory lock on an open
+// descriptor is released when the descriptor closes, which the kernel does for
+// every process it reaps — so the release is an authority independent of the
+// holder, which is what the rule asks for and what no amount of care inside the
+// holder could provide.
 //
 // It is also why there is no TTL and no stale-breaking. A lockfile mechanism
 // has to guess when a holder has died, and every guess is wrong in one of two

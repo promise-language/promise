@@ -22,10 +22,10 @@ import (
 // IT REFUSES RATHER THAN REPORTING A GRANT, which is the tempting reading and
 // the expensive one. A granted lock said by something that locked nothing means
 // every heavy gate on the machine runs beside every other, and
-// docs/gates-and-commands.md § Two scopes forbids exactly that — a party that
-// cannot take the exclusion does not run the measurement, it refuses and names
-// what it could not take. A refusal costs those platforms the gates a project
-// declared host-scoped and nothing else.
+// docs/gates-and-commands.md § Two scopes for two different reasons forbids
+// exactly that — a party that cannot take the exclusion does not run the
+// measurement, it refuses and names what it could not take. A refusal costs
+// those platforms the gates a project declared host-scoped and nothing else.
 //
 // tryLockExclusive is the one that has to refuse rather than report "not
 // granted": a false with no error reads as "someone else holds it", which would

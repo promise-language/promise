@@ -2,8 +2,9 @@ package hostscope
 
 // The arena identity the exclusion is held by and re-entered on, copied from
 // flow's identity.go on the terms the package comment states. A runner names
-// its holder flow.ArenaAt(checkout); a nested verify must compute the identical
-// pair from the same checkout, or it is a peer queueing behind its own parent.
+// its holder flow.ArenaAt(hostHome, checkout); a nested verify must compute the
+// identical pair from the same two records, or it is a peer queueing behind its
+// own parent.
 
 import (
 	"encoding/json"
@@ -14,16 +15,22 @@ import (
 	"strings"
 )
 
-// HostId is the machine an arena lives on: the host's SHORT NAME — its first
-// dotted segment — normalized.
+// HostId is the machine an arena lives on: the id the host home's identity
+// record carries, as provisioning drew it (org identity.md § Where records are
+// kept). It is READ and NEVER DERIVED — see HostIdAt.
 //
-// It MUST be unique across every host the orchestrator can see. A duplicate is
-// not a cosmetic collision: arenas are addressed by (HostId, ArenaId), so two
-// machines sharing an id merge into one identity and the one-to-one claim
-// invariant stops holding. Uniqueness cannot be inherited from the FQDN,
-// because the short form drops the domain — build01.us-east and build01.eu-west
-// both normalize to build01 — so a fleet spanning domains must assign unique
-// short names rather than relying on the domain to separate them.
+// On a host it is `h-` and 32 lowercase hexadecimal digits. IN A GUEST IT IS
+// THE GUEST'S OWN `g-` ID, never its parent host's: the machine an arena lives
+// on is the one whose processes are visible from it, and from inside a guest
+// that is the guest. A holder's process is confirmed alive there and nowhere
+// else, and the host-scope exclusion's lock is in the guest's own filesystem,
+// so two guests under one HostId would be one name for two machines neither of
+// which can see the other.
+//
+// Random, so it is unique without anyone assigning it. The derivation it
+// replaces — the host name's first dotted segment — collided across domains
+// (build01.us-east and build01.eu-west were one host) and is one the corpus
+// refuses by name.
 type HostId string
 
 // ArenaId is an arena's id as provisioning drew it: `a-` and 32 lowercase
@@ -78,62 +85,107 @@ const ArenaRecordPath = ".workspace/arena.json"
 // record reports the arena as unknown and never creates one for it.
 var ErrArenaUnknown = errors.New("no " + ArenaRecordPath + ": this checkout has no arena identity; run workspace setup")
 
-// ArenaAt names the arena a checkout at root is: the machine's derived HostId
-// and the ArenaId READ from the checkout's arena record. Nothing about the id is
-// derived — not from the path, not from the host — because a derived id is
-// copied by a cloned image and discloses what it was derived from (org
-// identity.md § Ids).
+// ErrHostUnknown is a machine whose host home holds no identity record, or an
+// account the platform reports no home for: the host is unknown, and nothing
+// that needs the arena's identity can proceed. The recovery is provisioning's,
+// for the reason ErrArenaUnknown's is — only provisioning creates a host's id,
+// and a person confirms its label as it does.
+var ErrHostUnknown = errors.New("no " + hostRecordFile + " in the host home: this machine has no host identity; run workspace setup")
+
+// ArenaAt names the arena a checkout at root is: the HostId READ from the host
+// home's record (HostIdAt) and the ArenaId READ from the checkout's arena record
+// (ArenaIdAt). Nothing about either is derived — not from the path, not from the
+// host name — because a derived id is copied by a cloned image and discloses
+// what it was derived from (org identity.md § Ids).
+//
+// Either record missing is that half unknown — ErrArenaUnknown, ErrHostUnknown —
+// and either one malformed is refused naming its file. A pair missing a half
+// names no arena, so every failure returns the empty pair.
+//
+// It is here rather than inside an orchestrator because two parties need the
+// answer and must not disagree about it. An orchestrator reads its own arena
+// to stamp a lease; a caller holding an ItemInfo asks whether the arena named
+// on it is THIS one. A second reader would be a second answer.
+//
+// Both locations are taken as they stand. root is DeriveArenaRoot, or whatever
+// the orchestrator was configured with; nothing here reads the process working
+// directory, for the reason DeriveArenaRoot gives at length. hostHome is the
+// platform's (forge's logging.HostHome), "" where the account has none; it is a
+// parameter so a test can hand it a record without touching the real one.
+func ArenaAt(hostHome, root string) (ArenaIdentity, error) {
+	id, err := ArenaIdAt(root)
+	if err != nil {
+		return ArenaIdentity{}, err
+	}
+	host, err := HostIdAt(hostHome)
+	if err != nil {
+		return ArenaIdentity{}, err
+	}
+	return ArenaIdentity{Host: host, Id: id}, nil
+}
+
+// ArenaIdAt reads the ArenaId the checkout at root carries in its arena record,
+// and nothing else — the half of ArenaAt a party that needs only the id reads,
+// so that a machine with no host record does not cost it an arena it has.
 //
 // A missing record is ErrArenaUnknown. A record that exists and does not parse,
 // or whose id is not an arena id, is refused naming the file: it is never
 // replaced and never read around, because either would give the arena a second
 // identity. The record's label is for display and is not read.
-func ArenaAt(root string) (ArenaIdentity, error) {
+func ArenaIdAt(root string) (ArenaId, error) {
 	path := filepath.Join(root, filepath.FromSlash(ArenaRecordPath))
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return ArenaIdentity{}, ErrArenaUnknown
+		return "", ErrArenaUnknown
 	}
 	if err != nil {
-		return ArenaIdentity{}, fmt.Errorf("read the arena record %s: %w", path, err)
+		return "", fmt.Errorf("read the arena record %s: %w", path, err)
 	}
 	var rec struct {
 		Id ArenaId `json:"id"`
 	}
 	if err := json.Unmarshal(b, &rec); err != nil {
-		return ArenaIdentity{}, fmt.Errorf("the arena record %s does not parse, and is refused rather than replaced: %w", path, err)
+		return "", fmt.Errorf("the arena record %s does not parse, and is refused rather than replaced: %w", path, err)
 	}
 	if !rec.Id.Valid() {
-		return ArenaIdentity{}, fmt.Errorf(
+		return "", fmt.Errorf(
 			"the arena record %s names %q, which is not an arena id (a- and 32 lowercase hexadecimal digits), and is refused rather than replaced",
 			path, string(rec.Id))
 	}
-	return ArenaIdentity{Host: DeriveHostId(), Id: rec.Id}, nil
+	return rec.Id, nil
 }
 
-// NormalizeHostId reduces a machine name to its HostId: the first dotted
-// segment, lowercased.
+// HostIdAt reads the HostId from the identity record in hostHome: the host's
+// `h-` id, or in a guest the guest's own `g-` id (see HostId).
 //
-// The normalization is a requirement rather than a courtesy — these are
-// compared by string equality across systems, so two spellings of one host are
-// two hosts.
-func NormalizeHostId(name string) HostId {
-	name = strings.TrimSpace(name)
-	if i := strings.IndexByte(name, '.'); i >= 0 {
-		name = name[:i]
-	}
-	return HostId(strings.ToLower(name))
-}
-
-// DeriveHostId returns this machine's HostId, normalized from its own name.
+// THE RECORD IS READ BY FORGE'S READER (logging.ReadHostRecord), the one every
+// log line on the machine is placed by, so this and the logs cannot disagree
+// about which records are machines. What is added here is only what that
+// reader folds together: a record that is ABSENT is ErrHostUnknown, and one
+// that is THERE and not a host's or a guest's is refused naming the file.
+// Reporting the second as unknown would invite creating a second identity.
 //
-// A machine that cannot name itself yields the empty HostId rather than a
-// guess: an invented name would be a second machine's identity waiting to
-// collide.
-func DeriveHostId() HostId {
-	name, err := os.Hostname()
-	if err != nil {
-		return ""
+// An empty hostHome is an account the platform reports no home for, which has
+// no host home and treats every record as missing (org identity.md § Where
+// records are kept).
+//
+// It reads and nothing else. It never creates, repairs or replaces the record —
+// only provisioning writes a host's, with a person confirming its label, and
+// only the governor that creates a guest writes the guest's — and it
+// never falls back to the host name or anything else at hand. The label is for
+// display and is not read.
+func HostIdAt(hostHome string) (HostId, error) {
+	if hostHome == "" {
+		return "", ErrHostUnknown
 	}
-	return NormalizeHostId(name)
+	if rec, ok := readHostRecord(hostHome); ok {
+		return HostId(rec.ID), nil
+	}
+	path := filepath.Join(hostHome, hostRecordFile)
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("%w (looked for %s)", ErrHostUnknown, path)
+	}
+	return "", fmt.Errorf(
+		"the host record %s is not a readable host or guest record (kind host with an h- id, or kind guest with a g- id "+
+			"and its host's h- id, each 32 lowercase hexadecimal digits), and is refused rather than replaced", path)
 }

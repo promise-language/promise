@@ -40,6 +40,32 @@ func initGitRepo(t *testing.T, dir string) string {
 	return string(out[:len(out)-1]) // strip trailing newline
 }
 
+// nonRepoTempDir is an empty directory git does not see as part of any
+// repository — the subject of every "outside a git checkout" test.
+//
+// It cannot be had by choosing where the directory goes. The temp root is
+// inside the checkout on purpose: SetupLocalCache pins TMPDIR/TMP/TEMP under
+// .promise-home/, sessions export GOTMPDIR under .home/, and t.TempDir()
+// honours GOTMPDIR first — so a fresh temp dir sits inside the real work tree,
+// and git, walking up from it, finds the repository (#603). Steering it out by
+// clearing a variable both misses the next variable and lands in the system
+// temp directory, which docs/build-tools.md § Test Sandboxing forbids.
+//
+// So the directory stays where it is, and git's upward search is stopped at its
+// parent with GIT_CEILING_DIRECTORIES. It fails closed: if git still resolves a
+// repository there — an inherited GIT_DIR overrides the ceiling — the test stops
+// naming that, rather than asserting about a directory that is not what it
+// claims. t.Setenv rules out t.Parallel for the caller.
+func nonRepoTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	if out, err := exec.Command("git", "-C", dir, "rev-parse", "--git-dir").CombinedOutput(); err == nil {
+		t.Fatalf("precondition: %s still resolves to a git repository (%s) under GIT_CEILING_DIRECTORIES", dir, strings.TrimSpace(string(out)))
+	}
+	return dir
+}
+
 // TestGitSHAFull: the function returns HEAD's full 40-char hex SHA in a git repo
 // (matching `git rev-parse HEAD`), and the SHA must satisfy isFullGitSHA so the
 // install gate accepts it as valid provenance extracted from
@@ -66,12 +92,7 @@ func TestGitSHAFull(t *testing.T) {
 // built without git provenance as "no provenance" rather than feeding a sentinel
 // to git cat-file (T0854).
 func TestGitSHAFull_NotARepo(t *testing.T) {
-	// Clear TMPDIR so t.TempDir() uses /tmp rather than .promise-home/tmp.
-	// When bin/verify sets TMPDIR to the repo-internal .promise-home/tmp,
-	// t.TempDir() lands inside the repo and GitSHAFull would find the repo's
-	// .git by walking up the directory tree.
-	t.Setenv("TMPDIR", "")
-	dir := t.TempDir() // empty, no `git init`
+	dir := nonRepoTempDir(t)
 	if got := GitSHAFull(dir); got != "" {
 		t.Errorf("GitSHAFull(non-repo) = %q, want \"\"", got)
 	}
@@ -98,11 +119,7 @@ func TestGitSHA(t *testing.T) {
 }
 
 func TestGitSHA_NotARepo(t *testing.T) {
-	// Clear TMPDIR so t.TempDir() uses /tmp rather than .promise-home/tmp.
-	// Same issue as TestGitSHAFull_NotARepo — when TMPDIR points inside the
-	// repo, GitSHA finds the repo's .git by walking up.
-	t.Setenv("TMPDIR", "")
-	if got := GitSHA(t.TempDir()); got != "unknown" {
+	if got := GitSHA(nonRepoTempDir(t)); got != "unknown" {
 		t.Errorf("GitSHA(non-repo) = %q, want \"unknown\"", got)
 	}
 }

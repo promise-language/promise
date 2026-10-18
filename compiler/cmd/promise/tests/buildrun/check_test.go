@@ -147,6 +147,44 @@ func TestCheckLinkImportIsNotAWarning(t *testing.T) {
 	}
 }
 
+// An import referenced only inside a `target(cond) declaration is used on every
+// target: "unused" is decided by the file's source, not by what the target being
+// checked compiles (#582, module-system.md#import-scope rule 4). The declaration
+// is compiled for windows and filtered out for the host and wasm32-wasi. An
+// import the file references nowhere still warns.
+func TestCheckImportReferencedOnlyInTargetFilteredDecl(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		body string
+		want string // the result line, on every target
+	}{
+		{"referenced", "  return path.join(p, \"x\");\n", "ok repro.pr"},
+		{"unreferenced", "  return p;\n", "warn repro.pr (1 warning)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := clitest.TempDir(t)
+			writeFiles(t, dir, map[string]string{
+				"repro.pr": "use path;\n\nonly_elsewhere(string p) string `target(windows) {\n" + tt.body + "}\n",
+			})
+			for _, args := range [][]string{
+				{"repro.pr"},
+				{"-target", "x86_64-pc-windows-msvc", "repro.pr"},
+				{"-target", "wasm32-wasi", "repro.pr"},
+			} {
+				stdout, stderr, ok := runCheck(t, dir, args...)
+				if !ok {
+					t.Fatalf("check %v failed\nstdout: %s\nstderr: %s", args, stdout, stderr)
+				}
+				if got := strings.TrimSpace(stdout); got != tt.want {
+					t.Errorf("check %v: result line = %q, want %q\nstderr: %s", args, got, tt.want, stderr)
+				}
+			}
+		})
+	}
+}
+
 func TestCheckErrorsExitNonZeroAndCount(t *testing.T) {
 	t.Parallel()
 	dir := clitest.TempDir(t)

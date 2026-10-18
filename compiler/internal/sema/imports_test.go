@@ -80,6 +80,13 @@ func testModuleScopes(t *testing.T) map[string]*types.Scope {
 // once on the merged file (as injectStdImport does), and runs the checker.
 func checkUnit(t *testing.T, files []unitFile, mods map[string]*types.Scope) []error {
 	t.Helper()
+	return checkUnitForTarget(t, files, mods, TargetInfo{})
+}
+
+// checkUnitForTarget is checkUnit with `target(cond) filtering against target;
+// the zero TargetInfo filters nothing.
+func checkUnitForTarget(t *testing.T, files []unitFile, mods map[string]*types.Scope, target TargetInfo) []error {
+	t.Helper()
 	var merged *ast.File
 	for _, f := range files {
 		file := parseNamed(t, f.name, f.src)
@@ -92,7 +99,7 @@ func checkUnit(t *testing.T, files []unitFile, mods map[string]*types.Scope) []e
 	}
 	// injectStdImport: prepend a Pos-less `use std as _;` (module-wide).
 	merged.Uses = append([]*ast.UseDecl{{Alias: "_", CatalogName: "std"}}, merged.Uses...)
-	_, errs := CheckWithModules(merged, mods)
+	_, errs := CheckWithTarget(merged, mods, target)
 	return errs
 }
 
@@ -225,6 +232,120 @@ func TestImportScope_UnusedAnonymousImportWarns(t *testing.T) {
 		{"a.pr", "use path as _;\nmain() { print_line(join(\"/a\", \"b\")); }\n"},
 	}, testModuleScopes(t))
 	expectNoErrorContaining(t, errs2, "unused import")
+}
+
+var (
+	linuxTarget   = TargetInfo{OS: "linux", Arch: "x86_64"}
+	windowsTarget = TargetInfo{OS: "windows", Arch: "x86_64"}
+)
+
+// filteredDeclModuleScopes is testModuleScopes plus a module exporting a type and
+// an enum (for type and pattern positions) and one exporting a function named
+// like a platform identifier (for the `target(windows) annotation itself).
+func filteredDeclModuleScopes(t *testing.T) map[string]*types.Scope {
+	t.Helper()
+	mods := testModuleScopes(t)
+	mods["shapes"] = buildModuleFromSource(t, "shapes",
+		"type Spot `public { int x; }\nenum Heading `public { North, South }\n")
+	mods["plat"] = buildModuleFromSource(t, "plat", "windows() int `public { return 1; }\n")
+	return mods
+}
+
+// module-system.md#import-scope rule 4 (#582): "unused" is decided by the file's
+// source, so a reference inside a declaration the target filters out still
+// counts. Each case is checked on the target that filters the declaration; where
+// the checked path also sees the reference, the same source is checked with no
+// filtering too, which keeps every case's source honest Promise.
+func TestImportScope_ReferenceInTargetFilteredDeclCounts(t *testing.T) {
+	mods := filteredDeclModuleScopes(t)
+	for _, tt := range []struct {
+		name     string
+		src      string // a.pr, whose import is under test
+		sibling  string // b.pr, when a.pr needs a module-wide declaration; "" for none
+		filtered TargetInfo
+		// alsoUnfiltered checks the source with every declaration compiled.
+		// False where the checked path has its own gap for that position
+		// (#621: glob type names, #623: qualified patterns).
+		alsoUnfiltered bool
+	}{
+		{"named call", "use path;\nonly_windows(string p) string `target(windows) { return path.join(p, \"x\"); }\n",
+			"", linuxTarget, true},
+		{"named call, negated condition", "use path;\nnot_windows(string p) string `target(!windows) { return path.join(p, \"x\"); }\n",
+			"", windowsTarget, true},
+		{"qualified parameter type", "use shapes;\nonly_windows(shapes.Spot p) int `target(windows) { return p.x; }\n",
+			"", linuxTarget, true},
+		{"filtered type: field type and method body",
+			"use shapes;\nuse path;\ntype Holder `target(windows) {\n  shapes.Spot at;\n  name(this, string p) string { return path.join(p, \"x\"); }\n}\n",
+			"", linuxTarget, true},
+		{"string interpolation", "use path;\nonly_windows(string p) string `target(windows) { return \"at {path.join(p, \"x\")}\"; }\n",
+			"", linuxTarget, true},
+		{"lambda body", "use path;\nonly_windows(string p) string `target(windows) {\n  f := |string q| -> path.join(q, \"x\");\n  return f(p);\n}\n",
+			"", linuxTarget, true},
+		{"glob call", "use path as _;\nonly_windows(string p) string `target(windows) { return join(p, \"x\"); }\n",
+			"", linuxTarget, true},
+		{"glob call, negated condition", "use path as _;\nnot_windows(string p) string `target(!windows) { return join(p, \"x\"); }\n",
+			"", windowsTarget, true},
+		{"qualified enum pattern",
+			"use shapes;\nonly_windows() int `target(windows) { return match some_dir() { shapes.Heading.North => 1, _ => 2 }; }\n",
+			"use shapes;\nsome_dir() shapes.Heading { return shapes.Heading.North; }\n",
+			linuxTarget, false},
+		{"glob type name", "use shapes as _;\nonly_windows(Spot p) int `target(windows) { return p.x; }\n",
+			"", linuxTarget, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			files := []unitFile{{"a.pr", tt.src}}
+			if tt.sibling != "" {
+				files = append(files, unitFile{"b.pr", tt.sibling})
+			}
+			expectNoErrors(t, checkUnitForTarget(t, files, mods, tt.filtered))
+			if tt.alsoUnfiltered {
+				expectNoErrors(t, checkUnit(t, files, mods))
+			}
+		})
+	}
+}
+
+// Rule 4 keeps firing beside a filtered declaration: an import nothing in the
+// file references warns whether or not the declaration is filtered out.
+func TestImportScope_UnreferencedImportStillWarnsBesideFilteredDecl(t *testing.T) {
+	mods := filteredDeclModuleScopes(t)
+	for _, tt := range []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"named import", "use path;\nonly_windows(int n) int `target(windows) { return n + 1; }\n",
+			"unused import 'path'"},
+		{"glob import, only non-injected names", "use path as _;\nonly_windows(int count) int `target(windows) { return count + 1; }\n",
+			"no name injected by this anonymous import"},
+		// The `target(windows) condition names a platform, not plat's windows().
+		{"glob import, name only in the annotation", "use plat as _;\nonly_windows() int `target(windows) { return 2; }\n",
+			"no name injected by this anonymous import"},
+	} {
+		for _, target := range []struct {
+			name string
+			info TargetInfo
+		}{{"linux", linuxTarget}, {"windows", windowsTarget}} {
+			t.Run(tt.name+"/"+target.name, func(t *testing.T) {
+				errs := checkUnitForTarget(t, []unitFile{{"a.pr", tt.src}}, mods, target.info)
+				expectError(t, errs, tt.want)
+				if semaHasFatalErr(errs) {
+					t.Fatalf("an unused import must warn, not fail: %v", errs)
+				}
+			})
+		}
+	}
+}
+
+// The scan is per file: b.pr's filtered reference does not make a.pr's own
+// unreferenced `use path;` used.
+func TestImportScope_FilteredDeclReferenceIsFileLocal(t *testing.T) {
+	errs := checkUnitForTarget(t, []unitFile{
+		{"a.pr", "use path;\nmain() { print_line(\"hi\"); }\n"},
+		{"b.pr", "use path;\nonly_windows(string p) string `target(windows) { return path.join(p, \"x\"); }\n"},
+	}, testModuleScopes(t), linuxTarget)
+	expectError(t, errs, "a.pr:1:0: warning: unused import 'path'")
+	expectNoErrorContaining(t, errs, "b.pr:1:0: warning: unused import")
 }
 
 // module-system.md#import-scope rule 4: `link says the import is kept for what it links,

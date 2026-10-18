@@ -250,15 +250,32 @@ func runGlueSmokeDriver(t *testing.T, nodePath string, exitCode byte, driver str
 // that fails to load in every browser.
 func TestGenerateJSGlueSyntaxValid(t *testing.T) {
 	nodePath := requireNode(t)
-	dir := t.TempDir()
 	modules := []*Module{{Name: "test", ImportModule: "promise_env"}}
-	glueFile := filepath.Join(dir, "glue.mjs")
-	if err := os.WriteFile(glueFile, []byte(GenerateJSGlue(modules)), 0644); err != nil {
+	nodeCheckGlue(t, nodePath, GenerateJSGlue(modules))
+}
+
+// TestGenerateJSGlueOverloadSyntaxValid parses the glue generated for WebIDL
+// overload sets (#263), including anonymous special operations: their imports
+// must name a member, since `_refLoad(handle).(...)` would make the whole file
+// fail to load. (Duplicate object keys are legal JS, so key uniqueness is
+// asserted on the text in overload_test.go, not here.)
+func TestGenerateJSGlueOverloadSyntaxValid(t *testing.T) {
+	nodePath := requireNode(t)
+	for _, src := range []string{overloadFixture, anonymousGetterFixture} {
+		nodeCheckGlue(t, nodePath, GenerateJSGlue(overloadIR(t, src)))
+	}
+}
+
+// nodeCheckGlue fails the test unless `node --check` parses glue.
+func nodeCheckGlue(t *testing.T, nodePath, glue string) {
+	t.Helper()
+	glueFile := filepath.Join(t.TempDir(), "glue.mjs")
+	if err := os.WriteFile(glueFile, []byte(glue), 0644); err != nil {
 		t.Fatalf("write glue: %v", err)
 	}
 	out, err := exec.Command(nodePath, "--check", glueFile).CombinedOutput()
 	if err != nil {
-		t.Fatalf("node --check reported invalid JS: %v\n%s", err, out)
+		t.Fatalf("node --check reported invalid JS: %v\n%s\n\nglue:\n%s", err, out, glue)
 	}
 }
 

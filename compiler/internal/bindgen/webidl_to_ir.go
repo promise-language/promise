@@ -1,6 +1,7 @@
 package bindgen
 
 import (
+	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -136,6 +137,10 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 		Doc:    iface.Doc,
 	}
 
+	// How many operations of each Promise name this interface has emitted so
+	// far, in merged member order — see numberOverload.
+	overloads := make(map[string]int)
+
 	for _, member := range iface.Members {
 		switch m := member.(type) {
 		case *webidl.Attribute:
@@ -172,14 +177,17 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 			}
 
 		case *webidl.Operation:
-			if m.Special == "getter" || m.Special == "setter" || m.Special == "deleter" {
-				// Special operations — emit with special naming
-				f := c.convertOperation(iface.Name, m)
-				res.Methods = append(res.Methods, f)
-			} else if m.Name != "" {
-				f := c.convertOperation(iface.Name, m)
-				res.Methods = append(res.Methods, f)
+			// Named operations, and the anonymous special operations (emitted
+			// under their special keyword). Anything else without a name — an
+			// anonymous stringifier — has no member to emit.
+			special := m.Special == "getter" || m.Special == "setter" || m.Special == "deleter"
+			if m.Name == "" && !special {
+				continue
 			}
+			f := c.convertOperation(iface.Name, m)
+			overloads[f.Name]++
+			numberOverload(&f, overloads[f.Name])
+			res.Methods = append(res.Methods, f)
 
 		case *webidl.Constructor:
 			f := c.convertConstructor(iface.Name, m)
@@ -201,17 +209,38 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 	return res
 }
 
+// numberOverload names the k-th operation of an interface's overload set (k is
+// 1-based, in merged declaration order). Promise has no overloading
+// (docs/language-design.md, "No Overloading"), so every overload after the first
+// becomes a member of its own: `<name>_<k>`, imported as `<Interface>.<member>.<k>`.
+// The import keeps the IDL member as its second component, so the JS glue calls
+// that same member with this overload's own arguments and the host's overload
+// resolution chooses among them (docs/wasm-bindings.md, "Overloaded Operations").
+// The extern and link names derive from f.Name, so they follow automatically.
+func numberOverload(f *Func, k int) {
+	if k < 2 {
+		return
+	}
+	f.Name = fmt.Sprintf("%s_%d", f.Name, k)
+	f.ImportName = fmt.Sprintf("%s.%d", f.ImportName, k)
+}
+
 func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operation) Func {
 	name := idlToSnake(op.Name)
+	// The import names the JS member the glue calls. An anonymous special
+	// operation has no identifier, so it is named by its special keyword on
+	// both sides — never by an empty member, which would emit `obj.(...)`.
+	member := op.Name
 	if op.Special != "" && op.Name == "" {
 		name = op.Special
+		member = op.Special
 	}
 
 	f := Func{
 		Name:       name,
 		Kind:       FuncMethod,
 		OwnerType:  ifaceName,
-		ImportName: ifaceName + "." + op.Name,
+		ImportName: ifaceName + "." + member,
 		Doc:        op.Doc,
 	}
 	if op.Static {

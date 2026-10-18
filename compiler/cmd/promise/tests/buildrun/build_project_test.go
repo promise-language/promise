@@ -902,6 +902,79 @@ interface Document {
 	}
 }
 
+// TestBindWebIdlOverloadsCompileClean is the end-to-end acceptance for #263:
+// `promise bind webidl` on an IDL with overloaded operations — an equal-arity
+// pair differing only in type (the item's setAttribute + TrustedHTML case), an
+// arity pair, and a static pair — plus a program calling every overload, must
+// compile for wasm32-web. Before the fix each overload emitted the same extern,
+// and the module failed with "_element_set_attribute redeclared in this scope".
+func TestBindWebIdlOverloadsCompileClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "dom.idl")
+	idl := `interface TrustedHTML {};
+
+interface Element {
+	undefined setAttribute(DOMString name, DOMString value);
+	undefined setAttribute(DOMString name, TrustedHTML value);
+	undefined scroll();
+	undefined scroll(double x, double y);
+	static Element make(long n);
+	static Element make(DOMString tag);
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", outDir, idlPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	userPath := filepath.Join(outDir, "use_overloads.pr")
+	user := `main() {
+    el := Element.borrow(2);
+    el.set_attribute("class", "box");
+    trusted := TrustedHTML.borrow(3);
+    el.set_attribute_2("class", trusted);
+    el.scroll();
+    el.scroll_2(1.0, 2.0);
+    made := Element.make(1i32);
+    named := Element.make_2("div");
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	emitCmd := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir)
+	out, err := emitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	// Each overload reaches the IR as its own import, named after the member the
+	// JS glue calls plus the overload's ordinal.
+	for _, want := range []string{
+		"@element_set_attribute(", "@element_set_attribute_2(",
+		"@element_scroll(", "@element_scroll_2(",
+		"@element_make(", "@element_make_2(",
+		`"wasm-import-name"="Element.setAttribute"`, `"wasm-import-name"="Element.setAttribute.2"`,
+		`"wasm-import-name"="Element.scroll.2"`, `"wasm-import-name"="Element.make.2"`,
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR is missing %q", want)
+		}
+	}
+}
+
 // TestBindWitBorrowFactoryCompilesClean is the WIT/wasi counterpart of
 // TestBindWebIdlBorrowFactoryCompilesClean. `emitResource` is shared by both
 // front ends, but the surrounding module is not: the wasi path emits

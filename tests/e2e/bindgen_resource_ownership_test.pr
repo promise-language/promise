@@ -129,6 +129,23 @@ type OwnDocument `structural(protocol: false) `public `doc("A second generated-s
   }
 }
 
+// OwnElement mirrors a generated wrapper for a derived interface
+// (`interface Element : Node`, T1507): an `is` child that declares no fields of
+// its own — it inherits the handle, the ownership flag and every member — but
+// still declares its own `borrow` factory (its `global hides the parent's, so it
+// returns the derived type) and its own guarded drop.
+type OwnElement is OwnNode `structural(protocol: false) `public `doc("Model of a bindgen-generated wrapper for a derived interface.") {
+  borrow(i32 handle, Ref[Mutex[OwnTable]] move host) OwnElement `public `global `doc("Wrap an existing host handle without taking ownership.") {
+    return OwnElement(_handle: handle, _owned: false, _host: move host);
+  }
+
+  drop(~this) {
+    if this._owned {
+      release_handle(this._host, this._handle);
+    }
+  }
+}
+
 own_table() Ref[Mutex[OwnTable]] `doc("A shared table with handles 0-7 live and no releases recorded.") {
   return Ref[Mutex[OwnTable]](Mutex[OwnTable](OwnTable(live: 0xFF, releases: 0, doubles: 0)));
 }
@@ -140,6 +157,10 @@ own_doubles(Ref[Mutex[OwnTable]] host) int `doc("Releases that hit an already-fr
 own_is_live(Ref[Mutex[OwnTable]] host, i32 handle) bool `doc("Whether the handle still resolves in the table.") {
   return (host.borrow.lock().borrow.live & (1 << (handle as int))) != 0;
 }
+
+// own_handle_of stands in for a generated method with a parent-typed parameter
+// (`append_child(this, Node node)`), which lowers its argument to the handle.
+own_handle_of(OwnNode node) i32 `doc("Read the handle of any node-typed wrapper, as a parent-typed parameter lowers it.") => node._handle;
 
 // own_try_mint mints an owning wrapper and reports whether the host call
 // succeeded, dropping the wrapper inside its own scope either way.
@@ -274,6 +295,52 @@ test_many_borrows_one_owner() `test {
   }
   assert(own_releases(h) == 1, "dropping the borrowed views added no releases");
   assert(own_doubles(h) == 0, "no borrowed view double-released");
+}
+
+// T1507 — a derived wrapper passed where its parent type is expected. Without
+// inheritance the caller rewrapped the handle as the parent type, minting a
+// second owner; the derived wrapper now IS the parent type, so there is one
+// owner and one release.
+test_derived_wrapper_passes_as_parent_without_rewrap() `test {
+  h := own_table();
+  {
+    el := OwnElement(_handle: 5, _owned: true, _host: h.clone());
+    assert(own_handle_of(el) == 5, "the derived wrapper is accepted as its parent type");
+    assert(own_releases(h) == 0, "passing it as the parent released nothing");
+    assert(own_is_live(h, 5), "handle 5 still live after the call");
+    // A later use keeps `el` alive across the checks above (a value drops at
+    // its last use), so they observe the call, not the owner's own drop.
+    assert(el._owned, "the caller still holds its owning wrapper");
+  }
+  assert(own_releases(h) == 1, "the one owner released exactly once");
+  assert(own_doubles(h) == 0, "no double release");
+  assert(!own_is_live(h, 5), "handle 5 freed once the owner dropped");
+}
+
+// A derived wrapper held through a parent-typed binding: the drop dispatches to
+// the derived type's guarded drop, so the handle is released once — not zero
+// times (a lost drop) and not twice (parent and child both releasing).
+test_derived_wrapper_through_parent_binding_releases_once() `test {
+  h := own_table();
+  {
+    OwnNode n = OwnElement(_handle: 6, _owned: true, _host: h.clone());
+    assert(n._owned, "ownership travels through the parent-typed binding");
+  }
+  assert(own_releases(h) == 1, "released exactly once through the parent-typed binding");
+  assert(own_doubles(h) == 0, "no double release");
+  assert(!own_is_live(h, 6), "handle 6 freed");
+}
+
+// The derived type's own `borrow` returns the derived type and owns nothing.
+test_borrowed_derived_wrapper_releases_nothing() `test {
+  h := own_table();
+  {
+    OwnElement b = OwnElement.borrow(3, h.clone());
+    assert(!b._owned, "borrow on a derived wrapper is non-owning");
+    assert(own_handle_of(b) == 3, "a borrowed derived wrapper is still accepted as its parent type");
+  }
+  assert(own_releases(h) == 0, "borrowed derived wrapper released nothing");
+  assert(own_is_live(h, 3), "handle 3 still live");
 }
 
 // The negative control. Every test above asserts `doubles == 0`; this one shows

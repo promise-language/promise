@@ -395,12 +395,29 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 | `T?` (nullable) | `T?` | Promise optional |
 | `void` / `undefined` | (void) | |
 | `interface` | `type { int _js_ref; ... }` | Opaque JS handle |
+| `interface I : P` | `type I is P { ... }` | Inherits `P`'s members; the handle and ownership fields are declared once, on the root of the chain; `P` carries `` `open `` (see below) |
 | `dictionary` | `type { ... }` | Value type |
 | `enum` | `enum { ... }` | With string mapping for JS |
 | `callback` | `(Args) Return` | Lambda type |
 | `ArrayBuffer` | `u8[]` | |
 | `any` | `JsValue` | Tagged enum (see below) |
 | `object` | `JsValue` | Same enum, `Object` variant |
+
+**Interface inheritance.** A derived interface is an `is` child of its parent, so the generated
+wrappers model the IDL hierarchy (`EventTarget` → `Node` → `Element` → …). Each member — its public
+wrapper, its private extern and its JS import — is generated once, on the interface that declares
+it, and every derived wrapper inherits it: `Node.appendChild`'s one import serves an `Element`
+too, because the JS side resolves the call through the object's own prototype chain. A derived
+wrapper is accepted wherever its parent type is expected, so passing an `Element` to a
+`Node`-typed parameter needs no rewrapping of its handle. Each wrapper still declares its own
+`borrow` factory — a derived type's `` `global `` of the same name hides the parent's, so
+`Element.borrow` returns an `Element` — and its own guarded `drop(~this)`, which is dispatched
+virtually: a derived wrapper held through a parent-typed binding releases its handle exactly once.
+A parent interface is concrete (every wrapper is constructed field-wise), so it carries
+`` `open `` to permit the `is` ([Sealed by Default](language-design.md#sealed-by-default)). A
+parent that is not among the bound IDL files is still named in the `is` clause, so the generated
+module fails to compile with `undefined type` rather than silently omitting the inherited
+members.
 
 ### JsValue the Dynamic Value Enum
 
@@ -1081,5 +1098,3 @@ Parse sample IDL files, verify AST structure, verify generated Promise code comp
 3. **Error type mapping**: WIT `result<T, E>` maps to Promise failable `T!`, but Promise failable functions carry `error` (the base error type). Should we generate an `is E` error subtype for each WIT error enum, or use a single `WasiError` type with an error code?
 
 4. **Flags representation**: WIT `flags` types are bitfields. Should they map to a value type with `has(flag)` / `set(flag)` methods, or to a set of `bool` constants, or to an integer with bitwise operations?
-
-5. **WebIDL inheritance**: WebIDL interfaces support inheritance (`Element : Node`). Should this map to Promise `is` inheritance, or should each interface be independent with duplicated method declarations?

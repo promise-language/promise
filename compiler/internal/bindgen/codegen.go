@@ -273,16 +273,28 @@ func createFactoryName(r Resource) string {
 }
 
 func (g *generator) emitResource(r Resource, importModule string) {
-	g.line("type %s `structural(protocol: false) `public `target(%s)%s {", r.Name, g.target, docAnnot(r.Doc))
+	// A derived interface is an `is` child of its parent, so it inherits the
+	// parent's members instead of repeating them, and is accepted wherever the
+	// parent type is expected — no rewrapping a handle to satisfy a parent-typed
+	// parameter (T1507).
+	inherits := ""
+	if r.Parent != "" {
+		inherits = " is " + r.Parent
+	}
+	g.line("type %s%s `structural(protocol: false) `public `target(%s)%s {", r.Name, inherits, g.target, docAnnot(r.Doc))
 	g.indent++
-	g.line("i32 _handle;")
-	// Ownership state travels with the wrapper: every construction path below
-	// wraps a handle the host just minted for us and so owns it, while `borrow`
-	// wraps a handle somebody else owns. The field is emitted even when the
-	// resource has no drop, so a construction site never has to know the target
-	// resource's Drop flag to spell its ownership (T1510).
-	g.line("bool _owned;")
-	g.blank()
+	// The handle and its ownership flag live on the root of an inheritance chain
+	// only; a derived wrapper inherits both.
+	if r.Parent == "" {
+		g.line("i32 _handle;")
+		// Ownership state travels with the wrapper: every construction path below
+		// wraps a handle the host just minted for us and so owns it, while `borrow`
+		// wraps a handle somebody else owns. The field is emitted even when the
+		// resource has no drop, so a construction site never has to know the target
+		// resource's Drop flag to spell its ownership (T1510).
+		g.line("bool _owned;")
+		g.blank()
+	}
 
 	// Non-owning wrapper factory — the one construction path that does not take
 	// ownership. Used to wrap the glue's seeded ambient handles (globalThis,

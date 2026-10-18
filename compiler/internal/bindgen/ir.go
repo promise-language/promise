@@ -88,8 +88,9 @@ type Param struct {
 // Resource represents a resource type with methods.
 type Resource struct {
 	Name    string
-	Methods []Func
-	Drop    bool // has destructor
+	Parent  string // resource this one inherits from (WebIDL `interface X : Parent`); "" for a root
+	Methods []Func // only the members this resource declares — inherited ones stay on Parent
+	Drop    bool   // has destructor
 	Doc     string
 }
 

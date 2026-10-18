@@ -5157,3 +5157,131 @@ func TestGenerateJSGlueSeedsBeforeInit(t *testing.T) {
 		t.Errorf("_refStore is not declared before the seeding loop (decl at %d, seed at %d)", store, seed)
 	}
 }
+
+// --- T1507: interface inheritance ---
+
+// inheritanceIDL is a three-level chain plus a sibling: EventTarget → Node →
+// Element, and Document : Node.
+const inheritanceIDL = `
+	interface EventTarget {
+		undefined dispatch(DOMString kind);
+	};
+	interface Node : EventTarget {
+		attribute DOMString textContent;
+		Node appendChild(Node node);
+	};
+	interface Element : Node {
+		readonly attribute DOMString tagName;
+		undefined setAttribute(DOMString name, DOMString value);
+	};
+	interface Document : Node {
+		Element createElement(DOMString localName);
+	};`
+
+func inheritanceModules(t *testing.T, src string) []*Module {
+	t.Helper()
+	file, errs := webidl.Parse(src, "dom.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	return WebIdlToIR(file)
+}
+
+// TestWebIdlToIRInterfaceParent pins that the IR records each interface's
+// direct parent and keeps only the interface's own members: inherited members
+// reach a derived wrapper through its `is` clause, never as copies.
+func TestWebIdlToIRInterfaceParent(t *testing.T) {
+	modules := inheritanceModules(t, inheritanceIDL)
+	byName := map[string]Resource{}
+	for _, r := range modules[0].Resources {
+		byName[r.Name] = r
+	}
+	for name, want := range map[string]string{
+		"EventTarget": "",
+		"Node":        "EventTarget",
+		"Element":     "Node",
+		"Document":    "Node",
+	} {
+		r, ok := byName[name]
+		if !ok {
+			t.Fatalf("no resource %s in the IR", name)
+		}
+		if r.Parent != want {
+			t.Errorf("%s.Parent = %q, want %q", name, r.Parent, want)
+		}
+	}
+	// Element declares a readonly attribute (one getter) and one operation.
+	var names []string
+	for _, m := range byName["Element"].Methods {
+		names = append(names, m.Name)
+	}
+	if got := strings.Join(names, ","); got != "tag_name,set_attribute" {
+		t.Errorf("Element methods = %s, want only its own tag_name,set_attribute", got)
+	}
+}
+
+// TestCodegenResourceInheritance pins the generated hierarchy: each derived
+// wrapper is an `is` child of its direct parent, the handle and ownership
+// fields are declared once (on the root), and every member, extern and JS
+// import is generated once, on the interface that declares it.
+func TestCodegenResourceInheritance(t *testing.T) {
+	modules := inheritanceModules(t, inheritanceIDL)
+	out := GeneratePromise(modules, "web")
+
+	assertContains(t, out, "type EventTarget `structural(protocol: false) `public `target(web) {\n    i32 _handle;\n    bool _owned;\n")
+	assertContains(t, out, "type Node is EventTarget `structural(protocol: false) `public `target(web) {\n    borrow(")
+	assertContains(t, out, "type Element is Node `structural(protocol: false) `public `target(web) {\n    borrow(")
+	assertContains(t, out, "type Document is Node `structural(protocol: false) `public `target(web) {\n    borrow(")
+	// The `is` names the direct parent only.
+	assertNotContains(t, out, "type Element is EventTarget")
+	if n := strings.Count(out, "i32 _handle;"); n != 1 {
+		t.Errorf("i32 _handle; declared %d times, want once (on the root)", n)
+	}
+	if n := strings.Count(out, "bool _owned;"); n != 1 {
+		t.Errorf("bool _owned; declared %d times, want once (on the root)", n)
+	}
+
+	// A derived wrapper keeps its own non-owning factory, returning itself.
+	assertContains(t, out, borrowFactoryLine("Element", "borrow"))
+	assertContains(t, out, "return Element(_handle: handle, _owned: false);")
+	// ...and its own guarded drop and release import.
+	assertContains(t, out, "drop(~this) {\n        if this._owned {\n            _element_drop(this._handle);\n        }\n    }")
+	assertContains(t, out, `"[resource-drop]element"`)
+
+	// Inherited members are not copied onto the derived wrapper.
+	for _, once := range []string{
+		"append_child(this, Node node) Node `public",
+		"_node_append_child(i32 handle, i32 node) i32\n",
+		"dispatch(this, string kind) `public",
+		"_event_target_dispatch(i32 handle, string kind)\n",
+	} {
+		if n := strings.Count(out, once); n != 1 {
+			t.Errorf("%q generated %d times, want once", once, n)
+		}
+	}
+	assertNotContains(t, out, "_element_append_child")
+	assertNotContains(t, out, "_element_dispatch")
+	assertNotContains(t, out, "_document_text_content")
+
+	// One JS import serves every subtype.
+	js := GenerateJSGlue(modules)
+	if n := strings.Count(js, `"Node.appendChild"(`); n != 1 {
+		t.Errorf(`"Node.appendChild" import emitted %d times, want once`, n)
+	}
+	assertNotContains(t, js, `"Element.appendChild"`)
+	assertNotContains(t, js, `"Document.appendChild"`)
+}
+
+// TestCodegenResourceInheritanceUnboundParent pins the choice for a parent that
+// is not among the bound files: the `is` clause still names it, so the module
+// fails to compile with `undefined type` instead of silently dropping the
+// inherited members — the bug T1507 fixes.
+func TestCodegenResourceInheritanceUnboundParent(t *testing.T) {
+	modules := inheritanceModules(t, `interface Element : Node {
+		readonly attribute DOMString tagName;
+	};`)
+	out := GeneratePromise(modules, "web")
+	assertContains(t, out, "type Element is Node `structural(protocol: false) `public `target(web) {")
+	assertNotContains(t, out, "i32 _handle;")
+}

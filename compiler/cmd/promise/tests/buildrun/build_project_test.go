@@ -1016,6 +1016,135 @@ func TestBindWebIdlBorrowedWrapperSkipsRelease(t *testing.T) {
 	}
 }
 
+// TestBindWebIdlInheritanceCompilesClean is the end-to-end acceptance for
+// T1507: `promise bind webidl` on an inheritance chain must produce wrappers a
+// program can use the way the IDL reads — a derived wrapper reaches its
+// parent's and grandparent's members, and is accepted where the parent type is
+// expected without rewrapping its handle. The generator-level tests pin the
+// emitted `is` clause; only compiling a caller proves the hierarchy is usable.
+func TestBindWebIdlInheritanceCompilesClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "dom.idl")
+	// RectReadOnly/Rect is a compatible redeclaration (DOMRect's shape): the child
+	// re-declares the parent's readonly attribute as read-write, which overrides
+	// the inherited getter and adds a setter.
+	idl := `interface EventTarget {
+	undefined dispatch(DOMString kind);
+};
+
+interface Node : EventTarget {
+	attribute DOMString textContent;
+	Node appendChild(Node node);
+};
+
+interface Element : Node {
+	readonly attribute DOMString tagName;
+	undefined setAttribute(DOMString name, DOMString value);
+};
+
+interface Document : Node {
+	Element createElement(DOMString localName);
+};
+
+interface RectReadOnly {
+	readonly attribute double x;
+};
+
+interface Rect : RectReadOnly {
+	attribute double x;
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", outDir, idlPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	userPath := filepath.Join(outDir, "use_inheritance.pr")
+	user := `main() {
+    doc := Document.borrow(2);
+    el := doc.create_element("div");
+    el.text_content = "hi";
+    el.dispatch("click");
+    el.set_attribute("id", "x");
+    page := doc.create_element("section");
+    added := page.append_child(el);
+    root := doc.append_child(page);
+    held := Element.borrow(4);
+    print_line(held.tag_name);
+    r := Rect.borrow(5);
+    r.x = 1.0;
+    print_line(r.x.to_string());
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	for _, want := range []string{"@Node.append_child(", "@Element.borrow(", "@Element.drop(", "@Rect.x$set("} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR is missing %q", want)
+		}
+	}
+	// The inherited member's host import is declared once, by the interface that
+	// declares the member. (The compiler may still specialize the inherited
+	// wrapper per subtype, as `@Element.append_child`; that body calls this same
+	// import.)
+	if n := strings.Count(ir, "declare i32 @node_append_child("); n != 1 {
+		t.Errorf("@node_append_child declared %d times, want once", n)
+	}
+	for _, copied := range []string{"@element_append_child(", "@document_append_child(", "@element_dispatch("} {
+		if strings.Contains(ir, copied) {
+			t.Errorf("IR contains %q — an inherited member's import was copied onto a derived wrapper", copied)
+		}
+	}
+}
+
+// TestBindWebIdlUnboundParentFailsLoudly is the error path: a derived interface
+// whose parent is not among the bound files must not compile into a wrapper
+// that silently lacks the inherited members — the failure T1507 reports.
+func TestBindWebIdlUnboundParentFailsLoudly(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "element.idl")
+	if err := os.WriteFile(idlPath, []byte("interface Element : Node {\n\treadonly attribute DOMString tagName;\n};\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	if out, err := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", outDir, idlPath).CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
+	if err == nil {
+		t.Fatalf("emit-ir succeeded on a wrapper whose parent Node is unbound (want a compile error)\n%s", out)
+	}
+	if !strings.Contains(string(out), "undefined type: Node") {
+		t.Errorf("want an `undefined type: Node` error naming the missing parent\noutput:\n%s", out)
+	}
+}
+
 // irFunctionBody returns the text of the first `define` whose signature contains
 // marker, up to the closing brace at column 0.
 func irFunctionBody(ir, marker string) (string, bool) {

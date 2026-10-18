@@ -9,7 +9,9 @@ import (
 )
 
 // WebIdlToIR converts a parsed WebIDL file into a slice of binding IR modules.
-// Each WebIDL interface produces one IR Resource. Dictionaries become Records.
+// Each WebIDL interface produces one IR Resource, which records its inheritance
+// parent but carries only its own members — the generated `is` clause is how a
+// derived interface reaches its parent's (T1507). Dictionaries become Records.
 // Enums become IR Enums. The file produces a single module named from the
 // first interface, or "web" if no interfaces are present.
 //
@@ -128,9 +130,10 @@ func (c *webidlConverter) convertTypedef(td *webidl.Typedef) Type {
 
 func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 	res := Resource{
-		Name: iface.Name,
-		Drop: true,
-		Doc:  iface.Doc,
+		Name:   iface.Name,
+		Parent: iface.Parent,
+		Drop:   true,
+		Doc:    iface.Doc,
 	}
 
 	for _, member := range iface.Members {

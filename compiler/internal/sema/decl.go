@@ -1773,6 +1773,11 @@ func (c *Checker) resolvePlacement(annotations []*ast.MetaAnnotation) types.Plac
 // warn, and neither does an import carrying `link — one kept for what it links
 // rather than for a name it binds (T2192). A warning, not an error — a stray
 // import is a tidiness issue, not a correctness one.
+//
+// "References" means the file's source, not only what this target compiles: a
+// reference inside a declaration the Check pass skipped (Info.FilteredDecls —
+// a `target(cond) that does not match) counts too, found syntactically by
+// collectFilteredDeclRefs (#582).
 func (c *Checker) checkUnusedImports() {
 	// Build per-file sets of referenced objects from recorded identifier uses,
 	// so an anonymous import's injected names can be checked for use.
@@ -1787,6 +1792,18 @@ func (c *Checker) checkUnusedImports() {
 		m[obj] = true
 	}
 
+	// Filtered declarations are scanned only for a file with an import that
+	// would otherwise warn, and at most once per file.
+	filtered := make(map[string]filteredDeclRefs)
+	filteredRefs := func(file string) filteredDeclRefs {
+		refs, ok := filtered[file]
+		if !ok {
+			refs = c.collectFilteredDeclRefs(file)
+			filtered[file] = refs
+		}
+		return refs
+	}
+
 	for _, mod := range c.modules {
 		p := mod.Pos()
 		if p.File == "" {
@@ -1797,15 +1814,97 @@ func (c *Checker) checkUnusedImports() {
 		}
 		pos := ast.Pos{File: p.File, Line: p.Line, Column: p.Column}
 		if mod.IsGlob() {
-			if !c.globImportUsed(mod, refsByFile[p.File]) {
+			if !c.globImportUsed(mod, refsByFile[p.File]) && !c.globImportUsed(mod, filteredRefs(p.File).objects) {
 				c.warnf(pos, "unused import — no name injected by this anonymous import is referenced in this file")
 			}
 			continue
 		}
-		if !c.usedModules[mod] {
+		if !c.usedModules[mod] && !filteredRefs(p.File).modules[mod] {
 			c.warnf(pos, "unused import '%s' — no reference to `%s.` in this file", mod.Name(), mod.Name())
 		}
 	}
+}
+
+// filteredDeclRefs is what one file's unchecked declarations reference through
+// that file's import scope (#582).
+type filteredDeclRefs struct {
+	modules map[*types.Module]bool // named imports reached as `alias.`
+	objects map[types.Object]bool  // bare names bound in the import scope (glob-injected names)
+}
+
+// collectFilteredDeclRefs scans the declarations of file that the Check pass
+// skipped (Info.FilteredDecls) for references to the file's imports (#582).
+//
+// Those declarations are not type-checked, so the scan is syntactic: a name is
+// looked up in the file's import scope — the binding the Check pass would use,
+// minus the declaration's own locals. A local that shadows an alias therefore
+// counts as a reference; resolving locals would mean scoping code that is
+// deliberately not checked, and the cost is a missed tidiness warning, never a
+// false one. Annotation parameters are skipped: they name platforms
+// (`target(windows)) and lifetimes, never an import.
+func (c *Checker) collectFilteredDeclRefs(file string) filteredDeclRefs {
+	refs := filteredDeclRefs{
+		modules: make(map[*types.Module]bool),
+		objects: make(map[types.Object]bool),
+	}
+	scope := c.importScopeFor(file)
+	qualifier := func(name string) {
+		if mod, ok := scope.Lookup(name).(*types.Module); ok {
+			refs.modules[mod] = true
+		}
+	}
+	bare := func(name string) {
+		if obj := scope.Lookup(name); obj != nil {
+			refs.objects[obj] = true
+		}
+	}
+	for _, decl := range c.file.Decls {
+		if !c.info.FilteredDecls[decl] || decl.Pos().File != file {
+			continue
+		}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.MetaAnnotation:
+				return false
+			case *ast.MemberExpr:
+				if ident, ok := n.Target.(*ast.IdentExpr); ok {
+					qualifier(ident.Name)
+				}
+			case *ast.QualifiedTypeRef:
+				qualifier(n.Module)
+			case *ast.EnumVariantMatchPattern:
+				if n.Module != "" {
+					qualifier(n.Module)
+				} else {
+					bare(n.Enum)
+				}
+			case *ast.EnumDestructureMatchPattern:
+				if n.Module != "" {
+					qualifier(n.Module)
+				} else {
+					bare(n.Enum)
+				}
+			case *ast.IdentExpr:
+				bare(n.Name)
+			case *ast.NamedTypeRef:
+				bare(n.Name)
+			case *ast.TypeBindingMatchPattern:
+				bare(n.TypeName)
+			case *ast.ShortDestructureMatchPattern:
+				bare(n.Name)
+			case *ast.IdentIsPattern:
+				bare(n.Name)
+			case *ast.DestructureIsPattern:
+				bare(n.TypeName)
+			case *ast.ErrorHandlerExpr:
+				if n.TypeName != "" {
+					bare(n.TypeName)
+				}
+			}
+			return true
+		})
+	}
+	return refs
 }
 
 // globImportUsed reports whether any public name injected by an anonymous import

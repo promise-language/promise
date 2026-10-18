@@ -419,6 +419,19 @@ parent that is not among the bound IDL files is still named in the `is` clause, 
 module fails to compile with `undefined type` rather than silently omitting the inherited
 members.
 
+#### Overloaded Operations
+
+Promise has no overloading ([language-design.md § No Overloading](language-design.md#no-overloading)), so a WebIDL overload set becomes distinct members. An overload set is the operations of one interface that generate the same Promise name, counted after partials and mixins are merged, in that merged declaration order. The first keeps its name. The k-th (k ≥ 2) carries the suffix `_<k>` on every name derived from it, and its import appends `.<k>` to the import name:
+
+| IDL | Promise member | Extern | Import |
+|---|---|---|---|
+| `undefined setAttribute(DOMString name, DOMString value);` | `set_attribute` | `_element_set_attribute` | `Element.setAttribute` |
+| `undefined setAttribute(DOMString name, TrustedHTML value);` | `set_attribute_2` | `_element_set_attribute_2` | `Element.setAttribute.2` |
+
+Each overload keeps its own signature exactly; none is widened to `JsValue` to merge it with another. The JS glue implements every import of the set by calling the same JS member (`setAttribute`) with that overload's own arguments, so the host's overload resolution — not a dispatcher in the bindings — chooses among them. The rule applies to regular, static, and constructor operations alike; a constructor's factory becomes `create_<k>`.
+
+The suffix is an ordinal because nothing else is unique: overloads can share an arity, as the two `setAttribute`s do, and several IDL types lower to the same Promise type (`JsValue`, `i32` handles).
+
 ### JsValue the Dynamic Value Enum
 
 WebIDL's `any` and `object` types are dynamic, but Promise doesn't need a built-in `any` type to represent them. Following the same pattern as `JsonValue` in the `json` module, the `web` binding module defines a `JsValue` enum — a tagged union that covers all JS value types using standard language primitives:

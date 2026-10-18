@@ -253,9 +253,9 @@ func (g *jsGlueGenerator) emitMethodImport(resourceName string, f Func) {
 	case FuncConstructor:
 		g.emitConstructorBody(resourceName, f, jsParams)
 	case FuncStatic:
-		g.emitStaticBody(resourceName, f, jsParams)
+		g.emitStaticBody(resourceName, importName, f)
 	default:
-		g.emitMethodBody(resourceName, f, jsParams)
+		g.emitMethodBody(importName, f)
 	}
 
 	g.write("    },\n")
@@ -307,35 +307,48 @@ func (g *jsGlueGenerator) emitConstructorBody(resourceName string, f Func, jsPar
 	g.write("      return _refStore(obj);\n")
 }
 
-func (g *jsGlueGenerator) emitStaticBody(resourceName string, f Func, jsParams []string) {
+func (g *jsGlueGenerator) emitStaticBody(resourceName, importName string, f Func) {
 	args := g.buildJSCallArgs(f)
-	jsName := idlCamelCase(f.Name)
-	call := fmt.Sprintf("%s.%s(%s)", resourceName, jsName, strings.Join(args, ", "))
+	call := fmt.Sprintf("%s.%s(%s)", resourceName, importMember(importName), strings.Join(args, ", "))
 	g.emitReturnConversion(f, call)
 }
 
-func (g *jsGlueGenerator) emitMethodBody(resourceName string, f Func, jsParams []string) {
+func (g *jsGlueGenerator) emitMethodBody(importName string, f Func) {
 	args := g.buildJSCallArgs(f)
-	jsName := idlCamelCase(f.Name)
+	member := importMember(importName)
 
 	// Check if this is an attribute getter/setter.
 	// Attribute import names have 3 parts: "Type.attrName.get/set"
-	// Operation import names have 2 parts: "Type.methodName"
-	parts := strings.Split(f.ImportName, ".")
+	// Operation import names have 2 parts: "Type.methodName", or 3 when the
+	// operation is the k-th of an overload set: "Type.methodName.k"
+	parts := strings.Split(importName, ".")
 	if len(parts) == 3 && parts[2] == "get" {
-		attrName := idlCamelCase(parts[1])
-		call := fmt.Sprintf("_refLoad(handle).%s", attrName)
+		call := fmt.Sprintf("_refLoad(handle).%s", member)
 		g.emitReturnConversion(f, call)
 		return
 	}
 	if len(parts) == 3 && parts[2] == "set" {
-		attrName := idlCamelCase(parts[1])
-		g.writef("      _refLoad(handle).%s = %s;\n", attrName, strings.Join(args, ", "))
+		g.writef("      _refLoad(handle).%s = %s;\n", member, strings.Join(args, ", "))
 		return
 	}
 
-	call := fmt.Sprintf("_refLoad(handle).%s(%s)", jsName, strings.Join(args, ", "))
+	call := fmt.Sprintf("_refLoad(handle).%s(%s)", member, strings.Join(args, ", "))
 	g.emitReturnConversion(f, call)
+}
+
+// importMember returns the JS member an import invokes: the second dotted
+// component of its import name — "Element.setAttribute", "Element.innerHTML.get"
+// and "Element.setAttribute.2" all name a member of Element. The WebIDL front end
+// writes the IDL identifier there verbatim, so this is the one place the glue
+// reads a member name. It is never re-derived from the snake_case Promise name,
+// which an overload ordinal (set_attribute_2) or an acronym (getURL → get_url)
+// does not survive.
+func importMember(importName string) string {
+	parts := strings.Split(importName, ".")
+	if len(parts) < 2 {
+		return importName
+	}
+	return parts[1]
 }
 
 func (g *jsGlueGenerator) buildJSCallArgs(f Func) []string {

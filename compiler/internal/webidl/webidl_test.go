@@ -1504,6 +1504,8 @@ func TestParseDefinitionDocComments(t *testing.T) {
 	}{
 		{"block before ext attrs", "/** The root. */\n[Exposed=Window]\ninterface A {};", iface, "The root."},
 		{"line between ext attrs and decl", "[Exposed=Window]\n// The root.\ninterface A {};", iface, "The root."},
+		{"comment before ext attrs wins over one after them",
+			"// Before.\n[Exposed=Window]\n// After.\ninterface A {};", iface, "Before."},
 		{"decorated multi-line block", "/**\n * Line one.\n * Line two.\n */\ninterface A {};", iface, "Line one.\nLine two."},
 		{"markdown bold is not decoration", "/**\n * **Bold** text.\n */\ninterface A {};", iface, "**Bold** text."},
 		{"starred closer", "/** The root. **/\ninterface A {};", iface, "The root."},
@@ -1526,8 +1528,11 @@ func TestParseDefinitionDocComments(t *testing.T) {
 		{"file header detached by a blank line",
 			"// GENERATED CONTENT - DO NOT EDIT\n// Source: DOM Standard\n\n[Exposed=*]\ninterface Event {};", iface, ""},
 		{"blank line keeps only the later run", "// first\n\n// second\ninterface A {};", iface, "second"},
+		{"blank line holding indentation detaches", "// first\n  \t\ninterface A {};", iface, ""},
 		{"comment trailing the previous declaration", "interface A {}; // about A\ninterface B {};",
 			func(f *File) string { return f.Interfaces[1].Doc }, ""},
+		{"trailing comment leaves the next line's comment attached", "interface A {}; // about A\n// B.\ninterface B {};",
+			func(f *File) string { return f.Interfaces[1].Doc }, "B."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

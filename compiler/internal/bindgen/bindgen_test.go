@@ -2438,6 +2438,39 @@ func TestWebIdlDocCommentEscaped(t *testing.T) {
 	assertContains(t, out, "greet(this) `public `doc(\"Say \\\"hi\\\" \\\\ to \\{name}. Next line.\") {")
 }
 
+// The WIT doc path is unchanged by #659: a `///` comment is the item's `doc,
+// through the escaping WebIDL shares, and the WebIDL-only generated line never
+// appears in a WIT binding.
+func TestWitDocCommentReachesGeneratedDoc(t *testing.T) {
+	src := `
+interface types {
+    /// A point with "x", \ and {y}.
+    /// Second line.
+    record point {
+        x: f64,
+    }
+    /// A file.
+    resource file {
+        /// Reads it.
+        read: func() -> u32;
+    }
+    /// Adds two.
+    add: func(a: u32, b: u32) -> u32;
+    sub: func(a: u32, b: u32) -> u32;
+}
+`
+	file, errs := wit.Parse(src, "test.wit")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	out := GeneratePromise(WitToIR(file), "wasi")
+	assertContains(t, out, "type Point `structural(protocol: false) `public `doc(\"A point with \\\"x\\\", \\\\ and \\{y}. Second line.\") {")
+	assertContains(t, out, "type File `structural(protocol: false) `public `target(wasi) `doc(\"A file.\") {")
+	assertContains(t, out, "read(this) u32 `public `doc(\"Reads it.\") {")
+	assertContains(t, out, "add(u32 a, u32 b) u32 `public `target(wasi) `doc(\"Adds two.\") {")
+	assertNotContains(t, out, "(WebIDL ")
+}
+
 func TestToKebab(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"Descriptor", "descriptor"},

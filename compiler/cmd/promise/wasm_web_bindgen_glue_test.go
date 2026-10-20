@@ -1,10 +1,7 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -55,28 +52,12 @@ const bindgenGlueMain = `main() {
 }
 `
 
-// bindgenGlueDriver loads the generated element.js the way a page would, with
-// globalThis.fetch shimmed to read the sibling .wasm (Node's fetch takes no
-// relative URLs). Arguments: the .wasm file, the textContent fixture ("empty"
-// or "big"), and the innerHTML fixture ("ok" or "throw"). It reports one
-// RESULT: line of JSON.
-const bindgenGlueDriver = `
-const fs = require("fs");
-const path = require("path");
-const { pathToFileURL } = require("url");
-
-const dir = __dirname;
+// bindgenGlueDriver loads the generated element.js the way a page would
+// (nodePageDriver). Arguments: the .wasm file, the textContent fixture
+// ("empty" or "big"), and the innerHTML fixture ("ok" or "throw"). It reports
+// one RESULT: line of JSON.
+const bindgenGlueDriver = nodePageDriver + `
 const [wasmFile, text, html] = process.argv.slice(2);
-
-globalThis.fetch = async (url) => {
-  const data = await fs.promises.readFile(path.join(dir, url));
-  return new Response(data, { headers: { "content-type": "application/wasm" } });
-};
-
-const logs = [];
-const errs = [];
-console.log = (...args) => { logs.push(args.join(" ")); };
-console.error = (...args) => { errs.push(args.join(" ")); };
 
 if (html === "throw") {
   Object.defineProperty(globalThis, "innerHTML", {
@@ -136,7 +117,8 @@ func TestBindWebIdlGlueRoundTripsStrings(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(outDir, "main.pr"), []byte(bindgenGlueMain), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(outDir, "driver.cjs"), []byte(bindgenGlueDriver), 0644); err != nil {
+	driver := filepath.Join(outDir, "driver.cjs")
+	if err := os.WriteFile(driver, []byte(bindgenGlueDriver), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -165,7 +147,7 @@ func TestBindWebIdlGlueRoundTripsStrings(t *testing.T) {
 			{"big", "big", "ok", "text:200000 stable:true"},
 		}
 		for _, c := range cases {
-			got := runBindgenGlueDriver(t, nodePath, outDir, wasm, c.text, c.html)
+			got := runNodeDriver[bindgenGlueResult](t, nodePath, driver, wasm, c.text, c.html)
 			name := b.name + "/" + c.name
 			if !got.OK {
 				t.Errorf("%s: init() rejected: %q (logs %q, errs %q)", name, got.Message, got.Logs, got.Errs)
@@ -191,30 +173,9 @@ func TestBindWebIdlGlueRoundTripsStrings(t *testing.T) {
 
 		// A host import that throws must reject init(), not be swallowed as a
 		// normal exit-unwind.
-		got := runBindgenGlueDriver(t, nodePath, outDir, wasm, "empty", "throw")
+		got := runNodeDriver[bindgenGlueResult](t, nodePath, driver, wasm, "empty", "throw")
 		if got.OK || got.Message != "innerHTML getter failed" {
 			t.Errorf("%s/throw: want init() rejected with the getter's error, got ok=%v message=%q", b.name, got.OK, got.Message)
 		}
 	}
-}
-
-// runBindgenGlueDriver runs bindgenGlueDriver under the pinned node and decodes
-// its RESULT line.
-func runBindgenGlueDriver(t *testing.T, nodePath, dir, wasm, text, html string) bindgenGlueResult {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), clitest.Budget())
-	defer cancel()
-	cmd := exec.CommandContext(ctx, nodePath, filepath.Join(dir, "driver.cjs"), wasm, text, html)
-	out, err := cmd.CombinedOutput()
-	for _, line := range strings.Split(string(out), "\n") {
-		if payload, ok := strings.CutPrefix(line, "RESULT:"); ok {
-			var r bindgenGlueResult
-			if jerr := json.Unmarshal([]byte(payload), &r); jerr != nil {
-				t.Fatalf("cannot decode driver result %q: %v", payload, jerr)
-			}
-			return r
-		}
-	}
-	t.Fatalf("driver produced no RESULT line (err=%v):\n%s", err, out)
-	return bindgenGlueResult{}
 }

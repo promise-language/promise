@@ -10,7 +10,8 @@ import (
 )
 
 // requireNode skips the test if Node.js isn't on PATH — these tests exercise
-// the generated glue with a real JS engine, so there's no meaningful fallback.
+// the generated loaders with a real JS engine, so there's no meaningful
+// fallback.
 func requireNode(t *testing.T) string {
 	t.Helper()
 	nodePath, err := exec.LookPath("node") // path-ok: skips for the absent runtime itself, which is the legitimate form
@@ -40,11 +41,14 @@ func uleb(n uint32) []byte {
 
 // buildSmokeWasmModule hand-encodes a minimal WASM binary — no LLVM/Promise
 // toolchain involved — that imports exactly promise_env.write/exit/
-// monotonic_nanos, matching what a Module with no resources or free
-// functions still requires from the generated importObject. _initialize
-// issues two PAL writes to fd 1, "AB" then "CD\n", as separate calls
-// (exercising cross-write line buffering, since only the second call carries
-// the newline) and then calls exit(exitCode).
+// monotonic_nanos with the real ABI's shapes (codegen/pal/wasm_web.go), the
+// base PAL imports every wasm32-web binary requires of either loader.
+// _initialize calls monotonic_nanos, then issues three PAL writes to fd 1,
+// "AB", "CD\n" and "EF", as separate calls — the first two exercise
+// cross-write line buffering, since only the second carries the newline, and
+// the third leaves a partial line for init() to flush once the run ends — and
+// then calls exit(exitCode). write's len and monotonic_nanos's result are i64s,
+// as in the real ABI, so they cross as BigInts (#305).
 func buildSmokeWasmModule(exitCode byte) []byte {
 	section := func(id byte, content []byte) []byte {
 		out := []byte{id}
@@ -57,11 +61,11 @@ func buildSmokeWasmModule(exitCode byte) []byte {
 
 	buf := []byte{0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00} // magic + version
 
-	// Type section: 0: (i32)->() [exit], 1: (i32,i32,i32)->(i64) [write],
+	// Type section: 0: (i32)->() [exit], 1: (i32,i32,i64)->(i64) [write],
 	// 2: ()->(i64) [monotonic_nanos], 3: ()->() [_initialize].
 	typeSec := []byte{0x04}
 	typeSec = append(typeSec, 0x60, 0x01, 0x7F, 0x00)
-	typeSec = append(typeSec, 0x60, 0x03, 0x7F, 0x7F, 0x7F, 0x01, 0x7E)
+	typeSec = append(typeSec, 0x60, 0x03, 0x7F, 0x7F, 0x7E, 0x01, 0x7E)
 	typeSec = append(typeSec, 0x60, 0x00, 0x01, 0x7E)
 	typeSec = append(typeSec, 0x60, 0x00, 0x00)
 	buf = append(buf, section(1, typeSec)...)
@@ -95,12 +99,15 @@ func buildSmokeWasmModule(exitCode byte) []byte {
 	exportSec = append(exportSec, 0x00, 0x03)
 	buf = append(buf, section(7, exportSec)...)
 
-	// Code section: _initialize body — write(1,0,2); drop; write(1,2,3);
-	// drop; exit(exitCode).
+	// Code section: _initialize body — monotonic_nanos(); drop;
+	// write(1,0,2); drop; write(1,2,3); drop; write(1,5,2); drop;
+	// exit(exitCode).
 	body := []byte{0x00} // no local decls
 	body = append(body,
-		0x41, 0x01, 0x41, 0x00, 0x41, 0x02, 0x10, 0x00, 0x1A, // write(1, 0, 2); drop
-		0x41, 0x01, 0x41, 0x02, 0x41, 0x03, 0x10, 0x00, 0x1A, // write(1, 2, 3); drop
+		0x10, 0x02, 0x1A, // monotonic_nanos(); drop
+		0x41, 0x01, 0x41, 0x00, 0x42, 0x02, 0x10, 0x00, 0x1A, // write(1, 0, 2 as i64); drop
+		0x41, 0x01, 0x41, 0x02, 0x42, 0x03, 0x10, 0x00, 0x1A, // write(1, 2, 3 as i64); drop
+		0x41, 0x01, 0x41, 0x05, 0x42, 0x02, 0x10, 0x00, 0x1A, // write(1, 5, 2 as i64); drop
 		0x41, exitCode, 0x10, 0x01, // exit(exitCode)
 		0x0B, // end
 	)
@@ -109,8 +116,8 @@ func buildSmokeWasmModule(exitCode byte) []byte {
 	codeSec = append(codeSec, body...)
 	buf = append(buf, section(10, codeSec)...)
 
-	// Data section: "ABCD\n" at offset 0, backing the two write() calls.
-	data := []byte("ABCD\n")
+	// Data section: "ABCD\nEF" at offset 0, backing the three write() calls.
+	data := []byte("ABCD\nEF")
 	dataSeg := []byte{0x00, 0x41, 0x00, 0x0B} // active, memory 0, offset i32.const 0
 	dataSeg = append(dataSeg, uleb(uint32(len(data)))...)
 	dataSeg = append(dataSeg, data...)
@@ -121,18 +128,20 @@ func buildSmokeWasmModule(exitCode byte) []byte {
 	return buf
 }
 
-// nodeSmokeDriver is a CommonJS Node script written next to the generated
-// glue.js and its companion .wasm. It shims globalThis.fetch (Node's fetch
-// has no support for relative or file:// URLs, unlike a browser) to read the
-// sibling .wasm file, imports the generated ES module, and reports what
-// happened on a single "RESULT:" line so the Go test can assert on it
-// without a JS-side test framework.
+// nodeSmokeDriver is a CommonJS Node script written next to a generated
+// loader and its companion .wasm, run as `node driver.js <loader> [init
+// args...]`. It shims globalThis.fetch (Node's fetch has no support for
+// relative or file:// URLs, unlike a browser) to read the sibling .wasm file,
+// imports the loader as an ES module, calls its init() with the given
+// arguments, and reports what happened on a single "RESULT:" line so the Go
+// test can assert on it without a JS-side test framework.
 const nodeSmokeDriver = `
 const fs = require("fs");
 const path = require("path");
 const { pathToFileURL } = require("url");
 
 const dir = __dirname;
+const [loaderFile, ...initArgs] = process.argv.slice(2);
 
 globalThis.fetch = async (url) => {
   const data = await fs.promises.readFile(path.join(dir, url));
@@ -145,17 +154,17 @@ console.log = (...args) => { logs.push(args.join(" ")); };
 console.error = (...args) => { errs.push(args.join(" ")); };
 
 (async () => {
-  const mod = await import(pathToFileURL(path.join(dir, "glue.js")).href);
+  const mod = await import(pathToFileURL(path.join(dir, loaderFile)).href);
   try {
-    const exportsResult = await mod.init("frontend.wasm");
+    const exportsResult = await mod.init(...initArgs);
     process.stdout.write("RESULT:OK logs=" + JSON.stringify(logs) + " errs=" + JSON.stringify(errs) + " exports=" + JSON.stringify(Object.keys(exportsResult)) + "\n");
   } catch (e) {
-    process.stdout.write("RESULT:ERR message=" + JSON.stringify(e && e.message) + " code=" + JSON.stringify(e && e.code) + " logs=" + JSON.stringify(logs) + " errs=" + JSON.stringify(errs) + "\n");
+    process.stdout.write("RESULT:ERR message=" + JSON.stringify(e && e.message) + " code=" + JSON.stringify(e && e.code) + " exitSignal=" + JSON.stringify(e instanceof mod._ExitSignal) + " logs=" + JSON.stringify(logs) + " errs=" + JSON.stringify(errs) + "\n");
   }
 })();
 `
 
-// refTableDriver instantiates the same glue and then exercises the reference
+// refTableDriver instantiates the glue and then exercises the reference
 // table directly through the module's exported _refStore/_refLoad/_refRelease.
 // It reports one JSON object of named boolean checks so the Go side can name the
 // exact invariant that broke rather than eyeballing a handle number (T1510).
@@ -165,6 +174,7 @@ const path = require("path");
 const { pathToFileURL } = require("url");
 
 const dir = __dirname;
+const [loaderFile, ...initArgs] = process.argv.slice(2);
 
 globalThis.fetch = async (url) => {
   const data = await fs.promises.readFile(path.join(dir, url));
@@ -172,8 +182,8 @@ globalThis.fetch = async (url) => {
 };
 
 (async () => {
-  const mod = await import(pathToFileURL(path.join(dir, "glue.js")).href);
-  await mod.init("frontend.wasm");
+  const mod = await import(pathToFileURL(path.join(dir, loaderFile)).href);
+  await mod.init(...initArgs);
   const { _refStore, _refLoad, _refRelease } = mod;
   const checks = {};
 
@@ -201,27 +211,41 @@ globalThis.fetch = async (url) => {
 });
 `
 
-// runGlueSmoke generates glue for a bare "promise_env" module (no resources
-// or free functions — the minimal shape that still needs the base PAL
-// imports), writes it next to a hand-built smoke .wasm exiting with
-// exitCode, runs nodeSmokeDriver against them, and returns its single
-// "RESULT:..." stdout line.
-func runGlueSmoke(t *testing.T, nodePath string, exitCode byte) string {
-	t.Helper()
-	return runGlueSmokeDriver(t, nodePath, exitCode, nodeSmokeDriver)
+// smokeLoader is one of the two generated wasm32-web loaders. The base PAL
+// runtime is one contract, so both run the same smoke module, driver and
+// assertions (#305).
+type smokeLoader struct {
+	name     string
+	js       string
+	initArgs []string // what this loader's init() takes, passed through the driver's argv
 }
 
-// runGlueSmokeDriver is runGlueSmoke parameterized by the driver script, so a
-// test can instantiate the real generated glue and then poke at whatever part
-// of it it cares about.
-func runGlueSmokeDriver(t *testing.T, nodePath string, exitCode byte, driver string) string {
+// smokeLoaders returns both loaders, each set up to fetch frontend.wasm: the
+// bootstrap has the path baked in, the glue takes it as init()'s argument.
+func smokeLoaders() []smokeLoader {
+	return []smokeLoader{
+		{name: "bootstrap", js: GenerateBootstrapJS("frontend.wasm")},
+		glueSmokeLoader(),
+	}
+}
+
+// glueSmokeLoader is the glue for a bare "promise_env" module (no resources or
+// free functions) — the minimal glue shape that still needs the base PAL
+// imports.
+func glueSmokeLoader() smokeLoader {
+	modules := []*Module{{Name: "test", ImportModule: "promise_env"}}
+	return smokeLoader{name: "glue", js: GenerateJSGlue(modules), initArgs: []string{"frontend.wasm"}}
+}
+
+// runSmokeDriver writes loader as loader.js next to a hand-built smoke .wasm
+// exiting with exitCode, runs driver against them with the loader's init()
+// arguments, and returns its single "RESULT:..." stdout line.
+func runSmokeDriver(t *testing.T, nodePath string, loader smokeLoader, exitCode byte, driver string) string {
 	t.Helper()
 	dir := t.TempDir()
 
-	modules := []*Module{{Name: "test", ImportModule: "promise_env"}}
-	glueSource := GenerateJSGlue(modules)
-	if err := os.WriteFile(filepath.Join(dir, "glue.js"), []byte(glueSource), 0644); err != nil {
-		t.Fatalf("write glue.js: %v", err)
+	if err := os.WriteFile(filepath.Join(dir, "loader.js"), []byte(loader.js), 0644); err != nil {
+		t.Fatalf("write loader.js: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "frontend.wasm"), buildSmokeWasmModule(exitCode), 0644); err != nil {
 		t.Fatalf("write smoke wasm: %v", err)
@@ -231,7 +255,8 @@ func runGlueSmokeDriver(t *testing.T, nodePath string, exitCode byte, driver str
 		t.Fatalf("write driver: %v", err)
 	}
 
-	out, err := exec.Command(nodePath, driverFile).CombinedOutput()
+	args := append([]string{driverFile, "loader.js"}, loader.initArgs...)
+	out, err := exec.Command(nodePath, args...).CombinedOutput()
 	result := ""
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.HasPrefix(line, "RESULT:") {
@@ -244,14 +269,17 @@ func runGlueSmokeDriver(t *testing.T, nodePath string, exitCode byte, driver str
 	return result
 }
 
-// TestGenerateJSGlueSyntaxValid catches template bugs that a Go string
-// builder can silently introduce (a stray brace, an unescaped quote) which
-// no Go-side substring assertion would notice, but which would ship glue
-// that fails to load in every browser.
-func TestGenerateJSGlueSyntaxValid(t *testing.T) {
+// TestLoaderSyntaxValid catches template bugs that a Go string builder can
+// silently introduce (a stray brace, an unescaped quote) which no Go-side
+// substring assertion would notice, but which would ship a loader that fails
+// to load in every browser.
+func TestLoaderSyntaxValid(t *testing.T) {
 	nodePath := requireNode(t)
-	modules := []*Module{{Name: "test", ImportModule: "promise_env"}}
-	nodeCheckGlue(t, nodePath, GenerateJSGlue(modules))
+	for _, loader := range smokeLoaders() {
+		t.Run(loader.name, func(t *testing.T) {
+			nodeCheckGlue(t, nodePath, loader.js)
+		})
+	}
 }
 
 // TestGenerateJSGlueOverloadSyntaxValid parses the glue generated for WebIDL
@@ -286,39 +314,57 @@ func nodeCheckGlue(t *testing.T, nodePath, glue string) {
 	}
 }
 
-// TestGenerateJSGlueSmokeInstantiates is the direct rebuttal to "the catch is
-// unreachable": before this fix, WebAssembly.instantiate threw a LinkError
-// for any module (no promise_env.write/exit/monotonic_nanos in the generated
-// importObject), so _initialize — and the exit-unwind catch around it — never
-// ran. This instantiates the real generated glue against a real (if minimal)
-// WASM module and checks that a clean exit(0) resolves init() instead of
-// throwing, and that two writes without and then with a trailing newline are
-// joined into a single console.log call rather than logging "AB", a blank
-// line, and "CD" separately.
-func TestGenerateJSGlueSmokeInstantiates(t *testing.T) {
+// TestLoaderSmokeSuccessBuffersLines instantiates each loader against a real
+// (if minimal) WASM module. For the glue it is the direct rebuttal to "the
+// catch is unreachable": before T1506, WebAssembly.instantiate threw a
+// LinkError for any module (no promise_env.write/exit/monotonic_nanos in the
+// generated importObject), so _initialize — and the exit-unwind catch around
+// it — never ran. It checks that a clean exit(0) resolves init() instead of
+// throwing (which needs monotonic_nanos to return a BigInt), that two writes
+// without and then with a trailing newline are joined into a single
+// console.log call rather than logging "AB", a blank line, and "CD"
+// separately, and that the trailing "EF" with no newline is still logged once
+// the run ends.
+func TestLoaderSmokeSuccessBuffersLines(t *testing.T) {
 	nodePath := requireNode(t)
-	result := runGlueSmoke(t, nodePath, 0)
+	for _, loader := range smokeLoaders() {
+		t.Run(loader.name, func(t *testing.T) {
+			result := runSmokeDriver(t, nodePath, loader, 0, nodeSmokeDriver)
 
-	if !strings.HasPrefix(result, "RESULT:OK") {
-		t.Fatalf("expected instantiation + a clean exit(0) to resolve init(), got: %s", result)
-	}
-	if !strings.Contains(result, `logs=["ABCD"]`) {
-		t.Errorf("expected the two writes to join into one buffered line \"ABCD\", got: %s", result)
+			if !strings.HasPrefix(result, "RESULT:OK") {
+				t.Fatalf("expected instantiation + a clean exit(0) to resolve init(), got: %s", result)
+			}
+			if !strings.Contains(result, `logs=["ABCD","EF"]`) {
+				t.Errorf("expected the first two writes to join into one buffered line \"ABCD\" and the partial \"EF\" to be flushed at exit, got: %s", result)
+			}
+		})
 	}
 }
 
-// TestGenerateJSGlueSmokeSurfacesNonZeroExit verifies that exit(1) — a panic
-// or an explicit non-zero exit() — is not swallowed by the same catch that
-// treats exit(0) as normal completion.
-func TestGenerateJSGlueSmokeSurfacesNonZeroExit(t *testing.T) {
+// TestLoaderSmokeSurfacesNonZeroExit verifies that exit(1) — a panic or an
+// explicit non-zero exit() — is not swallowed by the same catch that treats
+// exit(0) as normal completion, that it rejects init() with the loader's
+// exported _ExitSignal carrying the code, and that the partial line pending
+// when the run failed is flushed before the rejection rather than lost.
+func TestLoaderSmokeSurfacesNonZeroExit(t *testing.T) {
 	nodePath := requireNode(t)
-	result := runGlueSmoke(t, nodePath, 1)
+	for _, loader := range smokeLoaders() {
+		t.Run(loader.name, func(t *testing.T) {
+			result := runSmokeDriver(t, nodePath, loader, 1, nodeSmokeDriver)
 
-	if !strings.HasPrefix(result, "RESULT:ERR") {
-		t.Fatalf("expected exit(1) to reject init() instead of resolving, got: %s", result)
-	}
-	if !strings.Contains(result, `code=1`) {
-		t.Errorf("expected the exit code to be preserved on the propagated error, got: %s", result)
+			if !strings.HasPrefix(result, "RESULT:ERR") {
+				t.Fatalf("expected exit(1) to reject init() instead of resolving, got: %s", result)
+			}
+			if !strings.Contains(result, ` code=1 `) {
+				t.Errorf("expected the exit code to be preserved on the propagated error, got: %s", result)
+			}
+			if !strings.Contains(result, `exitSignal=true`) {
+				t.Errorf("expected the rejection to be an instance of the exported _ExitSignal, got: %s", result)
+			}
+			if !strings.Contains(result, `logs=["ABCD","EF"]`) {
+				t.Errorf("expected the partial \"EF\" to be flushed before init() rejected, got: %s", result)
+			}
+		})
 	}
 }
 
@@ -331,7 +377,7 @@ func TestGenerateJSGlueSmokeSurfacesNonZeroExit(t *testing.T) {
 // that pinning must not disturb.
 func TestGenerateJSGlueRefTablePinsAmbientHandles(t *testing.T) {
 	nodePath := requireNode(t)
-	result := runGlueSmokeDriver(t, nodePath, 0, refTableDriver)
+	result := runSmokeDriver(t, nodePath, glueSmokeLoader(), 0, refTableDriver)
 
 	payload := strings.TrimPrefix(result, "RESULT:")
 	if strings.HasPrefix(payload, "ERR ") {

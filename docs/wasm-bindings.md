@@ -782,9 +782,10 @@ Load the bootstrap for a program with no WebIDL bindings. Load the bindgen glue 
 program that has them — it is a superset of the bootstrap. Loading both would
 instantiate the module twice.
 
-> Whether these two artifacts should be consolidated into one is still open (#305).
-> Until that is decided the base PAL imports are deliberately present in both, so that
-> either can stand alone.
+The two stay separate on purpose: each is the whole loader for one kind of program, so
+neither needs the other. What they share — the base PAL imports, the exit unwind and
+`_ExitSignal`, and the line buffering, all below — is generated for both from one
+source, so the two cannot differ.
 
 ### Base PAL Imports
 
@@ -807,8 +808,10 @@ Two behaviors are easy to get wrong when writing a host by hand:
   run unwinds through `exit`. The generated code throws an `_ExitSignal` carrying the
   exit code; `init()` swallows code `0` and rethrows anything else, so a panic or an
   explicit non-zero exit still surfaces to the caller as a rejection rather than
-  silently returning the exports. The thrown error carries the code on `.code`
-  (`_ExitSignal` itself is not exported).
+  silently returning the exports. Both artifacts export `_ExitSignal`: a caller
+  identifies an exit with `e instanceof _ExitSignal`, then reads the code from
+  `e.code`. `.code` alone does not identify an exit — a `DOMException` a host import
+  throws has a numeric `.code` too.
 - **`write` output must be line-buffered.** `print_line` appends the line separator
   before the write reaches the PAL, and `console.log` adds its own newline — logging
   each chunk verbatim would double every line, and a `print()` without a newline would
@@ -905,6 +908,13 @@ export async function init(wasmPath) {
 Both artifacts export `init` as a **named** export, but their signatures differ: the
 bootstrap already knows its `.wasm` path and takes an optional `importObject`, while the
 bindgen glue takes the `.wasm` URL.
+
+The bootstrap adds the `promise_env` entries of that `importObject` to the base imports,
+and an entry of the same name replaces the base one. That is how a page supplies a
+function a hand-declared `wasm_import` names (`examples/11_wasm/web_console.pr`). It is
+not a way to combine the two artifacts: the bindgen glue exports no import object, and a
+program with bindings loads the glue instead of the bootstrap. Each loader holds one
+instance, so a page calls `init` once.
 
 ```html
 <script type="module">

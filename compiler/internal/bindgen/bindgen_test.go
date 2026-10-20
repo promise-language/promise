@@ -3304,7 +3304,7 @@ func TestGenerateJSGlueInstantiation(t *testing.T) {
 // use the typed _ExitSignal sentinel rather than matching a bare Error's
 // .message string (which would also swallow unrelated JS errors carrying the
 // same text), and must still propagate a non-zero code — see
-// TestGenerateJSGlueRejectsNonZeroExit for the corresponding behavioral proof.
+// TestLoaderSmokeSurfacesNonZeroExit for the corresponding behavioral proof.
 func TestGenerateJSGlueInstantiationCatchesExitUnwind(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",

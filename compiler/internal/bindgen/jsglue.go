@@ -26,12 +26,52 @@ type jsGlueGenerator struct {
 
 func (g *jsGlueGenerator) generate(modules []*Module) string {
 	g.emitHeader()
+	g.emitPALRuntime()
 	g.emitRefTable()
 	g.emitStringHelpers()
-	g.emitExitSignal()
-	g.emitLineBufferHelpers()
 	g.emitImportObject(modules)
 	g.emitInstantiation()
+	return g.buf.String()
+}
+
+// GenerateBootstrapJS generates the bootstrap loader `promise build` writes
+// beside every wasm32-web binary: the loader for a program with no WebIDL
+// bindings. It is built from the same emitters as GenerateJSGlue, so the base
+// PAL runtime the two loaders share — the promise_env.write/exit/
+// monotonic_nanos imports, the exit unwind and the line buffering — is
+// written once and cannot differ between them (#305).
+//
+// promise_env entries on the importObject passed to init() are added to the
+// base imports and replace a base entry of the same name: that is how a page
+// supplies a function a hand-declared `wasm_import` names. It is not a way to
+// combine this loader with the bindgen glue, which exports no import object.
+func GenerateBootstrapJS(wasmBase string) string {
+	g := &jsGlueGenerator{}
+	g.writef(`// Auto-generated bootstrap loader for %s — do not edit.
+// A program with WebIDL bindings loads the glue from promise bind webidl
+// instead of this file. promise_env entries on the importObject passed to
+// init() are added to (and override) the base PAL imports below.
+
+`, wasmBase)
+	g.emitPALRuntime()
+	g.write("// Base PAL runtime imports every wasm32-web binary needs.\n")
+	g.write("const basePromiseEnv = {\n")
+	g.emitBasePromiseEnvImports()
+	g.write("};\n\n")
+	g.writef(`export async function init(importObject = {}) {
+  const response = await fetch("%s");
+  const { instance } = await WebAssembly.instantiateStreaming(response, {
+    ...importObject,
+    promise_env: { ...basePromiseEnv, ...(importObject.promise_env || {}) },
+  });
+  wasm = instance;
+
+`, wasmBase)
+	g.emitRunInitialize()
+	g.write(`
+  return wasm.exports;
+}
+`)
 	return g.buf.String()
 }
 
@@ -48,8 +88,6 @@ func (g *jsGlueGenerator) emitHeader() {
 // This file provides the JS glue for WASM browser bindings.
 
 "use strict";
-
-let wasm;
 
 `)
 }
@@ -105,7 +143,6 @@ const _pinnedMax = _ambientRefs.length;
 func (g *jsGlueGenerator) emitStringHelpers() {
 	g.write(`// --- String Marshalling ---
 const _encoder = new TextEncoder();
-const _decoder = new TextDecoder("utf-8");
 
 function _readString(ptr, len) {
   const mem = new Uint8Array(wasm.exports.memory.buffer);
@@ -136,34 +173,40 @@ function _writeStringResult(retptr, str) {
 `)
 }
 
-// emitExitSignal defines the typed sentinel exit() throws to unwind the
-// synchronous WASM call stack — the only way to abort a WASM function from a
-// JS import. Carrying the real exit code lets init() tell a normal main()
-// return (pal_exit(0)) apart from a panic or an explicit non-zero exit(),
-// instead of matching on a bare Error's .message string, which would also
-// swallow any unrelated JS error that happened to carry the same text.
-func (g *jsGlueGenerator) emitExitSignal() {
-	g.write(`class _ExitSignal extends Error {
-  constructor(code) {
-    super("promise_env.exit");
-    this.code = code;
-  }
-}
-
-`)
-}
-
-// emitLineBufferHelpers defines the per-fd line buffering that
-// promise_env.write uses. console.log/console.error each add their own
-// trailing newline, but Promise's print_line already appends
+// emitPALRuntime writes the module-level base PAL runtime both loaders share
+// (GenerateJSGlue and GenerateBootstrapJS): the instance binding, the decoder
+// promise_env.write uses, the exit sentinel, and the line buffering.
+//
+// _ExitSignal is the typed sentinel exit() throws to unwind the synchronous
+// WASM call stack — the only way to abort a WASM function from a JS import.
+// Carrying the real exit code lets init() tell a normal main() return
+// (pal_exit(0)) apart from a panic or an explicit non-zero exit(), instead of
+// matching on a bare Error's .message string, which would also swallow any
+// unrelated JS error that happened to carry the same text. It is exported so a
+// caller can test `instanceof`: `.code` alone does not identify an exit, since
+// a DOMException a host import throws carries a numeric `.code` too.
+//
+// The line buffering is what promise_env.write uses. console.log/console.error
+// each add their own trailing newline, but Promise's print_line already appends
 // Platform.line_separator before the write ever reaches the PAL (see
 // definePrintStringBody in internal/codegen/io.go) — logging each write
 // verbatim would double every line, and a write with no trailing newline
 // would become its own console line, making it impossible to build one line
 // out of several print() calls. Buffering per fd and flushing only on
 // complete lines fixes both.
-func (g *jsGlueGenerator) emitLineBufferHelpers() {
-	g.write(`const _lineBuf = { 1: "", 2: "" };
+func (g *jsGlueGenerator) emitPALRuntime() {
+	g.write(`let wasm;
+
+const _decoder = new TextDecoder("utf-8");
+
+export class _ExitSignal extends Error {
+  constructor(code) {
+    super("promise_env.exit");
+    this.code = code;
+  }
+}
+
+const _lineBuf = { 1: "", 2: "" };
 
 function _flushLine(fd, line) {
   (fd === 2 ? console.error : console.log)(line);
@@ -192,7 +235,8 @@ function _flushRemainder() {
 // entries every Promise wasm32-web binary imports unconditionally, regardless
 // of which WebIDL bindings it also uses. Without these, WebAssembly.instantiate
 // throws a LinkError before any binding code — or _initialize — ever runs, so
-// the exit-unwind catch in emitInstantiation has nothing to catch (T1506).
+// the exit-unwind catch in emitRunInitialize has nothing to catch (T1506).
+// Both loaders write these entries from here.
 func (g *jsGlueGenerator) emitBasePromiseEnvImports() {
 	g.write(`    write(fd, ptr, len) {
       // i64 args/returns are BigInts in default WebAssembly mode.
@@ -438,7 +482,20 @@ export async function init(wasmPath) {
   const { instance } = await WebAssembly.instantiateStreaming(response, importObject);
   wasm = instance;
 
-  // Call WASM _initialize if exported. A normal main() return is signaled by
+`)
+	g.emitRunInitialize()
+	g.write(`
+  return wasm.exports;
+}
+
+export { _refStore, _refLoad, _refRelease };
+`)
+}
+
+// emitRunInitialize writes the body both loaders' init() run once the
+// instance is bound to wasm: call _initialize and classify how it ended.
+func (g *jsGlueGenerator) emitRunInitialize() {
+	g.write(`  // Call WASM _initialize if exported. A normal main() return is signaled by
   // pal_exit(0), which lowers to the promise_env.exit import — the only way
   // to abort a synchronous WASM call from a JS import is to throw, so exit()
   // always throws to unwind the call stack. That's expected on success, not
@@ -456,11 +513,6 @@ export async function init(wasmPath) {
     }
   }
   _flushRemainder();
-
-  return wasm.exports;
-}
-
-export { _refStore, _refLoad, _refRelease };
 `)
 }
 

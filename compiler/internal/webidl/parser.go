@@ -73,25 +73,33 @@ func (p *Parser) parseFile() *File {
 	file := &File{}
 
 	for !p.at(TokenEOF) {
-		// Skip extended attributes at top level (consumed but not stored on file)
-		extAttrs := p.tryParseExtAttrs()
+		// Extended attributes at top level are kept only on interfaces.
+		doc, extAttrs := p.parseDeclStart()
 		tok := p.peek()
 
 		switch tok.Kind {
 		case TokenInterface:
 			iface := p.parseInterface()
 			iface.ExtAttrs = append(extAttrs, iface.ExtAttrs...)
+			iface.Doc = doc
 			file.Interfaces = append(file.Interfaces, iface)
 		case TokenDictionary:
-			file.Dictionaries = append(file.Dictionaries, p.parseDictionary())
+			dict := p.parseDictionary()
+			dict.Doc = doc
+			file.Dictionaries = append(file.Dictionaries, dict)
 		case TokenEnum:
-			file.Enums = append(file.Enums, p.parseEnum())
+			e := p.parseEnum()
+			e.Doc = doc
+			file.Enums = append(file.Enums, e)
 		case TokenCallback:
 			if cb := p.parseCallback(); cb != nil {
+				cb.Doc = doc
 				file.Callbacks = append(file.Callbacks, cb)
 			}
 		case TokenTypedef:
-			file.Typedefs = append(file.Typedefs, p.parseTypedef())
+			td := p.parseTypedef()
+			td.Doc = doc
+			file.Typedefs = append(file.Typedefs, td)
 		case TokenPartial:
 			p.next() // consume 'partial'
 			partialTok := p.peek()
@@ -111,7 +119,9 @@ func (p *Parser) parseFile() *File {
 		case TokenMixin:
 			// Standalone: interface mixin Name { ... };
 			// But WebIDL spec uses "interface mixin", so this handles just "mixin"
-			file.Mixins = append(file.Mixins, p.parseMixin())
+			m := p.parseMixin()
+			m.Doc = doc
+			file.Mixins = append(file.Mixins, m)
 		case TokenIdent:
 			// Could be: "Target includes Mixin;"
 			if p.lex.PeekN(1).Kind == TokenIncludes {
@@ -129,6 +139,18 @@ func (p *Parser) parseFile() *File {
 	}
 
 	return file
+}
+
+// parseDeclStart consumes the extended attributes that open a definition or
+// member and returns them with the declaration's doc comment: the comment before
+// the attributes, or else the one between them and the declaration.
+func (p *Parser) parseDeclStart() (string, []*ExtAttr) {
+	doc := p.peek().Doc
+	attrs := p.tryParseExtAttrs()
+	if doc == "" {
+		doc = p.peek().Doc
+	}
+	return doc, attrs
 }
 
 func (p *Parser) tryParseExtAttrs() []*ExtAttr {
@@ -441,10 +463,26 @@ func (p *Parser) parseIncludes() *IncludesStatement {
 	}
 }
 
-// parseMember parses a single interface/mixin member.
+// parseMember parses a single interface/mixin member, with its doc comment.
 func (p *Parser) parseMember() Member {
-	// Skip extended attributes on members
-	p.tryParseExtAttrs()
+	// Extended attributes on members are skipped.
+	doc, _ := p.parseDeclStart()
+	member := p.parseMemberBody()
+	switch m := member.(type) {
+	case *Attribute:
+		m.Doc = doc
+	case *Operation:
+		m.Doc = doc
+	case *Constructor:
+		m.Doc = doc
+	case *Const:
+		m.Doc = doc
+	}
+	return member
+}
+
+// parseMemberBody parses a member after its extended attributes.
+func (p *Parser) parseMemberBody() Member {
 	tok := p.peek()
 
 	switch tok.Kind {
@@ -488,9 +526,7 @@ func (p *Parser) parseMember() Member {
 		}
 		if p.at(TokenReadonly) || p.at(TokenAttribute) {
 			readonly := p.match(TokenReadonly)
-			attr := p.parseAttribute(readonly, false)
-			attr.Doc = "stringifier"
-			return attr
+			return p.parseAttribute(readonly, false)
 		}
 		return p.parseOperation(false, "stringifier")
 	case TokenConstructor:

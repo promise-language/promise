@@ -74,7 +74,7 @@ func TestT0724DictionaryPlainType(t *testing.T) {
 	}
 	out := GeneratePromise(WebIdlToIR(file), "web")
 
-	assertContains(t, out, "type Opts `structural(protocol: false) `public {")
+	assertContains(t, out, "type Opts `structural(protocol: false) `public `doc(\"`Opts` (WebIDL dictionary)\") {")
 	assertContains(t, out, "string name;")         // required → bare type
 	assertContains(t, out, "bool? check_opacity;") // optional → T?
 	// No `value annotation anywhere (the leading backtick distinguishes the
@@ -96,7 +96,7 @@ func TestT0724DictionaryJsValueFieldPlain(t *testing.T) {
 	}
 	out := GeneratePromise(WebIdlToIR(file), "web")
 
-	assertContains(t, out, "type SetHTMLOptions `structural(protocol: false) `public {")
+	assertContains(t, out, "type SetHTMLOptions `structural(protocol: false) `public `doc(\"`SetHTMLOptions` (WebIDL dictionary)\") {")
 	assertContains(t, out, "JsValue? sanitizer;")
 	assertContains(t, out, "bool? run_scripts;")
 	assertNotContains(t, out, "`value")

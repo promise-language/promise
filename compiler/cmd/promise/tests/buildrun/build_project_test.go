@@ -975,6 +975,82 @@ interface Element {
 	}
 }
 
+// TestBindWebIdlDocCommentsCompileClean is the end-to-end acceptance for #659:
+// IDL comments become `doc annotations and every uncommented declaration gets a
+// generated one, so every `public line of the generated module carries a `doc —
+// and comment text holding `"`, `\`, `{…}` and line breaks, in an LF or a CRLF
+// source, still yields a module that compiles for wasm32-web. An unescaped `{`
+// would open an interpolation inside the doc string.
+func TestBindWebIdlDocCommentsCompileClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	idl := `// GENERATED CONTENT - DO NOT EDIT
+// Source: a test fixture
+
+/**
+ * An element. Say "hi" \ to {name}.
+ * Second line.
+ */
+[Exposed=Window]
+interface Element {
+	// The id, as in <div id="x">.
+	attribute DOMString id;
+	readonly attribute DOMString tagName;
+	/** Sets {name} to "value". */
+	undefined setAttribute(DOMString name, DOMString value);
+	undefined setAttribute(DOMString name, long value);
+	const unsigned short ELEMENT_NODE = 1;
+};
+// Options for {Element}.
+dictionary Opts { long x; };
+enum Mode { "open", "closed" };
+`
+	for _, tc := range []struct{ name, eol string }{{"LF", "\n"}, {"CRLF", "\r\n"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := clitest.TempDir(t)
+			idlPath := filepath.Join(dir, "dom.idl")
+			if err := os.WriteFile(idlPath, []byte(strings.ReplaceAll(idl, "\n", tc.eol)), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			outDir := filepath.Join(dir, "out")
+			bindCmd := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", outDir, idlPath)
+			if out, err := bindCmd.CombinedOutput(); err != nil {
+				t.Fatalf("bind webidl failed: %v\n%s", err, out)
+			}
+
+			pr, err := os.ReadFile(filepath.Join(outDir, "dom.pr"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, line := range strings.Split(string(pr), "\n") {
+				if strings.Contains(line, "`public") && !strings.Contains(line, "`doc(\"") {
+					t.Errorf("`public declaration without a `doc: %s", strings.TrimSpace(line))
+				}
+			}
+			for _, want := range []string{
+				"`doc(\"An element. Say \\\"hi\\\" \\\\ to \\{name}. Second line.\") {",
+				"`doc(\"Sets \\{name} to \\\"value\\\".\") {",
+				"`doc(\"`Element.setAttribute` (WebIDL operation)\") {",
+			} {
+				if !strings.Contains(string(pr), want) {
+					t.Errorf("generated dom.pr is missing %q", want)
+				}
+			}
+
+			emitCmd := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir)
+			if out, err := emitCmd.CombinedOutput(); err != nil {
+				t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+			}
+		})
+	}
+}
+
 // TestBindWitBorrowFactoryCompilesClean is the WIT/wasi counterpart of
 // TestBindWebIdlBorrowFactoryCompilesClean. `emitResource` is shared by both
 // front ends, but the surrounding module is not: the wasi path emits

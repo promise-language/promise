@@ -754,7 +754,7 @@ The `promise bind` output for each IDL follows a consistent pattern:
 1. **Type definitions** — Promise types mapped from IDL records/variants/enums/resources
 2. **Private extern declarations** — low-level imports with `wasm_import` annotations
 3. **Public API wrappers** — ergonomic methods that marshal between Promise types and the canonical ABI
-4. **`doc` annotations** — on all public declarations, generated from IDL documentation comments
+4. **`doc` annotations** — on all public declarations. A declaration's text is the IDL documentation comment on the construct it binds: in WIT the `///` comment before the item; in WebIDL the `//` and `/* … */` comments directly before a definition or member, either before its extended attributes or between them and the declaration. A blank line between a comment and the declaration detaches it, so a file's header comment documents nothing, and neither does a comment that follows code on the same line. Specification IDL carries almost no comments — the prose that documents a member lives in the specification's text, outside the IDL block — so a WebIDL interface, dictionary, enum, attribute, operation or constant with no comment carries a generated line naming what it binds, on the interface that binds it: `` `Element.setAttribute` (WebIDL operation) ``. An attribute's getter and setter carry the same line, and so does every overload of one operation. The declarations the generator adds itself carry fixed text: the `borrow` factory, the `JsValue` members, and an owning factory whose constructor has no comment, which states the ownership the factory takes.
 
 ---
 

@@ -2,6 +2,7 @@ package webidl
 
 import (
 	"fmt"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -247,17 +248,21 @@ type Token struct {
 	Kind  TokenKind
 	Value string
 	Pos   Pos
+	// Doc is the documentation comment directly before this token, or "" —
+	// see skipWhitespaceAndComments for which comments count.
+	Doc string
 }
 
 // Lexer tokenizes WebIDL source text.
 type Lexer struct {
-	src    string
-	file   string
-	pos    int
-	line   int
-	col    int
-	tokens []Token
-	idx    int
+	src      string
+	file     string
+	pos      int
+	line     int
+	col      int
+	prevLine int // line the previous token ended on; 0 before the first token
+	tokens   []Token
+	idx      int
 }
 
 // NewLexer creates a new lexer for the given source text.
@@ -274,13 +279,15 @@ func NewLexer(src, file string) *Lexer {
 
 func (l *Lexer) tokenize() {
 	for {
-		l.skipWhitespaceAndComments()
+		doc := l.skipWhitespaceAndComments()
 		if l.pos >= len(l.src) {
 			l.tokens = append(l.tokens, Token{Kind: TokenEOF, Pos: l.currentPos()})
 			return
 		}
 		tok := l.nextToken()
+		tok.Doc = doc
 		l.tokens = append(l.tokens, tok)
+		l.prevLine = l.line
 	}
 }
 
@@ -334,22 +341,36 @@ func (l *Lexer) peek() rune {
 	return r
 }
 
-func (l *Lexer) skipWhitespaceAndComments() {
+// skipWhitespaceAndComments advances to the next token and returns its doc
+// comment: the comments directly before it, joined by "\n". A blank line between
+// a comment and what follows it detaches the comment, so a file's header comment
+// documents nothing; a comment that starts on the line the previous token ended
+// on trails that code and documents nothing either (docs/wasm-bindings.md,
+// "Generated Module Contents").
+func (l *Lexer) skipWhitespaceAndComments() string {
+	var doc []string
+	breaks := 0 // line breaks since the previous token or comment
 	for l.pos < len(l.src) {
 		r := l.peek()
 		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+			if r == '\n' {
+				breaks++
+			}
 			l.advance()
 			continue
 		}
-		// Line comment: //
-		if r == '/' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '/' {
+		if r != '/' || l.pos+1 >= len(l.src) || (l.src[l.pos+1] != '/' && l.src[l.pos+1] != '*') {
+			break
+		}
+		trailing := l.line == l.prevLine
+		start := l.pos
+		if l.src[l.pos+1] == '/' {
+			// Line comment: //
 			for l.pos < len(l.src) && l.peek() != '\n' {
 				l.advance()
 			}
-			continue
-		}
-		// Block comment: /* ... */
-		if r == '/' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '*' {
+		} else {
+			// Block comment: /* ... */
 			l.advance() // /
 			l.advance() // *
 			for l.pos < len(l.src) {
@@ -360,10 +381,44 @@ func (l *Lexer) skipWhitespaceAndComments() {
 				}
 				l.advance()
 			}
-			continue
 		}
-		break
+		if breaks >= 2 {
+			doc = nil
+		}
+		if !trailing {
+			doc = append(doc, commentText(l.src[start:l.pos]))
+		}
+		breaks = 0
 	}
+	if breaks >= 2 {
+		return ""
+	}
+	return strings.TrimSpace(strings.Join(doc, "\n"))
+}
+
+// commentText returns the text of one comment: a line comment loses its
+// slashes; a block comment loses its delimiters, the extra stars of a `/**` or
+// `**/`, and the `*` that decorates each line of a `/** … */` block. Every line
+// is trimmed, which also drops a CRLF source's `\r`. An unterminated block
+// comment keeps everything after its `/*`.
+func commentText(raw string) string {
+	if strings.HasPrefix(raw, "//") {
+		return strings.TrimSpace(strings.TrimLeft(raw, "/"))
+	}
+	body := strings.TrimPrefix(raw, "/*")
+	if rest, ok := strings.CutSuffix(body, "*/"); ok {
+		body = strings.TrimRight(rest, "*")
+	}
+	body = strings.TrimLeft(body, "*")
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(line, "*"); ok && (rest == "" || rest[0] == ' ' || rest[0] == '\t') {
+			line = strings.TrimSpace(rest)
+		}
+		lines[i] = line
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 func (l *Lexer) nextToken() Token {

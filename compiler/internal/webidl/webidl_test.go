@@ -1047,9 +1047,10 @@ func TestParseMemberSpecials(t *testing.T) {
 	if deleter.Special != "deleter" {
 		t.Errorf("expected special 'deleter', got %q", deleter.Special)
 	}
+	// A stringifier attribute binds like any attribute; Doc holds only its comment.
 	strAttr := members[2].(*Attribute)
-	if strAttr.Doc != "stringifier" {
-		t.Errorf("expected stringifier doc, got %q", strAttr.Doc)
+	if strAttr.Name != "href" || strAttr.Doc != "" {
+		t.Errorf("expected attribute href with no doc, got %q with doc %q", strAttr.Name, strAttr.Doc)
 	}
 	strOp := members[3].(*Operation)
 	if strOp.Special != "stringifier" {
@@ -1469,4 +1470,179 @@ func containsImpl(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// --- Doc comments (#659) ---
+
+// memberDoc returns the Doc of a member kind that carries one.
+func memberDoc(t *testing.T, m Member) string {
+	t.Helper()
+	switch m := m.(type) {
+	case *Attribute:
+		return m.Doc
+	case *Operation:
+		return m.Doc
+	case *Constructor:
+		return m.Doc
+	case *Const:
+		return m.Doc
+	}
+	t.Fatalf("member %T carries no doc", m)
+	return ""
+}
+
+// The comments directly before a definition — before its extended attributes or
+// between them and the declaration — become its Doc; a blank line, an
+// intervening declaration, or a comment trailing code on its line detaches them.
+func TestParseDefinitionDocComments(t *testing.T) {
+	iface := func(f *File) string { return f.Interfaces[0].Doc }
+	cases := []struct {
+		name string
+		src  string
+		doc  func(*File) string
+		want string
+	}{
+		{"block before ext attrs", "/** The root. */\n[Exposed=Window]\ninterface A {};", iface, "The root."},
+		{"line between ext attrs and decl", "[Exposed=Window]\n// The root.\ninterface A {};", iface, "The root."},
+		{"comment before ext attrs wins over one after them",
+			"// Before.\n[Exposed=Window]\n// After.\ninterface A {};", iface, "Before."},
+		{"decorated multi-line block", "/**\n * Line one.\n * Line two.\n */\ninterface A {};", iface, "Line one.\nLine two."},
+		{"markdown bold is not decoration", "/**\n * **Bold** text.\n */\ninterface A {};", iface, "**Bold** text."},
+		{"starred closer", "/** The root. **/\ninterface A {};", iface, "The root."},
+		{"banner block", "/*****\n * The root.\n *****/\ninterface A {};", iface, "The root."},
+		{"empty block", "/**/\ninterface A {};", iface, ""},
+		{"consecutive line comments merge", "// One.\n// Two.\ninterface A {};", iface, "One.\nTwo."},
+		{"empty line comment keeps the paragraph", "// One.\n//\n// Two.\ninterface A {};", iface, "One.\n\nTwo."},
+		{"CRLF block", "/**\r\n * One.\r\n * Two.\r\n */\r\ninterface A {};", iface, "One.\nTwo."},
+		{"CRLF line comments", "// One.\r\n// Two.\r\ninterface A {};", iface, "One.\nTwo."},
+		{"interface mixin", "// M.\ninterface mixin M {};", iface, "M."},
+		{"dictionary", "// D.\ndictionary D { long x; };", func(f *File) string { return f.Dictionaries[0].Doc }, "D."},
+		{"enum", "/* E. */ enum E { \"a\" };", func(f *File) string { return f.Enums[0].Doc }, "E."},
+		{"typedef", "// T.\ntypedef long T;", func(f *File) string { return f.Typedefs[0].Doc }, "T."},
+		{"callback", "// C.\ncallback C = undefined (long x);", func(f *File) string { return f.Callbacks[0].Doc }, "C."},
+		{"standalone mixin", "// M.\nmixin M {};", func(f *File) string { return f.Mixins[0].Doc }, "M."},
+
+		{"no comment", "interface A {};", iface, ""},
+		{"comment does not reach the next declaration", "// A.\ninterface A {};\ninterface B {};",
+			func(f *File) string { return f.Interfaces[1].Doc }, ""},
+		{"file header detached by a blank line",
+			"// GENERATED CONTENT - DO NOT EDIT\n// Source: DOM Standard\n\n[Exposed=*]\ninterface Event {};", iface, ""},
+		{"blank line keeps only the later run", "// first\n\n// second\ninterface A {};", iface, "second"},
+		{"blank line holding indentation detaches", "// first\n  \t\ninterface A {};", iface, ""},
+		{"comment trailing the previous declaration", "interface A {}; // about A\ninterface B {};",
+			func(f *File) string { return f.Interfaces[1].Doc }, ""},
+		{"trailing comment leaves the next line's comment attached", "interface A {}; // about A\n// B.\ninterface B {};",
+			func(f *File) string { return f.Interfaces[1].Doc }, "B."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			file, errs := Parse(tc.src, "test.webidl")
+			if len(errs) > 0 {
+				t.Fatalf("unexpected errors: %v", errs)
+			}
+			if got := tc.doc(file); got != tc.want {
+				t.Errorf("doc = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Every member kind that becomes a declaration takes the comment before it.
+func TestParseMemberDocComments(t *testing.T) {
+	src := `interface A {
+		// ro.
+		readonly attribute long ro;
+		/** rw. */
+		attribute long rw;
+		// st.
+		static attribute long st;
+		// op.
+		undefined op();
+		// sop.
+		static undefined sop();
+		// ov1.
+		undefined ov(long x);
+		// ov2.
+		undefined ov(DOMString x);
+		// get.
+		getter long (unsigned long index);
+		// ctor.
+		constructor();
+		// const.
+		const long C = 1;
+		// ce.
+		[CEReactions] attribute long ce;
+		[CEReactions]
+		// ce2.
+		attribute long ce2;
+		// str.
+		stringifier attribute DOMString href;
+		// str2.
+		stringifier;
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	want := []string{"ro.", "rw.", "st.", "op.", "sop.", "ov1.", "ov2.", "get.", "ctor.", "const.", "ce.", "ce2.", "str.", "str2."}
+	members := file.Interfaces[0].Members
+	if len(members) != len(want) {
+		t.Fatalf("got %d members, want %d", len(members), len(want))
+	}
+	for i, w := range want {
+		if got := memberDoc(t, members[i]); got != w {
+			t.Errorf("member %d (%T) doc = %q, want %q", i, members[i], got, w)
+		}
+	}
+}
+
+// A comment that is not directly before a member documents nothing: one that
+// trails a member's line, one inside a declaration, and one before `}`.
+func TestParseMemberDocDetached(t *testing.T) {
+	src := `interface A {
+		attribute long x; // about x
+		attribute /* inside */ long y;
+		// before the brace
+	};
+	// before the next interface
+	interface B { attribute long z; };`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	members := file.Interfaces[0].Members
+	if len(members) != 2 {
+		t.Fatalf("got %d members, want 2", len(members))
+	}
+	for i, m := range members {
+		if got := memberDoc(t, m); got != "" {
+			t.Errorf("member %d doc = %q, want none", i, got)
+		}
+	}
+	if got := file.Interfaces[1].Doc; got != "before the next interface" {
+		t.Errorf("B doc = %q, want the comment before it", got)
+	}
+	if got := memberDoc(t, file.Interfaces[1].Members[0]); got != "" {
+		t.Errorf("B.z doc = %q, want none", got)
+	}
+}
+
+// An unterminated block comment still runs to end of file, as before, without
+// indexing past the end of the source.
+func TestParseUnterminatedBlockComment(t *testing.T) {
+	for _, src := range []string{
+		"interface A {};\n/* never closed",
+		"interface A {};\n/*",
+		"interface A {};\n/*/",
+		"interface A {};\n/**",
+	} {
+		file, errs := Parse(src, "test.webidl")
+		if len(errs) > 0 {
+			t.Errorf("%q: unexpected errors: %v", src, errs)
+			continue
+		}
+		if len(file.Interfaces) != 1 || file.Interfaces[0].Doc != "" {
+			t.Errorf("%q: want one interface with no doc, got %+v", src, file.Interfaces)
+		}
+	}
 }

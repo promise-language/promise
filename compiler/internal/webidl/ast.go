@@ -135,6 +135,7 @@ type Const struct {
 	Name  string
 	Type  *TypeRef
 	Value string
+	Doc   string
 	Pos   Pos
 }
 

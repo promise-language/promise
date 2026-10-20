@@ -84,11 +84,22 @@ func isMixin(iface *webidl.Interface) bool {
 	return false
 }
 
+// webidlDoc returns the `doc text of a declaration bound from WebIDL: its IDL
+// comment, or — spec IDL carries almost none, its prose living outside the IDL
+// block — a line naming the construct it binds, e.g. "`Element.setAttribute`
+// (WebIDL operation)" (docs/wasm-bindings.md, "Generated Module Contents").
+func webidlDoc(comment, construct, idlName string) string {
+	if comment != "" {
+		return comment
+	}
+	return "`" + idlName + "` (WebIDL " + construct + ")"
+}
+
 func (c *webidlConverter) convertEnum(e *webidl.Enum) Type {
 	t := Type{
 		Name: e.Name,
 		Kind: TypeEnum,
-		Doc:  e.Doc,
+		Doc:  webidlDoc(e.Doc, "enum", e.Name),
 	}
 	for _, v := range e.Values {
 		t.Cases = append(t.Cases, Case{
@@ -102,7 +113,7 @@ func (c *webidlConverter) convertDictionary(d *webidl.Dictionary) Type {
 	t := Type{
 		Name: d.Name,
 		Kind: TypeRecord,
-		Doc:  d.Doc,
+		Doc:  webidlDoc(d.Doc, "dictionary", d.Name),
 	}
 	for _, m := range d.Members {
 		f := Field{
@@ -134,7 +145,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 		Name:   iface.Name,
 		Parent: iface.Parent,
 		Drop:   true,
-		Doc:    iface.Doc,
+		Doc:    webidlDoc(iface.Doc, "interface", iface.Name),
 	}
 
 	// How many operations of each Promise name this interface has emitted so
@@ -144,15 +155,17 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 	for _, member := range iface.Members {
 		switch m := member.(type) {
 		case *webidl.Attribute:
+			idlName := iface.Name + "." + m.Name
+			doc := webidlDoc(m.Doc, "attribute", idlName)
 			// Getter
 			getter := Func{
 				Name:       idlToSnake(m.Name),
 				Kind:       FuncMethod,
 				Accessor:   AccessorGetter,
 				OwnerType:  iface.Name,
-				ImportName: iface.Name + "." + m.Name + ".get",
+				ImportName: idlName + ".get",
 				Results:    []TypeRef{convertWebIdlTypeRef(m.Type)},
-				Doc:        m.Doc,
+				Doc:        doc,
 			}
 			if m.Static {
 				getter.Kind = FuncStatic
@@ -166,9 +179,9 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 					Kind:       FuncMethod,
 					Accessor:   AccessorSetter,
 					OwnerType:  iface.Name,
-					ImportName: iface.Name + "." + m.Name + ".set",
+					ImportName: idlName + ".set",
 					Params:     []Param{{Name: "value", Type: convertWebIdlTypeRef(m.Type)}},
-					Doc:        m.Doc,
+					Doc:        doc,
 				}
 				if m.Static {
 					setter.Kind = FuncStatic
@@ -195,12 +208,14 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 
 		case *webidl.Const:
 			// Constants become static getter-like functions
+			idlName := iface.Name + "." + m.Name
 			f := Func{
 				Name:       idlToSnake(m.Name),
 				Kind:       FuncStatic,
 				OwnerType:  iface.Name,
-				ImportName: iface.Name + "." + m.Name,
+				ImportName: idlName,
 				Results:    []TypeRef{convertWebIdlTypeRef(m.Type)},
+				Doc:        webidlDoc(m.Doc, "constant", idlName),
 			}
 			res.Methods = append(res.Methods, f)
 		}
@@ -236,12 +251,13 @@ func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operatio
 		member = op.Special
 	}
 
+	idlName := ifaceName + "." + member
 	f := Func{
 		Name:       name,
 		Kind:       FuncMethod,
 		OwnerType:  ifaceName,
-		ImportName: ifaceName + "." + member,
-		Doc:        op.Doc,
+		ImportName: idlName,
+		Doc:        webidlDoc(op.Doc, "operation", idlName),
 	}
 	if op.Static {
 		f.Kind = FuncStatic

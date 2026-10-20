@@ -397,16 +397,19 @@ func (l *Lexer) skipWhitespaceAndComments() string {
 }
 
 // commentText returns the text of one comment: a line comment loses its
-// slashes; a block comment loses its delimiters and the `*` that decorates each
-// line of a `/** … */` block. Every line is trimmed, which also drops a CRLF
-// source's `\r`. An unterminated block comment keeps everything after its `/*`.
+// slashes; a block comment loses its delimiters, the extra stars of a `/**` or
+// `**/`, and the `*` that decorates each line of a `/** … */` block. Every line
+// is trimmed, which also drops a CRLF source's `\r`. An unterminated block
+// comment keeps everything after its `/*`.
 func commentText(raw string) string {
 	if strings.HasPrefix(raw, "//") {
 		return strings.TrimSpace(strings.TrimLeft(raw, "/"))
 	}
 	body := strings.TrimPrefix(raw, "/*")
-	body = strings.TrimSuffix(body, "*/")
-	body = strings.TrimPrefix(body, "*") // the second star of `/**`
+	if rest, ok := strings.CutSuffix(body, "*/"); ok {
+		body = strings.TrimRight(rest, "*")
+	}
+	body = strings.TrimLeft(body, "*")
 	lines := strings.Split(body, "\n")
 	for i, line := range lines {
 		line = strings.TrimSpace(line)

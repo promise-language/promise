@@ -523,8 +523,8 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr, failable bool) value.Va
 	initResult := startBlk.NewCall(c.coroSuspend, constant.None, constant.False)
 
 	suspendBlk := coroFn.NewBlock("coro.suspend")
-	bodyBlk := coroFn.NewBlock("body")
-	cleanupBlk := coroFn.NewBlock("cleanup")
+	bodyBlk := coroFn.NewBlock(coroBodyLabel)
+	cleanupBlk := coroFn.NewBlock(coroCleanupLabel)
 
 	startBlk.NewSwitch(initResult, suspendBlk,
 		ir.NewCase(constant.NewInt(irtypes.I8, 0), bodyBlk),
@@ -971,8 +971,8 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 	initResult := initSuspBlk.NewCall(c.coroSuspend, constant.None, constant.False)
 
 	suspendBlk := coroFn.NewBlock("coro.suspend")
-	bodyBlk := coroFn.NewBlock("body")
-	cleanupBlk := coroFn.NewBlock("cleanup")
+	bodyBlk := coroFn.NewBlock(coroBodyLabel)
+	cleanupBlk := coroFn.NewBlock(coroCleanupLabel)
 	doneBlk := coroFn.NewBlock("coro.done")
 
 	initSuspBlk.NewSwitch(initResult, suspendBlk,
@@ -2293,8 +2293,8 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	initResult := initSuspBlk.NewCall(c.coroSuspend, constant.None, constant.False)
 
 	suspendBlk := coroFn.NewBlock("coro.suspend")
-	bodyBlk := coroFn.NewBlock("body")
-	cleanupBlk := coroFn.NewBlock("cleanup")
+	bodyBlk := coroFn.NewBlock(coroBodyLabel)
+	cleanupBlk := coroFn.NewBlock(coroCleanupLabel)
 	// Create doneBlk early so intermediate coro.suspend switches can reference it.
 	// Instructions are added after the body is compiled.
 	doneBlk := coroFn.NewBlock("coro.done")

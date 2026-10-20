@@ -1,0 +1,57 @@
+// #264: every coroutine-shaped function labelled its body and cleanup blocks
+// `body` and `cleanup`. LLVM gives value names and block labels one namespace,
+// so a local or parameter of either name compiled into a coroutine was emitted
+// beside a label of the same name and opt rejected the module. Each test below
+// compiles user names into a different coroutine kind.
+test_go_block_locals() `test {
+  t := go {
+    int body = 5;
+    int cleanup = body + 1;
+    assert(cleanup == 6, "go block locals");
+  };
+  <-t;
+}
+
+_second[T](T a, T b) T {
+  return b;
+}
+
+_maybe!(bool fail) int {
+  if fail {
+    raise error("fail");
+  }
+  return 1;
+}
+
+// A callee that is not a bare identifier (explicit type args here) compiles the
+// call's arguments inside the coroutine, so their handler bindings are its locals.
+test_go_call_argument_bindings() `test {
+  t := go _second[int](_maybe(true)? body {
+    -1;
+  }, _maybe(true)? cleanup {
+    -2;
+  });
+  int got = <-t;
+  assert(got == -2, "go call argument bindings");
+}
+
+// The generator coroutine's parameters carry the user's parameter names.
+_gen_body(int body) stream[int] `doc("Yields body + 1 from a local named cleanup.") {
+  int cleanup = body + 1;
+  yield cleanup;
+}
+
+test_generator_param_and_local() `test {
+  int total = 0;
+  for x in _gen_body(3) {
+    total = total + x;
+  }
+  assert(total == 4, "generator param and local");
+}
+
+// A plain function natively; on WASM the test body is compiled into a coroutine.
+test_test_body_locals() `test {
+  int body = 1;
+  int cleanup = body + 1;
+  assert(cleanup == 2, "test body locals");
+}

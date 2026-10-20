@@ -1045,7 +1045,7 @@ func (c *Compiler) defineTaskFreeAfterDoneBody(fn *ir.Func, elemType types.Type,
 	// result type T is itself a Task[U], emitVariantFieldDrop routes to
 	// emitTaskJoinAndFree, which — seeing a stale c.inCoroutine/c.coroSuspendBlk —
 	// would emit a coro.suspend referencing the *enclosing* coroutine's cleanup
-	// block (which doesn't exist here → "use of undefined value '%cleanup'").
+	// block (which doesn't exist here → "use of undefined value '%coro.cleanup'").
 	// Clearing inCoroutine routes the nested task-field drop through the legacy
 	// callable Task[U].drop (spin shell on host, coop-step pump on WASM), which is
 	// valid inside a plain function.

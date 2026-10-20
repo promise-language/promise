@@ -134,11 +134,24 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 			hasSret = false
 		}
 
+		// WASM imports: a string result comes back the way a string parameter goes
+		// out — as a canonical (ptr, len) pair, which the host writes through a
+		// trailing return pointer the caller supplies, rather than into an sret
+		// pointer to Promise's private boxed-string value struct (T1506). Decided
+		// once here and carried on ext.WasmStringResult, because genExternCall has
+		// to pass the return area and lift the result to match. Exactly `string`:
+		// a `string?` result keeps its optional sret form.
+		isWasmStringResult := isWasmImport && !ext.IsFailable && ext.ResultType == types.Type(types.TypString)
+		if isWasmStringResult {
+			hasSret = false
+		}
+
 		// Deduplicate by C name — multiple Promise externs may map to the same C function
 		if fn, ok := cFuncs[ext.CName]; ok {
 			ext.IRFunc = fn
 			ext.HasSret = hasSret
 			ext.RawABI = isRawABI
+			ext.WasmStringResult = isWasmStringResult
 			c.funcs[ext.PromiseName] = fn
 			continue
 		}
@@ -188,6 +201,7 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 				// instead of a pointer to Promise's private boxed-string value
 				// struct — the host (JS) side has no knowledge of that internal
 				// layout, and previously received a single pointer to it verbatim (T1506).
+				// A string result crosses the same way; see isWasmStringResult.
 				params = append(params, ir.NewParam(paramName+"_ptr", irtypes.I8Ptr))
 				params = append(params, ir.NewParam(paramName+"_len", irtypes.I32))
 				continue
@@ -197,8 +211,13 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 			params = append(params, ir.NewParam(paramName, irtypes.I8Ptr))
 		}
 
+		if isWasmStringResult {
+			// Last, where the canonical ABI places a lowered import's return pointer.
+			params = append(params, ir.NewParam("retptr", irtypes.I8Ptr))
+		}
+
 		retType := irtypes.Type(irtypes.Void)
-		if !ext.IsFailable && ext.ResultType != nil {
+		if !ext.IsFailable && ext.ResultType != nil && !isWasmStringResult {
 			if isOpaqueContainerType(ext.ResultType) {
 				retType = irtypes.I8Ptr
 			} else if !hasSret {
@@ -219,6 +238,7 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 		ext.IRFunc = fn
 		ext.HasSret = hasSret
 		ext.RawABI = isRawABI
+		ext.WasmStringResult = isWasmStringResult
 		c.funcs[ext.PromiseName] = fn
 		cFuncs[ext.CName] = fn
 	}
@@ -309,6 +329,32 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 		alloca := c.createEntryAlloca(layout.Value.LLVMType)
 		c.block.NewStore(packed, alloca)
 		callArgs = append(callArgs, c.block.NewBitCast(alloca, irtypes.I8Ptr))
+	}
+
+	// WASM import string result: the host writes the canonical (ptr, len) pair
+	// through the trailing return pointer, the bytes being a buffer it allocated
+	// with cabi_realloc. Copy them into a Promise-owned string, then release the
+	// buffer with the raw `free` matching cabi_realloc's raw malloc — pal_free
+	// would decrement an alloc count cabi_realloc never incremented, and the debug
+	// allocator rejects the block's foreign header (T1506). The area is zeroed
+	// before each call so a host that writes nothing yields "" rather than a
+	// stale pointer from a previous call through the same entry alloca.
+	if ext.WasmStringResult {
+		retAreaType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I32)
+		retArea := c.createEntryAlloca(retAreaType)
+		c.block.NewStore(constant.NewZeroInitializer(retAreaType), retArea)
+		callArgs = append(callArgs, c.block.NewBitCast(retArea, irtypes.I8Ptr))
+		c.block.NewCall(ext.IRFunc, callArgs...)
+
+		zero := constant.NewInt(irtypes.I32, 0)
+		ptrField := c.block.NewGetElementPtr(retAreaType, retArea, zero, zero)
+		lenField := c.block.NewGetElementPtr(retAreaType, retArea, zero, constant.NewInt(irtypes.I32, 1))
+		dataPtr := c.block.NewLoad(irtypes.I8Ptr, ptrField)
+		dataLen := c.block.NewZExt(c.block.NewLoad(irtypes.I32, lenField), irtypes.I64)
+		str := c.block.NewCall(c.funcs["promise_string_new"], dataPtr, dataLen)
+		freeFn := c.getOrDeclareFunc("free", irtypes.Void, ir.NewParam("ptr", irtypes.I8Ptr))
+		c.block.NewCall(freeFn, dataPtr)
+		return str
 	}
 
 	// Container return types return i8* directly — no sret (non-failable only)

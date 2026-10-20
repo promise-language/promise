@@ -3159,6 +3159,7 @@ func TestGenerateJSGlueStringHelpers(t *testing.T) {
 	out := GenerateJSGlue(modules)
 	assertContains(t, out, "function _readString(ptr, len)")
 	assertContains(t, out, "function _writeString(str)")
+	assertContains(t, out, "function _writeStringResult(retptr, str)")
 	assertContains(t, out, "TextEncoder")
 	assertContains(t, out, "TextDecoder")
 }
@@ -3200,6 +3201,65 @@ func TestGenerateJSGlueMethodImport(t *testing.T) {
 	assertContains(t, out, `"Element.setAttribute"`)
 	assertContains(t, out, "_readString(name_ptr, name_len)")
 	assertContains(t, out, "_refLoad(handle)")
+}
+
+// stringResultModules is a resource whose members return a string in every
+// shape the glue emits — attribute getter, nullable operation, static — plus a
+// scalar getter that must not change.
+func stringResultModules() []*Module {
+	str := TypeRef{Kind: BuiltinKind, Builtin: "string"}
+	return []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Element",
+			Drop: true,
+			Methods: []Func{
+				{
+					Name: "inner_html", Kind: FuncMethod, OwnerType: "Element",
+					ImportName: "Element.innerHTML.get", Results: []TypeRef{str},
+				},
+				{
+					Name: "get_attribute", Kind: FuncMethod, OwnerType: "Element",
+					ImportName: "Element.getAttribute",
+					Params:     []Param{{Name: "name", Type: str}},
+					Results:    []TypeRef{{Kind: OptionKind, Elem: &str}},
+				},
+				{
+					Name: "describe", Kind: FuncStatic, OwnerType: "Element",
+					ImportName: "Element.describe",
+					Params:     []Param{{Name: "n", Type: TypeRef{Kind: BuiltinKind, Builtin: "i32"}}},
+					Results:    []TypeRef{str},
+				},
+				{
+					Name: "child_count", Kind: FuncMethod, OwnerType: "Element",
+					ImportName: "Element.childCount.get",
+					Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "i32"}},
+				},
+			},
+		}},
+	}}
+}
+
+// TestGenerateJSGlueStringResultTrailingRetptr: a string result crosses as the
+// canonical (ptr, len) pair written through a trailing return pointer, the
+// shape codegen's declareExterns declares for a wasm_import string result
+// (T1506). Before, the glue took no retptr — so a getter read the compiler's
+// leading sret pointer as its handle — and returned a pointer into a
+// cabi_retarea() export that does not exist.
+func TestGenerateJSGlueStringResultTrailingRetptr(t *testing.T) {
+	out := GenerateJSGlue(stringResultModules())
+	assertContains(t, out, `"Element.innerHTML.get"(handle, retptr)`)
+	assertContains(t, out, "_writeStringResult(retptr, _refLoad(handle).innerHTML);")
+	assertContains(t, out, `"Element.getAttribute"(handle, name_ptr, name_len, retptr)`)
+	assertContains(t, out, "_writeStringResult(retptr, _refLoad(handle).getAttribute(_readString(name_ptr, name_len)));")
+	assertContains(t, out, `"Element.describe"(n, retptr)`)
+	assertContains(t, out, "_writeStringResult(retptr, Element.describe(n));")
+	// A scalar result is returned directly and takes no return pointer.
+	assertContains(t, out, `"Element.childCount.get"(handle)`)
+	assertContains(t, out, "return _refLoad(handle).childCount;")
+	assertNotContains(t, out, "cabi_retarea")
+	assertNotContains(t, out, "return retarea")
 }
 
 func TestGenerateJSGlueConstructor(t *testing.T) {
@@ -3822,8 +3882,8 @@ func TestGenerateJSGlueStringReturn(t *testing.T) {
 		}},
 	}}
 	out := GenerateJSGlue(modules)
-	assertContains(t, out, "_writeString(String(result))")
-	assertContains(t, out, "cabi_retarea()")
+	assertContains(t, out, `"Element.getTag"(handle, retptr)`)
+	assertContains(t, out, "_writeStringResult(retptr, _refLoad(handle).getTag());")
 }
 
 func TestGenerateJSGlueMethodNoImportName(t *testing.T) {
@@ -4596,8 +4656,10 @@ func TestGenerateJSGlueNullableStringReturn(t *testing.T) {
 		}},
 	}}
 	out := GenerateJSGlue(modules)
-	assertContains(t, out, "if (result == null) return 0;")
-	assertContains(t, out, "_writeString(String(result))")
+	// null is handled inside _writeStringResult, which writes (0, 0).
+	assertContains(t, out, `"Storage.getItem"(handle, key_ptr, key_len, retptr)`)
+	assertContains(t, out, "_writeStringResult(retptr, _refLoad(handle).getItem(_readString(key_ptr, key_len)));")
+	assertNotContains(t, out, "return 0;")
 }
 
 func TestWebIdlOptionalParam(t *testing.T) {

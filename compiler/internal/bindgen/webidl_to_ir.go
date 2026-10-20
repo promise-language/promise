@@ -455,28 +455,35 @@ func idlEnumValueToPascal(s string) string {
 	return result
 }
 
+// eachName calls fn with every NamedKind name in ref, depth-first, stopping at
+// the first call that returns true; it reports whether one did. It is the one
+// walk over a TypeRef's shape — a new TypeRefKind that can name a type extends
+// it here.
+func eachName(ref TypeRef, fn func(name string) bool) bool {
+	if ref.Kind == NamedKind && fn(ref.Name) {
+		return true
+	}
+	if ref.Elem != nil && eachName(*ref.Elem, fn) {
+		return true
+	}
+	if ref.Ok != nil && eachName(*ref.Ok, fn) {
+		return true
+	}
+	if ref.Err != nil && eachName(*ref.Err, fn) {
+		return true
+	}
+	for _, e := range ref.Elements {
+		if eachName(e, fn) {
+			return true
+		}
+	}
+	return false
+}
+
 // moduleHasJsValue returns true if any TypeRef in the module references JsValue.
 func moduleHasJsValue(m *Module) bool {
-	var check func(ref TypeRef) bool
-	check = func(ref TypeRef) bool {
-		if ref.Kind == NamedKind && ref.Name == "JsValue" {
-			return true
-		}
-		if ref.Elem != nil && check(*ref.Elem) {
-			return true
-		}
-		if ref.Ok != nil && check(*ref.Ok) {
-			return true
-		}
-		if ref.Err != nil && check(*ref.Err) {
-			return true
-		}
-		for _, e := range ref.Elements {
-			if check(e) {
-				return true
-			}
-		}
-		return false
+	check := func(ref TypeRef) bool {
+		return eachName(ref, func(name string) bool { return name == "JsValue" })
 	}
 
 	for _, t := range m.Types {

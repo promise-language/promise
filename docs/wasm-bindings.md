@@ -220,6 +220,28 @@ modules/wasi/
     wasi_test.pr           # tests for the bindings
 ```
 
+#### Generating a subset
+
+`promise bind webidl -keep <path>` generates only what a keep list names. The list holds one entry per line; surrounding whitespace is trimmed and blank lines are skipped:
+
+| Entry | Keeps |
+|---|---|
+| `I` | interface `I`; a `namespace` is listed the same way |
+| `I.m` | on a kept `I`, the attribute `m`, or every operation named `m` |
+| `I.constructor` | on a kept `I`, every constructor |
+
+```bash
+promise bind webidl -keep keep.txt -name web -o modules/web/ idl/
+```
+
+Entries are matched after partials and mixins are merged, so a mixin's member is listed under each interface that includes it. The list selects from the input rather than declaring it: an entry that names nothing there selects nothing and is not an error, so a list derived from browser-compat data may name far more than the bound IDL defines. A line of any other shape — an empty part, more than one `.`, inner whitespace — is an error naming its line, and every such line is reported before anything is written.
+
+Constants, iterable, maplike and setlike declarations, and anonymous special operations have no entry of their own: they go with their interface. An unlisted interface is dropped with its members, unless a kept interface inherits from it: an ancestor stays, with only its listed members, so the `is` clause resolves. Dictionaries, enums, typedefs and callbacks are never listed.
+
+A member name is the unit. All operations of one name are kept or dropped together, and so are all constructors, so the ordinals of [Overloaded Operations](#overloaded-operations) never depend on the list.
+
+The subset never leaves a dangling reference. To a fixed point, a typedef whose type names a dropped definition is dropped, and so is a dictionary whose parent is dropped or whose `required` member names one. Then an optional dictionary member that names a dropped definition is removed, and an interface member that names one is dropped together with every member sharing its name. `bind` reports each of these on stderr, with the definition it named. A name inside a union, `Promise<T>` or `record<K, V>` is not a reference, because each of those lowers to `JsValue`. A definition absent from the input is not one the list dropped: a member naming it fails to compile with `undefined type`, as an unbound parent does (§"WebIDL to Promise", interface inheritance), and the remedy is binding the spec that defines it.
+
 ### Pipeline Architecture
 
 ```

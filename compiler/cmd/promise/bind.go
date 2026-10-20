@@ -205,6 +205,7 @@ func runBindWebIdl(args []string) {
 		outDir     = "."
 		moduleName = ""
 		target     = "web"
+		keepPath   = ""
 		files      []string
 	)
 
@@ -217,6 +218,17 @@ func runBindWebIdl(args []string) {
 				os.Exit(1)
 			}
 			outDir = args[i]
+		case "-keep":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "-keep requires an argument")
+				os.Exit(1)
+			}
+			if keepPath != "" {
+				fmt.Fprintln(os.Stderr, "-keep given twice: pass one keep list")
+				os.Exit(1)
+			}
+			keepPath = args[i]
 		case "-name":
 			i++
 			if i >= len(args) {
@@ -243,7 +255,24 @@ func runBindWebIdl(args []string) {
 		fmt.Fprintln(os.Stderr, "  -o <dir>        output directory (default: .)")
 		fmt.Fprintln(os.Stderr, "  -name <name>    module name (default: derived from first interface)")
 		fmt.Fprintln(os.Stderr, "  -target <t>     target annotation: web, wasi (default: web)")
+		fmt.Fprintln(os.Stderr, "  -keep <path>    generate only the interfaces and members listed in <path>,")
+		fmt.Fprintln(os.Stderr, "                  one Interface or Interface.member per line")
 		os.Exit(1)
+	}
+
+	// The keep list is read before any IDL, so a bad list writes nothing.
+	var keep *bindgen.KeepList
+	if keepPath != "" {
+		src, err := os.ReadFile(keepPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error reading keep list: %v\n", err)
+			os.Exit(1)
+		}
+		keep, err = bindgen.ParseKeepList(keepPath, string(src))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
 
 	// Expand directories
@@ -305,6 +334,14 @@ func runBindWebIdl(args []string) {
 
 	// Merge partials, mixins, and includes
 	webidl.Merge(mergedFile)
+
+	// Reduce to the keep list after the merge, so a mixin's members are listed
+	// under the interfaces that include it.
+	if keep != nil {
+		for _, d := range bindgen.ApplyKeepList(mergedFile, keep) {
+			fmt.Fprintf(os.Stderr, "keep: dropped %s: it names %s, which the keep list drops\n", d.What, d.Ref)
+		}
+	}
 
 	// Convert to binding IR
 	allModules := bindgen.WebIdlToIR(mergedFile)

@@ -1218,6 +1218,180 @@ func TestBindWebIdlUnboundParentFailsLoudly(t *testing.T) {
 	}
 }
 
+// TestBindWebIdlKeepListCompilesClean drives `bind webidl -keep` end to end
+// (#18): only the listed interfaces and members are generated, an unlisted
+// ancestor of a kept interface stays so its `is` clause resolves, members a
+// partial interface or a mixin adds from another file are filtered like the
+// interface's own (the list applies after the merge), a listed member naming an
+// unlisted interface is dropped and reported on stderr, and the reduced module
+// compiles for wasm32-web.
+func TestBindWebIdlKeepListCompilesClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "dom.idl")
+	idl := `interface EventTarget {
+	undefined dispatch(DOMString kind);
+};
+
+interface Node : EventTarget {
+	attribute DOMString textContent;
+	Node appendChild(Node node);
+};
+
+interface Element : Node {
+	readonly attribute DOMString tagName;
+	undefined setAttribute(DOMString name, DOMString value);
+	undefined remove();
+	Fancy fancy();
+};
+
+interface Document : Node {
+	Element createElement(DOMString localName);
+};
+
+interface Fancy {
+	undefined sparkle();
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A second spec extends Element, as the standards IDL does across files.
+	extPath := filepath.Join(dir, "ext.idl")
+	ext := `partial interface Element {
+	undefined focus();
+	undefined blur();
+};
+
+interface mixin ParentNode {
+	undefined prepend(DOMString node);
+	undefined replaceChildren(DOMString node);
+};
+
+Element includes ParentNode;
+`
+	if err := os.WriteFile(extPath, []byte(ext), 0644); err != nil {
+		t.Fatal(err)
+	}
+	keepPath := filepath.Join(dir, "keep.txt")
+	keep := "Element\nElement.tagName\nElement.setAttribute\nElement.fancy\nElement.focus\nElement.prepend\nDocument\nDocument.createElement\nNode.textContent\nNode.appendChild\n"
+	if err := os.WriteFile(keepPath, []byte(keep), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	var stderr bytes.Buffer
+	bindCmd := exec.Command(bin, "bind", "webidl", "-keep", keepPath, "-name", "dom", "-o", outDir, idlPath, extPath)
+	bindCmd.Stderr = &stderr
+	if out, err := bindCmd.Output(); err != nil {
+		t.Fatalf("bind webidl -keep failed: %v\n%s%s", err, out, stderr.String())
+	}
+	if want := "keep: dropped Element.fancy: it names Fancy"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("bind stderr does not report the dropped member (want %q)\nstderr:\n%s", want, stderr.String())
+	}
+
+	pr, err := os.ReadFile(filepath.Join(outDir, "dom.pr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(pr)
+	// EventTarget is unlisted but Node inherits from it, so it stays — without
+	// its unlisted member.
+	for _, want := range []string{"type EventTarget", "type Node", "type Element", "type Document"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("generated module is missing %q", want)
+		}
+	}
+	for _, absent := range []string{"Fancy", "fancy", "sparkle", "dispatch", "remove", "blur", "replace_children"} {
+		if strings.Contains(src, absent) {
+			t.Errorf("generated module contains %q, which the keep list drops", absent)
+		}
+	}
+
+	userPath := filepath.Join(outDir, "use_keep.pr")
+	user := `main() {
+    doc := Document.borrow(2);
+    el := doc.create_element("div");
+    el.text_content = "hi";
+    el.set_attribute("id", "x");
+    page := doc.create_element("section");
+    added := page.append_child(el);
+    held := Element.borrow(4);
+    print_line(held.tag_name);
+    held.focus();
+    held.prepend("x");
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	for _, want := range []string{"@Node.append_child(", "@Element.set_attribute(", "@Document.create_element(", "@Element.focus(", "@Element.prepend("} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR is missing %q", want)
+		}
+	}
+}
+
+// TestBindWebIdlKeepListInvocationErrors is the error path of `-keep` (#18): a
+// keep list that cannot be read or parsed, or a `-keep` with no value or given
+// twice, fails the command before anything is written.
+func TestBindWebIdlKeepListInvocationErrors(t *testing.T) {
+	t.Parallel()
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "dom.idl")
+	if err := os.WriteFile(idlPath, []byte("interface Element {\n\treadonly attribute DOMString tagName;\n};\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	goodKeep := filepath.Join(dir, "good.txt")
+	if err := os.WriteFile(goodKeep, []byte("Element\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	badKeep := filepath.Join(dir, "bad.txt")
+	if err := os.WriteFile(badKeep, []byte("Element\nElement.\nElement.tagName\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		args []string // after `bind webidl -o <out>`
+		want string
+	}{
+		{"malformed entry", []string{"-keep", badKeep, idlPath}, badKeep + `:2: malformed keep entry "Element."`},
+		{"missing list", []string{"-keep", filepath.Join(dir, "absent.txt"), idlPath}, "error reading keep list"},
+		{"no value", []string{idlPath, "-keep"}, "-keep requires an argument"},
+		{"given twice", []string{"-keep", goodKeep, "-keep", goodKeep, idlPath}, "-keep given twice"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			outDir := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "_"))
+			args := append([]string{"bind", "webidl", "-o", outDir}, tc.args...)
+			out, err := exec.Command(bin, args...).CombinedOutput()
+			if err == nil {
+				t.Fatalf("bind webidl %v succeeded (want an error)\n%s", tc.args, out)
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Errorf("want %q in the output\noutput:\n%s", tc.want, out)
+			}
+			if _, statErr := os.Stat(outDir); !os.IsNotExist(statErr) {
+				t.Errorf("bind wrote %s before failing (stat: %v)", outDir, statErr)
+			}
+		})
+	}
+}
+
 // irFunctionBody returns the text of the first `define` whose signature contains
 // marker, up to the closing brace at column 0.
 func irFunctionBody(ir, marker string) (string, bool) {

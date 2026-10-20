@@ -725,8 +725,16 @@ properties and operations become methods.
 
 **The IDL is the published standard, not a hand-kept copy.** The bindings are
 generated from the curated WebIDL extraction of the W3C and WHATWG
-specifications, pinned by revision, so a change in the binding surface traces to
-a spec revision rather than to an edit.
+specifications, pinned by revision.
+
+**The surface is Baseline.** Of that IDL, the generated half carries only the
+interfaces and members Baseline reports interoperable across the core browsers
+(newly or widely available), read from browser-compat data pinned by revision
+beside the IDL and applied with `promise bind webidl -keep`
+([wasm-bindings.md](wasm-bindings.md) §"Generating a subset"). A standard member
+some core browser lacks is not in `web`; browsers are not an axis inside the
+module. A change in the binding surface therefore traces to a revision of the
+spec or of the compat data, never to an edit.
 
 **An application does not run `promise bind` for standard Web APIs.** It writes
 `use web;` and gets the generated bindings with the module.

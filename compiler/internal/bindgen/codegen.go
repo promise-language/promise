@@ -146,7 +146,7 @@ func (g *generator) emitType(t Type, importModule string) {
 		// Type aliases are inlined at use sites in Promise.
 		// Emit a comment for documentation.
 		if t.Doc != "" {
-			g.line("// %s: %s", t.Name, t.Doc)
+			g.line("// %s: %s", t.Name, flattenDoc(t.Doc))
 		}
 	}
 }
@@ -1144,11 +1144,20 @@ func splitOnCase(s string, sep byte) string {
 	return b.String()
 }
 
+// flattenDoc puts doc text on one line: a `doc string and a `//` comment both
+// end at a line break, whichever of \r\n, \r or \n the IDL source used.
+func flattenDoc(s string) string {
+	return strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(s)
+}
+
+// escapeDoc returns doc text as the body of a Promise string literal whose
+// value is that text on one line. `{` is escaped because it would otherwise
+// open an interpolation (PromiseLexer.g4 STRING_MODE).
 func escapeDoc(s string) string {
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "\"", "\\\"")
-	s = strings.ReplaceAll(s, "\n", " ")
-	return s
+	s = strings.ReplaceAll(s, "{", "\\{")
+	return flattenDoc(s)
 }
 
 // docAnnot returns a trailing ` `doc("...") ` metaAnnotation for the given doc

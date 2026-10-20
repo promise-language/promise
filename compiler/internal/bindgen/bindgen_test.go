@@ -2209,6 +2209,23 @@ func TestCodegenTypeAliasDoc(t *testing.T) {
 	assertContains(t, out, "// ErrorCode: Error code type.")
 }
 
+// A multi-line alias doc stays on its `//` line: a line break would leave the
+// rest of the text as uncommented code.
+func TestCodegenTypeAliasDocMultiLine(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/types",
+		Types: []Type{{
+			Name:   "ErrorCode",
+			Kind:   TypeAlias,
+			Doc:    "Error code type.\nSee the spec.\r\nCRLF too.",
+			Target: &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "// ErrorCode: Error code type. See the spec. CRLF too.\n")
+}
+
 func TestCodegenResourceDoc(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
@@ -2287,12 +2304,138 @@ func TestCodegenResourceNoDrop(t *testing.T) {
 	assertNotContains(t, out, "[resource-drop]")
 }
 
+// escapeDoc yields the body of a string literal that lexes as plain text: `{`
+// would open an interpolation, and a raw \r or \n is not string text.
 func TestEscapeDocSpecialChars(t *testing.T) {
-	got := escapeDoc("line1\nline2 with \"quotes\" and \\backslash")
-	want := "line1 line2 with \\\"quotes\\\" and \\\\backslash"
-	if got != want {
-		t.Errorf("escapeDoc: got %q, want %q", got, want)
+	cases := []struct{ in, want string }{
+		{"line1\nline2 with \"quotes\" and \\backslash", "line1 line2 with \\\"quotes\\\" and \\\\backslash"},
+		{"a {x} b", "a \\{x} b"},
+		{"crlf\r\nline", "crlf line"},
+		{"cr\rline", "cr line"},
 	}
+	for _, tc := range cases {
+		if got := escapeDoc(tc.in); got != tc.want {
+			t.Errorf("escapeDoc(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// everyPublicDocIDL has a commented and an uncommented instance of every WebIDL
+// construct that generates a `public declaration, including members that reach
+// Element through a mixin and a partial interface.
+const everyPublicDocIDL = `/** A target. */
+interface EventTarget {
+	undefined dispatch();
+};
+interface mixin ParentNode {
+	// Prepends nodes.
+	undefined prepend(DOMString nodes);
+	undefined append(DOMString nodes);
+};
+[Exposed=Window]
+interface Element : EventTarget {
+	constructor();
+	// The id.
+	attribute DOMString id;
+	readonly attribute DOMString tagName;
+	attribute DOMString title;
+	static attribute DOMString defaultNs;
+	undefined setAttribute(DOMString name, DOMString value);
+	undefined setAttribute(DOMString name, long value);
+	// Finds one.
+	Element? querySelector(DOMString selectors);
+	static Element make(long n);
+	const unsigned short ELEMENT_NODE = 1;
+	// The kind.
+	const unsigned short KIND = 2;
+	getter DOMString (unsigned long index);
+};
+Element includes ParentNode;
+partial interface Element {
+	undefined remove();
+};
+interface Document {
+	// Makes a document.
+	constructor(DOMString title);
+};
+/** Options. */
+dictionary Opts { long x; };
+dictionary Plain { long y; };
+// The mode.
+enum Mode { "open", "closed" };
+enum Kind { "a" };
+`
+
+// Every `public declaration generated from WebIDL carries a `doc: its IDL
+// comment when it has one, else a line naming the construct it binds; an
+// uncommented constructor keeps the owning factory's ownership text (#659).
+func TestWebIdlEveryPublicDeclHasDoc(t *testing.T) {
+	file, errs := webidl.Parse(everyPublicDocIDL, "dom.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	out := GeneratePromise(WebIdlToIR(file), "web")
+
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "`public") && !strings.Contains(line, "`doc(\"") {
+			t.Errorf("`public declaration without a `doc: %s", strings.TrimSpace(line))
+		}
+	}
+
+	for _, want := range []string{
+		// Interfaces.
+		"type EventTarget `structural(protocol: false) `public `target(web) `doc(\"A target.\") {",
+		"type Element is EventTarget `structural(protocol: false) `public `target(web) `doc(\"`Element` (WebIDL interface)\") {",
+		// Attributes: read-write, readonly and static; both accessors share one line.
+		"get id string `public `doc(\"The id.\") {",
+		"set id(string value) `public `doc(\"The id.\") {",
+		"get tag_name string `public `doc(\"`Element.tagName` (WebIDL attribute)\") {",
+		"get title string `public `doc(\"`Element.title` (WebIDL attribute)\") {",
+		"set title(string value) `public `doc(\"`Element.title` (WebIDL attribute)\") {",
+		"get default_ns string `public `global `doc(\"`Element.defaultNs` (WebIDL attribute)\") {",
+		"set default_ns(string value) `public `global `doc(\"`Element.defaultNs` (WebIDL attribute)\") {",
+		// Operations: an overload set shares the line naming its IDL member.
+		"set_attribute(this, string name, string value) `public `doc(\"`Element.setAttribute` (WebIDL operation)\") {",
+		"set_attribute_2(this, string name, i32 value) `public `doc(\"`Element.setAttribute` (WebIDL operation)\") {",
+		"query_selector(this, string selectors) Element? `public `doc(\"Finds one.\") {",
+		"make(i32 n) Element `public `global `doc(\"`Element.make` (WebIDL operation)\") {",
+		"getter(this, u32 index) string `public `doc(\"`Element.getter` (WebIDL operation)\") {",
+		// Mixin and partial members are named on the interface that binds them.
+		"prepend(this, string nodes) `public `doc(\"Prepends nodes.\") {",
+		"append(this, string nodes) `public `doc(\"`Element.append` (WebIDL operation)\") {",
+		"remove(this) `public `doc(\"`Element.remove` (WebIDL operation)\") {",
+		// Constants.
+		"element_node() u16 `public `global `doc(\"`Element.ELEMENT_NODE` (WebIDL constant)\") {",
+		"kind() u16 `public `global `doc(\"The kind.\") {",
+		// Constructors: the comment, else the owning factory's own text.
+		createFactoryLine("Element", "create", ""),
+		"create(string title) Document `public `global `doc(\"Makes a document.\") {",
+		// Dictionaries and enums.
+		"type Opts `structural(protocol: false) `public `doc(\"Options.\") {",
+		"type Plain `structural(protocol: false) `public `doc(\"`Plain` (WebIDL dictionary)\") {",
+		"enum Mode `public `doc(\"The mode.\") {",
+		"enum Kind `public `doc(\"`Kind` (WebIDL enum)\") {",
+	} {
+		assertContains(t, out, want)
+	}
+}
+
+// IDL comment text reaches the `doc string escaped and on one line.
+func TestWebIdlDocCommentEscaped(t *testing.T) {
+	src := "interface A {\n" +
+		"\t/**\n" +
+		"\t * Say \"hi\" \\ to {name}.\n" +
+		"\t * Next line.\n" +
+		"\t */\n" +
+		"\tundefined greet();\n" +
+		"};"
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	out := GeneratePromise(WebIdlToIR(file), "web")
+	assertContains(t, out, "greet(this) `public `doc(\"Say \\\"hi\\\" \\\\ to \\{name}. Next line.\") {")
 }
 
 func TestToKebab(t *testing.T) {
@@ -3436,7 +3579,7 @@ func TestWebIdlBindElementConstructs(t *testing.T) {
 	prCode := GeneratePromise(modules, "web")
 
 	// Dictionary → plain type with Option-wrapped optional fields (T0724).
-	if !strings.Contains(prCode, "type CheckVisibilityOptions `structural(protocol: false) `public {") {
+	if !strings.Contains(prCode, "type CheckVisibilityOptions `structural(protocol: false) `public `doc(\"`CheckVisibilityOptions` (WebIDL dictionary)\") {") {
 		t.Errorf("expected CheckVisibilityOptions plain type, got:\n%s", prCode)
 	}
 	if !strings.Contains(prCode, "bool? check_opacity;") {
@@ -3446,7 +3589,7 @@ func TestWebIdlBindElementConstructs(t *testing.T) {
 		t.Error("expected ext-attr dict member content_visibility_auto to be parsed and Option-wrapped")
 	}
 	// Enum → Promise enum.
-	if !strings.Contains(prCode, "enum SanitizerPresets `public {") {
+	if !strings.Contains(prCode, "enum SanitizerPresets `public `doc(\"`SanitizerPresets` (WebIDL enum)\") {") {
 		t.Error("expected SanitizerPresets Promise enum")
 	}
 	if !strings.Contains(prCode, "Default,") {
@@ -3956,20 +4099,20 @@ func TestWebIdlAttributeGeneratesGetterSetterSyntax(t *testing.T) {
 	out := GeneratePromise(modules, "web")
 
 	// Instance read-write attribute: both getter and setter wrappers.
-	assertContains(t, out, "get class_name string `public {")
-	assertContains(t, out, "set class_name(string value) `public {")
+	assertContains(t, out, "get class_name string `public `doc(\"`Element.className` (WebIDL attribute)\") {")
+	assertContains(t, out, "set class_name(string value) `public `doc(\"`Element.className` (WebIDL attribute)\") {")
 	assertContains(t, out, "return _element_class_name(this._handle);")
 	assertContains(t, out, "_element_set_class_name(this._handle, value);")
 
 	// Readonly attribute: only getter, no setter.
-	assertContains(t, out, "get tag_name string `public {")
+	assertContains(t, out, "get tag_name string `public `doc(\"`Element.tagName` (WebIDL attribute)\") {")
 	if strings.Contains(out, "set tag_name(") {
 		t.Error("readonly attribute should not emit a setter")
 	}
 
 	// Static attribute uses `get`/`set` syntax with `global on both halves (T0703).
-	assertContains(t, out, "get default_ns string `public `global {")
-	assertContains(t, out, "set default_ns(string value) `public `global {")
+	assertContains(t, out, "get default_ns string `public `global `doc(\"`Element.defaultNs` (WebIDL attribute)\") {")
+	assertContains(t, out, "set default_ns(string value) `public `global `doc(\"`Element.defaultNs` (WebIDL attribute)\") {")
 	assertContains(t, out, "return _element_default_ns();")
 	assertContains(t, out, "_element_set_default_ns(value);")
 	// The paired-function fallback `set_default_ns(...)` must be gone — that
@@ -4017,12 +4160,12 @@ func TestWebIdlAttributeResourceTyped(t *testing.T) {
 	out := GeneratePromise(modules, "web")
 
 	// Getter: handle-to-resource construction.
-	assertContains(t, out, "get parent Node `public {")
+	assertContains(t, out, "get parent Node `public `doc(\"`Element.parent` (WebIDL attribute)\") {")
 	assertContains(t, out, "handle := _element_parent(this._handle);")
 	assertContains(t, out, "return Node(_handle: handle, _owned: true);")
 
 	// Setter: resource value passed as handle.
-	assertContains(t, out, "set parent(Node value) `public {")
+	assertContains(t, out, "set parent(Node value) `public `doc(\"`Element.parent` (WebIDL attribute)\") {")
 	assertContains(t, out, "_element_set_parent(this._handle, value._handle);")
 
 	// Externs: resource params/returns are i32 handles on the FFI boundary.
@@ -4050,12 +4193,12 @@ func TestWebIdlJsValueAttributeMarshalsViaRef(t *testing.T) {
 	out := GeneratePromise(modules, "web")
 
 	// Getter: i32 ref lifted into a JsValue.Object (not handle→resource construction).
-	assertContains(t, out, "get v JsValue `public {")
+	assertContains(t, out, "get v JsValue `public `doc(\"`Element.v` (WebIDL attribute)\") {")
 	assertContains(t, out, "ref := _element_v(this._handle);")
 	assertContains(t, out, "return JsValue.Object(_js_ref: ref as int);")
 
 	// Setter: JsValue lowered via _to_ref() (not value._handle).
-	assertContains(t, out, "set v(JsValue value) `public {")
+	assertContains(t, out, "set v(JsValue value) `public `doc(\"`Element.v` (WebIDL attribute)\") {")
 	assertContains(t, out, "_element_set_v(this._handle, value._to_ref());")
 
 	// Enum carries the internal write-marshalling method.
@@ -4085,7 +4228,7 @@ func TestWebIdlJsValueMethodParamAndResult(t *testing.T) {
 	modules := WebIdlToIR(file)
 	out := GeneratePromise(modules, "web")
 
-	assertContains(t, out, "wrap(this, JsValue x) JsValue `public {")
+	assertContains(t, out, "wrap(this, JsValue x) JsValue `public `doc(\"`Foo.wrap` (WebIDL operation)\") {")
 	assertContains(t, out, "ref := _foo_wrap(this._handle, x._to_ref());")
 	assertContains(t, out, "return JsValue.Object(_js_ref: ref as int);")
 	assertContains(t, out, "_foo_wrap(i32 handle, i32 x) i32")
@@ -4244,7 +4387,7 @@ func TestWebIdlAttributeNullableResource(t *testing.T) {
 	modules := WebIdlToIR(file)
 	out := GeneratePromise(modules, "web")
 
-	assertContains(t, out, "get parent Node? `public {")
+	assertContains(t, out, "get parent Node? `public `doc(\"`Element.parent` (WebIDL attribute)\") {")
 	assertContains(t, out, "handle := _element_parent(this._handle);")
 	assertContains(t, out, "if handle == 0 { return none; }")
 	assertContains(t, out, "return Node(_handle: handle, _owned: true);")
@@ -4263,7 +4406,7 @@ func TestWebIdlAttributeNullableBuiltinSetter(t *testing.T) {
 	modules := WebIdlToIR(file)
 	out := GeneratePromise(modules, "web")
 
-	assertContains(t, out, "set title(string? value) `public {")
+	assertContains(t, out, "set title(string? value) `public `doc(\"`Element.title` (WebIDL attribute)\") {")
 	assertContains(t, out, `_element_set_title(this._handle, value ?: "");`)
 	// Extern signature collapses the Option<string> to a bare string.
 	assertContains(t, out, "_element_set_title(i32 handle, string value)")
@@ -5164,8 +5307,8 @@ func TestWebIdlBorrowAttributeCollision(t *testing.T) {
 	out := GeneratePromise(WebIdlToIR(file), "web")
 	assertContains(t, out, borrowFactoryLine("Slot", "borrow_handle"))
 	// The attribute keeps its own name; only the factory moves aside.
-	assertContains(t, out, "get borrow string `public {")
-	assertContains(t, out, "set borrow(string value) `public {")
+	assertContains(t, out, "get borrow string `public `doc(\"`Slot.borrow` (WebIDL attribute)\") {")
+	assertContains(t, out, "set borrow(string value) `public `doc(\"`Slot.borrow` (WebIDL attribute)\") {")
 }
 
 // TestCodegenResourceOwnershipShapeCanonicalABI pins that ownership is an
@@ -5291,10 +5434,10 @@ func TestCodegenResourceInheritance(t *testing.T) {
 	modules := inheritanceModules(t, inheritanceIDL)
 	out := GeneratePromise(modules, "web")
 
-	assertContains(t, out, "type EventTarget `structural(protocol: false) `public `target(web) {\n    i32 _handle;\n    bool _owned;\n")
-	assertContains(t, out, "type Node is EventTarget `structural(protocol: false) `public `target(web) {\n    borrow(")
-	assertContains(t, out, "type Element is Node `structural(protocol: false) `public `target(web) {\n    borrow(")
-	assertContains(t, out, "type Document is Node `structural(protocol: false) `public `target(web) {\n    borrow(")
+	assertContains(t, out, "type EventTarget `structural(protocol: false) `public `target(web) `doc(\"`EventTarget` (WebIDL interface)\") {\n    i32 _handle;\n    bool _owned;\n")
+	assertContains(t, out, "type Node is EventTarget `structural(protocol: false) `public `target(web) `doc(\"`Node` (WebIDL interface)\") {\n    borrow(")
+	assertContains(t, out, "type Element is Node `structural(protocol: false) `public `target(web) `doc(\"`Element` (WebIDL interface)\") {\n    borrow(")
+	assertContains(t, out, "type Document is Node `structural(protocol: false) `public `target(web) `doc(\"`Document` (WebIDL interface)\") {\n    borrow(")
 	// The `is` names the direct parent only.
 	assertNotContains(t, out, "type Element is EventTarget")
 	if n := strings.Count(out, "i32 _handle;"); n != 1 {
@@ -5344,6 +5487,6 @@ func TestCodegenResourceInheritanceUnboundParent(t *testing.T) {
 		readonly attribute DOMString tagName;
 	};`)
 	out := GeneratePromise(modules, "web")
-	assertContains(t, out, "type Element is Node `structural(protocol: false) `public `target(web) {")
+	assertContains(t, out, "type Element is Node `structural(protocol: false) `public `target(web) `doc(\"`Element` (WebIDL interface)\") {")
 	assertNotContains(t, out, "i32 _handle;")
 }

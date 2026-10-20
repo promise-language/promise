@@ -196,12 +196,12 @@ interface Element {
 func TestWebIdlOverloadCodegenDistinctMembers(t *testing.T) {
 	out := GeneratePromise(overloadIR(t, overloadFixture), "web")
 
-	assertContains(t, out, "set_attribute(this, string name, string value) `public {")
+	assertContains(t, out, "set_attribute(this, string name, string value) `public `doc(\"`Element.setAttribute` (WebIDL operation)\") {")
 	assertContains(t, out, "_element_set_attribute(this._handle, name, value);")
-	assertContains(t, out, "set_attribute_2(this, string name, TrustedHTML value) `public {")
+	assertContains(t, out, "set_attribute_2(this, string name, TrustedHTML value) `public `doc(\"`Element.setAttribute` (WebIDL operation)\") {")
 	assertContains(t, out, "_element_set_attribute_2(this._handle, name, value._handle);")
-	assertContains(t, out, "make(i32 n) Element `public `global {")
-	assertContains(t, out, "make_2(string tag) Element `public `global {")
+	assertContains(t, out, "make(i32 n) Element `public `global `doc(\"`Element.make` (WebIDL operation)\") {")
+	assertContains(t, out, "make_2(string tag) Element `public `global `doc(\"`Element.make` (WebIDL operation)\") {")
 	assertContains(t, out, "handle := _element_make_2(tag);")
 
 	assertContains(t, out, "_element_set_attribute_2(i32 handle, string name, i32 value)\n")

@@ -3,7 +3,8 @@
 // Size-class segregated free-list with sbrk via memory.grow.
 // Single-threaded (WASM has no threads). Self-initializing from __heap_base.
 //
-// Rebuild: clang --target=wasm32-unknown-wasi -O2 -nostdlib -c wasm_alloc.c -o wasm_alloc.o
+// Rebuild: ./build_wasm_alloc.sh <pinned clang> — and commit wasm_alloc.o with
+// any change to a definition here. The object, not this file, is what links (T2128).
 
 typedef unsigned int uint32;
 typedef unsigned long size_t;

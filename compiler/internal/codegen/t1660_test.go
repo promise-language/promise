@@ -19,21 +19,7 @@ import (
 // never rebuilt to match (T2128).
 func TestRawABIExternSymbolsCoverWasmAllocC(t *testing.T) {
 	path := findWasmAllocSource(t)
-	src, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-
-	// Definitions only — a leading type, the name, an argument list, and an
-	// opening brace on the same line, which is how every helper is written.
-	defRe := regexp.MustCompile(`(?m)^[A-Za-z_][A-Za-z0-9_ *]*\b(cabi_[a-z0-9_]+)\s*\([^)]*\)\s*\{`)
-	found := map[string]bool{}
-	for _, m := range defRe.FindAllStringSubmatch(string(src), -1) {
-		found[m[1]] = true
-	}
-	if len(found) == 0 {
-		t.Fatalf("no cabi_* definitions found in %s — the pattern needs updating, not the registry", path)
-	}
+	found := wasmAllocCabiDefinitions(t, path)
 
 	for sym := range found {
 		if !rawABIExternSymbols[sym] {
@@ -46,6 +32,26 @@ func TestRawABIExternSymbolsCoverWasmAllocC(t *testing.T) {
 			t.Errorf("rawABIExternSymbols lists %s but %s no longer defines it", sym, path)
 		}
 	}
+}
+
+// wasmAllocCabiDefinitions returns the cabi_* functions the C source at path
+// defines. Definitions only — a leading type, the name, an argument list, and an
+// opening brace on the same line, which is how every helper is written.
+func wasmAllocCabiDefinitions(t *testing.T, path string) map[string]bool {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	defRe := regexp.MustCompile(`(?m)^[A-Za-z_][A-Za-z0-9_ *]*\b(cabi_[a-z0-9_]+)\s*\([^)]*\)\s*\{`)
+	found := map[string]bool{}
+	for _, m := range defRe.FindAllStringSubmatch(string(src), -1) {
+		found[m[1]] = true
+	}
+	if len(found) == 0 {
+		t.Fatalf("no cabi_* definitions found in %s — the pattern needs updating", path)
+	}
+	return found
 }
 
 // findWasmAllocSource walks up to the repo root to locate the canonical-ABI C

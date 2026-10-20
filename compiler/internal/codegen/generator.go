@@ -396,10 +396,10 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.block = prevBlock
 	c.entryBlock = prevEntry
 
-	cleanupBlk := coroFn.NewBlock("cleanup")
+	cleanupBlk := coroFn.NewBlock(coroCleanupLabel)
 	doneBlk := coroFn.NewBlock("coro.done")
 	finalSuspBlk := coroFn.NewBlock("final.suspend")
-	bodyBlk := coroFn.NewBlock("body")
+	bodyBlk := coroFn.NewBlock(coroBodyLabel)
 
 	// doneBlk serves as both the suspend path (ramp return) and the done path.
 	// coro.end is required for coro-split to generate proper ret void in the

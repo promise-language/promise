@@ -1,0 +1,17 @@
+// #264: main's body is compiled into the `.goroutine.main` coroutine, whose
+// body and cleanup blocks were labelled `body` and `cleanup`. LLVM gives value
+// names and block labels one namespace, so a local of either name was emitted
+// as `%body` beside a `body:` label and opt rejected the module ("'%body' is not
+// a basic block"). A snapshot test because only `main` reaches that coroutine.
+type Doc {
+  string? body;
+}
+
+main() `test(expected: "hi\n2\n") {
+  Doc doc = Doc(body: "hi");
+  if body := doc.body {
+    print_line(body);
+  }
+  int cleanup = 2;
+  print_line(cleanup);
+}

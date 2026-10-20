@@ -2305,8 +2305,8 @@ func (c *Compiler) compileTestCoroutine(nameStr string, fd *ast.FuncDecl) *ir.Fu
 	initResult := initSuspBlk.NewCall(c.coroSuspend, constant.None, constant.False)
 
 	suspendBlk := coroFn.NewBlock("coro.suspend")
-	bodyBlk := coroFn.NewBlock("body")
-	cleanupBlk := coroFn.NewBlock("cleanup")
+	bodyBlk := coroFn.NewBlock(coroBodyLabel)
+	cleanupBlk := coroFn.NewBlock(coroCleanupLabel)
 	doneBlk := coroFn.NewBlock("coro.done")
 	finalSuspBlk := coroFn.NewBlock("final.suspend")
 

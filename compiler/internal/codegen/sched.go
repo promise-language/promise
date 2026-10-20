@@ -2709,8 +2709,8 @@ func (c *Compiler) wrapMainWithScheduler() {
 	initResult := initSuspBlk.NewCall(c.coroSuspend, constant.None, constant.False)
 
 	suspendBlk := coroFn.NewBlock("coro.suspend")
-	bodyBlk := coroFn.NewBlock("body")
-	cleanupBlk := coroFn.NewBlock("cleanup")
+	bodyBlk := coroFn.NewBlock(coroBodyLabel)
+	cleanupBlk := coroFn.NewBlock(coroCleanupLabel)
 	doneBlk := coroFn.NewBlock("coro.done")
 
 	// T0858: create finalSuspBlk early so an explicit `return;` in the main

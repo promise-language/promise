@@ -373,6 +373,18 @@ func (c *Compiler) wrapError(errVal value.Value, resultType *irtypes.StructType)
 	return agg
 }
 
+// Labels of a coroutine's body and cleanup blocks. LLVM textual IR gives a
+// function's value names and block labels one namespace, so in a function that
+// holds user-derived value names (a local `body`, a parameter `cleanup`) a block
+// label must not spell one: neither a Promise identifier nor uniqueLocalName's
+// `<identifier>.N` rename of a repeat (`body.1`). A dot before a non-numeric
+// segment guarantees that, as newBlock's bases (dotted, or a keyword such as
+// `yield`) do for counted blocks (#264).
+const (
+	coroBodyLabel    = "coro.body"
+	coroCleanupLabel = "coro.cleanup"
+)
+
 // newBlock creates a new basic block in the current function.
 func (c *Compiler) newBlock(name string) *ir.Block {
 	c.blockCounter++

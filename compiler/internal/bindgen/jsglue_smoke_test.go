@@ -266,6 +266,13 @@ func TestGenerateJSGlueOverloadSyntaxValid(t *testing.T) {
 	}
 }
 
+// TestGenerateJSGlueStringResultSyntaxValid parses the glue for string results
+// (T1506): _writeStringResult and the trailing-retptr imports that call it.
+func TestGenerateJSGlueStringResultSyntaxValid(t *testing.T) {
+	nodePath := requireNode(t)
+	nodeCheckGlue(t, nodePath, GenerateJSGlue(stringResultModules()))
+}
+
 // nodeCheckGlue fails the test unless `node --check` parses glue.
 func nodeCheckGlue(t *testing.T, nodePath, glue string) {
 	t.Helper()

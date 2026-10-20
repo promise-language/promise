@@ -120,6 +120,19 @@ function _writeString(str) {
   return { ptr, len: bytes.length };
 }
 
+// A string result crosses as the canonical (ptr, len) pair, written through the
+// trailing return pointer the caller supplies; the caller copies the bytes into
+// its own string and frees the buffer. null/undefined write (0, 0), the empty
+// string — a nullable DOMString result is a bare string at the boundary.
+function _writeStringResult(retptr, str) {
+  let ptr = 0, len = 0;
+  if (str != null) ({ ptr, len } = _writeString(String(str)));
+  // A fresh view: _writeString's allocation may have grown memory.
+  const view = new DataView(wasm.exports.memory.buffer);
+  view.setInt32(retptr, ptr, true);
+  view.setInt32(retptr + 4, len, true);
+}
+
 `)
 }
 
@@ -297,7 +310,26 @@ func (g *jsGlueGenerator) buildJSParams(f Func) []string {
 		}
 	}
 
+	// A string result comes back through a trailing return pointer — last, the
+	// position codegen's declareExterns gives it (see _writeStringResult).
+	if returnsString(f) {
+		params = append(params, "retptr")
+	}
+
 	return params
+}
+
+// returnsString reports whether f's flat result is a string, a nullable one
+// included: the extern declares a bare string for both (promiseExternType).
+func returnsString(f Func) bool {
+	if len(f.Results) == 0 {
+		return false
+	}
+	ret := f.Results[0]
+	if ret.Kind == OptionKind && ret.Elem != nil {
+		ret = *ret.Elem
+	}
+	return isStringType(ret)
 }
 
 func (g *jsGlueGenerator) emitConstructorBody(resourceName string, f Func, jsParams []string) {
@@ -375,25 +407,18 @@ func (g *jsGlueGenerator) emitReturnConversion(f Func, call string) {
 		g.writef("      %s;\n", call)
 		return
 	}
+	if returnsString(f) {
+		// String return: (ptr, len) through the trailing retptr, nothing returned
+		g.writef("      _writeStringResult(retptr, %s);\n", call)
+		return
+	}
 	isNullable := f.Results[0].Kind == OptionKind
 	ret := f.Results[0]
 	// Unwrap option for the flat return type
 	if ret.Kind == OptionKind && ret.Elem != nil {
 		ret = *ret.Elem
 	}
-	if isStringType(ret) {
-		// String return: write to linear memory, return ptr+len via retarea
-		g.writef("      const result = %s;\n", call)
-		if isNullable {
-			g.write("      if (result == null) return 0;\n")
-		}
-		g.write("      const { ptr, len } = _writeString(String(result));\n")
-		g.write("      const retarea = wasm.exports.cabi_retarea();\n")
-		g.write("      const view = new DataView(wasm.exports.memory.buffer);\n")
-		g.write("      view.setInt32(retarea, ptr, true);\n")
-		g.write("      view.setInt32(retarea + 4, len, true);\n")
-		g.write("      return retarea;\n")
-	} else if isRefType(ret) {
+	if isRefType(ret) {
 		if isNullable {
 			g.writef("      const result = %s;\n", call)
 			g.write("      if (result == null) return 0;\n")

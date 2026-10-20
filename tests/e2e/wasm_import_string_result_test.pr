@@ -1,0 +1,36 @@
+// T1506: a `wasm_import` `string` result crosses as a canonical (ptr, len) pair
+// the host writes through a trailing return pointer. The caller copies those
+// bytes into a heap string it owns and frees the host's buffer.
+//
+// The ABI shape is pinned by the codegen IR tests, and a real host round trip by
+// the bind-webidl end-to-end test in cmd/promise. Neither can see an
+// allocation-count delta, though, and every call through this lowering allocates.
+// This is the cleanup check: the harness fails a test on any delta, so a lifted
+// result that is never dropped fails here.
+//
+// The wasm32-web harness answers a promise_env import it does not implement with
+// a no-op, so this host writes nothing. That is the edge the caller covers by
+// zeroing the return area before each call: (0, 0) lifts as "".
+_silent_host_string(i32 key) string `extern("silent_host_string") `wasm_import("promise_env", "silent_host_string") `target(web);
+
+lifted_string_failures() int `target(web) {
+  int failed = 0;
+  for i in 0..100 {
+    s := _silent_host_string(i as i32);
+    if s.len != 0 {
+      failed = failed + 1;
+    }
+    if "<" + s + ">" != "<>" {
+      failed = failed + 2;
+    }
+  }
+  return failed;
+}
+
+lifted_string_failures() int `target(!web) {
+  return 0;
+}
+
+test_wasm_import_string_result_is_released() `test {
+  assert(lifted_string_failures() == 0, "a string result the host never wrote must lift as an empty string");
+}

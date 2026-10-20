@@ -2,6 +2,7 @@ package misc2
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -214,6 +215,108 @@ func TestWasmExternFailableStillSret(t *testing.T) {
 	`, "wasm32-wasi")
 	// Failable externs always use sret, even on WASM
 	codegentest.AssertContains(t, ir, "declare void @test_open(i8* %sret")
+}
+
+// T1506: a wasm_import string RESULT crosses the way a string parameter does —
+// as a canonical (ptr, len) pair, which the host writes through a trailing
+// return pointer the caller supplies — not into a leading sret pointer to
+// Promise's private boxed-string value struct, whose layout no host can know.
+// The caller copies the host's buffer into a Promise-owned string and releases
+// it with raw free (the allocator cabi_realloc used), never pal_free.
+//
+// The convention belongs to wasm_import, not to the browser, so a WASI host
+// import returning a string lowers the same way.
+func TestWasmImportStringResultUsesTrailingRetptr(t *testing.T) {
+	for _, target := range []string{"wasm32-web", "wasm32-wasi"} {
+		t.Run(target, func(t *testing.T) {
+			assertTrailingRetptrLift(t, codegentest.GenerateIRForTarget(t, `
+				get_s(i32 h) string `+"`extern(\"get_s\") `wasm_import(\"dbg\", \"get_s\") `target(wasm)"+`;
+				main() { s := get_s(1); print_line(s); }
+			`, target))
+		})
+	}
+}
+
+// assertTrailingRetptrLift checks the lowering of the first call to @get_s: a
+// zeroed return area passed last, then the host's bytes copied into a Promise
+// string and the host's buffer released with raw free.
+func assertTrailingRetptrLift(t *testing.T, ir string) {
+	t.Helper()
+	codegentest.AssertContains(t, ir, `declare void @get_s(i32 %h, i8* %retptr) `)
+	codegentest.AssertNotContains(t, ir, "@get_s(i8* %sret")
+
+	lines := strings.Split(ir, "\n")
+	callIdx := -1
+	for i, l := range lines {
+		if strings.Contains(l, "call void @get_s(") {
+			callIdx = i
+			break
+		}
+	}
+	if callIdx < 0 {
+		t.Fatalf("no call to @get_s in IR:\n%s", ir)
+	}
+	call := regexp.MustCompile(`call void @get_s\(i32 [^,]+, i8\* (%\d+)\)`).FindStringSubmatch(lines[callIdx])
+	if call == nil {
+		t.Fatalf("return area is not the trailing argument: %s", lines[callIdx])
+	}
+	before := strings.Join(lines[max(0, callIdx-4):callIdx], "\n")
+	codegentest.AssertContains(t, before, call[1]+" = bitcast { i8*, i32 }* ")
+	codegentest.AssertContains(t, before, "store { i8*, i32 } zeroinitializer, ")
+
+	after := strings.Join(lines[callIdx:min(len(lines), callIdx+12)], "\n")
+	data := regexp.MustCompile(`(%\d+) = load i8\*, i8\*\* `).FindStringSubmatch(after)
+	if data == nil {
+		t.Fatalf("host data pointer is not loaded from the return area:\n%s", after)
+	}
+	codegentest.AssertContains(t, after, "@promise_string_new(i8* "+data[1]+", i64 ")
+	codegentest.AssertContains(t, after, "call void @free(i8* "+data[1]+")")
+	codegentest.AssertNotContains(t, after, "@pal_free(i8* "+data[1]+")")
+}
+
+// T1506: a second Promise name on the same C symbol takes declareExterns' dedup
+// path, which reuses the first declaration and has to carry the result lowering
+// over with it. Without it the alias's call passes no return area and reads a
+// result from a function declared void.
+func TestWasmImportStringResultAliasSharesLowering(t *testing.T) {
+	ir := codegentest.GenerateIRForTarget(t, `
+		get_a(i32 h) string `+"`extern(\"get_s\") `wasm_import(\"dbg\", \"get_s\") `target(web)"+`;
+		get_b(i32 h) string `+"`extern(\"get_s\") `wasm_import(\"dbg\", \"get_s\") `target(web)"+`;
+		main() { print_line(get_a(1)); print_line(get_b(2)); }
+	`, "wasm32-web")
+	codegentest.AssertContains(t, ir, `declare void @get_s(i32 %h, i8* %retptr) `)
+	for _, h := range []string{"1", "2"} {
+		if !regexp.MustCompile(`call void @get_s\(i32 ` + h + `, i8\* %\d+\)`).MatchString(ir) {
+			t.Errorf("the call through handle %s does not pass the trailing return area:\n%s", h, ir)
+		}
+	}
+}
+
+// T1506: parameters keep their (ptr, len) flattening ahead of the return
+// pointer, which is always last — the order the JS glue's parameter list mirrors.
+func TestWasmImportStringParamAndResultOrder(t *testing.T) {
+	ir := codegentest.GenerateIRForTarget(t, `
+		echo(string a) string `+"`extern(\"echo\") `wasm_import(\"dbg\", \"echo\") `target(web)"+`;
+		main() { print_line(echo("x")); }
+	`, "wasm32-web")
+	codegentest.AssertContains(t, ir, `declare void @echo(i8* %a_ptr, i32 %a_len, i8* %retptr) `)
+}
+
+// T1506: the result lowering is scoped to a plain `string` result of a
+// wasm_import. A failable or optional result keeps its sret form, and an extern
+// without wasm_import keeps the value-struct bridge the backend writes both
+// sides of.
+func TestWasmStringResultUnchangedOutsidePlainWasmImport(t *testing.T) {
+	ir := codegentest.GenerateIRForTarget(t, `
+		_open!(i32 fd) string `+"`extern(\"test_open_s\") `wasm_import(\"env\", \"test_open_s\") `target(web)"+`;
+		_opt() string? `+"`extern(\"test_opt_s\") `wasm_import(\"env\", \"test_opt_s\") `target(web)"+`;
+		_native() string `+"`extern(\"native_s\") `target(web)"+`;
+		main() {}
+	`, "wasm32-web")
+	codegentest.AssertContains(t, ir, "declare void @test_open_s(i8* %sret, i32 %fd)")
+	codegentest.AssertContains(t, ir, "declare void @test_opt_s(i8* %sret)")
+	codegentest.AssertContains(t, ir, "declare void @native_s(i8* %sret)")
+	codegentest.AssertNotContains(t, ir, "%retptr")
 }
 
 // T0315: wasm32-web targets must export @_initialize (the JS/Node entry point)

@@ -520,7 +520,7 @@ A scalar read back out of the **return area** is narrowed to its stored width fi
 
 The canonical-ABI helpers — `cabi_realloc`, `cabi_retarea_ptr`, `cabi_load_*`/`cabi_store_*`, `cabi_string_data`/`_len`/`_from`, `cabi_vector_data`/`_len`/`_from` — are defined in the compiler's own `wasm_alloc.c` and **statically linked**, not imported. They cross the `` `extern `` boundary in the **raw platform C ABI**: scalars by value, `string` and `T[]` as their bare instance/header pointer, and scalar or pointer results returned directly.
 
-This is a different convention from the one the platform-layer symbols the backend emits use. Those cross in Promise's value-struct bridge form — a leading `sret` result pointer, and every value parameter as a pointer to its value struct — because the backend writes both sides. It is also different from the `wasm_import` convention above, where a `string` parameter flattens to `(i32 ptr, i32 len)`: a JS host cannot know Promise's boxed-string layout, whereas `wasm_alloc.c` reads that layout deliberately.
+This is a different convention from the one the platform-layer symbols the backend emits use. Those cross in Promise's value-struct bridge form — a leading `sret` result pointer, and every value parameter as a pointer to its value struct — because the backend writes both sides. It is also different from the `wasm_import` convention above, where a `string` parameter flattens to `(i32 ptr, i32 len)` and a `string` result returns as the same pair, written by the host through a trailing return pointer the caller supplies. The host allocates those bytes with `cabi_realloc`; the caller copies them into a Promise string and releases the buffer with the allocator `cabi_realloc` used. A JS host cannot know Promise's boxed-string layout, whereas `wasm_alloc.c` reads that layout deliberately.
 
 **Which ABI a symbol carries is a property of the symbol, not of the declaration**, so it is registered once on the compiler side rather than marked up in generated binding source. Generated bindings therefore need no annotation for it, and a binding generated against an older compiler does not need regenerating when the set changes.
 
@@ -760,7 +760,7 @@ Load the bootstrap for a program with no WebIDL bindings. Load the bindgen glue 
 program that has them — it is a superset of the bootstrap. Loading both would
 instantiate the module twice.
 
-> Whether these two artifacts should be consolidated into one is still open (T1506).
+> Whether these two artifacts should be consolidated into one is still open (#305).
 > Until that is decided the base PAL imports are deliberately present in both, so that
 > either can stand alone.
 
@@ -847,6 +847,12 @@ const imports = {
             const name = readString(instance.exports.memory, name_ptr, name_len);
             const val = readString(instance.exports.memory, val_ptr, val_len);
             el.setAttribute(name, val);
+        },
+        element_get_inner_html(ref, retptr) {
+            const [ptr, len] = writeString(instance, refLoad(ref).innerHTML);
+            const view = new DataView(instance.exports.memory.buffer);
+            view.setInt32(retptr, ptr, true);
+            view.setInt32(retptr + 4, len, true);
         },
         "[resource-drop]element"(ref) {
             refRelease(ref);

@@ -603,7 +603,9 @@ func TestParseArgumentNameKeywords(t *testing.T) {
 }
 
 // TestParseKeywordOutsideArgumentNameErrors: an ArgumentNameKeyword is a name
-// only in argument position; anywhere else it is still a keyword.
+// only in argument position; anywhere else it is still a keyword. And only those
+// keywords name an argument: not any other keyword, and not a string literal
+// that merely spells one.
 func TestParseKeywordOutsideArgumentNameErrors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -612,6 +614,8 @@ func TestParseKeywordOutsideArgumentNameErrors(t *testing.T) {
 	}{
 		{"operation name", "interface Foo { undefined callback(); };", "got callback"},
 		{"argument type", "interface Foo { undefined f(callback x); };", "expected type, got callback"},
+		{"keyword outside the production", "interface Foo { undefined f(long optional); };", "expected ), got optional"},
+		{"string literal spelling one", `interface Foo { undefined f(long "callback"); };`, "expected ), got string-literal"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

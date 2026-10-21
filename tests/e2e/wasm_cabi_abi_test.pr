@@ -313,3 +313,35 @@ realloc_failures() int `target(!wasm) {
 test_cabi_realloc_round_trips_through_pal() `test {
   assert(realloc_failures() == 0, "cabi_realloc does not allocate, grow and release on the PAL heap");
 }
+
+// cabi_realloc ignores its align argument, so every block it returns has to be
+// aligned for the canonical ABI's largest alignment, 8 — a host traps on a
+// pointer that is not aligned to what it asked for. That rests on the PAL
+// allocator's layout, the debug allocator's header in front of each block
+// included (#261), so it is checked in every size class, fresh and grown.
+realloc_alignment_failures() int `target(wasm) {
+  i32[] sizes = [1i32, 20i32, 3000i32, 70000i32];
+  for size in sizes {
+    p := _cabi_realloc(0i32, 0i32, 8i32, size);
+    if p % 8i32 != 0i32 {
+      return 1;
+    }
+    grown := size * 2i32 + 1i32;
+    q := _cabi_realloc(p, size, 8i32, grown);
+    if q % 8i32 != 0i32 {
+      return 2;
+    }
+    if _cabi_realloc(q, grown, 8i32, 0i32) != 0i32 {
+      return 3;
+    }
+  }
+  return 0;
+}
+
+realloc_alignment_failures() int `target(!wasm) {
+  return 0;
+}
+
+test_cabi_realloc_blocks_are_8_byte_aligned() `test {
+  assert(realloc_alignment_failures() == 0, "cabi_realloc returned a block not aligned to 8");
+}

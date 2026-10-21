@@ -618,9 +618,12 @@ func isRefType(ref TypeRef) bool {
 
 // jsParamName converts a snake_case parameter name to a JS-safe identifier.
 func jsParamName(name string) string {
-	// Avoid JS reserved words
+	// Avoid JS reserved words. The glue is a strict-mode module, so the words
+	// reserved only in strict mode count too: `interface` and `static` reach here
+	// because WebIDL lets an argument be named by either keyword.
 	switch name {
-	case "default", "class", "function", "var", "let", "const", "this", "new", "delete", "in", "typeof":
+	case "default", "class", "function", "var", "let", "const", "this", "new", "delete", "in", "typeof",
+		"interface", "static":
 		return name + "_"
 	}
 	return name

@@ -301,6 +301,23 @@ func TestGenerateJSGlueStringResultSyntaxValid(t *testing.T) {
 	nodeCheckGlue(t, nodePath, GenerateJSGlue(stringResultModules()))
 }
 
+// TestGenerateJSGlueKeywordArgNamesSyntaxValid parses the glue for an operation
+// whose arguments are named by every WebIDL ArgumentNameKeyword (#650). The glue
+// is a strict-mode module, where `interface` and `static` are reserved: emitted
+// verbatim as parameter names, they make the whole module a SyntaxError.
+func TestGenerateJSGlueKeywordArgNamesSyntaxValid(t *testing.T) {
+	nodePath := requireNode(t)
+	src := `interface Target {
+  undefined f(long async, long attribute, long callback, long const,
+    long constructor, long deleter, long dictionary, long enum, long getter,
+    long includes, long inherit, DOMString interface, long iterable,
+    long maplike, long mixin, long namespace, long partial, long readonly,
+    long required, long setlike, long setter, long static, long stringifier,
+    long typedef, long unrestricted);
+};`
+	nodeCheckGlue(t, nodePath, GenerateJSGlue(overloadIR(t, src)))
+}
+
 // nodeCheckGlue fails the test unless `node --check` parses glue.
 func nodeCheckGlue(t *testing.T, nodePath, glue string) {
 	t.Helper()

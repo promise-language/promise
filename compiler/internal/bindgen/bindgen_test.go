@@ -3984,7 +3984,7 @@ func TestGenerateJSGlueRefParam(t *testing.T) {
 }
 
 func TestJsParamNameReservedWords(t *testing.T) {
-	reserved := []string{"default", "class", "function", "var", "let", "const", "this", "new", "delete", "in", "typeof"}
+	reserved := []string{"default", "class", "function", "var", "let", "const", "this", "new", "delete", "in", "typeof", "interface", "static"}
 	for _, word := range reserved {
 		got := jsParamName(word)
 		if got != word+"_" {

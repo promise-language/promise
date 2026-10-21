@@ -37,6 +37,7 @@ import (
 	"github.com/promise-language/promise/compiler/internal/parser"
 	"github.com/promise-language/promise/compiler/internal/sema"
 	"github.com/promise-language/promise/compiler/internal/types"
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // normalizeArgs canonicalizes CLI flag arguments so that both -/-- prefixes
@@ -6043,7 +6044,8 @@ func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) er
 // emitWebBootstrapJS writes the bootstrap loader alongside the .wasm output
 // for wasm32-web targets, named after it. bindgen.GenerateBootstrapJS owns the
 // content: instantiation, the base PAL runtime imports every wasm32-web binary
-// needs (promise_env.write/exit/monotonic_nanos), and the _initialize entry
+// needs (promise_env.write/exit/monotonic_nanos and the reactor's
+// schedule_pump), the modules/web host imports, and the _initialize entry
 // point — generated from the same source as the bindgen glue's copy (#305).
 func emitWebBootstrapJS(wasmFile string) {
 	jsFile := strings.TrimSuffix(wasmFile, ".wasm") + ".js"
@@ -6086,6 +6088,18 @@ func buildWasmLinkArgs(objFiles []string, target, outputFile string, useLTO bool
 	)
 	if isWeb {
 		args = append(args, "--export=_initialize", "--export-memory")
+		// Reactor top level (docs/web-apps.md §14): the bounded pump every JS
+		// callback calls after delivering an event.
+		args = append(args, "--export="+wasmweb.ExportPump)
+		// Delivery (§8, §14): promise_web_enqueue is the actual host->wasm entry
+		// point a real addEventListener callback calls to push one event —
+		// wasmweb.names.go's own comment already warns "adding a name here is not
+		// enough on its own"; this was the missing --export= for it. Without this,
+		// promise_web_enqueue is defined (defineWebEnqueueFunc, called unconditionally
+		// for isWasmWeb) but never appears in the wasm export section, so JS has no
+		// way to deliver an event into a subscription's channel at all — confirmed via
+		// WebAssembly.Module.exports() on a wasm32-web build using _web_subscribe.
+		args = append(args, "--export="+wasmweb.ExportEnqueue)
 	} else {
 		args = append(args, "--export=_start")
 	}

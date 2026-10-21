@@ -7,11 +7,12 @@ import (
 	"testing"
 
 	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // TestEmitWebBootstrapJSIncludesBasePALGlue verifies the auto-generated
 // wasm32-web bootstrap loader implements the base PAL runtime imports
-// (promise_env.write/exit/monotonic_nanos) that every wasm32-web binary
+// (promise_env.write/exit/monotonic_nanos/schedule_pump) that every wasm32-web binary
 // unconditionally imports — WebIDL bindings or not. Before this fix, the
 // bootstrap only did WebAssembly.instantiateStreaming with an empty default
 // importObject, leaving these unresolved for any program not paired with
@@ -29,9 +30,37 @@ func TestEmitWebBootstrapJSIncludesBasePALGlue(t *testing.T) {
 	}
 	content := string(data)
 
-	for _, want := range []string{"write(", "exit(", "monotonic_nanos("} {
+	for _, want := range []string{"write(", "exit(", "monotonic_nanos(", "schedule_pump("} {
 		if !strings.Contains(content, want) {
 			t.Errorf("bootstrap JS missing base PAL import %q", want)
+		}
+	}
+}
+
+// TestEmitWebBootstrapJSIncludesWebModuleGlue verifies the bootstrap loader
+// implements every promise_env import modules/web/web.pr declares — the
+// no-bindgen surface of docs/web-apps.md#it-must-be-usable-without-bindgen —
+// and that a delivered event reaches the program through the reactor's own
+// exports, so a program that does `use web;` needs no glue of its own.
+func TestEmitWebBootstrapJSIncludesWebModuleGlue(t *testing.T) {
+	dir := t.TempDir()
+	wasmFile := filepath.Join(dir, "frontend.wasm")
+
+	emitWebBootstrapJS(wasmFile)
+
+	data, err := os.ReadFile(filepath.Join(dir, "frontend.js"))
+	if err != nil {
+		t.Fatalf("read bootstrap JS: %v", err)
+	}
+	content := string(data)
+
+	for _, want := range []string{
+		"web_add_event_listener(", "console_log(", "document_get_body(",
+		`"[resource-drop]event"(`, `"[resource-drop]element"(`,
+		"wasm.exports." + wasmweb.ExportEnqueue + "(", "wasm.exports." + wasmweb.ExportPump + "()",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("bootstrap JS missing modules/web glue %q", want)
 		}
 	}
 }
@@ -168,8 +197,8 @@ type bootstrapLoadResult struct {
 // hand-encoded module; this pins it to what the compiler actually imports, and
 // to what a page can do with init():
 //
-//   - the binary imports the three base PAL entries and nothing else of its
-//     own accord, so the bootstrap is all a program with no bindings needs;
+//   - the binary imports the four base PAL entries (schedule_pump among them,
+//     for the reactor's promise_web_pump) and nothing else of its own accord, so the bootstrap is all a program with no bindings needs;
 //   - a page-supplied promise_env entry is reached through init()'s
 //     importObject without displacing the base imports, and a print() is still
 //     joined to the print_line() that follows it across that host call;
@@ -215,8 +244,8 @@ func TestBuildWebBootstrapLoadsProgram(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	base := []string{"promise_env.exit", "promise_env.monotonic_nanos", "promise_env.write"}
-	withTick := []string{"promise_env.exit", "promise_env.monotonic_nanos", "promise_env.tick", "promise_env.write"}
+	base := []string{"promise_env.exit", "promise_env.monotonic_nanos", "promise_env.schedule_pump", "promise_env.write"}
+	withTick := []string{"promise_env.exit", "promise_env.monotonic_nanos", "promise_env.schedule_pump", "promise_env.tick", "promise_env.write"}
 	cases := []struct {
 		name, program, mode string
 		want                bootstrapLoadResult

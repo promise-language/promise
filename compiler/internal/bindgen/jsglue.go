@@ -41,6 +41,11 @@ func (g *jsGlueGenerator) generate(modules []*Module) string {
 // monotonic_nanos imports, the exit unwind and the line buffering — is
 // written once and cannot differ between them (#305).
 //
+// Beyond the shared base, it carries the host side of modules/web — the
+// hand-written, no-bindgen surface of
+// docs/web-apps.md#it-must-be-usable-without-bindgen — over the same
+// ref table the bindgen glue uses, so a handle means the same thing in both.
+//
 // promise_env entries on the importObject passed to init() are added to the
 // base imports and replace a base entry of the same name: that is how a page
 // supplies a function a hand-declared `wasm_import` names. It is not a way to
@@ -54,9 +59,12 @@ func GenerateBootstrapJS(wasmBase string) string {
 
 `, wasmBase)
 	g.emitPALRuntime()
-	g.write("// Base PAL runtime imports every wasm32-web binary needs.\n")
+	g.emitRefTable()
+	g.emitStringHelpers()
+	g.write("// Base PAL runtime imports every wasm32-web binary needs, and modules/web's.\n")
 	g.write("const basePromiseEnv = {\n")
 	g.emitBasePromiseEnvImports()
+	g.emitWebModuleImports()
 	g.write("};\n\n")
 	g.writef(`export async function init(importObject = {}) {
   const response = await fetch("%s");
@@ -228,12 +236,53 @@ function _flushRemainder() {
   }
 }
 
+// schedule_pump (docs/web-apps.md#budget-and-continuation): the reactor asks
+// the host to call promise_web_pump again. kind 0 = ASAP (a MessageChannel,
+// free of setTimeout(0)'s ~4ms clamp), 1 = Timer (setTimeout(delayMs)),
+// 2 = AnimationFrame (requestAnimationFrame).
+let _asapChannel;
+const _asapQueue = [];
+
+function _pump() {
+  wasm.exports.promise_web_pump();
+}
+
+function _schedulePump(kind, delayMs) {
+  if (kind === 1) {
+    setTimeout(_pump, delayMs);
+    return;
+  }
+  if (kind === 2) {
+    requestAnimationFrame(_pump);
+    return;
+  }
+  if (!_asapChannel) {
+    _asapChannel = new MessageChannel();
+    _asapChannel.port1.onmessage = () => {
+      const fn = _asapQueue.shift();
+      if (fn) fn();
+    };
+    // In Node.js, assigning onmessage starts and refs the port, which would
+    // hold the process open on its own; unref it (after the assignment, which
+    // re-refs) so liveness comes only from real registrations
+    // (docs/web-apps.md#the-liveness-rule). Browsers have no such concept.
+    if (typeof _asapChannel.port1.unref === "function") {
+      _asapChannel.port1.unref();
+      _asapChannel.port2.unref();
+    }
+  }
+  _asapQueue.push(_pump);
+  _asapChannel.port2.postMessage(null);
+}
+
 `)
 }
 
 // emitBasePromiseEnvImports writes the promise_env.write/exit/monotonic_nanos
-// entries every Promise wasm32-web binary imports unconditionally, regardless
-// of which WebIDL bindings it also uses. Without these, WebAssembly.instantiate
+// and schedule_pump entries every Promise wasm32-web binary imports
+// unconditionally, regardless of which WebIDL bindings it also uses —
+// schedule_pump because every wasm32-web link exports the reactor's
+// promise_web_pump, which calls it. Without these, WebAssembly.instantiate
 // throws a LinkError before any binding code — or _initialize — ever runs, so
 // the exit-unwind catch in emitRunInitialize has nothing to catch (T1506).
 // Both loaders write these entries from here.
@@ -252,6 +301,36 @@ func (g *jsGlueGenerator) emitBasePromiseEnvImports() {
     },
     monotonic_nanos() {
       return BigInt(Math.round(performance.now() * 1e6));
+    },
+    schedule_pump(kind, delayMs) {
+      _schedulePump(kind, delayMs);
+    },
+`)
+}
+
+// emitWebModuleImports writes the host side of modules/web/web.pr's
+// `wasm_import`s (docs/web-apps.md#it-must-be-usable-without-bindgen). An
+// event listener stores each event in the ref table, pushes its handle into
+// the program's subscription through promise_web_enqueue, and pumps so the
+// subscriber runs before the listener returns.
+func (g *jsGlueGenerator) emitWebModuleImports() {
+	g.write(`    web_add_event_listener(target, kind_ptr, kind_len, sub_id) {
+      _refLoad(target).addEventListener(_readString(kind_ptr, kind_len), (event) => {
+        wasm.exports.promise_web_enqueue(sub_id, _refStore(event));
+        wasm.exports.promise_web_pump();
+      });
+    },
+    console_log(handle, message_ptr, message_len) {
+      _refLoad(handle).log(_readString(message_ptr, message_len));
+    },
+    document_get_body(handle) {
+      return _refStore(_refLoad(handle).body);
+    },
+    "[resource-drop]event"(handle) {
+      _refRelease(handle);
+    },
+    "[resource-drop]element"(handle) {
+      _refRelease(handle);
     },
 `)
 }

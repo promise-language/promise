@@ -1266,7 +1266,9 @@ interface Rect : RectReadOnly {
 
 // TestBindWebIdlUnboundParentFailsLoudly is the error path: a derived interface
 // whose parent is not among the bound files must not compile into a wrapper
-// that silently lacks the inherited members — the failure T1507 reports.
+// that silently lacks the inherited members — the failure T1507 reports. bind's
+// self-check (docs/web-apps.md#bind-time-self-check) reports it at bind time;
+// with -no-check the project is written and the next compile reports it.
 func TestBindWebIdlUnboundParentFailsLoudly(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -1280,17 +1282,26 @@ func TestBindWebIdlUnboundParentFailsLoudly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	outDir := filepath.Join(dir, "out")
-	if out, err := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", outDir, idlPath).CombinedOutput(); err != nil {
-		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	checkedDir := filepath.Join(dir, "checked")
+	out, err := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", checkedDir, idlPath).CombinedOutput()
+	if err == nil {
+		t.Fatalf("bind webidl succeeded on a wrapper whose parent Node is unbound (want its self-check to fail)\n%s", out)
+	}
+	if !strings.Contains(string(out), "undefined type: Node") {
+		t.Errorf("bind: want an `undefined type: Node` error naming the missing parent\noutput:\n%s", out)
 	}
 
-	out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
+	outDir := filepath.Join(dir, "out")
+	if out, err := exec.Command(bin, "bind", "webidl", "-no-check", "-name", "dom", "-o", outDir, idlPath).CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl -no-check failed: %v\n%s", err, out)
+	}
+
+	out, err = exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
 	if err == nil {
 		t.Fatalf("emit-ir succeeded on a wrapper whose parent Node is unbound (want a compile error)\n%s", out)
 	}
 	if !strings.Contains(string(out), "undefined type: Node") {
-		t.Errorf("want an `undefined type: Node` error naming the missing parent\noutput:\n%s", out)
+		t.Errorf("emit-ir: want an `undefined type: Node` error naming the missing parent\noutput:\n%s", out)
 	}
 }
 

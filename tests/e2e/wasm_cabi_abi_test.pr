@@ -12,14 +12,10 @@
 //     indistinguishable from C's (i32, i32) on wasm32) links silently and writes
 //     a pointer-to-value-struct where the scalar belonged.
 //
-// So the assertions have to run, not just link. Every helper whose signature
-// wasm-ld cannot check on its own is exercised below. The rest are covered by the
-// codegen IR tests and the link check instead, each for a stated reason:
-//   - `cabi_string_from`/`cabi_vector_from` return a C-heap block that Promise
-//     would then pal_free — the separate heap mismatch tracked as T1503;
-//   - `cabi_realloc` has no matching free reachable from Promise, so calling it
-//     here would leak the block. Its arity differs from the bridge form, so the
-//     link check does see it.
+// So the assertions have to run, not just link. Every helper is exercised below.
+// The ones that allocate — `cabi_realloc`, `cabi_string_from`, `cabi_vector_from`
+// — allocate from the PAL heap, so what they return is an ordinary Promise
+// allocation that Promise itself releases (#261); see the tests at the end.
 _cabi_retarea_ptr() i32 `extern("cabi_retarea_ptr") `target(wasm);
 _cabi_load_i32(i32 ptr) i32 `extern("cabi_load_i32") `target(wasm);
 _cabi_load_i64(i32 ptr) i64 `extern("cabi_load_i64") `target(wasm);
@@ -204,4 +200,116 @@ vector_failures() int `target(!wasm) {
 
 test_cabi_vector_helpers_are_linked() `test {
   assert(vector_failures() == 0, "canonical-ABI vector helpers disagree with wasm_alloc.o");
+}
+
+// #261: the helpers that allocate do so from the PAL heap, so what they return
+// is an ordinary Promise allocation — counted by the harness's alloc-count check
+// and released by the same pal_free/pal_realloc as any other. They used to take
+// it from the C malloc heap instead, and the debug allocator aborted on the
+// first drop ("fatal: invalid free (bad header magic)").
+_cabi_string_from(i32 ptr, i32 len) string `extern("cabi_string_from") `target(wasm);
+_cabi_vector_from_u8(i32 ptr, i32 len, i32 elem_size) u8[] `extern("cabi_vector_from") `target(wasm);
+_cabi_realloc(i32 ptr, i32 old_size, i32 align, i32 new_size) i32 `extern("cabi_realloc") `target(wasm);
+
+// A lifted string is dropped through pal_free, here and in the concatenation
+// built from it. Repeated so the freed blocks are handed out again.
+string_from_failures() int `target(wasm) {
+  for i in 0..100 {
+    s := _cabi_string_from(_cabi_string_data("hello"), 5i32);
+    if s.len != 5 {
+      return 1;
+    }
+    if s != "hello" {
+      return 2;
+    }
+    if s + "!" != "hello!" {
+      return 3;
+    }
+    empty := _cabi_string_from(0i32, 0i32);
+    if empty != "" {
+      return 4;
+    }
+  }
+  return 0;
+}
+
+string_from_failures() int `target(!wasm) {
+  return 0;
+}
+
+test_cabi_string_from_is_promise_owned() `test {
+  assert(string_from_failures() == 0, "a string built by cabi_string_from is not a Promise allocation");
+}
+
+// A lifted vector is dropped through pal_free, and pushing past the capacity
+// cabi_vector_from gave it (cap == len) grows its header through pal_realloc.
+vector_from_failures() int `target(wasm) {
+  for i in 0..100 {
+    u8[] src = [104u8, 101u8, 108u8, 108u8];
+    u8[] v = _cabi_vector_from_u8(_cabi_vector_data_u8(src), 4i32, 1i32);
+    if v.len != 4 {
+      return 1;
+    }
+    if v[0] != 104u8 || v[3] != 108u8 {
+      return 2;
+    }
+    for j in 0..100 {
+      v.push(j as u8);
+    }
+    if v.len != 104 || v[3] != 108u8 || v[103] != 99u8 {
+      return 3;
+    }
+    u8[] empty = _cabi_vector_from_u8(0i32, 0i32, 1i32);
+    if empty.len != 0 {
+      return 4;
+    }
+  }
+  return 0;
+}
+
+vector_from_failures() int `target(!wasm) {
+  return 0;
+}
+
+test_cabi_vector_from_is_promise_owned() `test {
+  assert(vector_from_failures() == 0, "a vector built by cabi_vector_from is not a Promise allocation");
+}
+
+// The host's allocator, driven the way a host drives it: allocate, grow past the
+// largest size class (so the block moves), then release with a zero size. Both
+// the null and the non-null path have to be on the PAL heap — a grow through the
+// raw C realloc would leave a block the final pal_free rejects — and the release
+// has to free, or the harness reports the block as leaked.
+realloc_failures() int `target(wasm) {
+  p := _cabi_realloc(0i32, 0i32, 1i32, 8i32);
+  if p == 0i32 {
+    return 1;
+  }
+  _cabi_store_i32(p, 1819043176i32);
+  _cabi_store_i32(p + 4i32, 7i32);
+
+  q := _cabi_realloc(p, 8i32, 1i32, 70000i32);
+  if q == 0i32 {
+    return 2;
+  }
+  if _cabi_load_i32(q) != 1819043176i32 || _cabi_load_i32(q + 4i32) != 7i32 {
+    return 3;
+  }
+  _cabi_store_i32(q + 69996i32, 5i32);
+  if _cabi_load_i32(q + 69996i32) != 5i32 {
+    return 4;
+  }
+
+  if _cabi_realloc(q, 70000i32, 1i32, 0i32) != 0i32 {
+    return 5;
+  }
+  return 0;
+}
+
+realloc_failures() int `target(!wasm) {
+  return 0;
+}
+
+test_cabi_realloc_round_trips_through_pal() `test {
+  assert(realloc_failures() == 0, "cabi_realloc does not allocate, grow and release on the PAL heap");
 }

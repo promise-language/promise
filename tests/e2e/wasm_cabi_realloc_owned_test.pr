@@ -1,0 +1,47 @@
+// #261: a block a host obtains from cabi_realloc is an ordinary Promise
+// allocation, so Promise can own and release a value the host built in it.
+//
+// This is the reported case: a JS glue lays a string instance out in memory it
+// got from cabi_realloc and hands it to Promise, which drops it through
+// pal_free. While cabi_realloc took its blocks from the C malloc heap, the debug
+// allocator aborted on that drop ("fatal: invalid free (bad header magic)"), and
+// the glue's way out was to set the literal flag on the length — which stops the
+// abort by claiming the string owns nothing, and so leaks every one.
+//
+// cabi_realloc is declared here with a `string` result so the block arrives as
+// the string it is about to hold. That needs a file of its own: one unit cannot
+// declare the same C symbol with two result types, and wasm_cabi_abi_test.pr
+// declares it returning the raw i32 address.
+_cabi_realloc_string(i32 ptr, i32 old_size, i32 align, i32 new_size) string `extern("cabi_realloc") `target(wasm);
+_cabi_string_data(string s) i32 `extern("cabi_string_data") `target(wasm);
+_cabi_store_i32(i32 ptr, i32 val) `extern("cabi_store_i32") `target(wasm);
+_cabi_store_i64(i32 ptr, i64 val) `extern("cabi_store_i64") `target(wasm);
+
+// Builds "hell" the way a host would, in the wasm32 string layout: i32 variant
+// pointer at +0, padding at +4, i64 length at +8 (no literal flag), bytes at +16.
+// Repeated so the freed blocks are handed out again.
+adopted_string_failures() int `target(wasm) {
+  for i in 0..100 {
+    s := _cabi_realloc_string(0i32, 0i32, 8i32, 20i32);
+    base := _cabi_string_data(s) - 16i32;
+    _cabi_store_i32(base, 0i32);
+    _cabi_store_i32(base + 4i32, 0i32);
+    _cabi_store_i64(base + 8i32, 4i64);
+    _cabi_store_i32(base + 16i32, 1819043176i32);
+    if s.len != 4 {
+      return 1;
+    }
+    if s != "hell" {
+      return 2;
+    }
+  }
+  return 0;
+}
+
+adopted_string_failures() int `target(!wasm) {
+  return 0;
+}
+
+test_cabi_realloc_block_is_promise_owned() `test {
+  assert(adopted_string_failures() == 0, "a string built in a cabi_realloc block is not a Promise allocation");
+}

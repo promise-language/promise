@@ -104,6 +104,12 @@ world api {
 		if strings.HasPrefix(imp.Name, "cabi_") {
 			t.Errorf("canonical binding imports %s::%s — a helper wasm_alloc.o does not define, which no host provides", imp.Module, imp.Name)
 		}
+		// wasm_alloc.o's allocating helpers call the PAL allocator, which the
+		// module itself defines (#261); left unresolved it would become a host
+		// import no host provides, just like a missing helper.
+		if strings.HasPrefix(imp.Name, "pal_") {
+			t.Errorf("canonical binding imports %s::%s — a PAL function the module should define, which no host provides", imp.Module, imp.Name)
+		}
 	}
 	for _, name := range []string{"hello", "checksum", "payload"} {
 		if !hostFuncs[name] {

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/promise-language/promise/compiler/cmd/promise/clitest"
+	"github.com/promise-language/promise/compiler/internal/wasmtest"
 )
 
 // T1660: `promise bind wit -canonical-abi` output must build for wasm32-wasi
@@ -19,11 +20,15 @@ import (
 // Nothing built a canonical binding, and wasm-ld reports a mismatch as a warning
 // while substituting a trapping stub — so the defect was invisible twice over.
 //
-// The fixture is deliberately string-only: `list<T>` would pull in
-// cabi_vector_* (missing from the prebuilt wasm_alloc.o — T2128). A string
-// result is also the exact shape T1660 broke, since `string` is not an opaque
-// container type and so took the sret path. The scalar types are covered by
-// TestBindWitCanonicalAbiScalarsBuildForWasm below.
+// A string result is the exact shape T1660 broke, since `string` is not an
+// opaque container type and so took the sret path. The `list<u8>` pair pulls in
+// bindgen's per-element cabi_vector_* helpers. A helper the runtime object does
+// not define is no link error either: --allow-undefined turns it into a host
+// import, which wasm-ld never signature-checks and no host provides, so the
+// build succeeds and the module refuses to instantiate (T2128). Hence the
+// module's imports are read back as well — a canonical helper is statically
+// linked, never imported (docs/wasm-bindings.md). The scalar types are covered
+// by TestBindWitCanonicalAbiScalarsBuildForWasm below.
 func TestBindWitCanonicalAbiLinksCleanForWasm(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -37,6 +42,8 @@ func TestBindWitCanonicalAbiLinksCleanForWasm(t *testing.T) {
 
 interface greet {
   hello: func(name: string) -> string;
+  checksum: func(data: list<u8>) -> u32;
+  payload: func() -> list<u8>;
 }
 
 world api {
@@ -60,19 +67,48 @@ world api {
 	user := `main() {
     s := hello("world");
     print_line(s);
+    print_line("{checksum([1u8, 2u8, 3u8])}");
+    p := payload();
+    print_line("{p.len}");
 }
 `
 	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	buildCmd := exec.Command(bin, "build", "-target", "wasm32-wasi", "-o", filepath.Join(dir, "greet.wasm"), outDir)
+	wasmPath := filepath.Join(dir, "greet.wasm")
+	buildCmd := exec.Command(bin, "build", "-target", "wasm32-wasi", "-o", wasmPath, outDir)
 	out, err := buildCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("build -target wasm32-wasi failed (want exit 0): %v\n%s", err, out)
 	}
 	if strings.Contains(string(out), "signature mismatch") {
 		t.Errorf("canonical binding linked with a wasm-ld signature mismatch:\n%s", out)
+	}
+
+	module, err := os.ReadFile(wasmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imports, err := wasmtest.Imports(module)
+	if err != nil {
+		t.Fatalf("%s: %v", wasmPath, err)
+	}
+	// The interface's own functions are the imports this module should have, so
+	// finding them shows the import section was read rather than missed.
+	hostFuncs := map[string]bool{}
+	for _, imp := range imports {
+		if imp.Module == "test:api/greet" {
+			hostFuncs[imp.Name] = true
+		}
+		if strings.HasPrefix(imp.Name, "cabi_") {
+			t.Errorf("canonical binding imports %s::%s — a helper wasm_alloc.o does not define, which no host provides", imp.Module, imp.Name)
+		}
+	}
+	for _, name := range []string{"hello", "checksum", "payload"} {
+		if !hostFuncs[name] {
+			t.Errorf("module does not import test:api/greet::%s (imports: %+v)", name, imports)
+		}
 	}
 }
 
@@ -98,13 +134,12 @@ world api {
 // that has to narrow to the stored width before testing — see the comment on
 // liftScalarFromMemory.
 //
-// The fixture stays away from two unrelated open defects, so a failure here
-// names this one: `list<T>` pulls in cabi_vector_* (absent from the prebuilt
-// wasm_alloc.o — T2128), and a payload-less `result` stays on the direct path,
-// where the wrapper propagates with `^` instead of `?^` and the extern is
-// declared with a trailing bang — neither of which parses (T2146). Resource
-// members stay scalar-only for a third reason: a string or list on a resource
-// is marshalled by no one (T2144).
+// The fixture stays away from an unrelated open defect, so a failure here names
+// this one: a payload-less `result` stays on the direct path, where the wrapper
+// propagates with `^` instead of `?^` and the extern is declared with a trailing
+// bang — neither of which parses (T2146). Resource members stay scalar-only for
+// a second reason: a string or list on a resource is marshalled by no one
+// (T2144).
 func TestBindWitCanonicalAbiScalarsBuildForWasm(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {

@@ -17,9 +17,6 @@
 // codegen IR tests and the link check instead, each for a stated reason:
 //   - `cabi_string_from`/`cabi_vector_from` return a C-heap block that Promise
 //     would then pal_free — the separate heap mismatch tracked as T1503;
-//   - `cabi_vector_data`/`_len`/`_from` are absent from the checked-in prebuilt
-//     wasm_alloc.o even though wasm_alloc.c defines them, so calling one links as
-//     an undefined host import and the module will not instantiate (T2128);
 //   - `cabi_realloc` has no matching free reachable from Promise, so calling it
 //     here would leak the block. Its arity differs from the bridge form, so the
 //     link check does see it.
@@ -34,6 +31,8 @@ _cabi_store_f32(i32 ptr, f32 val) `extern("cabi_store_f32") `target(wasm);
 _cabi_store_f64(i32 ptr, f64 val) `extern("cabi_store_f64") `target(wasm);
 _cabi_string_data(string s) i32 `extern("cabi_string_data") `target(wasm);
 _cabi_string_len(string s) i32 `extern("cabi_string_len") `target(wasm);
+_cabi_vector_data_u8(u8[] v) i32 `extern("cabi_vector_data") `target(wasm);
+_cabi_vector_len_u8(u8[] v) i32 `extern("cabi_vector_len") `target(wasm);
 
 // A second Promise name on the same C symbol. bindgen emits exactly this shape —
 // one `_cabi_vector_len_<elem>` per list element type, all bound to
@@ -145,4 +144,64 @@ alias_failures() int `target(!wasm) {
 
 test_aliased_cabi_symbol_keeps_raw_abi() `test {
   assert(alias_failures() == 0, "a second `extern on one canonical-ABI symbol lost the raw ABI");
+}
+
+// The vector helpers, under the per-element-type names bindgen emits for every
+// `list<T>` — so the i32 pair is a second Promise name on each C symbol, with a
+// different element type, and takes the dedup path above.
+//
+// These helpers were defined in wasm_alloc.c but missing from the prebuilt
+// wasm_alloc.o, so a call linked as an undefined host import and the module
+// would not instantiate (T2128). Running is the gate: the build alone succeeds
+// either way under --allow-undefined.
+_cabi_vector_data_i32(i32[] v) i32 `extern("cabi_vector_data") `target(wasm);
+_cabi_vector_len_i32(i32[] v) i32 `extern("cabi_vector_len") `target(wasm);
+
+// A vector crosses as its bare header pointer; the helpers read Promise's own
+// layout off it (len at +0 with the static flag masked, elements at +16).
+vector_failures() int `target(wasm) {
+  int failed = 0;
+
+  if _cabi_vector_len_u8([104u8, 101u8, 108u8, 108u8]) != 4i32 {
+    failed = failed + 1;
+  }
+  if _cabi_load_i32(_cabi_vector_data_u8([104u8, 101u8, 108u8, 108u8])) != 1819043176i32 {
+    failed = failed + 2;
+  }
+
+  // Built at runtime, so heap-owned: the harness's alloc-count check covers the
+  // drop bookkeeping on the raw-ABI path, as heap_string_failures does for string.
+  u8[] grown = [];
+  grown.push(104u8);
+  grown.push(101u8);
+  grown.push(108u8);
+  grown.push(108u8);
+  if _cabi_vector_len_u8(grown) != 4i32 {
+    failed = failed + 4;
+  }
+  if _cabi_load_i32(_cabi_vector_data_u8(grown)) != 1819043176i32 {
+    failed = failed + 8;
+  }
+
+  u8[] empty = [];
+  if _cabi_vector_len_u8(empty) != 0i32 {
+    failed = failed + 16;
+  }
+
+  i32[] wide = [7i32, 8i32, 9i32];
+  if _cabi_vector_len_i32(wide) != 3i32 {
+    failed = failed + 32;
+  }
+  if _cabi_load_i32(_cabi_vector_data_i32(wide) + 4i32) != 8i32 {
+    failed = failed + 64;
+  }
+  return failed;
+}
+
+vector_failures() int `target(!wasm) {
+  return 0;
+}
+
+test_cabi_vector_helpers_are_linked() `test {
+  assert(vector_failures() == 0, "canonical-ABI vector helpers disagree with wasm_alloc.o");
 }

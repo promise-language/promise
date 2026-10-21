@@ -631,6 +631,25 @@ func (p *Parser) parseIterable() *Iterable {
 	return it
 }
 
+// argumentNameKeywords is WebIDL's ArgumentNameKeyword production: the keywords
+// that may also name an argument, and only an argument.
+var argumentNameKeywords = map[string]bool{
+	"async": true, "attribute": true, "callback": true, "const": true,
+	"constructor": true, "deleter": true, "dictionary": true, "enum": true,
+	"getter": true, "includes": true, "inherit": true, "interface": true,
+	"iterable": true, "maplike": true, "mixin": true, "namespace": true,
+	"partial": true, "readonly": true, "required": true, "setlike": true,
+	"setter": true, "static": true, "stringifier": true, "typedef": true,
+	"unrestricted": true,
+}
+
+// isArgumentName reports whether tok can name an argument: an identifier, or the
+// keyword token of an ArgumentNameKeyword. A word the lexer does not treat as a
+// keyword arrives as an identifier, so the second test needs no list of kinds.
+func isArgumentName(tok Token) bool {
+	return tok.Kind == TokenIdent || (argumentNameKeywords[tok.Value] && keywords[tok.Value] == tok.Kind)
+}
+
 func (p *Parser) parseParams() []*Param {
 	var params []*Param
 	for !p.at(TokenRParen) && !p.at(TokenEOF) {
@@ -648,7 +667,7 @@ func (p *Parser) parseParams() []*Param {
 			param.Variadic = true
 		}
 
-		if p.at(TokenIdent) || p.at(TokenIncludes) || p.at(TokenInterface) {
+		if isArgumentName(p.peek()) {
 			param.Name = p.next().Value
 		}
 

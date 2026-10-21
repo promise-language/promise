@@ -548,6 +548,84 @@ func TestParseVariadicParam(t *testing.T) {
 	}
 }
 
+// TestParseArgumentNameKeywords: every word of WebIDL's ArgumentNameKeyword
+// production names an argument, as webref's `addEventListener(…, callback)` does.
+func TestParseArgumentNameKeywords(t *testing.T) {
+	for _, kw := range []string{
+		"async", "attribute", "callback", "const", "constructor", "deleter",
+		"dictionary", "enum", "getter", "includes", "inherit", "interface",
+		"iterable", "maplike", "mixin", "namespace", "partial", "readonly",
+		"required", "setlike", "setter", "static", "stringifier", "typedef",
+		"unrestricted",
+	} {
+		t.Run(kw, func(t *testing.T) {
+			src := "interface Foo { undefined f(long " + kw + ", DOMString after); };"
+			file, errs := Parse(src, "test.webidl")
+			if len(errs) > 0 {
+				t.Fatalf("unexpected errors: %v", errs)
+			}
+			op := file.Interfaces[0].Members[0].(*Operation)
+			if len(op.Params) != 2 {
+				t.Fatalf("expected 2 params, got %d", len(op.Params))
+			}
+			if op.Params[0].Name != kw {
+				t.Errorf("expected param %q, got %q", kw, op.Params[0].Name)
+			}
+			if op.Params[1].Name != "after" {
+				t.Errorf("expected param 'after', got %q", op.Params[1].Name)
+			}
+		})
+	}
+
+	t.Run("optional defaulted", func(t *testing.T) {
+		src := "interface Foo { undefined f(optional boolean callback = false); };"
+		file, errs := Parse(src, "test.webidl")
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		p := file.Interfaces[0].Members[0].(*Operation).Params[0]
+		if p.Name != "callback" || !p.Optional || p.Default != "false" {
+			t.Errorf("expected optional callback = false, got %+v", p)
+		}
+	})
+
+	t.Run("variadic", func(t *testing.T) {
+		src := "interface Foo { undefined f(any... interface); };"
+		file, errs := Parse(src, "test.webidl")
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		p := file.Interfaces[0].Members[0].(*Operation).Params[0]
+		if p.Name != "interface" || !p.Variadic {
+			t.Errorf("expected variadic interface, got %+v", p)
+		}
+	})
+}
+
+// TestParseKeywordOutsideArgumentNameErrors: an ArgumentNameKeyword is a name
+// only in argument position; anywhere else it is still a keyword.
+func TestParseKeywordOutsideArgumentNameErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"operation name", "interface Foo { undefined callback(); };", "got callback"},
+		{"argument type", "interface Foo { undefined f(callback x); };", "expected type, got callback"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, errs := Parse(tt.src, "test.webidl")
+			if len(errs) == 0 {
+				t.Fatal("expected parse errors")
+			}
+			if !contains(errs[0].Error(), tt.want) {
+				t.Errorf("expected first error to contain %q, got: %v", tt.want, errs)
+			}
+		})
+	}
+}
+
 func TestParseConst(t *testing.T) {
 	src := `interface Node {
 		const unsigned short ELEMENT_NODE = 1;

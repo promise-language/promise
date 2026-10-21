@@ -975,6 +975,65 @@ interface Element {
 	}
 }
 
+// TestBindWebIdlKeywordArgNamesCompileClean is the end-to-end acceptance for
+// #650: WebIDL lets an argument be named by a keyword, as webref's
+// `addEventListener(DOMString type, EventListener? callback)` does. Before the
+// fix the parser rejected it and `bind` exited 1 for the whole input. `enum` is
+// also a Promise keyword, so its parameter must come out sanitized as `_enum`.
+func TestBindWebIdlKeywordArgNamesCompileClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "kw.idl")
+	idl := `interface Target {
+	undefined f(DOMString callback, long interface, boolean enum);
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "webidl", "-name", "kw", "-o", outDir, idlPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	generated, err := os.ReadFile(filepath.Join(outDir, "kw.pr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "string callback, i32 interface, bool _enum"; !strings.Contains(string(generated), want) {
+		t.Errorf("generated wrapper is missing params %q:\n%s", want, generated)
+	}
+
+	userPath := filepath.Join(outDir, "use_kw.pr")
+	user := `main() {
+    t := Target.borrow(2);
+    t.f("x", 1i32, true);
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	emitCmd := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir)
+	out, err := emitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	for _, want := range []string{"@target_f(", `"wasm-import-name"="Target.f"`} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR is missing %q", want)
+		}
+	}
+}
+
 // TestBindWebIdlDocCommentsCompileClean is the end-to-end acceptance for #659:
 // IDL comments become `doc annotations and every uncommented declaration gets a
 // generated one, so every `public line of the generated module carries a `doc —

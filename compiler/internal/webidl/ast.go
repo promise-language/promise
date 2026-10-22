@@ -16,6 +16,20 @@ type File struct {
 	Includes     []*IncludesStatement
 }
 
+// Append adds every definition of src to f, after f's own, so Merge sees the
+// definitions of several parsed files as one file's.
+func (f *File) Append(src *File) {
+	f.Interfaces = append(f.Interfaces, src.Interfaces...)
+	f.Dictionaries = append(f.Dictionaries, src.Dictionaries...)
+	f.Enums = append(f.Enums, src.Enums...)
+	f.Callbacks = append(f.Callbacks, src.Callbacks...)
+	f.Typedefs = append(f.Typedefs, src.Typedefs...)
+	f.Partials = append(f.Partials, src.Partials...)
+	f.PartialDicts = append(f.PartialDicts, src.PartialDicts...)
+	f.Mixins = append(f.Mixins, src.Mixins...)
+	f.Includes = append(f.Includes, src.Includes...)
+}
+
 // Interface represents a WebIDL interface declaration.
 type Interface struct {
 	Name     string

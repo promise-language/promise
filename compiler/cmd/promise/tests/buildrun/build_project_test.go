@@ -1034,6 +1034,72 @@ func TestBindWebIdlKeywordArgNamesCompileClean(t *testing.T) {
 	}
 }
 
+// TestBindWebIdlLegacyCallerCompilesClean is the end-to-end acceptance for #651:
+// webref's `HTMLAllCollection` declares `legacycaller … item(…)`. Before the fix
+// the parser rejected `legacycaller` and `bind` exited 1 for the whole input. A
+// named legacycaller binds as the regular operation of its name; an anonymous
+// one calls the object itself and binds no member.
+func TestBindWebIdlLegacyCallerCompilesClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "all.idl")
+	idl := `interface Element {};
+
+interface HTMLAllCollection {
+	readonly attribute unsigned long length;
+	legacycaller Element? item(unsigned long index);
+};
+
+interface Callable {
+	legacycaller Element? (unsigned long index);
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "webidl", "-name", "all", "-o", outDir, idlPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	generated, err := os.ReadFile(filepath.Join(outDir, "all.pr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(generated), "legacycaller") {
+		t.Errorf("the anonymous legacycaller bound a member:\n%s", generated)
+	}
+
+	userPath := filepath.Join(outDir, "use_all.pr")
+	user := `main() {
+    all := HTMLAllCollection.borrow(2);
+    el := all.item(0u32);
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	emitCmd := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir)
+	out, err := emitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	for _, want := range []string{"@html_all_collection_item(", `"wasm-import-name"="HTMLAllCollection.item"`} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR is missing %q", want)
+		}
+	}
+}
+
 // TestBindWebIdlDocCommentsCompileClean is the end-to-end acceptance for #659:
 // IDL comments become `doc annotations and every uncommented declaration gets a
 // generated one, so every `public line of the generated module carries a `doc —

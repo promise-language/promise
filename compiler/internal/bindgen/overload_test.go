@@ -135,6 +135,34 @@ func TestWebIdlOverloadSetNames(t *testing.T) {
 			},
 		},
 		{
+			// A named legacycaller is also the regular operation of its name, so
+			// it is one member of that name's overload set.
+			name: "named legacycaller",
+			src: `interface Element {};
+			interface HTMLAllCollection {
+				legacycaller Element? item(unsigned long index);
+				Element? item(DOMString name);
+			};`,
+			resource: "HTMLAllCollection",
+			want: []overloadMethod{
+				{"item", "HTMLAllCollection.item", FuncMethod, "u32"},
+				{"item_2", "HTMLAllCollection.item.2", FuncMethod, "string"},
+			},
+		},
+		{
+			// An anonymous legacycaller calls the object itself: no member.
+			name: "anonymous legacycaller",
+			src: `interface Element {};
+			interface Callable {
+				readonly attribute unsigned long length;
+				legacycaller Element? (unsigned long index);
+			};`,
+			resource: "Callable",
+			want: []overloadMethod{
+				{"length", "Callable.length.get", FuncMethod, ""},
+			},
+		},
+		{
 			// Counters are per interface: B's close is not B's second close.
 			name: "same name on two interfaces",
 			src: `interface A { undefined close(); };

@@ -123,7 +123,7 @@ type Operation struct {
 	Params  []*Param
 	Return  *TypeRef
 	Static  bool
-	Special string // "getter", "setter", "deleter", "stringifier" or ""
+	Special string // "getter", "setter", "deleter", "stringifier", "legacycaller" or ""
 	Doc     string
 	Pos     Pos
 }

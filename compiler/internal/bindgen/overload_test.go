@@ -120,6 +120,65 @@ func TestWebIdlOverloadSetNames(t *testing.T) {
 			},
 		},
 		{
+			// #617: an interface's constructors are an overload set too.
+			name: "constructor set",
+			src: `interface X {
+				constructor(long n);
+				constructor(DOMString tag);
+			};`,
+			resource: "X",
+			want: []overloadMethod{
+				{"constructor", "X.constructor", FuncConstructor, "i32"},
+				{"constructor_2", "X.constructor.2", FuncConstructor, "string"},
+			},
+		},
+		{
+			// The constructors and the operations named `create` are two sets,
+			// numbered apart however their declarations interleave.
+			name: "constructors beside an operation named create",
+			src: `interface Slot {
+				constructor();
+				unsigned long create();
+				constructor(long n);
+				undefined create(DOMString s);
+			};`,
+			resource: "Slot",
+			want: []overloadMethod{
+				{"constructor", "Slot.constructor", FuncConstructor, ""},
+				{"create", "Slot.create", FuncMethod, ""},
+				{"constructor_2", "Slot.constructor.2", FuncConstructor, "i32"},
+				{"create_2", "Slot.create.2", FuncMethod, "string"},
+			},
+		},
+		{
+			// An operation whose name snakes to `constructor` joins the
+			// constructors' set, so its extern cannot collide with theirs.
+			name: "operation named Constructor",
+			src: `interface Odd {
+				constructor();
+				undefined Constructor(long n);
+			};`,
+			resource: "Odd",
+			want: []overloadMethod{
+				{"constructor", "Odd.constructor", FuncConstructor, ""},
+				{"constructor_2", "Odd.Constructor.2", FuncMethod, "i32"},
+			},
+		},
+		{
+			// A derived interface's constructors are its own set: the parent's
+			// do not carry over, so B's lone constructor is its first.
+			name: "constructors on a derived interface",
+			src: `interface A {
+				constructor(long n);
+				constructor(DOMString tag);
+			};
+			interface B : A { constructor(boolean b); };`,
+			resource: "B",
+			want: []overloadMethod{
+				{"constructor", "B.constructor", FuncConstructor, "bool"},
+			},
+		},
+		{
 			// Anonymous special operations are emitted under their keyword, and
 			// the import names that keyword too — never an empty member.
 			name: "anonymous special operations",
@@ -276,6 +335,120 @@ func TestWebIdlOverloadJSGlue(t *testing.T) {
 			t.Errorf("import key %q appears %d times, want exactly once:\n%s", key, n, glue)
 		}
 	}
+}
+
+// constructorOverloadFixture has a constructor overload set of two.
+const constructorOverloadFixture = `interface X {
+	constructor(long n);
+	constructor(DOMString tag);
+};`
+
+// #617: every constructor of a set gets its own factory, extern, link name and
+// import, each declared exactly once — before the fix both constructors emitted
+// `create` and `_x_constructor`, and the module failed with "redeclared in this
+// scope". The ordinal composes with the T1974 fallback when an IDL member is
+// already named `create`.
+func TestWebIdlOverloadConstructorCodegen(t *testing.T) {
+	cases := []struct {
+		name   string
+		src    string
+		want   []string // each must appear
+		once   []string // each must appear exactly once
+		absent []string // none may appear
+	}{
+		{
+			name: "two constructors",
+			src:  constructorOverloadFixture,
+			want: []string{
+				createFactoryLine("X", "create", "i32 n"),
+				createFactoryLine("X", "create_2", "string tag"),
+				"handle := _x_constructor(n);",
+				"handle := _x_constructor_2(tag);",
+				"_x_constructor(i32 n) i32\n",
+				"_x_constructor_2(string tag) i32\n",
+				"`extern(\"x_constructor\")",
+				"`extern(\"x_constructor_2\")",
+				"`wasm_import(\"promise_env\", \"X.constructor\")",
+				"`wasm_import(\"promise_env\", \"X.constructor.2\")",
+			},
+			once: []string{
+				"\n_x_constructor(", "\n_x_constructor_2(",
+				"    create(", "    create_2(",
+				`"X.constructor")`, `"X.constructor.2")`,
+			},
+		},
+		{
+			name: "member named create",
+			src: `interface Slot {
+				constructor();
+				constructor(long n);
+				unsigned long create();
+			};`,
+			want: []string{
+				createFactoryLine("Slot", "create_handle", ""),
+				createFactoryLine("Slot", "create_handle_2", "i32 n"),
+				"handle := _slot_constructor();",
+				"handle := _slot_constructor_2(n);",
+				// The IDL member keeps its own name; only the factories move aside.
+				"create(this) u32 `public `doc(\"`Slot.create` (WebIDL operation)\") {",
+				"`wasm_import(\"promise_env\", \"Slot.constructor.2\")",
+			},
+			once: []string{
+				"\n_slot_create(", "\n_slot_constructor(", "\n_slot_constructor_2(",
+				"    create_handle(", "    create_handle_2(",
+				`"Slot.constructor")`, `"Slot.constructor.2")`,
+			},
+			// The ordinal goes on the fallback stem, never the default one.
+			absent: []string{"    create_2("},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := GeneratePromise(overloadIR(t, tc.src), "web")
+			for _, want := range tc.want {
+				assertContains(t, out, want)
+			}
+			for _, decl := range tc.once {
+				if n := strings.Count(out, decl); n != 1 {
+					t.Errorf("%q appears %d times, want exactly once:\n%s", decl, n, out)
+				}
+			}
+			for _, bad := range tc.absent {
+				assertNotContains(t, out, bad)
+			}
+		})
+	}
+}
+
+// Each constructor's import constructs the same JS class with that overload's
+// own arguments, under a key of its own: a JS object literal silently keeps the
+// last of two equal keys, which would route both factories to one overload.
+func TestWebIdlOverloadConstructorJSGlue(t *testing.T) {
+	glue := GenerateJSGlue(overloadIR(t, constructorOverloadFixture))
+
+	assertContains(t, glue, `"X.constructor"(n) {`+"\n      const obj = new X(n);")
+	assertContains(t, glue, `"X.constructor.2"(tag_ptr, tag_len) {`+"\n      const obj = new X(_readString(tag_ptr, tag_len));")
+	for _, key := range []string{`"X.constructor"(`, `"X.constructor.2"(`} {
+		if n := strings.Count(glue, key); n != 1 {
+			t.Errorf("import key %q appears %d times, want exactly once:\n%s", key, n, glue)
+		}
+	}
+}
+
+// A constructor's factory is derived from the name the front end gave it, so a
+// constructor not named constructorName is a front-end bug. It must fail loudly:
+// stripping a prefix that is not there would silently name the factory
+// `createcreate`.
+func TestConstructorFactoryNameRejectsForeignName(t *testing.T) {
+	r := Resource{Name: "Slot", Drop: true}
+	m := Func{Name: "create", Kind: FuncConstructor, ImportName: "Slot.constructor"}
+	defer func() {
+		if recover() == nil {
+			t.Error("constructorFactoryName accepted a constructor named \"create\"; want a panic")
+		}
+	}()
+	got := constructorFactoryName(r, m)
+	t.Errorf("constructorFactoryName = %q, want a panic", got)
 }
 
 // The glue reads the JS member from the import name, where the front end wrote

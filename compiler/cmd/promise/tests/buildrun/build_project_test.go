@@ -1049,6 +1049,76 @@ interface Element {
 	}
 }
 
+// TestBindWebIdlOverloadedConstructorsCompileClean is the end-to-end acceptance
+// for #617: `promise bind webidl` on interfaces declaring two constructors — one
+// plain, one beside an IDL member named `create` (the T1974 fallback) — plus a
+// program calling every factory, must compile for wasm32-web. Before the fix
+// both constructors emitted the same `create` factory and `_x_constructor`
+// extern, and the module failed with "redeclared in this scope".
+func TestBindWebIdlOverloadedConstructorsCompileClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "dom.idl")
+	idl := `interface X {
+	constructor(long n);
+	constructor(DOMString tag);
+};
+
+interface Slot {
+	constructor();
+	constructor(long n);
+	unsigned long create();
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", outDir, idlPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	userPath := filepath.Join(outDir, "use_constructors.pr")
+	user := `main() {
+    a := X.create(1i32);
+    b := X.create_2("div");
+    s := Slot.create_handle();
+    t := Slot.create_handle_2(2i32);
+    n := s.create();
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	emitCmd := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir)
+	out, err := emitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	// Each constructor reaches the IR as its own factory and its own import,
+	// named after the constructor plus the overload's ordinal.
+	for _, want := range []string{
+		"@X.create(", "@X.create_2(",
+		"@Slot.create_handle(", "@Slot.create_handle_2(",
+		"@x_constructor(", "@x_constructor_2(", "@slot_constructor_2(",
+		`"wasm-import-name"="X.constructor"`, `"wasm-import-name"="X.constructor.2"`,
+		`"wasm-import-name"="Slot.constructor.2"`,
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR is missing %q", want)
+		}
+	}
+}
+
 // TestBindWebIdlKeywordArgNamesCompileClean is the end-to-end acceptance for
 // #650: WebIDL lets an argument be named by a keyword, as webref's
 // `addEventListener(DOMString type, EventListener? callback)` does. Before the

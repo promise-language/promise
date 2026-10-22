@@ -192,8 +192,8 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 		Doc:    webidlDoc(iface.Doc, "interface", iface.Name),
 	}
 
-	// How many operations of each Promise name this interface has emitted so
-	// far, in merged member order — see numberOverload.
+	// How many operations and constructors of each Promise name this interface
+	// has emitted so far, in merged member order — see numberOverload.
 	overloads := make(map[string]int)
 
 	for _, member := range iface.Members {
@@ -242,12 +242,12 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 				continue
 			}
 			f := c.convertOperation(iface.Name, m)
-			overloads[f.Name]++
-			numberOverload(&f, overloads[f.Name])
+			numberOverload(overloads, &f)
 			res.Methods = append(res.Methods, f)
 
 		case *webidl.Constructor:
 			f := c.convertConstructor(iface.Name, m)
+			numberOverload(overloads, &f)
 			res.Methods = append(res.Methods, f)
 
 		case *webidl.Const:
@@ -268,15 +268,22 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 	return res
 }
 
-// numberOverload names the k-th operation of an interface's overload set (k is
-// 1-based, in merged declaration order). Promise has no overloading
-// (docs/language-design.md, "No Overloading"), so every overload after the first
-// becomes a member of its own: `<name>_<k>`, imported as `<Interface>.<member>.<k>`.
-// The import keeps the IDL member as its second component, so the JS glue calls
-// that same member with this overload's own arguments and the host's overload
-// resolution chooses among them (docs/wasm-bindings.md, "Overloaded Operations").
-// The extern and link names derive from f.Name, so they follow automatically.
-func numberOverload(f *Func, k int) {
+// numberOverload counts f in seen, the interface's overload sets keyed by
+// Promise name, and names it the k-th of its set (k is 1-based, in merged
+// declaration order). Promise has no overloading (docs/language-design.md, "No
+// Overloading"), so every overload after the first becomes a member of its own:
+// `<name>_<k>`, imported as `<Interface>.<member>.<k>`. The import keeps the IDL
+// member as its second component, so the JS glue calls that same member with
+// this overload's own arguments and the host's overload resolution chooses among
+// them (docs/wasm-bindings.md, "Overloaded Operations"). The extern and link
+// names derive from f.Name, so they follow automatically, and so does a
+// constructor's factory (constructorFactoryName). Constructors are named
+// constructorName, so they form one set — shared only with an operation whose
+// name also snakes to it (an IDL `Constructor`), which this count then keeps
+// from colliding with them.
+func numberOverload(seen map[string]int, f *Func) {
+	seen[f.Name]++
+	k := seen[f.Name]
 	if k < 2 {
 		return
 	}
@@ -328,7 +335,7 @@ func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operatio
 
 func (c *webidlConverter) convertConstructor(ifaceName string, ctor *webidl.Constructor) Func {
 	f := Func{
-		Name:       "create",
+		Name:       constructorName,
 		Kind:       FuncConstructor,
 		OwnerType:  ifaceName,
 		ImportName: ifaceName + ".constructor",

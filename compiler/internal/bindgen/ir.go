@@ -68,6 +68,13 @@ const (
 	FuncStatic
 )
 
+// constructorName is the Name every front end gives a FuncConstructor. A
+// constructor of an overload set carries its ordinal after it like any other
+// member (numberOverload: `constructor_2`). Codegen derives the constructor's
+// extern and link names from that Name as it does for every member, and its
+// owning factory by constructorFactoryName.
+const constructorName = "constructor"
+
 // AccessorKind marks a Func as a property getter or setter. Orthogonal to
 // FuncKind: an accessor can be either a FuncMethod (instance) or a FuncStatic
 // (static). Only WebIDL attributes produce non-None accessors.

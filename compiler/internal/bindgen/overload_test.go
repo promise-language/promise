@@ -21,7 +21,9 @@ func overloadIR(t *testing.T, src string) []*Module {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	return mustWebIdlToIR(t, file)
 }
 

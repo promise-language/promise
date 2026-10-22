@@ -2279,7 +2279,9 @@ func TestCodegenJsValueFromWebIdlUnion(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 	if !modules[0].HasJsValue {
 		t.Fatal("expected HasJsValue=true for union-typed attribute")
@@ -2380,7 +2382,9 @@ func TestWebIdlEveryPublicDeclHasDoc(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	out := GeneratePromise(mustWebIdlToIR(t, file), "web")
 
 	for _, line := range strings.Split(out, "\n") {
@@ -3162,7 +3166,9 @@ func parseMerged(t *testing.T, src string) *webidl.File {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	return file
 }
 
@@ -3508,7 +3514,9 @@ func TestWebIdlToIRMergedPartials(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 	res := modules[0].Resources[0]
 	// 1 getter (name) + 1 operation (doStuff) = 2 methods
@@ -3738,7 +3746,9 @@ func TestWebIdlEndToEnd(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 
 	// Generate Promise code
@@ -3810,7 +3820,9 @@ func TestWebIdlBindElementConstructs(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 	prCode := GeneratePromise(modules, "web")
 
@@ -4442,7 +4454,9 @@ func TestWebIdlJsValueAttributeMarshalsViaRef(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 	out := GeneratePromise(modules, "web")
 
@@ -4478,7 +4492,9 @@ func TestWebIdlJsValueMethodParamAndResult(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 	out := GeneratePromise(modules, "web")
 
@@ -4809,7 +4825,9 @@ func TestWebIdlToIRMergedPartialDictionary(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 	m := modules[0]
 	if len(m.Types) != 1 {
@@ -4845,7 +4863,9 @@ func TestJsValueEmission(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 	if !modules[0].HasJsValue {
 		t.Fatal("expected HasJsValue=true when types reference JsValue")
@@ -4876,7 +4896,9 @@ func TestJsValueDetectedInDictField(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 	if !modules[0].HasJsValue {
 		t.Fatal("expected HasJsValue=true when dictionary field is 'any'")
@@ -4892,7 +4914,9 @@ func TestJsValueDetectedInTypedef(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 	if !modules[0].HasJsValue {
 		t.Fatal("expected HasJsValue=true when typedef target is 'any'")
@@ -4908,7 +4932,9 @@ func TestJsValueDetectedNested(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 	if !modules[0].HasJsValue {
 		t.Fatal("expected HasJsValue=true for sequence<any> in dict field")
@@ -4925,7 +4951,9 @@ func TestJsValueNotEmittedWhenUnreferenced(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 	if modules[0].HasJsValue {
 		t.Fatal("expected HasJsValue=false when no types reference JsValue")
@@ -5067,7 +5095,9 @@ func TestWebIdlOptionalParam(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	modules := mustWebIdlToIR(t, file)
 	if len(modules) == 0 || len(modules[0].Resources) == 0 {
 		t.Fatal("expected at least one resource")
@@ -5225,7 +5255,9 @@ func TestWebIdlDOMExceptionGeneratesValidPromise(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	out := GeneratePromise(mustWebIdlToIR(t, file), "web")
 
 	// No `static remains anywhere in the generated source.
@@ -5644,7 +5676,9 @@ func inheritanceModules(t *testing.T, src string) []*Module {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	return mustWebIdlToIR(t, file)
 }
 

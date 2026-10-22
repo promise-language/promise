@@ -192,7 +192,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 		case *webidl.Operation:
 			// Named operations, and the anonymous special operations (emitted
 			// under their special keyword). Anything else without a name — an
-			// anonymous stringifier — has no member to emit.
+			// anonymous stringifier or legacycaller — has no member to emit.
 			special := m.Special == "getter" || m.Special == "setter" || m.Special == "deleter"
 			if m.Name == "" && !special {
 				continue

@@ -1140,6 +1140,80 @@ func TestParseMemberSpecials(t *testing.T) {
 	}
 }
 
+// TestParseLegacyCaller: `legacycaller` starts a special operation, named or
+// anonymous, as webref's `HTMLAllCollection` uses it. The lexer leaves it an
+// identifier, so anywhere else it still names something.
+func TestParseLegacyCaller(t *testing.T) {
+	t.Run("named, verbatim webref", func(t *testing.T) {
+		src := `[Exposed=Window, LegacyUnenumerableNamedProperties]
+		interface HTMLAllCollection {
+			readonly attribute unsigned long length;
+			getter Element (unsigned long index);
+			getter (HTMLCollection or Element)? namedItem(DOMString name);
+			legacycaller (HTMLCollection or Element)? item(optional DOMString nameOrIndex);
+		};`
+		file, errs := Parse(src, "test.webidl")
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		members := file.Interfaces[0].Members
+		if len(members) != 4 {
+			t.Fatalf("expected 4 members, got %d", len(members))
+		}
+		op := members[3].(*Operation)
+		if op.Name != "item" || op.Special != "legacycaller" {
+			t.Errorf("expected legacycaller item, got %q with special %q", op.Name, op.Special)
+		}
+		if op.Return.Kind != UnionType || !op.Return.Nullable {
+			t.Errorf("expected a nullable union return, got %+v", op.Return)
+		}
+		if len(op.Params) != 1 || op.Params[0].Name != "nameOrIndex" || !op.Params[0].Optional {
+			t.Errorf("expected one optional param nameOrIndex, got %+v", op.Params)
+		}
+	})
+
+	t.Run("anonymous", func(t *testing.T) {
+		src := "interface Callable { legacycaller any (any... args); };"
+		file, errs := Parse(src, "test.webidl")
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		op := file.Interfaces[0].Members[0].(*Operation)
+		if op.Name != "" || op.Special != "legacycaller" {
+			t.Errorf("expected anonymous legacycaller, got %q with special %q", op.Name, op.Special)
+		}
+		if len(op.Params) != 1 || !op.Params[0].Variadic {
+			t.Errorf("expected one variadic param, got %+v", op.Params)
+		}
+	})
+
+	t.Run("an identifier elsewhere", func(t *testing.T) {
+		src := "interface Foo { undefined f(long legacycaller, DOMString after); };"
+		file, errs := Parse(src, "test.webidl")
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		op := file.Interfaces[0].Members[0].(*Operation)
+		if op.Special != "" {
+			t.Errorf("expected a regular operation, got special %q", op.Special)
+		}
+		if len(op.Params) != 2 || op.Params[0].Name != "legacycaller" || op.Params[1].Name != "after" {
+			t.Errorf("expected params legacycaller, after; got %+v", op.Params)
+		}
+	})
+
+	// Unlike `stringifier;`, `legacycaller` has no shorthand: it needs a return type.
+	t.Run("no return type", func(t *testing.T) {
+		_, errs := Parse("interface Callable { legacycaller; };", "test.webidl")
+		if len(errs) == 0 {
+			t.Fatal("expected parse errors")
+		}
+		if want := "expected type, got ;"; !contains(errs[0].Error(), want) {
+			t.Errorf("expected first error to contain %q, got: %v", want, errs)
+		}
+	})
+}
+
 func TestParseStaticNonReadonlyAttribute(t *testing.T) {
 	src := `interface Foo {
 		static attribute DOMString name;

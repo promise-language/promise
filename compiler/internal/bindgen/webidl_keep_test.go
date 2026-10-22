@@ -175,6 +175,28 @@ func TestApplyKeepList(t *testing.T) {
 			types: map[string][]string{},
 		},
 		{
+			// A named legacycaller is the regular operation of its name, so the
+			// list names it by that name, never by its keyword: listed, it is
+			// kept with the rest of its overload set; unlisted, it is dropped.
+			name: "named legacycaller listed by its name",
+			src: `interface Element {};
+			interface HTMLAllCollection {
+				legacycaller Element? item(unsigned long index);
+				Element? item(DOMString name);
+			};
+			interface Plugin {
+				legacycaller Element? item(unsigned long index);
+				readonly attribute DOMString name;
+			};`,
+			list: "Element\nHTMLAllCollection\nHTMLAllCollection.item\nPlugin\nPlugin.name\n",
+			resources: map[string][]string{
+				"Element":           nil,
+				"HTMLAllCollection": {"HTMLAllCollection.item", "HTMLAllCollection.item.2"},
+				"Plugin":            {"Plugin.name.get"},
+			},
+			types: map[string][]string{},
+		},
+		{
 			// The list selects from the input: entries naming nothing in it —
 			// absent interfaces, absent members, BCD keys that are not IDL
 			// members — select nothing and are not errors.

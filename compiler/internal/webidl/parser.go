@@ -541,6 +541,12 @@ func (p *Parser) parseMemberBody() Member {
 		// async operation — parse as regular operation
 		return p.parseOperation(false, "")
 	default:
+		// legacycaller is a special keyword only here, at the start of a member;
+		// the lexer leaves it an identifier, so it still names anything elsewhere.
+		if tok.Kind == TokenIdent && tok.Value == "legacycaller" {
+			p.next()
+			return p.parseOperation(false, "legacycaller")
+		}
 		// Regular operation (return type first)
 		return p.parseOperation(false, "")
 	}

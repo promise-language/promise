@@ -392,6 +392,143 @@ func TestApplyKeepList(t *testing.T) {
 			},
 			types: map[string][]string{},
 		},
+		{
+			// #612: D's m shadows P's, so it is numbered after it. Listing D.m
+			// keeps P.m too — the unit spans the chain — so D's ordinal is the
+			// one the unfiltered IR assigns, whether or not P.m is listed.
+			name: "a kept name is kept on the ancestors",
+			src: `interface P {
+				undefined m(DOMString a);
+				readonly attribute DOMString other;
+			};
+			interface D : P { undefined m(long a); };`,
+			list: "D\nD.m\n",
+			resources: map[string][]string{
+				"P": {"P.m"},
+				"D": {"D.m.2"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			name: "a kept name reaches every ancestor",
+			src: `interface P { undefined m(DOMString a); };
+			interface C : P {};
+			interface G : C { undefined m(long a); };`,
+			list: "G\nG.m\n",
+			resources: map[string][]string{
+				"P": {"P.m"},
+				"C": nil,
+				"G": {"G.m.2"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// The list selects from the input: D declares no m, so D.m names
+			// nothing and keeps nothing up the chain.
+			name: "an entry for an undeclared member keeps no ancestor's",
+			src: `interface P { undefined m(DOMString a); };
+			interface D : P {};`,
+			list: "D\nD.m\n",
+			resources: map[string][]string{
+				"P": nil,
+				"D": nil,
+			},
+			types: map[string][]string{},
+		},
+		{
+			// P's m names a dropped definition, so the unit goes from P and from
+			// D, which inherits it — otherwise D's m would lose the ordinal the
+			// unfiltered IR gives it.
+			name: "an ancestor's dangling name is dropped from its descendants",
+			src: `interface Fancy {};
+			interface P { undefined m(Fancy f); };
+			interface D : P {
+				undefined m(DOMString a);
+				readonly attribute DOMString id;
+			};`,
+			list: "D\nD.m\nD.id\n",
+			resources: map[string][]string{
+				"P": nil,
+				"D": {"D.id.get"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "P.m", Ref: "Fancy"},
+				{What: "D.m", Ref: "Fancy"},
+			},
+		},
+		{
+			// Nothing inherits from D, so its dangling m leaves P's alone.
+			name: "a descendant's dangling name leaves the ancestor's",
+			src: `interface Fancy {};
+			interface P { undefined m(DOMString a); };
+			interface D : P { undefined m(Fancy f); };`,
+			list: "D\nD.m\n",
+			resources: map[string][]string{
+				"P": {"P.m"},
+				"D": nil,
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{{What: "D.m", Ref: "Fancy"}},
+		},
+		{
+			// A constructor is a `global factory, never an inherited slot, so
+			// its unit stops at its interface.
+			name: "constructors are not kept up the chain",
+			src: `interface P { constructor(); };
+			interface D : P { constructor(DOMString s); };`,
+			list: "D\nD.constructor\n",
+			resources: map[string][]string{
+				"P": nil,
+				"D": {"D.constructor"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// D is not kept, so its entry selects nothing — on D or up the chain.
+			name: "an entry on a dropped interface keeps no ancestor's",
+			src: `interface P { undefined m(DOMString a); };
+			interface D : P { undefined m(long a); };`,
+			list: "P\nD.m\n",
+			resources: map[string][]string{
+				"P": nil,
+			},
+			types: map[string][]string{},
+		},
+		{
+			// The drop reaches every kept descendant, through C, which declares
+			// no m and so reports none.
+			name: "an ancestor's dangling name is dropped two levels down",
+			src: `interface Fancy {};
+			interface P { undefined m(Fancy f); };
+			interface C : P { readonly attribute DOMString id; };
+			interface G : C { undefined m(DOMString a); };`,
+			list: "G\nG.m\nC.id\n",
+			resources: map[string][]string{
+				"P": nil,
+				"C": {"C.id.get"},
+				"G": nil,
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "P.m", Ref: "Fancy"},
+				{What: "G.m", Ref: "Fancy"},
+			},
+		},
+		{
+			// Constructors are never inherited, so P's dangling one leaves D's.
+			name: "an ancestor's dangling constructor leaves the descendant's",
+			src: `interface Fancy {};
+			interface P { constructor(Fancy f); };
+			interface D : P { constructor(DOMString s); };`,
+			list: "D\nD.constructor\nP.constructor\n",
+			resources: map[string][]string{
+				"P": nil,
+				"D": {"D.constructor"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{{What: "P.constructor", Ref: "Fancy"}},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

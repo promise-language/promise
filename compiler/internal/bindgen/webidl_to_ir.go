@@ -3,6 +3,7 @@ package bindgen
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"unicode"
@@ -14,10 +15,13 @@ import (
 // WebIdlToIR converts a parsed WebIDL file into a slice of binding IR modules.
 // Each WebIDL interface produces one IR Resource, which records its inheritance
 // parent but carries only its own members — the generated `is` clause is how a
-// derived interface reaches its parent's (T1507). Dictionaries become Records
-// carrying their inherited members as their own fields (flattened). Enums become
-// IR Enums. The file produces a single module named from the first interface,
-// or "web" if no interfaces are present.
+// derived interface reaches its parent's (T1507). A parent is converted before
+// the interfaces deriving from it, because a derived member's name depends on
+// what it inherits (docs/wasm-bindings.md, "Shadowed Members"); the resources
+// still come out in input order. Dictionaries become Records carrying their
+// inherited members as their own fields (flattened). Enums become IR Enums. The
+// file produces a single module named from the first interface, or "web" if no
+// interfaces are present.
 //
 // It fails when a dictionary's inheritance cannot be flattened — an ancestor
 // that is not a dictionary in the file, or a cycle — reporting every such
@@ -27,8 +31,10 @@ import (
 // includes statements.
 func WebIdlToIR(file *webidl.File) ([]*Module, error) {
 	c := &webidlConverter{
-		file:  file,
-		dicts: make(map[string]*webidl.Dictionary),
+		file:      file,
+		dicts:     make(map[string]*webidl.Dictionary),
+		ifaces:    interfacesByName(file),
+		converted: make(map[*webidl.Interface]*convertedInterface),
 	}
 	for _, d := range file.Dictionaries {
 		c.dicts[d.Name] = d
@@ -39,6 +45,48 @@ func WebIdlToIR(file *webidl.File) ([]*Module, error) {
 type webidlConverter struct {
 	file  *webidl.File
 	dicts map[string]*webidl.Dictionary // every dictionary in file, by name
+	// ifaces resolves an interface's parent by name (interfacesByName).
+	ifaces map[string]*webidl.Interface
+	// converted memoizes each interface's conversion, so a parent is converted
+	// once, before its children, whatever the input order.
+	converted map[*webidl.Interface]*convertedInterface
+}
+
+// convertedInterface is one interface's conversion: its Resource, and the
+// instance members visible on it — its own and those it inherits — which the
+// interfaces deriving from it are named against. visible stays nil while the
+// interface is being converted, so the back edge of an inheritance cycle
+// inherits nothing instead of recursing forever.
+type convertedInterface struct {
+	res     Resource
+	visible map[string][]slot
+}
+
+// interfacesByName indexes a merged file's interfaces by name, mixins excluded,
+// for resolving an interface's parent.
+func interfacesByName(file *webidl.File) map[string]*webidl.Interface {
+	ifaces := make(map[string]*webidl.Interface)
+	for _, iface := range file.Interfaces {
+		if !isMixin(iface) {
+			ifaces[iface.Name] = iface
+		}
+	}
+	return ifaces
+}
+
+// resource converts iface, after its parent, once.
+func (c *webidlConverter) resource(iface *webidl.Interface) *convertedInterface {
+	if done, ok := c.converted[iface]; ok {
+		return done
+	}
+	ci := &convertedInterface{}
+	c.converted[iface] = ci
+	var inherited map[string][]slot
+	if parent := c.ifaces[iface.Parent]; parent != nil {
+		inherited = c.resource(parent).visible
+	}
+	ci.res, ci.visible = c.convertInterface(iface, inherited)
+	return ci
 }
 
 func (c *webidlConverter) convert() ([]*Module, error) {
@@ -77,7 +125,7 @@ func (c *webidlConverter) convert() ([]*Module, error) {
 		if isMixin(iface) {
 			continue
 		}
-		m.Resources = append(m.Resources, c.convertInterface(iface))
+		m.Resources = append(m.Resources, c.resource(iface).res)
 	}
 
 	// Convert callbacks as function type aliases (skipped in IR for now —
@@ -184,7 +232,10 @@ func (c *webidlConverter) convertTypedef(td *webidl.Typedef) Type {
 	}
 }
 
-func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
+// convertInterface converts one interface, given the instance members it
+// inherits by Promise name, and returns its Resource with the instance members
+// visible on it for the interfaces deriving from it.
+func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited map[string][]slot) (Resource, map[string][]slot) {
 	res := Resource{
 		Name:   iface.Name,
 		Parent: iface.Parent,
@@ -192,9 +243,9 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 		Doc:    webidlDoc(iface.Doc, "interface", iface.Name),
 	}
 
-	// How many operations and constructors of each Promise name this interface
-	// has emitted so far, in merged member order — see numberOverload.
-	overloads := make(map[string]int)
+	// The ordinal of each member in the overload set of its Promise name, in
+	// merged member order — see memberNamer and numberOverload.
+	names := newMemberNamer(inherited)
 
 	for _, member := range iface.Members {
 		switch m := member.(type) {
@@ -214,6 +265,9 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 			if m.Static {
 				getter.Kind = FuncStatic
 			}
+			// One ordinal names the attribute's getter and setter alike.
+			k := names.declaredOnce(getter)
+			numberOverload(&getter, k)
 			res.Methods = append(res.Methods, getter)
 
 			// Setter (unless readonly)
@@ -230,6 +284,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 				if m.Static {
 					setter.Kind = FuncStatic
 				}
+				numberOverload(&setter, k)
 				res.Methods = append(res.Methods, setter)
 			}
 
@@ -242,12 +297,12 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 				continue
 			}
 			f := c.convertOperation(iface.Name, m)
-			numberOverload(overloads, &f)
+			numberOverload(&f, names.operation(f))
 			res.Methods = append(res.Methods, f)
 
 		case *webidl.Constructor:
 			f := c.convertConstructor(iface.Name, m)
-			numberOverload(overloads, &f)
+			numberOverload(&f, names.operation(f))
 			res.Methods = append(res.Methods, f)
 
 		case *webidl.Const:
@@ -261,34 +316,173 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 				Results:    []TypeRef{convertWebIdlTypeRef(m.Type)},
 				Doc:        webidlDoc(m.Doc, "constant", idlName),
 			}
+			numberOverload(&f, names.declaredOnce(f))
 			res.Methods = append(res.Methods, f)
 		}
 	}
 
-	return res
+	return res, names.visible()
 }
 
-// numberOverload counts f in seen, the interface's overload sets keyed by
-// Promise name, and names it the k-th of its set (k is 1-based, in merged
-// declaration order). Promise has no overloading (docs/language-design.md, "No
-// Overloading"), so every overload after the first becomes a member of its own:
-// `<name>_<k>`, imported as `<Interface>.<member>.<k>`. The import keeps the IDL
-// member as its second component, so the JS glue calls that same member with
-// this overload's own arguments and the host's overload resolution chooses among
-// them (docs/wasm-bindings.md, "Overloaded Operations"). The extern and link
-// names derive from f.Name, so they follow automatically, and so does a
-// constructor's factory (constructorFactoryName). Constructors are named
-// constructorName, so they form one set — shared only with an operation whose
-// name also snakes to it (an IDL `Constructor`), which this count then keeps
-// from colliding with them.
-func numberOverload(seen map[string]int, f *Func) {
-	seen[f.Name]++
-	k := seen[f.Name]
+// slot is an instance member a derived interface inherits: the ordinal the
+// overload set of its Promise name gave it, and the member (an attribute's
+// getter) whose signature a redeclaration is compared with.
+type slot struct {
+	ordinal int
+	member  Func
+}
+
+// memberNamer gives each member of one interface its ordinal in the overload
+// set of its Promise name (numberOverload spells it). The set spans the `is`
+// chain (docs/wasm-bindings.md, "Shadowed Members"): an instance member that is
+// exactly an inherited one — sameSignature — overrides it and takes its
+// ordinal, and every other member is numbered after the instance members the
+// interface inherits under that name, so a redeclaration never takes over an
+// inherited slot the override rule would reject. With nothing inherited the
+// numbering is the per-interface one of "Overloaded Operations".
+type memberNamer struct {
+	inherited  map[string][]slot  // the parent's visible instance members, by Promise name
+	last       map[string]int     // the highest ordinal each name has been given so far
+	overridden map[ordinalOf]bool // inherited slots an own member already overrides
+	own        map[string][]slot  // own instance members that took a new ordinal
+}
+
+// ordinalOf identifies a slot: the ordinal a name's overload set gave it.
+type ordinalOf struct {
+	name    string
+	ordinal int
+}
+
+func newMemberNamer(inherited map[string][]slot) *memberNamer {
+	return &memberNamer{
+		inherited:  inherited,
+		last:       make(map[string]int),
+		overridden: make(map[ordinalOf]bool),
+		own:        make(map[string][]slot),
+	}
+}
+
+// operation returns the ordinal of an operation or a constructor, f named by
+// its base name. Static operations and constructors are `global`, so they never
+// override an inherited slot, but they share their interface's set with its
+// instance operations.
+func (n *memberNamer) operation(f Func) int {
+	if f.Kind == FuncMethod {
+		if k, ok := n.override(f); ok {
+			return k
+		}
+	}
+	return n.add(f, n.next(f.Name))
+}
+
+// declaredOnce returns the ordinal of a member its interface declares once
+// under its name, f named by its base name: an attribute, f its getter, whose
+// setter shares the ordinal, or a constant, which is `global` and so never
+// overrides an inherited slot. Such a member is numbered only when it
+// redeclares an inherited name; otherwise it keeps its name and takes no
+// ordinal from its interface's operations, as before shadows were named.
+func (n *memberNamer) declaredOnce(f Func) int {
+	if len(n.inherited[f.Name]) == 0 {
+		return n.add(f, 1)
+	}
+	if f.Kind == FuncMethod {
+		if k, ok := n.override(f); ok {
+			return k
+		}
+	}
+	return n.add(f, n.next(f.Name))
+}
+
+// override returns the ordinal of the first inherited slot of f's name that f
+// is exactly and that no earlier member of this interface overrides.
+func (n *memberNamer) override(f Func) (int, bool) {
+	for _, s := range n.inherited[f.Name] {
+		key := ordinalOf{name: f.Name, ordinal: s.ordinal}
+		if !n.overridden[key] && sameSignature(s.member, f) {
+			n.overridden[key] = true
+			return s.ordinal, true
+		}
+	}
+	return 0, false
+}
+
+// next returns the next ordinal of a name: one past the highest the interface
+// has given it, which starts at the highest it inherits.
+func (n *memberNamer) next(name string) int {
+	if _, ok := n.last[name]; !ok {
+		for _, s := range n.inherited[name] {
+			n.last[name] = max(n.last[name], s.ordinal)
+		}
+	}
+	n.last[name]++
+	return n.last[name]
+}
+
+// add records an instance member as a slot the interfaces deriving from this
+// one inherit, and returns its ordinal.
+func (n *memberNamer) add(f Func, k int) int {
+	if f.Kind == FuncMethod {
+		n.own[f.Name] = append(n.own[f.Name], slot{ordinal: k, member: f})
+	}
+	return k
+}
+
+// visible returns the instance members visible on the interface — those it
+// inherits, then its own — by name. No list is appended to in place, so
+// siblings deriving from one parent never grow one they share.
+func (n *memberNamer) visible() map[string][]slot {
+	visible := make(map[string][]slot, len(n.inherited)+len(n.own))
+	for name, slots := range n.inherited {
+		visible[name] = slots
+	}
+	for name, slots := range n.own {
+		visible[name] = slices.Concat(visible[name], slots)
+	}
+	return visible
+}
+
+// sameSignature reports whether a redeclared member is exactly the inherited
+// one: the same kind of member, the same parameter types in order, and the same
+// result. Parameter names are not part of it. This is identity, not the
+// override rule's relaxed matching (docs/language-design.md, "How Inheritance
+// Maps to Vtables"): identity is an override under every version of that rule,
+// so a binding's names depend on the IDL alone.
+func sameSignature(a, b Func) bool {
+	if a.Accessor != b.Accessor || len(a.Params) != len(b.Params) || !reflect.DeepEqual(a.Results, b.Results) {
+		return false
+	}
+	for i := range a.Params {
+		if !reflect.DeepEqual(a.Params[i].Type, b.Params[i].Type) {
+			return false
+		}
+	}
+	return true
+}
+
+// numberOverload names the k-th member of an overload set (k is 1-based, in
+// merged declaration order, counted across the `is` chain for a member that
+// shadows an inherited one). Promise has no overloading (docs/language-design.md,
+// "No Overloading"), so every member after the first becomes a member of its
+// own: `<name>_<k>`, an operation imported as `<Interface>.<member>.<k>`. The
+// import keeps the IDL member as its second component, so the JS glue calls
+// that same member with this overload's own arguments and the host's overload
+// resolution chooses among them (docs/wasm-bindings.md, "Overloaded
+// Operations"). An attribute's import is left alone: an interface declares an
+// attribute once, so its import is unique already, and the glue reads the
+// accessor from its third component. The extern and link names derive from
+// f.Name, so they follow automatically, and so does a constructor's factory
+// (constructorFactoryName). Constructors are named constructorName, so they form
+// one set — shared only with an operation whose name also snakes to it (an IDL
+// `Constructor`), which one count for the set then keeps from colliding with
+// them.
+func numberOverload(f *Func, k int) {
 	if k < 2 {
 		return
 	}
 	f.Name = fmt.Sprintf("%s_%d", f.Name, k)
-	f.ImportName = fmt.Sprintf("%s.%d", f.ImportName, k)
+	if f.Accessor == AccessorNone {
+		f.ImportName = fmt.Sprintf("%s.%d", f.ImportName, k)
+	}
 }
 
 func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operation) Func {

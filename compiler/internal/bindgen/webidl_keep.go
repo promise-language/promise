@@ -3,6 +3,7 @@ package bindgen
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"unicode"
@@ -66,29 +67,32 @@ type KeepDrop struct {
 // definition.
 //
 // An interface is kept when it is listed, or when a kept interface inherits from
-// it: an ancestor stays, with only its listed members, so the `is` clause
-// resolves. A member of a kept interface is kept when `Interface.member` is
-// listed (`Interface.constructor` for its constructors); constants, iterable
-// declarations and anonymous special operations go with their interface.
-// Dictionaries, enums, typedefs and callbacks are not listed.
+// it: an ancestor stays, with its listed members and the member names its kept
+// descendants keep, so the `is` clause resolves. A member of a kept interface is
+// kept when `Interface.member` is listed (`Interface.constructor` for its
+// constructors); constants, iterable declarations and anonymous special
+// operations go with their interface. Dictionaries, enums, typedefs and
+// callbacks are not listed.
 //
 // The closure, to a fixed point: a typedef whose type names a dropped definition
 // is dropped, and so is a dictionary whose parent is dropped or whose required
 // member names one. Then an optional dictionary member naming one is removed,
 // and so is an interface member — together with every member sharing its name,
-// so the overload ordinals WebIdlToIR assigns never depend on the list.
+// on its interface and on every kept interface inheriting from it.
+//
+// A member name is the unit, and the unit spans the `is` chain, so the ordinals
+// WebIdlToIR assigns never depend on the list: a derived member is numbered
+// after the instance members of its name it inherits (docs/wasm-bindings.md,
+// "Shadowed Members"), so it keeps its ordinal only if the list keeps exactly
+// those. Constructors are never inherited, so their unit stops at their
+// interface.
 //
 // A reference is a name the lowered type carries (convertWebIdlTypeRef), so a
 // name inside a union, Promise<T> or record<K, V> — each lowered to JsValue — is
 // not one. A name absent from the input is not a dropped definition: a
 // declaration naming it is left to fail to compile, as an unbound parent does.
 func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
-	ifaces := make(map[string]*webidl.Interface)
-	for _, iface := range file.Interfaces {
-		if !isMixin(iface) {
-			ifaces[iface.Name] = iface
-		}
-	}
+	ifaces := interfacesByName(file)
 
 	kept := make(map[string]bool)
 	for _, iface := range file.Interfaces {
@@ -183,6 +187,19 @@ func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 	}
 	file.Dictionaries = dicts
 
+	// Every kept interface's selection first, so a name dangling on an ancestor
+	// is known before the interfaces inheriting it are reduced.
+	inherited := descendantKeeps(file, ifaces, kept, keep)
+	selections := make(map[*webidl.Interface]*memberSelection)
+	for _, iface := range file.Interfaces {
+		if isMixin(iface) || !kept[iface.Name] {
+			continue
+		}
+		selections[iface] = selectMembers(iface, func(unit string) bool {
+			return keep.members[iface.Name+"."+unit] || inherited[iface][unit]
+		}, droppedRef)
+	}
+
 	var interfaces []*webidl.Interface
 	for _, iface := range file.Interfaces {
 		if isMixin(iface) {
@@ -192,7 +209,7 @@ func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 		if !kept[iface.Name] {
 			continue
 		}
-		drops = append(drops, keepMembers(iface, keep, droppedRef)...)
+		drops = append(drops, keepMembers(iface, selections, ifaces)...)
 		interfaces = append(interfaces, iface)
 	}
 	file.Interfaces = interfaces
@@ -200,42 +217,120 @@ func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 	return drops
 }
 
-// keepMembers reduces a kept interface to its selected members, then drops each
-// member name whose members name a dropped definition, reporting one KeepDrop
-// per name.
-func keepMembers(iface *webidl.Interface, keep *KeepList, droppedRef func(...*webidl.TypeRef) string) []KeepDrop {
-	type selected struct {
-		member webidl.Member
-		unit   string
-	}
-	var members []selected
-	dangling := make(map[string]string) // unit → the dropped definition it names
-	var order []string                  // dangling units, in member order
-	for _, m := range iface.Members {
-		unit, listed, types := keepUnit(m)
-		if listed && !keep.members[iface.Name+"."+unit] {
+// descendantKeeps returns, for each interface, the member names a kept
+// interface inheriting from it keeps by a listed entry for a member it declares.
+// The unit spans the `is` chain, so an ancestor keeps those names too. An entry
+// naming a member its interface does not declare selects nothing, here as
+// everywhere; constructors are never inherited, so their entries stay put.
+func descendantKeeps(file *webidl.File, ifaces map[string]*webidl.Interface, kept map[string]bool, keep *KeepList) map[*webidl.Interface]map[string]bool {
+	units := make(map[*webidl.Interface]map[string]bool)
+	for _, d := range file.Interfaces {
+		if isMixin(d) || !kept[d.Name] {
 			continue
 		}
-		members = append(members, selected{member: m, unit: unit})
-		if _, seen := dangling[unit]; seen {
+		for _, m := range d.Members {
+			unit, listed, _ := keepUnit(m)
+			if !listed || unit == keepConstructor || !keep.members[d.Name+"."+unit] {
+				continue
+			}
+			for _, a := range ancestors(d, ifaces) {
+				if units[a] == nil {
+					units[a] = make(map[string]bool)
+				}
+				units[a][unit] = true
+			}
+		}
+	}
+	return units
+}
+
+// ancestors returns the interfaces iface inherits from, nearest first, ending at
+// an unbound parent or where an inheritance cycle comes back around.
+func ancestors(iface *webidl.Interface, ifaces map[string]*webidl.Interface) []*webidl.Interface {
+	var chain []*webidl.Interface
+	seen := map[*webidl.Interface]bool{iface: true}
+	for a := ifaces[iface.Parent]; a != nil && !seen[a]; a = ifaces[a.Parent] {
+		seen[a] = true
+		chain = append(chain, a)
+	}
+	return chain
+}
+
+// memberSelection is a kept interface's selected members, each with its unit,
+// and the units among them that name a dropped definition.
+type memberSelection struct {
+	members []selectedMember
+	// dangling maps a unit to the dropped definition one of its members names;
+	// order lists those units as their first such member appears.
+	dangling map[string]string
+	order    []string
+}
+
+type selectedMember struct {
+	member webidl.Member
+	unit   string
+}
+
+// selectMembers selects a kept interface's members — those of a unit selected
+// reports, and the unlisted kinds that go with their interface — and records
+// each unit whose members name a dropped definition.
+func selectMembers(iface *webidl.Interface, selected func(unit string) bool, droppedRef func(...*webidl.TypeRef) string) *memberSelection {
+	s := &memberSelection{dangling: make(map[string]string)}
+	for _, m := range iface.Members {
+		unit, listed, types := keepUnit(m)
+		if listed && !selected(unit) {
+			continue
+		}
+		s.members = append(s.members, selectedMember{member: m, unit: unit})
+		if _, seen := s.dangling[unit]; seen {
 			continue
 		}
 		if ref := droppedRef(types...); ref != "" {
-			dangling[unit] = ref
-			order = append(order, unit)
+			s.dangling[unit] = ref
+			s.order = append(s.order, unit)
+		}
+	}
+	return s
+}
+
+// keepMembers reduces a kept interface to its selected members, then drops each
+// member name whose members name a dropped definition — on the interface, or on
+// an ancestor it inherits the name from, whose reference (the nearest such
+// ancestor's) it reports. One KeepDrop per name: the interface's own dangling
+// names first, then those it inherits, each in member order.
+func keepMembers(iface *webidl.Interface, selections map[*webidl.Interface]*memberSelection, ifaces map[string]*webidl.Interface) []KeepDrop {
+	own := selections[iface]
+	dangling := maps.Clone(own.dangling)
+	for _, a := range ancestors(iface, ifaces) {
+		ancestor := selections[a]
+		if ancestor == nil {
+			continue
+		}
+		for unit, ref := range ancestor.dangling {
+			if _, ok := dangling[unit]; !ok && unit != keepConstructor {
+				dangling[unit] = ref
+			}
 		}
 	}
 
+	drops := make([]KeepDrop, 0, len(dangling))
+	reported := make(map[string]bool)
+	report := func(unit string) {
+		if !reported[unit] {
+			reported[unit] = true
+			drops = append(drops, KeepDrop{What: iface.Name + "." + unit, Ref: dangling[unit]})
+		}
+	}
+	for _, unit := range own.order {
+		report(unit)
+	}
 	iface.Members = nil
-	for _, s := range members {
-		if _, ok := dangling[s.unit]; !ok {
-			iface.Members = append(iface.Members, s.member)
+	for _, s := range own.members {
+		if _, drop := dangling[s.unit]; drop {
+			report(s.unit)
+			continue
 		}
-	}
-
-	drops := make([]KeepDrop, 0, len(order))
-	for _, unit := range order {
-		drops = append(drops, KeepDrop{What: iface.Name + "." + unit, Ref: dangling[unit]})
+		iface.Members = append(iface.Members, s.member)
 	}
 	return drops
 }

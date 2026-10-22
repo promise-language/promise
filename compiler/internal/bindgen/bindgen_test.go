@@ -3271,6 +3271,19 @@ func TestWebIdlToIRDictionaryInheritanceErrors(t *testing.T) {
 			},
 		},
 		{
+			// C is not on the cycle, so its walk never comes back to C: it must
+			// stop at the first dictionary it revisits.
+			name: "inherits into a cycle",
+			src: `dictionary C : A { long z; };
+			dictionary A : B { long x; };
+			dictionary B : A { long y; };`,
+			want: []string{
+				"dictionary C: inheritance cycle through A",
+				"dictionary A: inheritance cycle through A",
+				"dictionary B: inheritance cycle through B",
+			},
+		},
+		{
 			name: "every broken dictionary is reported",
 			src: `dictionary Fine { long x; };
 			dictionary First : Missing { long y; };

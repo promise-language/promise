@@ -2411,6 +2411,8 @@ func TestWebIdlEveryPublicDeclHasDoc(t *testing.T) {
 		// Constructors: the comment, else the owning factory's own text.
 		createFactoryLine("Element", "create", ""),
 		"create(string title) Document `public `global `doc(\"Makes a document.\") {",
+		// The host-object root the generator adds for a bound Document.
+		"get document Document `public `target(web) `doc(\"The page's document (WebIDL `Document`), seeded by the loader before the program runs. Borrowed: dropping it never releases the host object.\") {",
 		// Dictionaries and enums.
 		"type Opts `structural(protocol: false) `public `doc(\"Options.\") {",
 		"type Plain `structural(protocol: false) `public `doc(\"`Plain` (WebIDL dictionary)\") {",
@@ -5200,7 +5202,8 @@ func TestCodegenBorrowFactoryNameNoFalseCollision(t *testing.T) {
 // ambient reference cannot leave it releasable.
 func TestGenerateJSGlueSeedsAmbientHandlesDeterministically(t *testing.T) {
 	js := GenerateJSGlue([]*Module{{Name: "test", ImportModule: "promise_env"}})
-	assertContains(t, js, "const _ambientRefs = [\n  globalThis,\n"+
+	assertContains(t, js, "const _ambientRefs = [\n"+
+		`  typeof globalThis !== "undefined" ? globalThis : undefined,`+"\n"+
 		`  typeof document !== "undefined" ? document : undefined,`+"\n"+
 		`  typeof console !== "undefined" ? console : undefined,`+"\n];")
 	assertContains(t, js, "for (const _ambient of _ambientRefs) _refStore(_ambient);")

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -825,13 +826,13 @@ func TestMissingPerFileImportFailsBuild(t *testing.T) {
 
 // TestBindWebIdlBorrowFactoryCompilesClean is the end-to-end acceptance for
 // T1510's user-visible surface: `promise bind webidl` on an IDL with a resource,
-// plus a program that actually *calls* the generated non-owning factory, must
-// compile cleanly for wasm32-web.
+// plus a program that actually *calls* the generated non-owning factory — through
+// the generated `document` root (#660) — must compile cleanly for wasm32-web.
 //
 // The generator-level tests pin the emitted text; only this one proves the text
 // is a callable declaration — that a `global factory is legal inside a
 // `structural(protocol: false) resource, that its `i32 handle` param accepts a
-// plain integer literal (the seeded ambient handle a caller writes by hand), and
+// plain integer literal (the seeded ambient handle the root passes), and
 // that the extra `_owned` field does not break the wrapper's own construction
 // sites. Wrapping a seeded handle is the whole point of the item, so a
 // regression here is the failure a user hits first.
@@ -864,9 +865,10 @@ interface Document {
 	}
 
 	// A second file in the generated project (bind writes promise.toml, so outDir
-	// is a project and all its .pr files merge) using the borrow factory the way
-	// docs/wasm-bindings.md documents it: wrap ambient handle 2 without owning it,
-	// then use an owning wrapper the bindings minted alongside it.
+	// is a project and all its .pr files merge) reaching the page the way
+	// docs/wasm-bindings.md documents it: through the generated `document` root,
+	// which wraps the seeded handle with the borrow factory without owning it,
+	// then using an owning wrapper the bindings minted alongside it (#660).
 	//
 	// `Node` declares a constructor on purpose (T1974). A constructor emitted as
 	// `new(~this, ...)` REPLACES field-wise construction, which both the `borrow`
@@ -876,7 +878,7 @@ interface Document {
 	// nothing caught it.
 	userPath := filepath.Join(outDir, "use_borrow.pr")
 	user := `main() {
-    doc := Document.borrow(2);
+    doc := document;
     el := doc.create_element("div");
     el.text_content = "hi";
     made := Node.create("span");
@@ -899,6 +901,77 @@ interface Document {
 		if !strings.Contains(ir, want) {
 			t.Errorf("generated IR is missing %q", want)
 		}
+	}
+}
+
+// TestBindWebIdlDocumentRootBesideMemberOfSameName pins the shape the real web
+// module has (#660): webref's `Window` declares `readonly attribute Document
+// document`, so the generated module holds both a `Window.document` getter and
+// the module-level `document` root. Both return Document, so a member access
+// resolving to the root instead would type-check and silently read the page's
+// document rather than the window's; the IR is the one place the two differ.
+func TestBindWebIdlDocumentRootBesideMemberOfSameName(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "dom.idl")
+	idl := `interface Document {
+	readonly attribute DOMString title;
+};
+
+interface Window {
+	readonly attribute Document document;
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", outDir, idlPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	user := `window_document(Window w) Document {
+    return w.document;
+}
+
+page_document() Document {
+    return document;
+}
+
+main() {
+    title := page_document().title;
+}
+`
+	if err := os.WriteFile(filepath.Join(outDir, "use_both.pr"), []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+
+	body := func(fn string) string {
+		t.Helper()
+		m := regexp.MustCompile(`(?s)\ndefine [^\n]*@[\w.]*\b` + fn + `\([^\n]*\{\n(.*?)\n\}\n`).FindStringSubmatch(ir)
+		if m == nil {
+			t.Fatalf("no definition of %s in the IR", fn)
+		}
+		return m[1]
+	}
+	// The root is the zero-argument getter; the member takes the receiver.
+	const rootCall, memberCall = ".document()", "@Window.document("
+	if b := body("window_document"); !strings.Contains(b, memberCall) || strings.Contains(b, rootCall) {
+		t.Errorf("w.document must call the Window member getter, not the root:\n%s", b)
+	}
+	if b := body("page_document"); !strings.Contains(b, rootCall) || strings.Contains(b, memberCall) {
+		t.Errorf("bare document must call the module root, not a member getter:\n%s", b)
 	}
 }
 

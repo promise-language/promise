@@ -135,13 +135,16 @@ function _refRelease(handle) {
 // These references belong to the host, not to any wrapper, so releasing one is
 // always a bug — and a silently aliasing one, since the freed slot would be
 // handed to the next _refStore and a later _refLoad(2) would then read an
-// unrelated object. _refRelease ignores them instead; wrap them with a
-// resource's borrow() factory so no wrapper claims to own them (T1510).
+// unrelated object. _refRelease ignores them instead; the generated roots
+// (web.document) wrap them with a resource's borrow() factory so no wrapper
+// claims to own them (T1510). This list is rendered from bindgen's
+// ambientRefs, the same table the roots read their handles from.
 const _ambientRefs = [
-  globalThis,
-  typeof document !== "undefined" ? document : undefined,
-  typeof console !== "undefined" ? console : undefined,
-];
+`)
+	for _, a := range ambientRefs {
+		g.writef("  typeof %s !== \"undefined\" ? %s : undefined,\n", a.global, a.global)
+	}
+	g.write(`];
 for (const _ambient of _ambientRefs) _refStore(_ambient);
 const _pinnedMax = _ambientRefs.length;
 

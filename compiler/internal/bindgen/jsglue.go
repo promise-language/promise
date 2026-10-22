@@ -621,12 +621,19 @@ func isRefType(ref TypeRef) bool {
 
 // jsParamName converts a snake_case parameter name to a JS-safe identifier.
 func jsParamName(name string) string {
-	// Avoid JS reserved words. The glue is a strict-mode module, so the words
-	// reserved only in strict mode count too: `interface` and `static` reach here
-	// because WebIDL lets an argument be named by either keyword.
+	// Avoid every word a JS binding identifier cannot be. The glue is a
+	// "use strict" ES module, so that is the ECMAScript reserved words (`await`
+	// among them, which a module reserves), the words reserved only in strict
+	// mode, and `arguments` and `eval`, which strict mode forbids as binding
+	// names. The words sanitizeIdent already prefixes as Promise keywords are
+	// listed too: the glue's guarantee does not depend on Promise's grammar.
 	switch name {
-	case "default", "class", "function", "var", "let", "const", "this", "new", "delete", "in", "typeof",
-		"interface", "static":
+	case "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default",
+		"delete", "do", "else", "enum", "export", "extends", "false", "finally", "for", "function",
+		"if", "import", "in", "instanceof", "new", "null", "return", "super", "switch", "this",
+		"throw", "true", "try", "typeof", "var", "void", "while", "with", "yield",
+		"implements", "interface", "let", "package", "private", "protected", "public", "static",
+		"arguments", "eval":
 		return name + "_"
 	}
 	return name

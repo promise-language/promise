@@ -1533,6 +1533,119 @@ interface Rect : RectReadOnly {
 	}
 }
 
+// TestBindWebIdlShadowedMembersCompileClean is the end-to-end acceptance for
+// #612: a derived interface that redeclares an inherited member with a different
+// signature — webref's HTMLFormControlsCollection.namedItem (a different
+// result), SVGElement.className (an attribute of a different type), a
+// different parameter type, and a constant sharing an inherited operation's
+// Promise name — must bind and compile, with the redeclaration
+// numbered after the inherited member it would otherwise have overridden
+// (docs/wasm-bindings.md, "Shadowed Members"), while an exact redeclaration
+// (Rect.x) stays an override. Before the fix bind's self-check failed with
+// "cannot override inherited method 'named_item' from HTMLCollection".
+func TestBindWebIdlShadowedMembersCompileClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "dom.idl")
+	idl := `interface Element {
+	attribute DOMString className;
+};
+
+interface RadioNodeList {};
+
+interface SVGAnimatedString {};
+
+interface SVGElement : Element {
+	readonly attribute SVGAnimatedString className;
+};
+
+interface HTMLCollection {
+	getter Element? namedItem(DOMString name);
+};
+
+interface HTMLFormControlsCollection : HTMLCollection {
+	getter (RadioNodeList or Element)? namedItem(DOMString name);
+};
+
+interface Parent {
+	undefined m(DOMString text);
+	undefined reset();
+};
+
+interface Child : Parent {
+	undefined m(long n);
+	const long RESET = 1;
+};
+
+interface RectReadOnly {
+	readonly attribute double x;
+};
+
+interface Rect : RectReadOnly {
+	attribute double x;
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", outDir, idlPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	// Each derived wrapper reaches both the inherited member, typed as its
+	// parent declares it, and its own renamed one; it still upcasts.
+	userPath := filepath.Join(outDir, "use_shadows.pr")
+	user := `main() {
+    forms := HTMLFormControlsCollection.borrow(2);
+    first := forms.named_item("a");
+    either := forms.named_item_2("a");
+    HTMLCollection collection = forms;
+    again := collection.named_item("b");
+    svg := SVGElement.borrow(3);
+    animated := svg.class_name_2;
+    print_line(svg.class_name);
+    svg.class_name = "box";
+    child := Child.borrow(4);
+    child.m("text");
+    child.m_2(1i32);
+    child.reset();
+    print_line(Child.reset_2().to_string());
+    r := Rect.borrow(5);
+    r.x = 1.0;
+    print_line(r.x.to_string());
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	for _, want := range []string{
+		"@html_form_controls_collection_named_item_2(", `"wasm-import-name"="HTMLFormControlsCollection.namedItem.2"`,
+		"@html_collection_named_item(", `"wasm-import-name"="HTMLCollection.namedItem"`,
+		"@svg_element_class_name_2(", `"wasm-import-name"="SVGElement.className.get"`,
+		"@child_m_2(", `"wasm-import-name"="Child.m.2"`,
+		"@child_reset_2(", `"wasm-import-name"="Child.RESET.2"`,
+		"@Rect.x$set(",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR is missing %q", want)
+		}
+	}
+}
+
 // TestBindWebIdlUnboundParentFailsLoudly is the error path: a derived interface
 // whose parent is not among the bound files must not compile into a wrapper
 // that silently lacks the inherited members — the failure T1507 reports. bind's

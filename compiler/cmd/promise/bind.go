@@ -383,7 +383,7 @@ func runBindWebIdl(args []string) {
 	// Convert to binding IR
 	allModules, err := bindgen.WebIdlToIR(mergedFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 

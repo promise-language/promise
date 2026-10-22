@@ -3162,12 +3162,13 @@ func parseMerged(t *testing.T, src string) *webidl.File {
 }
 
 // dictionaryInheritanceIDL is a three-level chain, declared child first: a
-// dictionary's parent may come after it, or from another file.
+// dictionary's parent may come after it, or from another file. MouseEventInit
+// inherits an optional member and a required one, and declares a required one.
 const dictionaryInheritanceIDL = `dictionary MouseEventInit : UIEventInit {
 		required long clientX;
 	};
 	dictionary UIEventInit : EventInit {
-		long detail = 0;
+		required long detail;
 	};
 	dictionary EventInit {
 		boolean bubbles = false;
@@ -3194,7 +3195,7 @@ func TestWebIdlToIRDictionaryInheritance(t *testing.T) {
 		}
 		for _, f := range typ.Fields {
 			wantKind := OptionKind
-			if f.Name == "client_x" {
+			if f.Name == "detail" || f.Name == "client_x" {
 				wantKind = BuiltinKind // required → bare type
 			}
 			if f.Type.Kind != wantKind {
@@ -3304,13 +3305,13 @@ func TestCodegenDictionaryInheritance(t *testing.T) {
 	assertContains(t, out, "type MouseEventInit `structural(protocol: false) `public `doc(\"`MouseEventInit` (WebIDL dictionary)\") {\n"+
 		"    bool? bubbles;\n"+
 		"    bool? cancelable;\n"+
-		"    i32? detail;\n"+
+		"    i32 detail;\n"+
 		"    i32 client_x;\n"+
 		"}")
 	assertContains(t, out, "type UIEventInit `structural(protocol: false) `public `doc(\"`UIEventInit` (WebIDL dictionary)\") {\n"+
 		"    bool? bubbles;\n"+
 		"    bool? cancelable;\n"+
-		"    i32? detail;\n"+
+		"    i32 detail;\n"+
 		"}")
 	assertNotContains(t, out, " is ")
 }

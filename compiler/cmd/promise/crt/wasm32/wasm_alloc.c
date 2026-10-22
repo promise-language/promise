@@ -176,16 +176,25 @@ void *realloc(void *ptr, size_t new_size) {
 // compiler knows which symbols those are from rawABIExternSymbols in
 // compiler/internal/codegen/extern.go — adding a helper here means adding its
 // symbol there, or wasm-ld resolves the call to a trapping stub (T1660).
+//
+// The helpers that allocate do so through the PAL allocator, not malloc above:
+// a block they hand out is an ordinary Promise allocation, which Promise
+// releases with pal_free/pal_realloc like any other (#261). These are defined
+// by codegen's PAL in every wasm module (declareIntrinsics in
+// compiler/internal/codegen/compiler_intrinsics.go), not here. Sizes are i64 to
+// match the IR signatures.
+extern void *pal_alloc(long long size);
+extern void *pal_realloc(void *ptr, long long size);
 
 // cabi_realloc — Canonical ABI memory allocation for the Component Model.
 // Required export for every component; used by the host to allocate/reallocate
 // memory in the component's linear memory for passing compound types.
-// Alignment is naturally satisfied: all buckets are >= 16-byte aligned.
+// pal_realloc(NULL, n) allocates and pal_realloc(p, 0) frees, as realloc does.
+// Blocks are 8-byte aligned, the canonical ABI's largest alignment.
 void *cabi_realloc(void *ptr, size_t old_size, size_t align, size_t new_size) {
     (void)old_size;
     (void)align;
-    if (!ptr) return malloc(new_size);
-    return realloc(ptr, new_size);
+    return pal_realloc(ptr, (long long)new_size);
 }
 
 // __cabi_retarea — Fixed buffer for canonical ABI return value decoding.
@@ -241,9 +250,6 @@ void cabi_store_f64(int ptr, double val) {
 //
 // The extern ABI passes string as i8* (instance pointer) on wasm32 = i32.
 
-// Alloc counter declared in PAL-emitted LLVM IR.
-extern long long __promise_alloc_count;
-
 // Get data pointer from a string instance pointer.
 int cabi_string_data(void *instance) {
     return (int)((char *)instance + 16);
@@ -259,9 +265,8 @@ int cabi_string_len(void *instance) {
 // Copies data from ptr into the new instance. Caller owns the result.
 void *cabi_string_from(int ptr, int len) {
     int total = 16 + len;
-    void *inst = malloc(total);
+    void *inst = pal_alloc(total);
     if (!inst) return (void *)0;
-    __promise_alloc_count++; // track for leak detection (matches pal_alloc behavior)
     *(int *)inst = 0;                              // variant_ptr = null
     *(int *)((char *)inst + 4) = 0;                // padding = 0
     *(long long *)((char *)inst + 8) = (long long)len; // len (no literal flag)
@@ -301,9 +306,8 @@ int cabi_vector_len(void *header) {
 // Copies data from ptr into the new vector. Caller owns the result.
 void *cabi_vector_from(int data_ptr, int len, int elem_size) {
     int data_bytes = len * elem_size;
-    void *header = malloc(16 + data_bytes);
+    void *header = pal_alloc(16 + data_bytes);
     if (!header) return (void *)0;
-    __promise_alloc_count++;
     *(long long *)header = (long long)len;                    // len (no static flag)
     *(long long *)((char *)header + 8) = (long long)len;     // cap = len
     char *dst = (char *)header + 16;

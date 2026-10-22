@@ -222,7 +222,7 @@ func TestWasmExternFailableStillSret(t *testing.T) {
 // return pointer the caller supplies — not into a leading sret pointer to
 // Promise's private boxed-string value struct, whose layout no host can know.
 // The caller copies the host's buffer into a Promise-owned string and releases
-// it with raw free (the allocator cabi_realloc used), never pal_free.
+// it with pal_free — the allocator cabi_realloc uses (#261), never the raw C free.
 //
 // The convention belongs to wasm_import, not to the browser, so a WASI host
 // import returning a string lowers the same way.
@@ -239,7 +239,7 @@ func TestWasmImportStringResultUsesTrailingRetptr(t *testing.T) {
 
 // assertTrailingRetptrLift checks the lowering of the first call to @get_s: a
 // zeroed return area passed last, then the host's bytes copied into a Promise
-// string and the host's buffer released with raw free.
+// string and the host's buffer released with pal_free.
 func assertTrailingRetptrLift(t *testing.T, ir string) {
 	t.Helper()
 	codegentest.AssertContains(t, ir, `declare void @get_s(i32 %h, i8* %retptr) `)
@@ -270,8 +270,8 @@ func assertTrailingRetptrLift(t *testing.T, ir string) {
 		t.Fatalf("host data pointer is not loaded from the return area:\n%s", after)
 	}
 	codegentest.AssertContains(t, after, "@promise_string_new(i8* "+data[1]+", i64 ")
-	codegentest.AssertContains(t, after, "call void @free(i8* "+data[1]+")")
-	codegentest.AssertNotContains(t, after, "@pal_free(i8* "+data[1]+")")
+	codegentest.AssertContains(t, after, "call void @pal_free(i8* "+data[1]+")")
+	codegentest.AssertNotContains(t, after, "call void @free(i8* "+data[1]+")")
 }
 
 // T1506: a second Promise name on the same C symbol takes declareExterns' dedup

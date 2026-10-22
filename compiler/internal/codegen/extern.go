@@ -350,11 +350,11 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 	// WASM import string result: the host writes the canonical (ptr, len) pair
 	// through the trailing return pointer, the bytes being a buffer it allocated
 	// with cabi_realloc. Copy them into a Promise-owned string, then release the
-	// buffer with the raw `free` matching cabi_realloc's raw malloc — pal_free
-	// would decrement an alloc count cabi_realloc never incremented, and the debug
-	// allocator rejects the block's foreign header (T1506). The area is zeroed
+	// buffer with pal_free: cabi_realloc allocates through the PAL, so the
+	// buffer is an ordinary Promise allocation (T1506, #261). The area is zeroed
 	// before each call so a host that writes nothing yields "" rather than a
-	// stale pointer from a previous call through the same entry alloca.
+	// stale pointer from a previous call through the same entry alloca — and
+	// pal_free of that null pointer is a no-op.
 	if ext.WasmStringResult {
 		retAreaType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I32)
 		retArea := c.createEntryAlloca(retAreaType)
@@ -368,8 +368,7 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 		dataPtr := c.block.NewLoad(irtypes.I8Ptr, ptrField)
 		dataLen := c.block.NewZExt(c.block.NewLoad(irtypes.I32, lenField), irtypes.I64)
 		str := c.block.NewCall(c.funcs["promise_string_new"], dataPtr, dataLen)
-		freeFn := c.getOrDeclareFunc("free", irtypes.Void, ir.NewParam("ptr", irtypes.I8Ptr))
-		c.block.NewCall(freeFn, dataPtr)
+		c.block.NewCall(c.palFree, dataPtr)
 		return str
 	}
 

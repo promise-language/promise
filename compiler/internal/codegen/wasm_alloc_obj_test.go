@@ -48,10 +48,19 @@ func TestWasmAllocObjMatchesSource(t *testing.T) {
 	}
 }
 
+// wasmAllocPALImports are the only functions wasm_alloc.o may leave undefined:
+// the PAL allocator its allocating helpers call (#261). Codegen defines both in
+// every wasm module (declareIntrinsics, compiler_intrinsics.go), so the link
+// resolves them against the module rather than turning them into host imports.
+var wasmAllocPALImports = map[string]bool{
+	"pal_alloc":   true,
+	"pal_realloc": true,
+}
+
 // wasmAllocDrift is every way a wasm_alloc.o disagrees with its source, each
 // list sorted.
 type wasmAllocDrift struct {
-	imported []string // functions the object imports
+	imported []string // functions the object imports, beyond wasmAllocPALImports
 	missing  []string // cabi_* functions the source defines and the object does not
 	extra    []string // global cabi_* functions the object defines and the source does not
 }
@@ -62,10 +71,10 @@ type wasmAllocDrift struct {
 //     object (the drift T0292 introduced);
 //   - every global cabi_* function in the object must be defined by the source
 //     (an object built from something else);
-//   - the object must import no function at all. The source declares only
-//     extern data (__heap_base, __promise_alloc_count), so an undefined function
-//     — a memcpy libcall from a clang without bulk-memory, say — would reach
-//     every module as the same silent host import.
+//   - the object must import no function but those in wasmAllocPALImports.
+//     Besides them the source declares only extern data (__heap_base), so any
+//     other undefined function — a memcpy libcall from a clang without
+//     bulk-memory, say — would reach every module as the same silent host import.
 func diffWasmAllocObj(defined map[string]bool, syms []wasmtest.Symbol) wasmAllocDrift {
 	var drift wasmAllocDrift
 	inObj := map[string]bool{}
@@ -73,7 +82,9 @@ func diffWasmAllocObj(defined map[string]bool, syms []wasmtest.Symbol) wasmAlloc
 		switch {
 		case s.Kind != wasmtest.SymbolFunction:
 		case !s.Defined:
-			drift.imported = append(drift.imported, s.Name)
+			if !wasmAllocPALImports[s.Name] {
+				drift.imported = append(drift.imported, s.Name)
+			}
 		case !s.Local && strings.HasPrefix(s.Name, "cabi_"):
 			inObj[s.Name] = true
 		}
@@ -99,6 +110,10 @@ func TestDiffWasmAllocObjReportsEachDisagreement(t *testing.T) {
 	defined := map[string]bool{"cabi_both": true, "cabi_source_only": true}
 	syms := []wasmtest.Symbol{
 		{Kind: wasmtest.SymbolFunction, Name: "memcpy"},
+		// The PAL allocator the helpers call is the module's to define (#261);
+		// any other PAL function is not, so it is reported like memcpy.
+		{Kind: wasmtest.SymbolFunction, Name: "pal_alloc"},
+		{Kind: wasmtest.SymbolFunction, Name: "pal_free"},
 		{Kind: wasmtest.SymbolFunction, Name: "cabi_both", Defined: true},
 		{Kind: wasmtest.SymbolFunction, Name: "cabi_object_only", Defined: true},
 		// A file-static helper is not part of the linked surface.
@@ -112,7 +127,7 @@ func TestDiffWasmAllocObjReportsEachDisagreement(t *testing.T) {
 
 	got := diffWasmAllocObj(defined, syms)
 	want := wasmAllocDrift{
-		imported: []string{"memcpy"},
+		imported: []string{"memcpy", "pal_free"},
 		missing:  []string{"cabi_source_only"},
 		extra:    []string{"cabi_object_only"},
 	}

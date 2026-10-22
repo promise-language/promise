@@ -1,6 +1,7 @@
 package webidl
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -1612,6 +1613,41 @@ func TestMergePartialInterfaceUnmatched(t *testing.T) {
 	Merge(file)
 	if len(file.Interfaces[0].Members) != 1 {
 		t.Errorf("expected 1 member in Base, got %d", len(file.Interfaces[0].Members))
+	}
+}
+
+// TestFileAppendCopiesEveryField walks File's fields by reflection rather than
+// listing them, so a field added to File that Append does not copy fails here
+// (#656: bind's hand-kept list dropped PartialDicts).
+func TestFileAppendCopiesEveryField(t *testing.T) {
+	dst, src := &File{}, &File{}
+	dv, sv := reflect.ValueOf(dst).Elem(), reflect.ValueOf(src).Elem()
+	typ := dv.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		ft := typ.Field(i).Type
+		if ft.Kind() != reflect.Slice || ft.Elem().Kind() != reflect.Pointer {
+			t.Fatalf("File.%s is %s, not a slice of pointers: decide how Append combines it", typ.Field(i).Name, ft)
+		}
+		for _, v := range []reflect.Value{dv, sv} {
+			v.Field(i).Set(reflect.Append(reflect.MakeSlice(ft, 0, 1), reflect.New(ft.Elem().Elem())))
+		}
+	}
+	want := make([][2]any, typ.NumField())
+	for i := range want {
+		want[i] = [2]any{dv.Field(i).Index(0).Interface(), sv.Field(i).Index(0).Interface()}
+	}
+
+	dst.Append(src)
+
+	for i := 0; i < typ.NumField(); i++ {
+		name, got := typ.Field(i).Name, dv.Field(i)
+		if got.Len() != 2 {
+			t.Errorf("File.%s: got %d entries after Append, want 2 (dst's then src's)", name, got.Len())
+			continue
+		}
+		if got.Index(0).Interface() != want[i][0] || got.Index(1).Interface() != want[i][1] {
+			t.Errorf("File.%s: Append did not keep dst's entry first and add src's after it", name)
+		}
 	}
 }
 

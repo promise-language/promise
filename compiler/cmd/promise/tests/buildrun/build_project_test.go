@@ -1506,10 +1506,10 @@ func TestBindWebIdlUnboundParentFailsLoudly(t *testing.T) {
 // TestBindWebIdlKeepListCompilesClean drives `bind webidl -keep` end to end
 // (#18): only the listed interfaces and members are generated, an unlisted
 // ancestor of a kept interface stays so its `is` clause resolves, members a
-// partial interface or a mixin adds from another file are filtered like the
-// interface's own (the list applies after the merge), a listed member naming an
-// unlisted interface is dropped and reported on stderr, and the reduced module
-// compiles for wasm32-web.
+// partial interface, a mixin or a partial dictionary (#656) adds from another
+// file are filtered like the definition's own (the list applies after the
+// merge), a listed member naming an unlisted interface is dropped and reported
+// on stderr, and the reduced module compiles for wasm32-web.
 func TestBindWebIdlKeepListCompilesClean(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -1542,6 +1542,10 @@ interface Document : Node {
 interface Fancy {
 	undefined sparkle();
 };
+
+dictionary Opts {
+	DOMString label;
+};
 `
 	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
 		t.Fatal(err)
@@ -1559,6 +1563,11 @@ interface mixin ParentNode {
 };
 
 Element includes ParentNode;
+
+partial dictionary Opts {
+	boolean extra;
+	Fancy fancy;
+};
 `
 	if err := os.WriteFile(extPath, []byte(ext), 0644); err != nil {
 		t.Fatal(err)
@@ -1576,8 +1585,10 @@ Element includes ParentNode;
 	if out, err := bindCmd.Output(); err != nil {
 		t.Fatalf("bind webidl -keep failed: %v\n%s%s", err, out, stderr.String())
 	}
-	if want := "keep: dropped Element.fancy: it names Fancy"; !strings.Contains(stderr.String(), want) {
-		t.Errorf("bind stderr does not report the dropped member (want %q)\nstderr:\n%s", want, stderr.String())
+	for _, want := range []string{"keep: dropped Element.fancy: it names Fancy", "keep: dropped Opts.fancy: it names Fancy"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("bind stderr does not report the dropped member (want %q)\nstderr:\n%s", want, stderr.String())
+		}
 	}
 
 	pr, err := os.ReadFile(filepath.Join(outDir, "dom.pr"))
@@ -1587,7 +1598,7 @@ Element includes ParentNode;
 	src := string(pr)
 	// EventTarget is unlisted but Node inherits from it, so it stays — without
 	// its unlisted member.
-	for _, want := range []string{"type EventTarget", "type Node", "type Element", "type Document"} {
+	for _, want := range []string{"type EventTarget", "type Node", "type Element", "type Document", "bool? extra;"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("generated module is missing %q", want)
 		}
@@ -1625,6 +1636,68 @@ Element includes ParentNode;
 		if !strings.Contains(ir, want) {
 			t.Errorf("generated IR is missing %q", want)
 		}
+	}
+}
+
+// TestBindWebIdlPartialDictionary is the end-to-end check for #656: a
+// `partial dictionary` adds its members to the generated dictionary type,
+// whether it sits beside the dictionary or in another input file (the
+// cross-spec shape). The separate file is passed first, so the partial is
+// applied to a dictionary that arrives in a later file. No operation takes the
+// dictionary: passing one across the boundary is #172's marshalling work.
+func TestBindWebIdlPartialDictionary(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	const dict = "dictionary Opts { DOMString label; };\n"
+	const partial = "partial dictionary Opts { boolean extra; };\n"
+	type idlFile struct{ name, src string }
+	cases := []struct {
+		name  string
+		files []idlFile // in command-line order
+	}{
+		{"same file", []idlFile{{"pd.idl", dict + partial}}},
+		{"separate file", []idlFile{{"ext.idl", partial}, {"base.idl", dict}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := clitest.TempDir(t)
+			outDir := filepath.Join(dir, "out")
+			args := []string{"bind", "webidl", "-name", "pd", "-o", outDir}
+			for _, f := range tc.files {
+				path := filepath.Join(dir, f.name)
+				if err := os.WriteFile(path, []byte(f.src), 0644); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, path)
+			}
+			if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
+				t.Fatalf("bind webidl failed: %v\n%s", err, out)
+			}
+
+			pr, err := os.ReadFile(filepath.Join(outDir, "pd.pr"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			src := string(pr)
+			start := strings.Index(src, "type Opts ")
+			if start < 0 {
+				t.Fatalf("generated pd.pr has no `type Opts`:\n%s", src)
+			}
+			block := src[start:]
+			if end := strings.Index(block, "\n}"); end >= 0 {
+				block = block[:end]
+			}
+			for _, want := range []string{"string? label;", "bool? extra;"} {
+				if !strings.Contains(block, want) {
+					t.Errorf("type Opts is missing %q:\n%s", want, block)
+				}
+			}
+		})
 	}
 }
 

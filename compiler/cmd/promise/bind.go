@@ -359,14 +359,7 @@ func runBindWebIdl(args []string) {
 			os.Exit(1)
 		}
 
-		mergedFile.Interfaces = append(mergedFile.Interfaces, file.Interfaces...)
-		mergedFile.Dictionaries = append(mergedFile.Dictionaries, file.Dictionaries...)
-		mergedFile.Enums = append(mergedFile.Enums, file.Enums...)
-		mergedFile.Callbacks = append(mergedFile.Callbacks, file.Callbacks...)
-		mergedFile.Typedefs = append(mergedFile.Typedefs, file.Typedefs...)
-		mergedFile.Partials = append(mergedFile.Partials, file.Partials...)
-		mergedFile.Mixins = append(mergedFile.Mixins, file.Mixins...)
-		mergedFile.Includes = append(mergedFile.Includes, file.Includes...)
+		mergedFile.Append(file)
 	}
 
 	// Merge partials, mixins, and includes

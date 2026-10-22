@@ -22,7 +22,7 @@ func overloadIR(t *testing.T, src string) []*Module {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	return WebIdlToIR(file)
+	return mustWebIdlToIR(t, file)
 }
 
 // overloadResource returns the named resource of the converted module.

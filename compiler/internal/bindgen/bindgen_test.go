@@ -2,6 +2,7 @@ package bindgen
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -2274,7 +2275,7 @@ func TestCodegenJsValueFromWebIdlUnion(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	if !modules[0].HasJsValue {
 		t.Fatal("expected HasJsValue=true for union-typed attribute")
 	}
@@ -2375,7 +2376,7 @@ func TestWebIdlEveryPublicDeclHasDoc(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	out := GeneratePromise(WebIdlToIR(file), "web")
+	out := GeneratePromise(mustWebIdlToIR(t, file), "web")
 
 	for _, line := range strings.Split(out, "\n") {
 		if strings.Contains(line, "`public") && !strings.Contains(line, "`doc(\"") {
@@ -2436,7 +2437,7 @@ func TestWebIdlDocCommentEscaped(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	out := GeneratePromise(WebIdlToIR(file), "web")
+	out := GeneratePromise(mustWebIdlToIR(t, file), "web")
 	assertContains(t, out, "greet(this) `public `doc(\"Say \\\"hi\\\" \\\\ to \\{name}. Next line.\") {")
 }
 
@@ -3051,7 +3052,7 @@ func TestConvertOperationStatic(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	found := false
 	for _, r := range modules[0].Resources {
 		for _, m := range r.Methods {
@@ -3076,7 +3077,7 @@ func TestConvertOperationSpecialNoName(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	found := false
 	for _, r := range modules[0].Resources {
 		for _, m := range r.Methods {
@@ -3102,7 +3103,7 @@ func TestWebIdlToIRInterface(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	if len(modules) != 1 {
 		t.Fatalf("expected 1 module, got %d", len(modules))
 	}
@@ -3137,6 +3138,183 @@ func TestWebIdlToIRInterface(t *testing.T) {
 	}
 }
 
+// mustWebIdlToIR converts a file the test expects to convert, failing the test
+// on a conversion error.
+func mustWebIdlToIR(t *testing.T, file *webidl.File) []*Module {
+	t.Helper()
+	modules, err := WebIdlToIR(file)
+	if err != nil {
+		t.Fatalf("WebIdlToIR: %v", err)
+	}
+	return modules
+}
+
+// parseMerged parses src and merges its partials, mixins and includes — the
+// file `promise bind webidl` hands to WebIdlToIR.
+func parseMerged(t *testing.T, src string) *webidl.File {
+	t.Helper()
+	file, errs := webidl.Parse(src, "dict.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	return file
+}
+
+// dictionaryInheritanceIDL is a three-level chain, declared child first: a
+// dictionary's parent may come after it, or from another file.
+const dictionaryInheritanceIDL = `dictionary MouseEventInit : UIEventInit {
+		required long clientX;
+	};
+	dictionary UIEventInit : EventInit {
+		long detail = 0;
+	};
+	dictionary EventInit {
+		boolean bubbles = false;
+		boolean cancelable = false;
+	};`
+
+// TestWebIdlToIRDictionaryInheritance pins the flattening: a derived
+// dictionary's record carries its ancestors' members as fields of its own,
+// root first, then its own, and each member keeps its own required-ness.
+func TestWebIdlToIRDictionaryInheritance(t *testing.T) {
+	m := mustWebIdlToIR(t, parseMerged(t, dictionaryInheritanceIDL))[0]
+	_, _, types := keepShape(m)
+	want := map[string][]string{
+		"EventInit":      {"bubbles", "cancelable"},
+		"UIEventInit":    {"bubbles", "cancelable", "detail"},
+		"MouseEventInit": {"bubbles", "cancelable", "detail", "client_x"},
+	}
+	if !reflect.DeepEqual(types, want) {
+		t.Errorf("record fields = %v\nwant           %v", types, want)
+	}
+	for _, typ := range m.Types {
+		if typ.Name != "MouseEventInit" {
+			continue
+		}
+		for _, f := range typ.Fields {
+			wantKind := OptionKind
+			if f.Name == "client_x" {
+				wantKind = BuiltinKind // required → bare type
+			}
+			if f.Type.Kind != wantKind {
+				t.Errorf("MouseEventInit.%s kind = %d, want %d", f.Name, f.Type.Kind, wantKind)
+			}
+		}
+	}
+}
+
+// TestWebIdlToIRDictionaryInheritancePartialAncestor pins that a partial
+// dictionary extending an ancestor reaches every descendant, among that
+// ancestor's members and before the descendant's own.
+func TestWebIdlToIRDictionaryInheritancePartialAncestor(t *testing.T) {
+	src := dictionaryInheritanceIDL + `
+	partial dictionary EventInit {
+		boolean composed = false;
+	};`
+	m := mustWebIdlToIR(t, parseMerged(t, src))[0]
+	_, _, types := keepShape(m)
+	want := map[string][]string{
+		"EventInit":      {"bubbles", "cancelable", "composed"},
+		"UIEventInit":    {"bubbles", "cancelable", "composed", "detail"},
+		"MouseEventInit": {"bubbles", "cancelable", "composed", "detail", "client_x"},
+	}
+	if !reflect.DeepEqual(types, want) {
+		t.Errorf("record fields = %v\nwant           %v", types, want)
+	}
+}
+
+// TestWebIdlToIRDictionaryInheritanceErrors pins the failures: a flattened type
+// never names its parent, so an ancestor that is not a dictionary in the file
+// would silently drop members, and a cycle has no root. Each is an error naming
+// every affected dictionary, and nothing is converted.
+func TestWebIdlToIRDictionaryInheritanceErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  string
+		want []string // each must appear in the error
+	}{
+		{
+			name: "unbound parent",
+			src:  `dictionary MouseEventInit : UIEventInit { required long clientX; };`,
+			want: []string{"dictionary MouseEventInit inherits from UIEventInit, which is not a dictionary in the bound IDL files"},
+		},
+		{
+			// Every dictionary below the broken link would miss members.
+			name: "unbound grandparent",
+			src: `dictionary MouseEventInit : UIEventInit { required long clientX; };
+			dictionary UIEventInit : EventInit { long detail = 0; };`,
+			want: []string{
+				"dictionary MouseEventInit inherits from EventInit, which is not a dictionary",
+				"dictionary UIEventInit inherits from EventInit, which is not a dictionary",
+			},
+		},
+		{
+			name: "parent is an interface",
+			src: `interface EventInit {};
+			dictionary UIEventInit : EventInit { long detail = 0; };`,
+			want: []string{"dictionary UIEventInit inherits from EventInit, which is not a dictionary"},
+		},
+		{
+			name: "self cycle",
+			src:  `dictionary A : A { long x; };`,
+			want: []string{"dictionary A: inheritance cycle through A"},
+		},
+		{
+			name: "two-dictionary cycle",
+			src: `dictionary A : B { long x; };
+			dictionary B : A { long y; };`,
+			want: []string{
+				"dictionary A: inheritance cycle through A",
+				"dictionary B: inheritance cycle through B",
+			},
+		},
+		{
+			name: "every broken dictionary is reported",
+			src: `dictionary Fine { long x; };
+			dictionary First : Missing { long y; };
+			dictionary Second : Absent { long z; };`,
+			want: []string{
+				"dictionary First inherits from Missing",
+				"dictionary Second inherits from Absent",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			modules, err := WebIdlToIR(parseMerged(t, tc.src))
+			if err == nil {
+				t.Fatalf("WebIdlToIR succeeded, want an error containing %q", tc.want)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error does not contain %q:\n%v", w, err)
+				}
+			}
+			if modules != nil {
+				t.Errorf("WebIdlToIR returned modules alongside its error")
+			}
+		})
+	}
+}
+
+// TestCodegenDictionaryInheritance pins the generated shape: a derived
+// dictionary is a plain type declaring every member, never an `is` child.
+func TestCodegenDictionaryInheritance(t *testing.T) {
+	out := GeneratePromise(mustWebIdlToIR(t, parseMerged(t, dictionaryInheritanceIDL)), "web")
+	assertContains(t, out, "type MouseEventInit `structural(protocol: false) `public `doc(\"`MouseEventInit` (WebIDL dictionary)\") {\n"+
+		"    bool? bubbles;\n"+
+		"    bool? cancelable;\n"+
+		"    i32? detail;\n"+
+		"    i32 client_x;\n"+
+		"}")
+	assertContains(t, out, "type UIEventInit `structural(protocol: false) `public `doc(\"`UIEventInit` (WebIDL dictionary)\") {\n"+
+		"    bool? bubbles;\n"+
+		"    bool? cancelable;\n"+
+		"    i32? detail;\n"+
+		"}")
+	assertNotContains(t, out, " is ")
+}
+
 func TestWebIdlToIRDictionary(t *testing.T) {
 	src := `dictionary RequestInit {
 		required DOMString method;
@@ -3146,7 +3324,7 @@ func TestWebIdlToIRDictionary(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	m := modules[0]
 	if len(m.Types) != 1 {
 		t.Fatalf("expected 1 type, got %d", len(m.Types))
@@ -3181,7 +3359,7 @@ func TestWebIdlToIREnum(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	m := modules[0]
 	if len(m.Types) != 1 {
 		t.Fatalf("expected 1 type, got %d", len(m.Types))
@@ -3206,7 +3384,7 @@ func TestWebIdlToIRConstructor(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	res := modules[0].Resources[0]
 	if len(res.Methods) != 1 {
 		t.Fatalf("expected 1 method, got %d", len(res.Methods))
@@ -3261,7 +3439,7 @@ func TestWebIdlToIRReadWriteAttribute(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	res := modules[0].Resources[0]
 	// Read-write attribute should produce getter + setter = 2 methods
 	if len(res.Methods) != 2 {
@@ -3289,7 +3467,7 @@ func TestWebIdlToIRNullableParam(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	method := modules[0].Resources[0].Methods[0]
 	if method.Params[0].Type.Kind != OptionKind {
 		t.Errorf("expected OptionKind for nullable param, got %d", method.Params[0].Type.Kind)
@@ -3308,7 +3486,7 @@ func TestWebIdlToIRMergedPartials(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	res := modules[0].Resources[0]
 	// 1 getter (name) + 1 operation (doStuff) = 2 methods
 	if len(res.Methods) != 2 {
@@ -3538,7 +3716,7 @@ func TestWebIdlEndToEnd(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 
 	// Generate Promise code
 	prCode := GeneratePromise(modules, "web")
@@ -3610,7 +3788,7 @@ func TestWebIdlBindElementConstructs(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	prCode := GeneratePromise(modules, "web")
 
 	// Dictionary → plain type with Option-wrapped optional fields (T0724).
@@ -3644,7 +3822,7 @@ func TestWebIdlToIRTypedef(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	m := modules[0]
 	if len(m.Types) != 1 {
 		t.Fatalf("expected 1 type, got %d", len(m.Types))
@@ -3673,7 +3851,7 @@ func TestWebIdlToIRConstMember(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	res := modules[0].Resources[0]
 	if len(res.Methods) != 2 {
 		t.Fatalf("expected 2 methods from consts, got %d", len(res.Methods))
@@ -3697,7 +3875,7 @@ func TestWebIdlToIRSpecialOperations(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	res := modules[0].Resources[0]
 	if len(res.Methods) != 3 {
 		t.Fatalf("expected 3 methods, got %d", len(res.Methods))
@@ -3712,7 +3890,7 @@ func TestWebIdlToIRStaticOperation(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	res := modules[0].Resources[0]
 	if len(res.Methods) != 1 {
 		t.Fatalf("expected 1 method, got %d", len(res.Methods))
@@ -3731,7 +3909,7 @@ func TestWebIdlToIROptionalConstructorParam(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	ctor := modules[0].Resources[0].Methods[0]
 	if ctor.Params[0].Type.Kind != OptionKind {
 		t.Errorf("expected OptionKind for optional ctor param, got %d", ctor.Params[0].Type.Kind)
@@ -3750,7 +3928,7 @@ func TestWebIdlToIRMixinSkipped(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	m := modules[0]
 	// Only "Real" should appear as a resource, Mix is skipped
 	if len(m.Resources) != 1 {
@@ -4108,7 +4286,7 @@ func TestWebIdlToIRVoidReturn(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	res := modules[0].Resources[0]
 	for _, m := range res.Methods {
 		if len(m.Results) != 0 {
@@ -4130,7 +4308,7 @@ func TestWebIdlAttributeGeneratesGetterSetterSyntax(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	out := GeneratePromise(modules, "web")
 
 	// Instance read-write attribute: both getter and setter wrappers.
@@ -4191,7 +4369,7 @@ func TestWebIdlAttributeResourceTyped(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	out := GeneratePromise(modules, "web")
 
 	// Getter: handle-to-resource construction.
@@ -4224,7 +4402,7 @@ func TestWebIdlJsValueAttributeMarshalsViaRef(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	out := GeneratePromise(modules, "web")
 
 	// Getter: i32 ref lifted into a JsValue.Object (not handle→resource construction).
@@ -4260,7 +4438,7 @@ func TestWebIdlJsValueMethodParamAndResult(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	out := GeneratePromise(modules, "web")
 
 	assertContains(t, out, "wrap(this, JsValue x) JsValue `public `doc(\"`Foo.wrap` (WebIDL operation)\") {")
@@ -4419,7 +4597,7 @@ func TestWebIdlAttributeNullableResource(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	out := GeneratePromise(modules, "web")
 
 	assertContains(t, out, "get parent Node? `public `doc(\"`Element.parent` (WebIDL attribute)\") {")
@@ -4438,7 +4616,7 @@ func TestWebIdlAttributeNullableBuiltinSetter(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	out := GeneratePromise(modules, "web")
 
 	assertContains(t, out, "set title(string? value) `public `doc(\"`Element.title` (WebIDL attribute)\") {")
@@ -4528,7 +4706,7 @@ func TestWebIdlToIRStaticAttribute(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	res := modules[0].Resources[0]
 	// static read-write attribute → getter + setter, both FuncStatic
 	if len(res.Methods) != 2 {
@@ -4556,7 +4734,7 @@ func TestWebIdlToIRSequenceReturn(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	res := modules[0].Resources[0]
 	if len(res.Methods[0].Results) != 1 {
 		t.Fatal("expected 1 result")
@@ -4573,7 +4751,7 @@ func TestWebIdlToIRNoInterfaces(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	if modules[0].Name != "web" {
 		t.Errorf("expected default module name 'web', got %q", modules[0].Name)
 	}
@@ -4591,7 +4769,7 @@ func TestWebIdlToIRMergedPartialDictionary(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	m := modules[0]
 	if len(m.Types) != 1 {
 		t.Fatalf("expected 1 type, got %d", len(m.Types))
@@ -4627,7 +4805,7 @@ func TestJsValueEmission(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	if !modules[0].HasJsValue {
 		t.Fatal("expected HasJsValue=true when types reference JsValue")
 	}
@@ -4658,7 +4836,7 @@ func TestJsValueDetectedInDictField(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	if !modules[0].HasJsValue {
 		t.Fatal("expected HasJsValue=true when dictionary field is 'any'")
 	}
@@ -4674,7 +4852,7 @@ func TestJsValueDetectedInTypedef(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	if !modules[0].HasJsValue {
 		t.Fatal("expected HasJsValue=true when typedef target is 'any'")
 	}
@@ -4690,7 +4868,7 @@ func TestJsValueDetectedNested(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	if !modules[0].HasJsValue {
 		t.Fatal("expected HasJsValue=true for sequence<any> in dict field")
 	}
@@ -4707,7 +4885,7 @@ func TestJsValueNotEmittedWhenUnreferenced(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	if modules[0].HasJsValue {
 		t.Fatal("expected HasJsValue=false when no types reference JsValue")
 	}
@@ -4849,7 +5027,7 @@ func TestWebIdlOptionalParam(t *testing.T) {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	modules := WebIdlToIR(file)
+	modules := mustWebIdlToIR(t, file)
 	if len(modules) == 0 || len(modules[0].Resources) == 0 {
 		t.Fatal("expected at least one resource")
 	}
@@ -5007,7 +5185,7 @@ func TestWebIdlDOMExceptionGeneratesValidPromise(t *testing.T) {
 		t.Fatalf("parse: %v", errs)
 	}
 	webidl.Merge(file)
-	out := GeneratePromise(WebIdlToIR(file), "web")
+	out := GeneratePromise(mustWebIdlToIR(t, file), "web")
 
 	// No `static remains anywhere in the generated source.
 	if strings.Contains(out, "`static") {
@@ -5093,7 +5271,7 @@ func TestCodegenResourceOwnershipShapeWebIdl(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	out := GeneratePromise(WebIdlToIR(file), "web")
+	out := GeneratePromise(mustWebIdlToIR(t, file), "web")
 
 	assertContains(t, out, "i32 _handle;\n    bool _owned;\n")
 	assertContains(t, out, borrowFactoryLine("Node", "borrow"))
@@ -5340,7 +5518,7 @@ func TestWebIdlBorrowAttributeCollision(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	out := GeneratePromise(WebIdlToIR(file), "web")
+	out := GeneratePromise(mustWebIdlToIR(t, file), "web")
 	assertContains(t, out, borrowFactoryLine("Slot", "borrow_handle"))
 	// The attribute keeps its own name; only the factory moves aside.
 	assertContains(t, out, "get borrow string `public `doc(\"`Slot.borrow` (WebIDL attribute)\") {")
@@ -5426,7 +5604,7 @@ func inheritanceModules(t *testing.T, src string) []*Module {
 		t.Fatalf("parse errors: %v", errs)
 	}
 	webidl.Merge(file)
-	return WebIdlToIR(file)
+	return mustWebIdlToIR(t, file)
 }
 
 // TestWebIdlToIRInterfaceParent pins that the IR records each interface's

@@ -26,7 +26,7 @@ func keepIR(t *testing.T, src, list string) (*Module, []KeepDrop) {
 		t.Fatalf("ParseKeepList: %v", err)
 	}
 	drops := ApplyKeepList(file, keep)
-	return WebIdlToIR(file)[0], drops
+	return mustWebIdlToIR(t, file)[0], drops
 }
 
 // keepShape is what a test asserts about a converted module: each resource's
@@ -334,6 +334,29 @@ func TestApplyKeepList(t *testing.T) {
 				{What: "Opts.fancy", Ref: "Fancy"},
 				{What: "Element.start", Ref: "Init"},
 				{What: "Element.more", Ref: "MoreInit"},
+			},
+		},
+		{
+			// A derived dictionary is flattened from its pruned parent, so an
+			// optional member removed from the parent is gone from the child
+			// too, and the removal is reported once, under the parent.
+			name: "inherited optional member pruned once",
+			src: `interface Fancy {};
+			dictionary Base { Fancy fancy; DOMString label; };
+			dictionary Derived : Base { DOMString extra; };
+			interface Element {
+				undefined go(optional Derived init = {});
+			};`,
+			list: "Element\nElement.go\n",
+			resources: map[string][]string{
+				"Element": {"Element.go"},
+			},
+			types: map[string][]string{
+				"Base":    {"label"},
+				"Derived": {"label", "extra"},
+			},
+			drops: []KeepDrop{
+				{What: "Base.fancy", Ref: "Fancy"},
 			},
 		},
 		{

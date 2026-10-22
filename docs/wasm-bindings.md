@@ -739,7 +739,7 @@ User experience:
 use web;
 
 main() `target(web) {
-    doc := document();
+    doc := web.document;
     element := doc.create_element("div");
     element.set_attribute("class", "container");
     element.set_inner_text("Hello from Promise!");
@@ -754,7 +754,7 @@ The `promise bind` output for each IDL follows a consistent pattern:
 1. **Type definitions** — Promise types mapped from IDL records/variants/enums/resources
 2. **Private extern declarations** — low-level imports with `wasm_import` annotations
 3. **Public API wrappers** — ergonomic methods that marshal between Promise types and the canonical ABI
-4. **`doc` annotations** — on all public declarations. A declaration's text is the IDL documentation comment on the construct it binds: in WIT the `///` comment before the item; in WebIDL the `//` and `/* … */` comments directly before a definition or member, either before its extended attributes or between them and the declaration. A blank line between a comment and the declaration detaches it, so a file's header comment documents nothing, and neither does a comment that follows code on the same line. Specification IDL carries almost no comments — the prose that documents a member lives in the specification's text, outside the IDL block — so a WebIDL interface, dictionary, enum, attribute, operation or constant with no comment carries a generated line naming what it binds, on the interface that binds it: `` `Element.setAttribute` (WebIDL operation) ``. An attribute's getter and setter carry the same line, and so does every overload of one operation. The declarations the generator adds itself carry fixed text: the `borrow` factory, the `JsValue` members, and an owning factory whose constructor has no comment, which states the ownership the factory takes.
+4. **`doc` annotations** — on all public declarations. A declaration's text is the IDL documentation comment on the construct it binds: in WIT the `///` comment before the item; in WebIDL the `//` and `/* … */` comments directly before a definition or member, either before its extended attributes or between them and the declaration. A blank line between a comment and the declaration detaches it, so a file's header comment documents nothing, and neither does a comment that follows code on the same line. Specification IDL carries almost no comments — the prose that documents a member lives in the specification's text, outside the IDL block — so a WebIDL interface, dictionary, enum, attribute, operation or constant with no comment carries a generated line naming what it binds, on the interface that binds it: `` `Element.setAttribute` (WebIDL operation) ``. An attribute's getter and setter carry the same line, and so does every overload of one operation. The declarations the generator adds itself carry fixed text: the `borrow` factory, the host-object roots, the `JsValue` members, and an owning factory whose constructor has no comment, which states the ownership the factory takes.
 
 ---
 
@@ -985,11 +985,23 @@ before any import can run — `1` = `globalThis`, `2` = `document`, `3` =
 `console` — unconditionally and in that order, so the numbers mean the same thing
 in every host (a host without a DOM leaves slot 2 empty rather than shifting
 `console` into it). These references belong to the host and no Promise wrapper
-owns them, so they must be wrapped with `borrow`:
+owns them. A program reaches them through the module's **roots**, module-level
+getters the generator emits beside the types:
+
+- `document` (`web.document`), emitted when the bound WebIDL defines `Document`;
+- `console` (`web.console`), emitted when it defines the `console` namespace.
+
+`globalThis` has no root. Each root returns a borrowed wrapper over its seeded
+slot, built with the type's `borrow` factory, so dropping one never releases the
+host object, and a program never writes a handle number
+([web-apps.md](web-apps.md) §"Reaching the DOM"):
 
 ```promise
-doc := Document.borrow(2);      // non-owning: dropping it releases nothing
+doc := web.document;            // borrowed: dropping it releases nothing
 ```
+
+The seed list and the roots are generated from one definition of which slot holds
+which object, so the two cannot disagree on which slot is `document`.
 
 The glue pins these slots: `_refRelease` ignores any handle within the seeded
 range, a bound derived from the seed list rather than written out separately, so

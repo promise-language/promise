@@ -3,6 +3,8 @@ package bindgen
 import (
 	"fmt"
 	"strings"
+
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // GeneratePromise generates Promise source code (.pr) from binding IR modules.
@@ -66,6 +68,8 @@ func (g *generator) emitModule(m *Module) {
 		g.emitResource(r, m.ImportModule)
 		g.blank()
 	}
+
+	g.emitAmbientRoots(m)
 
 	// Emit free functions: private extern + public wrapper
 	for _, f := range m.Functions {
@@ -297,8 +301,8 @@ func (g *generator) emitResource(r Resource, importModule string) {
 	}
 
 	// Non-owning wrapper factory — the one construction path that does not take
-	// ownership. Used to wrap the glue's seeded ambient handles (globalThis,
-	// document, console) and to hand an existing wrapper's handle to an API
+	// ownership. Used by the host-object roots (emitAmbientRoots) to wrap the
+	// loader's seeded handles, and to hand an existing wrapper's handle to an API
 	// expecting a different resource type, neither of which may be released twice.
 	borrowName := borrowFactoryName(r)
 	g.line("%s(i32 handle) %s `public `global%s {", borrowName, r.Name, docAnnot(borrowDoc))
@@ -347,6 +351,37 @@ func (g *generator) emitResource(r Resource, importModule string) {
 		g.line("`wasm_import(\"%s\", \"%s\")", importModule, importName)
 		g.line("`target(%s);", g.target)
 		g.indent--
+	}
+}
+
+// emitAmbientRoots emits a module-level getter for each seeded host object whose
+// type the module binds — `web.document` — returning a borrowed wrapper over the
+// slot the loaders seed it into (ambientRefs), so a program never writes a
+// handle number (docs/web-apps.md §"Reaching the DOM"). Only the wasm32-web
+// loaders seed those slots, so other targets get none, and a root whose type the
+// bound IDL does not define is skipped rather than emitted naming an undefined
+// type. The slots index the glue's ref table, so only a module whose imports the
+// glue supplies (WebIDL) has roots: a WIT resource bound for the web target is
+// handed its handles by the page, where slot 2 is not the document.
+func (g *generator) emitAmbientRoots(m *Module) {
+	if g.target != "web" || m.ImportModule != wasmweb.ImportModule {
+		return
+	}
+	for i, a := range ambientRefs {
+		if a.root == "" {
+			continue
+		}
+		for _, r := range m.Resources {
+			if r.Name != a.typ {
+				continue
+			}
+			g.line("get %s %s `public `target(%s)%s {", a.root, r.Name, g.target, docAnnot(a.doc))
+			g.indent++
+			g.line("return %s.%s(%d);", r.Name, borrowFactoryName(r), ambientHandle(i))
+			g.indent--
+			g.line("}")
+			g.blank()
+		}
 	}
 }
 

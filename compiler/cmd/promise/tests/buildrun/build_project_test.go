@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1500,6 +1501,115 @@ func TestBindWebIdlUnboundParentFailsLoudly(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "undefined type: Node") {
 		t.Errorf("emit-ir: want an `undefined type: Node` error naming the missing parent\noutput:\n%s", out)
+	}
+}
+
+// dictionaryParentsIDL and dictionaryChildIDL split one inheritance chain
+// across two files, as the standards IDL does (EventInit in DOM, MouseEventInit
+// in UI Events).
+const (
+	dictionaryParentsIDL = `dictionary EventInit {
+	boolean bubbles = false;
+	boolean cancelable = false;
+};
+
+dictionary UIEventInit : EventInit {
+	long detail = 0;
+};
+`
+	dictionaryChildIDL = `dictionary MouseEventInit : UIEventInit {
+	required long clientX;
+};
+`
+)
+
+// TestBindWebIdlDictionaryInheritanceCompilesClean is the end-to-end acceptance
+// for #613: a derived dictionary carries its ancestors' members as fields of
+// its own, so a caller sets an inherited member exactly like an own one. The
+// child's file is bound first, so the chain resolves across files whatever
+// their order; only compiling a caller proves the inherited fields are usable.
+func TestBindWebIdlDictionaryInheritanceCompilesClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	childPath := filepath.Join(dir, "mouse.idl")
+	parentsPath := filepath.Join(dir, "events.idl")
+	if err := os.WriteFile(childPath, []byte(dictionaryChildIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parentsPath, []byte(dictionaryParentsIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	if out, err := exec.Command(bin, "bind", "webidl", "-name", "events", "-o", outDir, childPath, parentsPath).CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	userPath := filepath.Join(outDir, "use_dictionaries.pr")
+	user := `main() {
+    init := MouseEventInit(bubbles: true, detail: 2i32, client_x: 3i32);
+    if init.bubbles! {
+        print_line("bubbles");
+    }
+    print_line(init.client_x.to_string());
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput(); err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+}
+
+// TestBindWebIdlDictionaryUnboundParentFailsLoudly is the error path: a
+// flattened dictionary never names its parent, so an unbound one would compile
+// into a type silently missing the inherited members. bind refuses it before
+// writing anything, with or without its self-check, exits 1, and reports every
+// such dictionary as a diagnostic line of its own.
+func TestBindWebIdlDictionaryUnboundParentFailsLoudly(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	mousePath := filepath.Join(dir, "mouse.idl")
+	focusPath := filepath.Join(dir, "focus.idl")
+	if err := os.WriteFile(mousePath, []byte(dictionaryChildIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(focusPath, []byte("dictionary FocusEventInit : UIEventInit {\n\tlong order = 0;\n};\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"dictionary MouseEventInit inherits from UIEventInit, which is not a dictionary in the bound IDL files",
+		"dictionary FocusEventInit inherits from UIEventInit, which is not a dictionary in the bound IDL files",
+	}
+
+	for _, check := range [][]string{nil, {"-no-check"}} {
+		outDir := filepath.Join(dir, "out"+strings.Join(check, ""))
+		args := append(append([]string{"bind", "webidl"}, check...), "-name", "events", "-o", outDir, mousePath, focusPath)
+		out, err := exec.Command(bin, args...).CombinedOutput()
+		if err == nil {
+			t.Fatalf("bind %v succeeded on dictionaries whose parent UIEventInit is unbound (want an error)\n%s", check, out)
+		}
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+			t.Errorf("bind %v: want exit code 1, got %v", check, err)
+		}
+		if got := strings.Split(strings.TrimRight(string(out), "\n"), "\n"); !slices.Equal(got, want) {
+			t.Errorf("bind %v: output lines\n%q\nwant\n%q", check, got, want)
+		}
+		if _, err := os.Stat(filepath.Join(outDir, "events.pr")); !os.IsNotExist(err) {
+			t.Errorf("bind %v wrote events.pr despite the error (stat: %v)", check, err)
+		}
 	}
 }
 

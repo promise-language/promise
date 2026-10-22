@@ -1,7 +1,9 @@
 package bindgen
 
 import (
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -12,24 +14,34 @@ import (
 // WebIdlToIR converts a parsed WebIDL file into a slice of binding IR modules.
 // Each WebIDL interface produces one IR Resource, which records its inheritance
 // parent but carries only its own members — the generated `is` clause is how a
-// derived interface reaches its parent's (T1507). Dictionaries become Records.
-// Enums become IR Enums. The file produces a single module named from the
-// first interface, or "web" if no interfaces are present.
+// derived interface reaches its parent's (T1507). Dictionaries become Records
+// carrying their inherited members as their own fields (flattened). Enums become
+// IR Enums. The file produces a single module named from the first interface,
+// or "web" if no interfaces are present.
+//
+// It fails when a dictionary's inheritance cannot be flattened — an ancestor
+// that is not a dictionary in the file, or a cycle — reporting every such
+// dictionary.
 //
 // Call webidl.Merge(file) before this function to apply partials, mixins, and
 // includes statements.
-func WebIdlToIR(file *webidl.File) []*Module {
+func WebIdlToIR(file *webidl.File) ([]*Module, error) {
 	c := &webidlConverter{
-		file: file,
+		file:  file,
+		dicts: make(map[string]*webidl.Dictionary),
+	}
+	for _, d := range file.Dictionaries {
+		c.dicts[d.Name] = d
 	}
 	return c.convert()
 }
 
 type webidlConverter struct {
-	file *webidl.File
+	file  *webidl.File
+	dicts map[string]*webidl.Dictionary // every dictionary in file, by name
 }
 
-func (c *webidlConverter) convert() []*Module {
+func (c *webidlConverter) convert() ([]*Module, error) {
 	m := &Module{
 		Name:         "web",
 		ImportModule: "promise_env",
@@ -41,8 +53,17 @@ func (c *webidlConverter) convert() []*Module {
 	}
 
 	// Convert dictionaries as records
+	var errs []error
 	for _, d := range c.file.Dictionaries {
-		m.Types = append(m.Types, c.convertDictionary(d))
+		t, err := c.convertDictionary(d)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		m.Types = append(m.Types, t)
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
 	}
 
 	// Convert typedefs as aliases
@@ -72,7 +93,7 @@ func (c *webidlConverter) convert() []*Module {
 	// Scan all type references for JsValue usage
 	m.HasJsValue = moduleHasJsValue(m)
 
-	return []*Module{m}
+	return []*Module{m}, nil
 }
 
 func isMixin(iface *webidl.Interface) bool {
@@ -109,25 +130,48 @@ func (c *webidlConverter) convertEnum(e *webidl.Enum) Type {
 	return t
 }
 
-func (c *webidlConverter) convertDictionary(d *webidl.Dictionary) Type {
+// convertDictionary converts a dictionary to a Record holding every member the
+// dictionary has: its inherited dictionaries' members first, from the root of
+// the chain down, then its own, each dictionary's in declaration order. A
+// dictionary crosses the boundary by value as one complete set of fields, so it
+// is flattened rather than made an `is` child (docs/wasm-bindings.md,
+// "Dictionary inheritance"). A flattened type never names its parent, so an
+// ancestor that is not a dictionary here would silently drop members — it is
+// an error, as is a cycle.
+func (c *webidlConverter) convertDictionary(d *webidl.Dictionary) (Type, error) {
+	chain := []*webidl.Dictionary{d} // d, then its parent, …, then the root
+	for a := d; a.Parent != ""; {
+		p, ok := c.dicts[a.Parent]
+		if !ok {
+			return Type{}, fmt.Errorf("dictionary %s inherits from %s, which is not a dictionary in the bound IDL files", d.Name, a.Parent)
+		}
+		if slices.Contains(chain, p) {
+			return Type{}, fmt.Errorf("dictionary %s: inheritance cycle through %s", d.Name, p.Name)
+		}
+		chain = append(chain, p)
+		a = p
+	}
+
 	t := Type{
 		Name: d.Name,
 		Kind: TypeRecord,
 		Doc:  webidlDoc(d.Doc, "dictionary", d.Name),
 	}
-	for _, m := range d.Members {
-		f := Field{
-			Name: idlToSnake(m.Name),
-			Type: convertWebIdlTypeRef(m.Type),
+	for i := len(chain) - 1; i >= 0; i-- {
+		for _, m := range chain[i].Members {
+			f := Field{
+				Name: idlToSnake(m.Name),
+				Type: convertWebIdlTypeRef(m.Type),
+			}
+			if !m.Required {
+				// Optional dictionary members map to Option type
+				elem := f.Type
+				f.Type = TypeRef{Kind: OptionKind, Elem: &elem}
+			}
+			t.Fields = append(t.Fields, f)
 		}
-		if !m.Required {
-			// Optional dictionary members map to Option type
-			elem := f.Type
-			f.Type = TypeRef{Kind: OptionKind, Elem: &elem}
-		}
-		t.Fields = append(t.Fields, f)
 	}
-	return t
+	return t, nil
 }
 
 func (c *webidlConverter) convertTypedef(td *webidl.Typedef) Type {

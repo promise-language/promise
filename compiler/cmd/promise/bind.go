@@ -374,7 +374,11 @@ func runBindWebIdl(args []string) {
 	}
 
 	// Convert to binding IR
-	allModules := bindgen.WebIdlToIR(mergedFile)
+	allModules, err := bindgen.WebIdlToIR(mergedFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	// Determine final module name — use the IR module name (derived via idlToSnake)
 	// to stay consistent with what GeneratePromise emits.

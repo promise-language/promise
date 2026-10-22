@@ -48,7 +48,7 @@ func TestT0724KeywordParamSanitized(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	out := GeneratePromise(WebIdlToIR(file), "web")
+	out := GeneratePromise(mustWebIdlToIR(t, file), "web")
 
 	// Wrapper signature uses the sanitized names.
 	assertContains(t, out, "do_thing(this, string _type, i32 _for)")
@@ -72,7 +72,7 @@ func TestT0724DictionaryPlainType(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	out := GeneratePromise(WebIdlToIR(file), "web")
+	out := GeneratePromise(mustWebIdlToIR(t, file), "web")
 
 	assertContains(t, out, "type Opts `structural(protocol: false) `public `doc(\"`Opts` (WebIDL dictionary)\") {")
 	assertContains(t, out, "string name;")         // required → bare type
@@ -94,7 +94,7 @@ func TestT0724DictionaryJsValueFieldPlain(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	out := GeneratePromise(WebIdlToIR(file), "web")
+	out := GeneratePromise(mustWebIdlToIR(t, file), "web")
 
 	assertContains(t, out, "type SetHTMLOptions `structural(protocol: false) `public `doc(\"`SetHTMLOptions` (WebIDL dictionary)\") {")
 	assertContains(t, out, "JsValue? sanitizer;")

@@ -419,6 +419,7 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 | `interface` | `type { int _js_ref; ... }` | Opaque JS handle |
 | `interface I : P` | `type I is P { ... }` | Inherits `P`'s members; the handle and ownership fields are declared once, on the root of the chain; `P` carries `` `open `` (see below) |
 | `dictionary` | `type { ... }` | Value type |
+| `dictionary D : P` | `type D { ... }` | Carries `P`'s members, and its ancestors', as fields of its own; no `is` (see below) |
 | `enum` | `enum { ... }` | With string mapping for JS |
 | `callback` | `(Args) Return` | Lambda type |
 | `ArrayBuffer` | `u8[]` | |
@@ -440,6 +441,18 @@ A parent interface is concrete (every wrapper is constructed field-wise), so it 
 parent that is not among the bound IDL files is still named in the `is` clause, so the generated
 module fails to compile with `undefined type` rather than silently omitting the inherited
 members.
+
+**Dictionary inheritance.** A derived dictionary's type is flattened, not an `is` child: it
+declares every member the dictionary has as a field of its own — its ancestors' first, from the
+root of the chain down, then its own, each dictionary's in declaration order with its partial
+dictionaries merged in, and each keeping its own `required`-ness. So
+`MouseEventInit(bubbles: true, client_x: 3)` sets an inherited member and an own one alike. A
+dictionary crosses the boundary by value, as one complete set of fields; it is not accepted where
+an ancestor dictionary is expected — the caller builds that dictionary instead. A dictionary whose
+parent, or any further ancestor, is not a dictionary among the bound IDL files is a `bind` error
+naming the dictionary and the missing ancestor, and so is an inheritance cycle: a flattened type
+never names its parent, so the missing members could not surface as a compile error the way an
+unbound interface parent does.
 
 #### Overloaded Operations
 

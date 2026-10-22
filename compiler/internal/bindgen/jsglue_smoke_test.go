@@ -211,6 +211,44 @@ globalThis.fetch = async (url) => {
 });
 `
 
+// importCallDriver instantiates the glue of TestGenerateJSGlueReservedWordArgsReachHost,
+// keeping the import object init() hands to WebAssembly.instantiateStreaming,
+// then calls its "Target.g" import as the wasm module would: a handle to a host
+// object recording what its g member receives, then the arguments 7, a handle to
+// a node, and 9. It reports the received arguments, the node named as "<node>".
+const importCallDriver = `
+const fs = require("fs");
+const path = require("path");
+const { pathToFileURL } = require("url");
+
+const dir = __dirname;
+const [loaderFile, ...initArgs] = process.argv.slice(2);
+
+globalThis.fetch = async (url) => {
+  const data = await fs.promises.readFile(path.join(dir, url));
+  return new Response(data, { headers: { "content-type": "application/wasm" } });
+};
+
+let imports;
+const instantiateStreaming = WebAssembly.instantiateStreaming;
+WebAssembly.instantiateStreaming = (response, importObject) => {
+  imports = importObject;
+  return instantiateStreaming(response, importObject);
+};
+
+(async () => {
+  const mod = await import(pathToFileURL(path.join(dir, loaderFile)).href);
+  await mod.init(...initArgs);
+  const node = { tag: "node" };
+  let received;
+  const target = { g(...args) { received = args; } };
+  imports.promise_env["Target.g"](mod._refStore(target), 7, mod._refStore(node), 9);
+  process.stdout.write("RESULT:" + JSON.stringify(received.map((v) => (v === node ? "<node>" : v))) + "\n");
+})().catch((e) => {
+  process.stdout.write("RESULT:ERR " + JSON.stringify(e && e.message) + "\n");
+});
+`
+
 // smokeLoader is one of the two generated wasm32-web loaders. The base PAL
 // runtime is one contract, so both run the same smoke module, driver and
 // assertions (#305).
@@ -316,6 +354,48 @@ func TestGenerateJSGlueKeywordArgNamesSyntaxValid(t *testing.T) {
     long typedef, long unrestricted);
 };`
 	nodeCheckGlue(t, nodePath, GenerateJSGlue(overloadIR(t, src)))
+}
+
+// TestGenerateJSGlueReservedWordArgNamesSyntaxValid parses the glue for an
+// operation whose arguments are named by every word a strict-mode ES module
+// cannot bind (#675) — all but `void`, which WebIDL lexes as a type keyword and
+// so cannot name an argument. Emitted verbatim, any one of them makes the whole
+// module a SyntaxError.
+func TestGenerateJSGlueReservedWordArgNamesSyntaxValid(t *testing.T) {
+	nodePath := requireNode(t)
+	src := `interface Target {
+  undefined g(long await, long break, long case, long catch, long class,
+    long const, long continue, long debugger, long default, long delete,
+    long do, long else, long enum, long export, long extends, long false,
+    long finally, long for, long function, long if, long import, long in,
+    long instanceof, long new, long null, long return, long super,
+    long switch, long this, long throw, long true, long try, long typeof,
+    long var, long while, long with, long yield, long implements,
+    long interface, long let, long package, long private, long protected,
+    long public, long static, long arguments, long eval);
+};`
+	nodeCheckGlue(t, nodePath, GenerateJSGlue(overloadIR(t, src)))
+}
+
+// TestGenerateJSGlueReservedWordArgsReachHost calls the import of an operation
+// whose arguments are named `null`, `arguments` and `eval` (#675) and checks the
+// host member receives each value. node --check proves only that the glue
+// parses, so it cannot tell which name a call forwards when that name is itself
+// a valid expression: one of these three words left raw, or a renamed argument
+// spelled differently from the parameter the import binds. Either way the host
+// would get the wrong value (or a ReferenceError) at call time.
+func TestGenerateJSGlueReservedWordArgsReachHost(t *testing.T) {
+	nodePath := requireNode(t)
+	src := `interface Node {};
+interface Target {
+  undefined g(long null, Node arguments, long eval);
+};`
+	loader := smokeLoader{name: "glue", js: GenerateJSGlue(overloadIR(t, src)), initArgs: []string{"frontend.wasm"}}
+	result := runSmokeDriver(t, nodePath, loader, 0, importCallDriver)
+
+	if want := `RESULT:[7,"<node>",9]`; result != want {
+		t.Errorf("Target.g's host member received %s, want %s", result, want)
+	}
 }
 
 // nodeCheckGlue fails the test unless `node --check` parses glue.

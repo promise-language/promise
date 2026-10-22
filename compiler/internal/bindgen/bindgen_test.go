@@ -4187,16 +4187,34 @@ func TestGenerateJSGlueRefParam(t *testing.T) {
 }
 
 func TestJsParamNameReservedWords(t *testing.T) {
-	reserved := []string{"default", "class", "function", "var", "let", "const", "this", "new", "delete", "in", "typeof", "interface", "static"}
-	for _, word := range reserved {
-		got := jsParamName(word)
-		if got != word+"_" {
-			t.Errorf("jsParamName(%q) = %q, want %q", word, got, word+"_")
-		}
+	cases := map[string]string{
+		// ECMAScript reserved words
+		"await": "await_", "break": "break_", "case": "case_", "catch": "catch_",
+		"class": "class_", "const": "const_", "continue": "continue_",
+		"debugger": "debugger_", "default": "default_", "delete": "delete_",
+		"do": "do_", "else": "else_", "enum": "enum_", "export": "export_",
+		"extends": "extends_", "false": "false_", "finally": "finally_",
+		"for": "for_", "function": "function_", "if": "if_", "import": "import_",
+		"in": "in_", "instanceof": "instanceof_", "new": "new_", "null": "null_",
+		"return": "return_", "super": "super_", "switch": "switch_",
+		"this": "this_", "throw": "throw_", "true": "true_", "try": "try_",
+		"typeof": "typeof_", "var": "var_", "void": "void_", "while": "while_",
+		"with": "with_", "yield": "yield_",
+		// Reserved only in strict mode
+		"implements": "implements_", "interface": "interface_", "let": "let_",
+		"package": "package_", "private": "private_", "protected": "protected_",
+		"public": "public_", "static": "static_",
+		// Forbidden as binding names in strict mode
+		"arguments": "arguments_", "eval": "eval_",
+		// Contextual words a module can bind pass through
+		"value": "value", "async": "async", "of": "of", "undefined": "undefined",
 	}
-	// Non-reserved should pass through
-	if got := jsParamName("value"); got != "value" {
-		t.Errorf("jsParamName(\"value\") = %q, want \"value\"", got)
+	for name, want := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := jsParamName(name); got != want {
+				t.Errorf("jsParamName(%q) = %q, want %q", name, got, want)
+			}
+		})
 	}
 }
 

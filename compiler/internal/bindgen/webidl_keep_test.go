@@ -152,7 +152,7 @@ func TestApplyKeepList(t *testing.T) {
 			interface Event { constructor(DOMString type); };`,
 			list: "ImageData\nImageData.constructor\nEvent\n",
 			resources: map[string][]string{
-				"ImageData": {"ImageData.constructor", "ImageData.constructor"},
+				"ImageData": {"ImageData.constructor", "ImageData.constructor.2"},
 				"Event":     nil,
 			},
 			types: map[string][]string{},

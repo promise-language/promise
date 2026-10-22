@@ -208,6 +208,7 @@ func (c *witConverter) convertResourceMethod(fn *wit.Func, resourceName, importM
 
 	switch fn.Kind {
 	case wit.FuncConstructor:
+		f.Name = constructorName
 		f.Kind = FuncConstructor
 		f.ImportName = "[constructor]" + resourceName
 	case wit.FuncStatic:

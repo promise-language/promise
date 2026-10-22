@@ -602,6 +602,7 @@ func TestCodegenConstructorWrapper(t *testing.T) {
 	assertContains(t, out, createFactoryLine("Descriptor", "create", "string path"))
 	assertContains(t, out, "handle := _descriptor_constructor(path);")
 	assertContains(t, out, "return Descriptor(_handle: handle, _owned: true);")
+	assertContains(t, out, "`extern(\"descriptor_constructor\")")
 	assertContains(t, out, "`wasm_import(\"wasi:fs/types\", \"[constructor]descriptor\")")
 }
 
@@ -807,6 +808,10 @@ interface fs {
 	// constructor
 	if r.Methods[0].Kind != FuncConstructor {
 		t.Errorf("method 0: got kind %v, want Constructor", r.Methods[0].Kind)
+	}
+	// Codegen derives the factory, extern and link names from this name.
+	if r.Methods[0].Name != "constructor" {
+		t.Errorf("constructor name: got %q, want \"constructor\"", r.Methods[0].Name)
 	}
 	if r.Methods[0].ImportName != "[constructor]descriptor" {
 		t.Errorf("constructor import name: got %q", r.Methods[0].ImportName)
@@ -3407,8 +3412,12 @@ func TestWebIdlToIRConstructor(t *testing.T) {
 	if ctor.Kind != FuncConstructor {
 		t.Errorf("expected FuncConstructor, got %d", ctor.Kind)
 	}
-	if ctor.Name != "create" {
-		t.Errorf("expected 'create', got %q", ctor.Name)
+	// A lone constructor is the first of its set, so it carries no ordinal.
+	if ctor.Name != "constructor" {
+		t.Errorf("expected 'constructor', got %q", ctor.Name)
+	}
+	if ctor.ImportName != "Image.constructor" {
+		t.Errorf("expected import 'Image.constructor', got %q", ctor.ImportName)
 	}
 	if len(ctor.Params) != 2 {
 		t.Errorf("expected 2 params, got %d", len(ctor.Params))

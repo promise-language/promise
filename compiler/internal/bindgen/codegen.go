@@ -276,6 +276,19 @@ func createFactoryName(r Resource) string {
 	return "create"
 }
 
+// constructorFactoryName returns the owning factory a constructor is emitted as:
+// the resource's factory stem (createFactoryName) in place of the constructorName
+// the front end gave it, keeping the overload ordinal numberOverload appended —
+// `constructor_2` becomes `create_2`, or `create_handle_2` under the T1974
+// fallback (docs/wasm-bindings.md, "Overloaded Operations").
+func constructorFactoryName(r Resource, m Func) string {
+	ordinal, ok := strings.CutPrefix(m.Name, constructorName)
+	if !ok {
+		panic(fmt.Sprintf("bindgen: constructor %q of %s is not named %q", m.Name, r.Name, constructorName))
+	}
+	return createFactoryName(r) + ordinal
+}
+
 func (g *generator) emitResource(r Resource, importModule string) {
 	// A derived interface is an `is` child of its parent, so it inherits the
 	// parent's members instead of repeating them, and is accepted wherever the
@@ -398,7 +411,7 @@ func (g *generator) emitResourceMethod(m Func, r Resource, importModule string) 
 
 	switch m.Kind {
 	case FuncConstructor:
-		g.emitConstructorWrapper(m, resourceName, createFactoryName(r), importModule)
+		g.emitConstructorWrapper(m, resourceName, constructorFactoryName(r, m), importModule)
 	case FuncStatic:
 		g.emitStaticWrapper(m, resourceName, importModule)
 	default:
@@ -418,7 +431,7 @@ func (g *generator) emitResourceMethod(m Func, r Resource, importModule string) 
 // construction and differ only in the ownership they claim.
 func (g *generator) emitConstructorWrapper(m Func, resourceName, factoryName, importModule string) {
 	params := g.formatParams(m.Params)
-	externName := fmt.Sprintf("_%s_constructor", toSnake(resourceName))
+	externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), externNameSuffix(m))
 	externParams := g.formatExternCallArgs(m.Params)
 
 	failMark := ""
@@ -694,7 +707,7 @@ func (g *generator) emitMethodWrapper(m Func, resourceName, importModule string)
 func (g *generator) emitResourceMethodExtern(m Func, resourceName, importModule string) {
 	switch m.Kind {
 	case FuncConstructor:
-		externName := fmt.Sprintf("_%s_constructor", toSnake(resourceName))
+		externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), externNameSuffix(m))
 		params := g.formatExternParamsWithRetPtr(m.Params, m.Results)
 		retSig := "i32"
 		failable := isFailable(m.Results)
@@ -722,9 +735,6 @@ func (g *generator) emitResourceMethodExtern(m Func, resourceName, importModule 
 	}
 	g.indent++
 	externLinkName := toSnake(resourceName) + "_" + externNameSuffix(m)
-	if m.Kind == FuncConstructor {
-		externLinkName = toSnake(resourceName) + "_constructor"
-	}
 	g.line("`extern(\"%s\")", externLinkName)
 	g.line("`wasm_import(\"%s\", \"%s\")", importModule, m.ImportName)
 	g.line("`target(%s);", g.target)

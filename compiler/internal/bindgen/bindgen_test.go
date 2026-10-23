@@ -3586,8 +3586,8 @@ func TestGenerateJSGlueMethodImport(t *testing.T) {
 	}}
 	out := GenerateJSGlue(modules)
 	assertContains(t, out, `"Element.setAttribute"`)
-	assertContains(t, out, "_readString(name_ptr, name_len)")
-	assertContains(t, out, "_refLoad(handle)")
+	assertContains(t, out, "_readString(name$ptr, name$len)")
+	assertContains(t, out, "_refLoad($handle)")
 }
 
 // stringResultModules is a resource whose members return a string in every
@@ -3636,15 +3636,15 @@ func stringResultModules() []*Module {
 // cabi_retarea() export that does not exist.
 func TestGenerateJSGlueStringResultTrailingRetptr(t *testing.T) {
 	out := GenerateJSGlue(stringResultModules())
-	assertContains(t, out, `"Element.innerHTML.get"(handle, retptr)`)
-	assertContains(t, out, "_writeStringResult(retptr, _refLoad(handle).innerHTML);")
-	assertContains(t, out, `"Element.getAttribute"(handle, name_ptr, name_len, retptr)`)
-	assertContains(t, out, "_writeStringResult(retptr, _refLoad(handle).getAttribute(_readString(name_ptr, name_len)));")
-	assertContains(t, out, `"Element.describe"(n, retptr)`)
-	assertContains(t, out, "_writeStringResult(retptr, Element.describe(n));")
+	assertContains(t, out, `"Element.innerHTML.get"($handle, $retptr)`)
+	assertContains(t, out, "_writeStringResult($retptr, _refLoad($handle).innerHTML);")
+	assertContains(t, out, `"Element.getAttribute"($handle, name$ptr, name$len, $retptr)`)
+	assertContains(t, out, "_writeStringResult($retptr, _refLoad($handle).getAttribute(_readString(name$ptr, name$len)));")
+	assertContains(t, out, `"Element.describe"(n, $retptr)`)
+	assertContains(t, out, "_writeStringResult($retptr, Element.describe(n));")
 	// A scalar result is returned directly and takes no return pointer.
-	assertContains(t, out, `"Element.childCount.get"(handle)`)
-	assertContains(t, out, "return _refLoad(handle).childCount;")
+	assertContains(t, out, `"Element.childCount.get"($handle)`)
+	assertContains(t, out, "return _refLoad($handle).childCount;")
 	assertNotContains(t, out, "cabi_retarea")
 	assertNotContains(t, out, "return retarea")
 }
@@ -4118,7 +4118,7 @@ func TestGenerateJSGlueFreeFunc(t *testing.T) {
 	}}
 	out := GenerateJSGlue(modules)
 	assertContains(t, out, `"alert"`)
-	assertContains(t, out, "message_ptr")
+	assertContains(t, out, "message$ptr")
 	assertContains(t, out, "_readString")
 }
 
@@ -4173,7 +4173,7 @@ func TestGenerateJSGlueAttributeSetter(t *testing.T) {
 	out := GenerateJSGlue(modules)
 	assertContains(t, out, "textContent.get")
 	assertContains(t, out, "textContent.set")
-	assertContains(t, out, "_refLoad(handle).textContent")
+	assertContains(t, out, "_refLoad($handle).textContent")
 }
 
 func TestGenerateJSGlueRefParam(t *testing.T) {
@@ -4201,23 +4201,23 @@ func TestGenerateJSGlueRefParam(t *testing.T) {
 func TestJsParamNameReservedWords(t *testing.T) {
 	cases := map[string]string{
 		// ECMAScript reserved words
-		"await": "await_", "break": "break_", "case": "case_", "catch": "catch_",
-		"class": "class_", "const": "const_", "continue": "continue_",
-		"debugger": "debugger_", "default": "default_", "delete": "delete_",
-		"do": "do_", "else": "else_", "enum": "enum_", "export": "export_",
-		"extends": "extends_", "false": "false_", "finally": "finally_",
-		"for": "for_", "function": "function_", "if": "if_", "import": "import_",
-		"in": "in_", "instanceof": "instanceof_", "new": "new_", "null": "null_",
-		"return": "return_", "super": "super_", "switch": "switch_",
-		"this": "this_", "throw": "throw_", "true": "true_", "try": "try_",
-		"typeof": "typeof_", "var": "var_", "void": "void_", "while": "while_",
-		"with": "with_", "yield": "yield_",
+		"await": "await$", "break": "break$", "case": "case$", "catch": "catch$",
+		"class": "class$", "const": "const$", "continue": "continue$",
+		"debugger": "debugger$", "default": "default$", "delete": "delete$",
+		"do": "do$", "else": "else$", "enum": "enum$", "export": "export$",
+		"extends": "extends$", "false": "false$", "finally": "finally$",
+		"for": "for$", "function": "function$", "if": "if$", "import": "import$",
+		"in": "in$", "instanceof": "instanceof$", "new": "new$", "null": "null$",
+		"return": "return$", "super": "super$", "switch": "switch$",
+		"this": "this$", "throw": "throw$", "true": "true$", "try": "try$",
+		"typeof": "typeof$", "var": "var$", "void": "void$", "while": "while$",
+		"with": "with$", "yield": "yield$",
 		// Reserved only in strict mode
-		"implements": "implements_", "interface": "interface_", "let": "let_",
-		"package": "package_", "private": "private_", "protected": "protected_",
-		"public": "public_", "static": "static_",
+		"implements": "implements$", "interface": "interface$", "let": "let$",
+		"package": "package$", "private": "private$", "protected": "protected$",
+		"public": "public$", "static": "static$",
 		// Forbidden as binding names in strict mode
-		"arguments": "arguments_", "eval": "eval_",
+		"arguments": "arguments$", "eval": "eval$",
 		// Contextual words a module can bind pass through
 		"value": "value", "async": "async", "of": "of", "undefined": "undefined",
 	}
@@ -4225,6 +4225,24 @@ func TestJsParamNameReservedWords(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if got := jsParamName(name); got != want {
 				t.Errorf("jsParamName(%q) = %q, want %q", name, got, want)
+			}
+		})
+	}
+}
+
+// TestWebIdlArgNameCannotSpellGlueParam checks the premise the glue's own
+// parameter names rest on (#689): no WebIDL argument can be written as one of
+// them. A method's receiver, a string result's return pointer, a string
+// argument's pointer/length pair and jsParamName's escape of a reserved word
+// each contain a character a WebIDL identifier cannot, so naming an argument
+// after any of them is a parse error rather than a duplicate parameter.
+func TestWebIdlArgNameCannotSpellGlueParam(t *testing.T) {
+	pointer, length := jsStringParams("x")
+	for _, name := range []string{jsReceiverParam, jsReturnPointerParam, pointer, length, jsParamName("class")} {
+		t.Run(name, func(t *testing.T) {
+			src := "interface Target {\n  undefined f(long " + name + ");\n};"
+			if _, errs := webidl.Parse(src, "glue.webidl"); len(errs) == 0 {
+				t.Errorf("an argument named %q parses, and the glue adds a parameter of that name", name)
 			}
 		})
 	}
@@ -4249,7 +4267,7 @@ func TestGenerateJSGlueVoidReturnMethod(t *testing.T) {
 	}}
 	out := GenerateJSGlue(modules)
 	assertContains(t, out, `"Console.log"`)
-	assertContains(t, out, "_refLoad(handle).log(")
+	assertContains(t, out, "_refLoad($handle).log(")
 }
 
 func TestGenerateJSGlueOptionalParam(t *testing.T) {
@@ -4271,7 +4289,7 @@ func TestGenerateJSGlueOptionalParam(t *testing.T) {
 	}}
 	out := GenerateJSGlue(modules)
 	// Optional s32 should unwrap to scalar param "x"
-	assertContains(t, out, `"Foo.bar"(handle, x)`)
+	assertContains(t, out, `"Foo.bar"($handle, x)`)
 }
 
 func TestGenerateJSGlueStringReturn(t *testing.T) {
@@ -4291,8 +4309,8 @@ func TestGenerateJSGlueStringReturn(t *testing.T) {
 		}},
 	}}
 	out := GenerateJSGlue(modules)
-	assertContains(t, out, `"Element.getTag"(handle, retptr)`)
-	assertContains(t, out, "_writeStringResult(retptr, _refLoad(handle).getTag());")
+	assertContains(t, out, `"Element.getTag"($handle, $retptr)`)
+	assertContains(t, out, "_writeStringResult($retptr, _refLoad($handle).getTag());")
 }
 
 func TestGenerateJSGlueMethodNoImportName(t *testing.T) {
@@ -5082,8 +5100,8 @@ func TestGenerateJSGlueNullableStringReturn(t *testing.T) {
 	}}
 	out := GenerateJSGlue(modules)
 	// null is handled inside _writeStringResult, which writes (0, 0).
-	assertContains(t, out, `"Storage.getItem"(handle, key_ptr, key_len, retptr)`)
-	assertContains(t, out, "_writeStringResult(retptr, _refLoad(handle).getItem(_readString(key_ptr, key_len)));")
+	assertContains(t, out, `"Storage.getItem"($handle, key$ptr, key$len, $retptr)`)
+	assertContains(t, out, "_writeStringResult($retptr, _refLoad($handle).getItem(_readString(key$ptr, key$len)));")
 	assertNotContains(t, out, "return 0;")
 }
 

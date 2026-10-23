@@ -320,14 +320,14 @@ func TestWebIdlOverloadCodegenDistinctMembers(t *testing.T) {
 func TestWebIdlOverloadJSGlue(t *testing.T) {
 	glue := GenerateJSGlue(overloadIR(t, overloadFixture))
 
-	assertContains(t, glue, `"Element.setAttribute"(handle, name_ptr, name_len, value_ptr, value_len) {`)
-	assertContains(t, glue, "_refLoad(handle).setAttribute(_readString(name_ptr, name_len), _readString(value_ptr, value_len))")
-	assertContains(t, glue, `"Element.setAttribute.2"(handle, name_ptr, name_len, value) {`)
-	assertContains(t, glue, "_refLoad(handle).setAttribute(_readString(name_ptr, name_len), _refLoad(value))")
+	assertContains(t, glue, `"Element.setAttribute"($handle, name$ptr, name$len, value$ptr, value$len) {`)
+	assertContains(t, glue, "_refLoad($handle).setAttribute(_readString(name$ptr, name$len), _readString(value$ptr, value$len))")
+	assertContains(t, glue, `"Element.setAttribute.2"($handle, name$ptr, name$len, value) {`)
+	assertContains(t, glue, "_refLoad($handle).setAttribute(_readString(name$ptr, name$len), _refLoad(value))")
 	assertContains(t, glue, `"Element.make"(n) {`)
 	assertContains(t, glue, "Element.make(n)")
-	assertContains(t, glue, `"Element.make.2"(tag_ptr, tag_len) {`)
-	assertContains(t, glue, "Element.make(_readString(tag_ptr, tag_len))")
+	assertContains(t, glue, `"Element.make.2"(tag$ptr, tag$len) {`)
+	assertContains(t, glue, "Element.make(_readString(tag$ptr, tag$len))")
 	// The member is never rebuilt from the suffixed Promise name.
 	assertNotContains(t, glue, "setAttribute2")
 	assertNotContains(t, glue, "make2")
@@ -429,7 +429,7 @@ func TestWebIdlOverloadConstructorJSGlue(t *testing.T) {
 	glue := GenerateJSGlue(overloadIR(t, constructorOverloadFixture))
 
 	assertContains(t, glue, `"X.constructor"(n) {`+"\n      const obj = new X(n);")
-	assertContains(t, glue, `"X.constructor.2"(tag_ptr, tag_len) {`+"\n      const obj = new X(_readString(tag_ptr, tag_len));")
+	assertContains(t, glue, `"X.constructor.2"(tag$ptr, tag$len) {`+"\n      const obj = new X(_readString(tag$ptr, tag$len));")
 	for _, key := range []string{`"X.constructor"(`, `"X.constructor.2"(`} {
 		if n := strings.Count(glue, key); n != 1 {
 			t.Errorf("import key %q appears %d times, want exactly once:\n%s", key, n, glue)
@@ -463,9 +463,9 @@ func TestWebIdlJSGlueMemberIsVerbatimIdentifier(t *testing.T) {
 		readonly attribute DOMString baseURI;
 	};`))
 
-	assertContains(t, glue, "_refLoad(handle).toJSON()")
-	assertContains(t, glue, "Doc.fromURL(_readString(url_ptr, url_len))")
-	assertContains(t, glue, "_refLoad(handle).baseURI")
+	assertContains(t, glue, "_refLoad($handle).toJSON()")
+	assertContains(t, glue, "Doc.fromURL(_readString(url$ptr, url$len))")
+	assertContains(t, glue, "_refLoad($handle).baseURI")
 	assertNotContains(t, glue, "toJson")
 	assertNotContains(t, glue, "fromUrl")
 }
@@ -484,10 +484,10 @@ interface Form {
 func TestWebIdlOverloadAnonymousSpecialGlue(t *testing.T) {
 	glue := GenerateJSGlue(overloadIR(t, anonymousGetterFixture))
 
-	assertContains(t, glue, `"Form.getter"(handle, index) {`)
-	assertContains(t, glue, "_refLoad(handle)[index >>> 0]")
-	assertContains(t, glue, `"Form.getter.2"(handle, name_ptr, name_len) {`)
-	assertContains(t, glue, "_refLoad(handle)[_readString(name_ptr, name_len)]")
+	assertContains(t, glue, `"Form.getter"($handle, index) {`)
+	assertContains(t, glue, "_refLoad($handle)[index >>> 0]")
+	assertContains(t, glue, `"Form.getter.2"($handle, name$ptr, name$len) {`)
+	assertContains(t, glue, "_refLoad($handle)[_readString(name$ptr, name$len)]")
 	assertNotContains(t, glue, ").(")
 	assertNotContains(t, glue, ".getter(")
 }

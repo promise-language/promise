@@ -905,6 +905,78 @@ interface Document {
 	}
 }
 
+// TestBindArgNamedLikeWrapperLocalCompilesClean binds members whose arguments
+// are named like the locals a generated wrapper binds its extern's result to
+// (`handle`, `ref`, the canonical-ABI `tag`). Each wrapper used to redeclare
+// its own parameter, and bind's self-check (docs/web-apps.md §"Bind time self
+// check") rejected the module with "redeclared in this scope" (#699).
+//
+// The WIT fixture holds free functions only: a canonical-ABI resource wrapper
+// does not type-check for an unrelated reason (#541).
+func TestBindArgNamedLikeWrapperLocalCompilesClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind self-check integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	cases := []struct {
+		name string
+		file string
+		src  string
+		args []string
+	}{
+		{
+			name: "webidl",
+			file: "y.idl",
+			src: `interface Node {};
+
+interface Y {
+	constructor(long handle);
+	Node? m(long handle);
+	Node p(long handle, long handle_);
+	any n(long ref);
+	object? o(long ref);
+	static Node s(long handle);
+	static Node? u(long handle);
+	static any v(long ref);
+	static object? t(long ref);
+};
+`,
+			args: []string{"bind", "webidl", "-name", "y"},
+		},
+		{
+			name: "wit-canonical-abi",
+			file: "api.wit",
+			src: `package test:api;
+
+interface greet {
+  label: func(tag: u32) -> result<string, string>;
+  touch: func(tag: u32) -> result<_, string>;
+}
+
+world api {
+  import greet;
+}
+`,
+			args: []string{"bind", "wit", "-canonical-abi", "-name", "greetapi"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := clitest.TempDir(t)
+			srcPath := filepath.Join(dir, c.file)
+			if err := os.WriteFile(srcPath, []byte(c.src), 0644); err != nil {
+				t.Fatal(err)
+			}
+			args := slices.Concat(c.args, []string{"-o", filepath.Join(dir, "out"), srcPath})
+			if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
+				t.Fatalf("%s failed its self-check (want exit 0): %v\n%s", strings.Join(c.args[:2], " "), err, out)
+			}
+		})
+	}
+}
+
 // TestBindWebIdlDocumentRootBesideMemberOfSameName pins the shape the real web
 // module has (#660): webref's `Window` declares `readonly attribute Document
 // document`, so the generated module holds both a `Window.document` getter and

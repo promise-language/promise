@@ -2,6 +2,7 @@ package bindgen
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/promise-language/promise/compiler/internal/wasmweb"
@@ -419,6 +420,32 @@ func (g *generator) emitResourceMethod(m Func, r Resource, importModule string) 
 	}
 }
 
+// wrapperLocals names the locals a generated wrapper body binds an extern's
+// result to: handle (an interface's host handle), ref (a JsValue's JS ref) and
+// tag (a canonical-ABI result discriminant).
+type wrapperLocals struct{ handle, ref, tag string }
+
+// newWrapperLocals returns the locals of a wrapper whose parameters are params:
+// each its usual name, with "_" appended while a parameter has that name. A
+// local that reused a parameter's name would redeclare it, and the generated
+// module would not compile (#699).
+//
+// No fixed name is safe instead. A parameter is named after its IDL argument,
+// and an argument can be written as any lowercase identifier: idlToSnake keeps
+// one unchanged, the WebIDL lexer keeps a leading "_" (#693), and the WIT lexer
+// accepts "_" too. A Promise identifier has no character that an argument
+// cannot carry, as "$" is in a JS one. So the choice is made against the
+// parameters this wrapper actually declares.
+func newWrapperLocals(params []Param) wrapperLocals {
+	distinct := func(name string) string {
+		for slices.ContainsFunc(params, func(p Param) bool { return p.Name == name }) {
+			name += "_"
+		}
+		return name
+	}
+	return wrapperLocals{handle: distinct("handle"), ref: distinct("ref"), tag: distinct("tag")}
+}
+
 // emitConstructorWrapper emits the owning construction path for a resource: a
 // `global factory returning R, never a `new(~this, ...)` constructor.
 //
@@ -446,13 +473,14 @@ func (g *generator) emitConstructorWrapper(m Func, resourceName, factoryName, im
 		doc = createDoc
 	}
 
+	locals := newWrapperLocals(m.Params)
 	g.line("%s%s(%s) %s `public `global%s {", factoryName, failMark, params, resourceName, docAnnot(doc))
 	g.indent++
 	// The handle is acquired before the wrapper exists: a failable constructor
 	// propagates out of this line, so a raise can never leave behind a wrapper
 	// that would release a handle the host never minted.
-	g.line("handle := %s(%s)%s;", externName, externParams, raise)
-	g.line("return %s(_handle: handle, _owned: true);", resourceName)
+	g.line("%s := %s(%s)%s;", locals.handle, externName, externParams, raise)
+	g.line("return %s(_handle: %s, _owned: true);", resourceName, locals.handle)
 	g.indent--
 	g.line("}")
 }
@@ -474,32 +502,33 @@ func (g *generator) emitStaticWrapper(m Func, resourceName, importModule string)
 	// Check for resource return types
 	resReturn, isResReturn := resourceReturnType(m.Results)
 	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
+	locals := newWrapperLocals(m.Params)
 
 	if !g.canonicalABI && jsValueReturnType(m.Results) {
 		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
 		g.indent++
-		g.line("ref := %s(%s)%s;", externName, externParams, raise)
-		g.line("return JsValue.Object(_js_ref: ref as int);")
+		g.line("%s := %s(%s)%s;", locals.ref, externName, externParams, raise)
+		g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
 		g.indent--
 	} else if !g.canonicalABI && optionJsValueReturnType(m.Results) {
 		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
 		g.indent++
-		g.line("ref := %s(%s)%s;", externName, externParams, raise)
-		g.line("if ref == 0 { return none; }")
-		g.line("return JsValue.Object(_js_ref: ref as int);")
+		g.line("%s := %s(%s)%s;", locals.ref, externName, externParams, raise)
+		g.line("if %s == 0 { return none; }", locals.ref)
+		g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
 		g.indent--
 	} else if !g.canonicalABI && isResReturn {
 		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
 		g.indent++
-		g.line("handle := %s(%s)%s;", externName, externParams, raise)
-		g.line("return %s(_handle: handle, _owned: true);", resReturn)
+		g.line("%s := %s(%s)%s;", locals.handle, externName, externParams, raise)
+		g.line("return %s(_handle: %s, _owned: true);", resReturn, locals.handle)
 		g.indent--
 	} else if !g.canonicalABI && isOptResReturn {
 		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
 		g.indent++
-		g.line("handle := %s(%s)%s;", externName, externParams, raise)
-		g.line("if handle == 0 { return none; }")
-		g.line("return %s(_handle: handle, _owned: true);", optResReturn)
+		g.line("%s := %s(%s)%s;", locals.handle, externName, externParams, raise)
+		g.line("if %s == 0 { return none; }", locals.handle)
+		g.line("return %s(_handle: %s, _owned: true);", optResReturn, locals.handle)
 		g.indent--
 	} else if retType != "" {
 		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
@@ -551,24 +580,25 @@ func (g *generator) emitGetterWrapper(m Func, resourceName, importModule string)
 
 	resReturn, isResReturn := resourceReturnType(m.Results)
 	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
+	locals := newWrapperLocals(m.Params)
 
 	g.line("get %s%s %s %s%s {", m.Name, failMark, retType, annotations, docAnnot(m.Doc))
 	g.indent++
 	switch {
 	case !g.canonicalABI && jsValueReturnType(m.Results):
-		g.line("ref := %s(%s)%s;", externName, externArgs, raise)
-		g.line("return JsValue.Object(_js_ref: ref as int);")
+		g.line("%s := %s(%s)%s;", locals.ref, externName, externArgs, raise)
+		g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
 	case !g.canonicalABI && optionJsValueReturnType(m.Results):
-		g.line("ref := %s(%s)%s;", externName, externArgs, raise)
-		g.line("if ref == 0 { return none; }")
-		g.line("return JsValue.Object(_js_ref: ref as int);")
+		g.line("%s := %s(%s)%s;", locals.ref, externName, externArgs, raise)
+		g.line("if %s == 0 { return none; }", locals.ref)
+		g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
 	case !g.canonicalABI && isResReturn:
-		g.line("handle := %s(%s)%s;", externName, externArgs, raise)
-		g.line("return %s(_handle: handle, _owned: true);", resReturn)
+		g.line("%s := %s(%s)%s;", locals.handle, externName, externArgs, raise)
+		g.line("return %s(_handle: %s, _owned: true);", resReturn, locals.handle)
 	case !g.canonicalABI && isOptResReturn:
-		g.line("handle := %s(%s)%s;", externName, externArgs, raise)
-		g.line("if handle == 0 { return none; }")
-		g.line("return %s(_handle: handle, _owned: true);", optResReturn)
+		g.line("%s := %s(%s)%s;", locals.handle, externName, externArgs, raise)
+		g.line("if %s == 0 { return none; }", locals.handle)
+		g.line("return %s(_handle: %s, _owned: true);", optResReturn, locals.handle)
 	default:
 		g.line("return %s;", g.liftScalarCall(fmt.Sprintf("%s(%s)%s", externName, externArgs, raise), m.Results))
 	}
@@ -663,32 +693,33 @@ func (g *generator) emitMethodWrapper(m Func, resourceName, importModule string)
 	// Check for resource return types (need handle→resource construction)
 	resReturn, isResReturn := resourceReturnType(m.Results)
 	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
+	locals := newWrapperLocals(m.Params)
 
 	if !g.canonicalABI && jsValueReturnType(m.Results) {
 		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
 		g.indent++
-		g.line("ref := %s(%s)%s;", externName, externCallArgs, raise)
-		g.line("return JsValue.Object(_js_ref: ref as int);")
+		g.line("%s := %s(%s)%s;", locals.ref, externName, externCallArgs, raise)
+		g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
 		g.indent--
 	} else if !g.canonicalABI && optionJsValueReturnType(m.Results) {
 		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
 		g.indent++
-		g.line("ref := %s(%s)%s;", externName, externCallArgs, raise)
-		g.line("if ref == 0 { return none; }")
-		g.line("return JsValue.Object(_js_ref: ref as int);")
+		g.line("%s := %s(%s)%s;", locals.ref, externName, externCallArgs, raise)
+		g.line("if %s == 0 { return none; }", locals.ref)
+		g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
 		g.indent--
 	} else if !g.canonicalABI && isResReturn {
 		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
 		g.indent++
-		g.line("handle := %s(%s)%s;", externName, externCallArgs, raise)
-		g.line("return %s(_handle: handle, _owned: true);", resReturn)
+		g.line("%s := %s(%s)%s;", locals.handle, externName, externCallArgs, raise)
+		g.line("return %s(_handle: %s, _owned: true);", resReturn, locals.handle)
 		g.indent--
 	} else if !g.canonicalABI && isOptResReturn {
 		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
 		g.indent++
-		g.line("handle := %s(%s)%s;", externName, externCallArgs, raise)
-		g.line("if handle == 0 { return none; }")
-		g.line("return %s(_handle: handle, _owned: true);", optResReturn)
+		g.line("%s := %s(%s)%s;", locals.handle, externName, externCallArgs, raise)
+		g.line("if %s == 0 { return none; }", locals.handle)
+		g.line("return %s(_handle: %s, _owned: true);", optResReturn, locals.handle)
 		g.indent--
 	} else if retType != "" {
 		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
@@ -765,6 +796,8 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 	// Extern call args (with lowering + retptr)
 	externCallArgs := g.formatCanonicalCallArgs(f.Params, useRetPtr)
 
+	locals := newWrapperLocals(f.Params)
+
 	// Public wrapper
 	if retType != "" {
 		g.line("%s%s(%s) %s `public `target(%s)%s {", f.Name, failMark, params, retType, g.target, docAnnot(f.Doc))
@@ -775,20 +808,20 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 			lifted := g.liftReturnFromRetPtr(f.Results)
 			if failable {
 				// Check discriminant for result<T, E>
-				g.line("tag := _cabi_load_i32(_cabi_retarea_ptr());")
+				g.line("%s := _cabi_load_i32(_cabi_retarea_ptr());", locals.tag)
 				errMsg := g.liftErrFromRetPtr(f.Results[0])
-				g.line("if tag != 0 { raise error(%s); }", errMsg)
+				g.line("if %s != 0 { raise error(%s); }", locals.tag, errMsg)
 				g.line("return %s;", lifted)
 			} else {
 				g.line("return %s;", lifted)
 			}
 		} else if !g.canonicalABI && jsValueReturnType(f.Results) {
-			g.line("ref := %s(%s)%s;", externName, externCallArgs, raise)
-			g.line("return JsValue.Object(_js_ref: ref as int);")
+			g.line("%s := %s(%s)%s;", locals.ref, externName, externCallArgs, raise)
+			g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
 		} else if !g.canonicalABI && optionJsValueReturnType(f.Results) {
-			g.line("ref := %s(%s)%s;", externName, externCallArgs, raise)
-			g.line("if ref == 0 { return none; }")
-			g.line("return JsValue.Object(_js_ref: ref as int);")
+			g.line("%s := %s(%s)%s;", locals.ref, externName, externCallArgs, raise)
+			g.line("if %s == 0 { return none; }", locals.ref)
+			g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
 		} else {
 			g.line("return %s;", g.liftScalarCall(fmt.Sprintf("%s(%s)%s", externName, externCallArgs, raise), f.Results))
 		}
@@ -798,9 +831,9 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 		g.indent++
 		if useRetPtr && g.canonicalABI && failable {
 			g.line("%s(%s);", externName, externCallArgs)
-			g.line("tag := _cabi_load_i32(_cabi_retarea_ptr());")
+			g.line("%s := _cabi_load_i32(_cabi_retarea_ptr());", locals.tag)
 			errMsg := g.liftErrFromRetPtr(f.Results[0])
-			g.line("if tag != 0 { raise error(%s); }", errMsg)
+			g.line("if %s != 0 { raise error(%s); }", locals.tag, errMsg)
 		} else {
 			g.line("%s(%s)%s;", externName, externCallArgs, raise)
 		}

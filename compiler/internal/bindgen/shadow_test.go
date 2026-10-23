@@ -355,13 +355,13 @@ func TestWebIdlShadowCodegen(t *testing.T) {
 	assertNotContains(t, out, "get class_name SVGAnimatedString")
 
 	js := GenerateJSGlue(modules)
-	assertContains(t, js, `"HTMLFormControlsCollection.namedItem.2"(handle, name_ptr, name_len) {`)
-	assertContains(t, js, `"SVGElement.className.get"(handle) {`)
-	assertContains(t, js, "_refStore(_refLoad(handle).className)")
-	assertContains(t, js, `_writeStringResult(retptr, Reflect.get(Element.prototype, "className", _refLoad(handle)));`)
-	assertContains(t, js, `Reflect.set(Element.prototype, "className", _readString(value_ptr, value_len), _refLoad(handle));`)
-	assertContains(t, js, "Reflect.apply(HTMLCollection.prototype.namedItem, _refLoad(handle), [_readString(name_ptr, name_len)])")
-	if n := strings.Count(js, "_refLoad(handle).namedItem(_readString(name_ptr, name_len))"); n != 1 {
+	assertContains(t, js, `"HTMLFormControlsCollection.namedItem.2"($handle, name$ptr, name$len) {`)
+	assertContains(t, js, `"SVGElement.className.get"($handle) {`)
+	assertContains(t, js, "_refStore(_refLoad($handle).className)")
+	assertContains(t, js, `_writeStringResult($retptr, Reflect.get(Element.prototype, "className", _refLoad($handle)));`)
+	assertContains(t, js, `Reflect.set(Element.prototype, "className", _readString(value$ptr, value$len), _refLoad($handle));`)
+	assertContains(t, js, "Reflect.apply(HTMLCollection.prototype.namedItem, _refLoad($handle), [_readString(name$ptr, name$len)])")
+	if n := strings.Count(js, "_refLoad($handle).namedItem(_readString(name$ptr, name$len))"); n != 1 {
 		t.Errorf("namedItem resolved on the object by %d imports, want 1 (the shadow's)\n%s", n, js)
 	}
 }

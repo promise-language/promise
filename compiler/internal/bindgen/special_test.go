@@ -8,7 +8,7 @@ import (
 // #696: an anonymous getter, setter or deleter has no JS member — the host
 // exposes it only as property access on the object, keyed by its first argument
 // (docs/wasm-bindings.md, "Supported subset"). Before the fix the glue called
-// its keyword as a method (`_refLoad(handle).getter(index)`), which no host
+// its keyword as a method (`_refLoad($handle).getter(index)`), which no host
 // object has, so every call threw a TypeError.
 
 // specialOpsFixture declares every anonymous special operation, with an indexed
@@ -44,18 +44,18 @@ func TestWebIdlAnonymousSpecialGlue(t *testing.T) {
 		header string
 		body   string
 	}{
-		{"indexed getter", `"Target.getter"(handle, index) {`, "const result = _refLoad(handle)[index >>> 0];"},
-		{"named getter", `"Target.getter.2"(handle, name_ptr, name_len) {`, "const result = _refLoad(handle)[_readString(name_ptr, name_len)];"},
-		{"indexed setter", `"Target.setter"(handle, index, node) {`, "_refLoad(handle)[index >>> 0] = _refLoad(node);"},
-		{"named setter", `"Target.setter.2"(handle, name_ptr, name_len, node) {`, "_refLoad(handle)[_readString(name_ptr, name_len)] = _refLoad(node);"},
-		{"deleter", `"Target.deleter"(handle, name_ptr, name_len) {`, "delete _refLoad(handle)[_readString(name_ptr, name_len)];"},
+		{"indexed getter", `"Target.getter"($handle, index) {`, "const result = _refLoad($handle)[index >>> 0];"},
+		{"named getter", `"Target.getter.2"($handle, name$ptr, name$len) {`, "const result = _refLoad($handle)[_readString(name$ptr, name$len)];"},
+		{"indexed setter", `"Target.setter"($handle, index, node) {`, "_refLoad($handle)[index >>> 0] = _refLoad(node);"},
+		{"named setter", `"Target.setter.2"($handle, name$ptr, name$len, node) {`, "_refLoad($handle)[_readString(name$ptr, name$len)] = _refLoad(node);"},
+		{"deleter", `"Target.deleter"($handle, name$ptr, name$len) {`, "delete _refLoad($handle)[_readString(name$ptr, name$len)];"},
 		// A named special operation is a regular operation: still a method call.
-		{"named special operation", `"Target.item"(handle, index) {`, "const result = _refLoad(handle).item(index);"},
-		{"string result", `"StringMap.getter"(handle, name_ptr, name_len, retptr) {`, "_writeStringResult(retptr, _refLoad(handle)[_readString(name_ptr, name_len)]);"},
-		{"string value", `"StringMap.setter"(handle, name_ptr, name_len, value_ptr, value_len) {`, "_refLoad(handle)[_readString(name_ptr, name_len)] = _readString(value_ptr, value_len);"},
+		{"named special operation", `"Target.item"($handle, index) {`, "const result = _refLoad($handle).item(index);"},
+		{"string result", `"StringMap.getter"($handle, name$ptr, name$len, $retptr) {`, "_writeStringResult($retptr, _refLoad($handle)[_readString(name$ptr, name$len)]);"},
+		{"string value", `"StringMap.setter"($handle, name$ptr, name$len, value$ptr, value$len) {`, "_refLoad($handle)[_readString(name$ptr, name$len)] = _readString(value$ptr, value$len);"},
 		// Only a setter's result is rejected: a deleter declaring one binds, and
 		// receives what the delete yields.
-		{"deleter result", `"ReportingMap.deleter"(handle, name_ptr, name_len) {`, "return delete _refLoad(handle)[_readString(name_ptr, name_len)];"},
+		{"deleter result", `"ReportingMap.deleter"($handle, name$ptr, name$len) {`, "return delete _refLoad($handle)[_readString(name$ptr, name$len)];"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assertContains(t, glue, "    "+tc.header+"\n      "+tc.body+"\n")

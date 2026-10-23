@@ -214,7 +214,8 @@ globalThis.fetch = async (url) => {
 // importCallDriver returns a driver that instantiates the glue, keeping the
 // import object init() hands to WebAssembly.instantiateStreaming as `imports`,
 // then runs body, which calls those imports as the wasm module would — `mod`
-// is the loader, for its _refStore and _refLoad — and writes one "RESULT:" line.
+// is the loader, for its _refStore and _refLoad, and `wasmExports` the
+// instance's exports, its memory among them — and writes one "RESULT:" line.
 func importCallDriver(body string) string {
 	return `
 const fs = require("fs");
@@ -238,7 +239,7 @@ WebAssembly.instantiateStreaming = (response, importObject) => {
 
 (async () => {
   const mod = await import(pathToFileURL(path.join(dir, loaderFile)).href);
-  await mod.init(...initArgs);
+  const wasmExports = await mod.init(...initArgs);
 ` + body + `})().catch((e) => {
   process.stdout.write("RESULT:ERR " + JSON.stringify(e && e.message) + "\n");
 });
@@ -319,7 +320,7 @@ func TestLoaderSyntaxValid(t *testing.T) {
 // TestGenerateJSGlueOverloadSyntaxValid parses the glue generated for WebIDL
 // overload sets (#263), including anonymous special operations: their imports
 // name their keyword, never an empty member, and their bodies are property
-// access (#696) — `_refLoad(handle).(...)` would make the whole file fail to
+// access (#696) — `_refLoad($handle).(...)` would make the whole file fail to
 // load. (Duplicate object keys are legal JS, so key uniqueness is asserted on
 // the text in overload_test.go, not here.)
 func TestGenerateJSGlueOverloadSyntaxValid(t *testing.T) {
@@ -372,6 +373,80 @@ func TestGenerateJSGlueReservedWordArgNamesSyntaxValid(t *testing.T) {
     long public, long static, long arguments, long eval);
 };`
 	nodeCheckGlue(t, nodePath, GenerateJSGlue(overloadIR(t, src)))
+}
+
+// TestGenerateJSGlueArgNamesMatchingGlueParamsSyntaxValid parses the glue for
+// operations whose arguments are named like a parameter the glue adds around
+// them (#689): a method's receiver, a string result's return pointer, a string
+// argument's pointer/length pair, and jsParamName's reserved-word escape. Each
+// used to emit one parameter name twice, which method shorthand never allows, so
+// the whole module was a SyntaxError.
+func TestGenerateJSGlueArgNamesMatchingGlueParamsSyntaxValid(t *testing.T) {
+	nodePath := requireNode(t)
+	cases := []struct {
+		name      string
+		operation string
+	}{
+		{"receiver", "undefined f(long handle);"},
+		{"return pointer", "DOMString g(long retptr);"},
+		{"string pair", "undefined h(DOMString x, long xPtr, long xLen);"},
+		{"reserved-word escape", "undefined k(long class, long class_);"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			src := "interface Target {\n  " + c.operation + "\n};"
+			nodeCheckGlue(t, nodePath, GenerateJSGlue(overloadIR(t, src)))
+		})
+	}
+}
+
+// TestGenerateJSGlueArgNamesMatchingGlueParamsReachHost calls the imports of
+// operations whose arguments are named like a parameter the glue adds (#689)
+// and checks that each value reaches its own destination. node --check cannot:
+// in `"Target.f"($handle, handle)` both names are valid expressions, so a body
+// reading the receiver from the argument, or writing the string result through
+// the `retptr` argument rather than the glue's return pointer, still parses.
+//
+// The receiver is a host object whose members record whether they were called
+// on it, and what they received. Target.g's host member returns null, which the
+// glue writes as the empty string (0, 0) without allocating; the driver fills
+// the 8 bytes at the glue's return pointer (128) and at the `retptr` argument's
+// value (64) with 0xFF first, so the write shows up at the one and not the
+// other. Target.h's string argument is "AB", the first two bytes of the smoke
+// module's data.
+func TestGenerateJSGlueArgNamesMatchingGlueParamsReachHost(t *testing.T) {
+	nodePath := requireNode(t)
+	src := `interface Target {
+  undefined f(long handle);
+  DOMString g(long retptr);
+  undefined h(DOMString x, long xPtr, long xLen);
+  undefined k(long class, long class_);
+};`
+	loader := smokeLoader{name: "glue", js: GenerateJSGlue(overloadIR(t, src)), initArgs: []string{"frontend.wasm"}}
+	result := runSmokeDriver(t, nodePath, loader, 0, importCallDriver(`
+  const calls = [];
+  const record = (member) => function (...args) { calls.push([member, this === target, ...args]); return null; };
+  const target = { f: record("f"), g: record("g"), h: record("h"), k: record("k") };
+  const self = mod._refStore(target);
+  const bytes = new Uint8Array(wasmExports.memory.buffer);
+  bytes.fill(0xff, 64, 72);
+  bytes.fill(0xff, 128, 136);
+  imports.promise_env["Target.f"](self, 42);
+  imports.promise_env["Target.g"](self, 64, 128);
+  imports.promise_env["Target.h"](self, 0, 2, 11, 12);
+  imports.promise_env["Target.k"](self, 5, 6);
+  process.stdout.write("RESULT:" + JSON.stringify({
+    calls,
+    returnPointer: Array.from(bytes.subarray(128, 136)),
+    retptrArgument: Array.from(bytes.subarray(64, 72)),
+  }) + "\n");
+`))
+
+	want := `RESULT:{"calls":[["f",true,42],["g",true,64],["h",true,"AB",11,12],["k",true,5,6]],` +
+		`"returnPointer":[0,0,0,0,0,0,0,0],"retptrArgument":[255,255,255,255,255,255,255,255]}`
+	if result != want {
+		t.Errorf("Target's imports delivered\n%s\nwant\n%s", result, want)
+	}
 }
 
 // TestGenerateJSGlueReservedWordArgsReachHost calls the import of an operation

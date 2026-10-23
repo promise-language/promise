@@ -413,12 +413,33 @@ func (g *jsGlueGenerator) emitFreeFuncImport(f Func) {
 	g.write("    },\n")
 }
 
+// The names the glue gives its own parameters around a WebIDL operation's
+// arguments: the receiver handle a method takes first, and the return pointer a
+// string result comes back through, last. Each begins with a `$`, and a name
+// derived from a WebIDL argument never does: the WebIDL lexer's identifiers are
+// letters, digits and `_` (isIdentStart, isIdentContinue), idlToSnake and
+// sanitizeIdent add only `_`, and the one `$` such a name can carry is the one
+// jsParamName's escape puts at its end. So no argument can take one of these
+// names, whatever it is called (#689).
+const (
+	jsReceiverParam      = "$handle"
+	jsReturnPointerParam = "$retptr"
+)
+
+// jsStringParams returns the names of the (pointer, length) pair a string
+// argument named name crosses as. Neither can be another argument's name: the
+// one `$` such a name can carry is jsParamName's, at its end, and these two
+// continue past theirs.
+func jsStringParams(name string) (pointer, length string) {
+	return name + "$ptr", name + "$len"
+}
+
 func (g *jsGlueGenerator) buildJSParams(f Func) []string {
 	var params []string
 
 	// Methods get a handle parameter first
 	if f.Kind == FuncMethod {
-		params = append(params, "handle")
+		params = append(params, jsReceiverParam)
 	}
 
 	for _, p := range f.Params {
@@ -430,7 +451,8 @@ func (g *jsGlueGenerator) buildJSParams(f Func) []string {
 		}
 		// String parameters are ptr+len pairs
 		if isStringType(ref) {
-			params = append(params, name+"_ptr", name+"_len")
+			pointer, length := jsStringParams(name)
+			params = append(params, pointer, length)
 		} else {
 			params = append(params, name)
 		}
@@ -439,7 +461,7 @@ func (g *jsGlueGenerator) buildJSParams(f Func) []string {
 	// A string result comes back through a trailing return pointer — last, the
 	// position codegen's declareExterns gives it (see _writeStringResult).
 	if returnsString(f) {
-		params = append(params, "retptr")
+		params = append(params, jsReturnPointerParam)
 	}
 
 	return params
@@ -481,7 +503,7 @@ func (g *jsGlueGenerator) emitStaticBody(resourceName, importName string, f Func
 func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func) {
 	args := g.buildJSCallArgs(f)
 	member := importMember(importName)
-	const obj = "_refLoad(handle)"
+	const obj = "_refLoad(" + jsReceiverParam + ")"
 
 	// Check if this is an attribute getter/setter.
 	// Attribute import names have 3 parts: "Type.attrName.get/set"
@@ -568,7 +590,8 @@ func (g *jsGlueGenerator) buildJSCallArgs(f Func) []string {
 			ref = *ref.Elem
 		}
 		if isStringType(ref) {
-			args = append(args, fmt.Sprintf("_readString(%s_ptr, %s_len)", name, name))
+			pointer, length := jsStringParams(name)
+			args = append(args, fmt.Sprintf("_readString(%s, %s)", pointer, length))
 		} else if isRefType(ref) {
 			args = append(args, fmt.Sprintf("_refLoad(%s)", name))
 		} else {
@@ -585,7 +608,7 @@ func (g *jsGlueGenerator) emitReturnConversion(f Func, call string) {
 	}
 	if returnsString(f) {
 		// String return: (ptr, len) through the trailing retptr, nothing returned
-		g.writef("      _writeStringResult(retptr, %s);\n", call)
+		g.writef("      _writeStringResult(%s, %s);\n", jsReturnPointerParam, call)
 		return
 	}
 	isNullable := f.Results[0].Kind == OptionKind
@@ -677,6 +700,10 @@ func jsParamName(name string) string {
 	// mode, and `arguments` and `eval`, which strict mode forbids as binding
 	// names. The words sanitizeIdent already prefixes as Promise keywords are
 	// listed too: the glue's guarantee does not depend on Promise's grammar.
+	//
+	// The escape appends a `$`, which no name derived from a WebIDL identifier
+	// carries, so an escaped word cannot meet another argument's name: `class`
+	// and `class_` stay distinct, as `_` would not keep them (#689).
 	switch name {
 	case "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default",
 		"delete", "do", "else", "enum", "export", "extends", "false", "finally", "for", "function",
@@ -684,7 +711,7 @@ func jsParamName(name string) string {
 		"throw", "true", "try", "typeof", "var", "void", "while", "with", "yield",
 		"implements", "interface", "let", "package", "private", "protected", "public", "static",
 		"arguments", "eval":
-		return name + "_"
+		return name + "$"
 	}
 	return name
 }

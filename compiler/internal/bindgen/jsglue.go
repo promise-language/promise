@@ -490,8 +490,37 @@ func (g *jsGlueGenerator) emitMethodBody(importName string, f Func) {
 		return
 	}
 
+	// An anonymous getter, setter or deleter is imported under its keyword
+	// (convertOperation), which no IDL operation can be named, and the host
+	// exposes it only as property access keyed by its first argument
+	// (docs/wasm-bindings.md, "Supported subset"). WebIdlToIR has already
+	// rejected one that does not take exactly that key, and a setter its value.
+	switch member {
+	case "getter":
+		g.emitReturnConversion(f, fmt.Sprintf("_refLoad(handle)[%s]", propertyKey(f, args)))
+		return
+	case "setter":
+		g.writef("      _refLoad(handle)[%s] = %s;\n", propertyKey(f, args), args[1])
+		return
+	case "deleter":
+		g.emitReturnConversion(f, fmt.Sprintf("delete _refLoad(handle)[%s]", propertyKey(f, args)))
+		return
+	}
+
 	call := fmt.Sprintf("_refLoad(handle).%s(%s)", member, strings.Join(args, ", "))
 	g.emitReturnConversion(f, call)
+}
+
+// propertyKey returns the property key an anonymous special operation's first
+// argument, args[0], names. An unsigned long index crosses the boundary as a
+// signed i32, and a property key gets no WebIDL conversion back to unsigned —
+// `obj[-1]` names an ordinary property, not index 4294967295 — so `>>> 0`
+// restores it.
+func propertyKey(f Func, args []string) string {
+	if p := f.Params[0].Type; p.Kind == BuiltinKind && p.Builtin == "u32" {
+		return args[0] + " >>> 0"
+	}
+	return args[0]
 }
 
 // importMember returns the JS member an import invokes: the second dotted
@@ -500,7 +529,9 @@ func (g *jsGlueGenerator) emitMethodBody(importName string, f Func) {
 // writes the IDL identifier there verbatim, so this is the one place the glue
 // reads a member name. It is never re-derived from the snake_case Promise name,
 // which an overload ordinal (set_attribute_2) or an acronym (getURL → get_url)
-// does not survive.
+// does not survive. An anonymous special operation has no member: its second
+// component is its keyword ("Form.getter"), which emitMethodBody turns into
+// property access.
 func importMember(importName string) string {
 	parts := strings.Split(importName, ".")
 	if len(parts) < 2 {

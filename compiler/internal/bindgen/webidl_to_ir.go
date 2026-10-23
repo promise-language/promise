@@ -24,8 +24,9 @@ import (
 // interfaces are present.
 //
 // It fails when a dictionary's inheritance cannot be flattened — an ancestor
-// that is not a dictionary in the file, or a cycle — reporting every such
-// dictionary.
+// that is not a dictionary in the file, or a cycle — or when an anonymous
+// getter, setter or deleter cannot be reached by property access
+// (anonymousSpecialError), reporting every such dictionary and operation.
 //
 // Call webidl.Merge(file) before this function to apply partials, mixins, and
 // includes statements.
@@ -50,6 +51,9 @@ type webidlConverter struct {
 	// converted memoizes each interface's conversion, so a parent is converted
 	// once, before its children, whatever the input order.
 	converted map[*webidl.Interface]*convertedInterface
+	// errs collects the members convertInterface cannot bind; convert reports
+	// them with the dictionaries'.
+	errs []error
 }
 
 // convertedInterface is one interface's conversion: its Resource, and the
@@ -110,9 +114,6 @@ func (c *webidlConverter) convert() ([]*Module, error) {
 		}
 		m.Types = append(m.Types, t)
 	}
-	if len(errs) > 0 {
-		return nil, errors.Join(errs...)
-	}
 
 	// Convert typedefs as aliases
 	for _, td := range c.file.Typedefs {
@@ -126,6 +127,9 @@ func (c *webidlConverter) convert() ([]*Module, error) {
 			continue
 		}
 		m.Resources = append(m.Resources, c.resource(iface).res)
+	}
+	if errs = append(errs, c.errs...); len(errs) > 0 {
+		return nil, errors.Join(errs...)
 	}
 
 	// Convert callbacks as function type aliases (skipped in IR for now —
@@ -297,6 +301,12 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 				continue
 			}
 			f := c.convertOperation(iface.Name, m)
+			if m.Name == "" {
+				if err := anonymousSpecialError(m, f); err != nil {
+					c.errs = append(c.errs, err)
+					continue
+				}
+			}
 			numberOverload(&f, names.operation(f))
 			res.Methods = append(res.Methods, f)
 
@@ -488,8 +498,10 @@ func numberOverload(f *Func, k int) {
 func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operation) Func {
 	name := idlToSnake(op.Name)
 	// The import names the JS member the glue calls. An anonymous special
-	// operation has no identifier, so it is named by its special keyword on
-	// both sides — never by an empty member, which would emit `obj.(...)`.
+	// operation has no identifier and no JS member: it is named by its special
+	// keyword on both sides — never by an empty member — and the glue reads that
+	// keyword as the property access the host exposes it by (emitMethodBody;
+	// docs/wasm-bindings.md, "Supported subset").
 	member := op.Name
 	if op.Special != "" && op.Name == "" {
 		name = op.Special
@@ -525,6 +537,32 @@ func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operatio
 	}
 
 	return f
+}
+
+// anonymousSpecialError reports an anonymous getter, setter or deleter, op
+// converted as f, that property access cannot express, or returns nil. The host
+// exposes one only as property access on the object (docs/wasm-bindings.md,
+// "Supported subset"), which passes exactly a key — and a setter, a value — and
+// gives back no setter result; the glue's forms (emitMethodBody) rely on it.
+func anonymousSpecialError(op *webidl.Operation, f Func) error {
+	want, passes := 1, "property access passes exactly one: the key"
+	if op.Special == "setter" {
+		want, passes = 2, "property assignment passes exactly two: the key and the value"
+	}
+	var msg string
+	switch {
+	case len(f.Params) != want:
+		noun := "arguments"
+		if len(f.Params) == 1 {
+			noun = "argument"
+		}
+		msg = fmt.Sprintf("takes %d %s, but %s", len(f.Params), noun, passes)
+	case op.Special == "setter" && len(f.Results) > 0:
+		msg = "declares a result, but property assignment returns none"
+	default:
+		return nil
+	}
+	return &webidl.ParseError{Pos: op.Pos, Msg: fmt.Sprintf("anonymous %s of %s %s", op.Special, f.OwnerType, msg)}
 }
 
 func (c *webidlConverter) convertConstructor(ifaceName string, ctor *webidl.Constructor) Func {

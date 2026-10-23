@@ -211,12 +211,12 @@ globalThis.fetch = async (url) => {
 });
 `
 
-// importCallDriver instantiates the glue of TestGenerateJSGlueReservedWordArgsReachHost,
-// keeping the import object init() hands to WebAssembly.instantiateStreaming,
-// then calls its "Target.g" import as the wasm module would: a handle to a host
-// object recording what its g member receives, then the arguments 7, a handle to
-// a node, and 9. It reports the received arguments, the node named as "<node>".
-const importCallDriver = `
+// importCallDriver returns a driver that instantiates the glue, keeping the
+// import object init() hands to WebAssembly.instantiateStreaming as `imports`,
+// then runs body, which calls those imports as the wasm module would — `mod`
+// is the loader, for its _refStore and _refLoad — and writes one "RESULT:" line.
+func importCallDriver(body string) string {
+	return `
 const fs = require("fs");
 const path = require("path");
 const { pathToFileURL } = require("url");
@@ -239,15 +239,11 @@ WebAssembly.instantiateStreaming = (response, importObject) => {
 (async () => {
   const mod = await import(pathToFileURL(path.join(dir, loaderFile)).href);
   await mod.init(...initArgs);
-  const node = { tag: "node" };
-  let received;
-  const target = { g(...args) { received = args; } };
-  imports.promise_env["Target.g"](mod._refStore(target), 7, mod._refStore(node), 9);
-  process.stdout.write("RESULT:" + JSON.stringify(received.map((v) => (v === node ? "<node>" : v))) + "\n");
-})().catch((e) => {
+` + body + `})().catch((e) => {
   process.stdout.write("RESULT:ERR " + JSON.stringify(e && e.message) + "\n");
 });
 `
+}
 
 // smokeLoader is one of the two generated wasm32-web loaders. The base PAL
 // runtime is one contract, so both run the same smoke module, driver and
@@ -322,9 +318,10 @@ func TestLoaderSyntaxValid(t *testing.T) {
 
 // TestGenerateJSGlueOverloadSyntaxValid parses the glue generated for WebIDL
 // overload sets (#263), including anonymous special operations: their imports
-// must name a member, since `_refLoad(handle).(...)` would make the whole file
-// fail to load. (Duplicate object keys are legal JS, so key uniqueness is
-// asserted on the text in overload_test.go, not here.)
+// name their keyword, never an empty member, and their bodies are property
+// access (#696) — `_refLoad(handle).(...)` would make the whole file fail to
+// load. (Duplicate object keys are legal JS, so key uniqueness is asserted on
+// the text in overload_test.go, not here.)
 func TestGenerateJSGlueOverloadSyntaxValid(t *testing.T) {
 	nodePath := requireNode(t)
 	for _, src := range []string{overloadFixture, anonymousGetterFixture} {
@@ -384,6 +381,10 @@ func TestGenerateJSGlueReservedWordArgNamesSyntaxValid(t *testing.T) {
 // a valid expression: one of these three words left raw, or a renamed argument
 // spelled differently from the parameter the import binds. Either way the host
 // would get the wrong value (or a ReferenceError) at call time.
+//
+// The driver calls "Target.g" with a handle to a host object recording what its
+// g member receives, then the arguments 7, a handle to a node, and 9, and
+// reports the received arguments, the node named as "<node>".
 func TestGenerateJSGlueReservedWordArgsReachHost(t *testing.T) {
 	nodePath := requireNode(t)
 	src := `interface Node {};
@@ -391,10 +392,74 @@ interface Target {
   undefined g(long null, Node arguments, long eval);
 };`
 	loader := smokeLoader{name: "glue", js: GenerateJSGlue(overloadIR(t, src)), initArgs: []string{"frontend.wasm"}}
-	result := runSmokeDriver(t, nodePath, loader, 0, importCallDriver)
+	result := runSmokeDriver(t, nodePath, loader, 0, importCallDriver(`
+  const node = { tag: "node" };
+  let received;
+  const target = { g(...args) { received = args; } };
+  imports.promise_env["Target.g"](mod._refStore(target), 7, mod._refStore(node), 9);
+  process.stdout.write("RESULT:" + JSON.stringify(received.map((v) => (v === node ? "<node>" : v))) + "\n");
+`))
 
 	if want := `RESULT:[7,"<node>",9]`; result != want {
 		t.Errorf("Target.g's host member received %s, want %s", result, want)
+	}
+}
+
+// TestGenerateJSGlueAnonymousSpecialReachesHost calls the imports of
+// specialOpsFixture's Target against a host object with indexed and named
+// properties (#696). A legacy platform object is exotic, so a Proxy over a
+// backing object stands in for one, its traps recording every key they see.
+// String keys come from the smoke module's data segment, "ABCD\nEF" at offset 0:
+// (0, 2) is "AB" and (2, 2) is "CD". An index of 2^31 crosses the boundary as
+// the i32 -2147483648, and must still reach the host as that index.
+func TestGenerateJSGlueAnonymousSpecialReachesHost(t *testing.T) {
+	nodePath := requireNode(t)
+	loader := smokeLoader{name: "glue", js: GenerateJSGlue(overloadIR(t, specialOpsFixture)), initArgs: []string{"frontend.wasm"}}
+	result := runSmokeDriver(t, nodePath, loader, 0, importCallDriver(`
+  const env = imports.promise_env;
+  const first = { tag: "first" }, second = { tag: "second" }, third = { tag: "third" };
+  const backing = { 0: first, AB: second };
+  const keys = [];
+  const target = new Proxy(backing, {
+    get(obj, key) { keys.push(String(key)); return obj[key]; },
+    set(obj, key, value) { keys.push(String(key)); obj[key] = value; return true; },
+    deleteProperty(obj, key) { keys.push(String(key)); return delete obj[key]; },
+  });
+  const h = mod._refStore(target);
+  const node = mod._refStore(third);
+  const checks = {};
+  checks.indexed_get = mod._refLoad(env["Target.getter"](h, 0)) === first;
+  checks.indexed_get_absent = env["Target.getter"](h, 7) === 0;
+  checks.named_get = mod._refLoad(env["Target.getter.2"](h, 0, 2)) === second;
+  env["Target.setter"](h, 1, node);
+  checks.indexed_set = backing[1] === third;
+  env["Target.setter"](h, -2147483648, node);
+  checks.indexed_set_high = backing["2147483648"] === third && !("-2147483648" in backing);
+  env["Target.setter.2"](h, 2, 2, node);
+  checks.named_set = backing.CD === third;
+  env["Target.deleter"](h, 0, 2);
+  checks.named_delete = !("AB" in backing);
+  checks.keys_only = !keys.some((k) => k === "getter" || k === "setter" || k === "deleter");
+  process.stdout.write("RESULT:" + JSON.stringify(checks) + "\n");
+`))
+
+	payload := strings.TrimPrefix(result, "RESULT:")
+	if strings.HasPrefix(payload, "ERR ") {
+		t.Fatalf("special-operation driver failed: %s", result)
+	}
+	var checks map[string]bool
+	if err := json.Unmarshal([]byte(payload), &checks); err != nil {
+		t.Fatalf("cannot parse driver result %q: %v", result, err)
+	}
+	for _, name := range []string{
+		"indexed_get", "indexed_get_absent", "named_get", "indexed_set",
+		"indexed_set_high", "named_set", "named_delete", "keys_only",
+	} {
+		if ok, reported := checks[name]; !reported {
+			t.Errorf("driver did not report %q: %s", name, result)
+		} else if !ok {
+			t.Errorf("check %q does not hold", name)
+		}
 	}
 }
 

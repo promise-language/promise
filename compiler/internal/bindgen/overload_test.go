@@ -449,7 +449,7 @@ func TestConstructorFactoryNameRejectsForeignName(t *testing.T) {
 			t.Error("constructorFactoryName accepted a constructor named \"create\"; want a panic")
 		}
 	}()
-	got := constructorFactoryName(r, m)
+	got := constructorFactoryName(r, nil, m)
 	t.Errorf("constructorFactoryName = %q, want a panic", got)
 }
 

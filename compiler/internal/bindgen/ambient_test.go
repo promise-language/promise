@@ -53,6 +53,14 @@ func TestCodegenAmbientRoots(t *testing.T) {
 			target:  "web",
 			factory: "borrow_handle",
 		},
+		{
+			// So does an inherited instance member named borrow (#684).
+			name: "inherited borrow member",
+			idl: `interface Node { undefined borrow(DOMString s); };
+			      interface Document : Node { readonly attribute DOMString title; };`,
+			target:  "web",
+			factory: "borrow_handle",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

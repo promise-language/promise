@@ -490,7 +490,7 @@ Promise has no overloading ([language-design.md § No Overloading](language-desi
 | `undefined setAttribute(DOMString name, DOMString value);` | `set_attribute` | `_element_set_attribute` | `Element.setAttribute` |
 | `undefined setAttribute(DOMString name, TrustedHTML value);` | `set_attribute_2` | `_element_set_attribute_2` | `Element.setAttribute.2` |
 
-Each overload keeps its own signature exactly; none is widened to `JsValue` to merge it with another. The JS glue implements every import of the set by calling the same JS member (`setAttribute`) with that overload's own arguments, so the host's overload resolution — not a dispatcher in the bindings — chooses among them. The rule applies to regular, static, and constructor operations alike; a constructor's factory becomes `create_<k>`.
+Each overload keeps its own signature exactly; none is widened to `JsValue` to merge it with another. The JS glue implements every import of the set by calling the same JS member (`setAttribute`) with that overload's own arguments, so the host's overload resolution — not a dispatcher in the bindings — chooses among them. The rule applies to regular, static, and constructor operations alike; a constructor's factory becomes `create_<k>` (or `create_handle_<k>`, under the [factory-name fallback](#wit-resources-to-promise-ownership)).
 
 The suffix is an ordinal because nothing else is unique: overloads can share an arity, as the two `setAttribute`s do, and several IDL types lower to the same Promise type (`JsValue`, `i32` handles).
 
@@ -625,6 +625,17 @@ WIT resources have lifecycle semantics that map naturally to Promise's ownership
 | `method` (self: borrow) | Method taking `this` (shared ref) |
 | resource drop | `drop(~this)` calls host's `[resource-drop]` import **when `_owned`** |
 | (generated) | `R.borrow(i32 handle) R` — non-owning wrapper around a handle someone else owns |
+
+**Factory names.** A factory is named `create_handle` or `borrow_handle` instead when the type
+already has a member of the default name: one the resource declares, other than its constructor,
+or an instance operation or attribute it inherits from any ancestor — a `` `global `` factory of
+that name would take over the inherited slot and must satisfy it
+([Override signatures](language-design.md#how-inheritance-maps-to-vtables)). An inherited static
+operation, static attribute or constant does not count: the factory hides it, as a derived
+interface's `` `global `` hides its parent's ([Shadowed Members](#shadowed-members)). An
+overloaded constructor's ordinal goes on whichever name applies: `create_2`, or `create_handle_2`.
+There is one fallback level: a type that also has a member named `create_handle` or
+`borrow_handle` fails to compile, rather than having its factory silently renamed again.
 
 Example generated binding for a WIT filesystem resource:
 

@@ -37,6 +37,9 @@ type generator struct {
 	target       string
 	indent       int
 	canonicalABI bool
+	// resources indexes the module being emitted's resources by name, for
+	// resolving a Resource.Parent (ancestors).
+	resources map[string]Resource
 }
 
 func (g *generator) line(format string, args ...interface{}) {
@@ -52,6 +55,11 @@ func (g *generator) blank() {
 }
 
 func (g *generator) emitModule(m *Module) {
+	g.resources = make(map[string]Resource, len(m.Resources))
+	for _, r := range m.Resources {
+		g.resources[r.Name] = r
+	}
+
 	// Emit JsValue enum if any type references it
 	if m.HasJsValue {
 		g.emitJsValueEnum()
@@ -239,20 +247,55 @@ const borrowDoc = "Wrap an existing host handle without taking ownership. " +
 	"Dropping the returned wrapper does not release the handle; its owner " +
 	"(or the host) remains responsible for it."
 
-// borrowFactoryName returns the name of the generated non-owning wrapper factory
-// for a resource — normally "borrow", falling back to "borrow_handle" when an IDL
-// member already generates a member of that name. One fallback level is enough: a
-// resource declaring both `borrow` and `borrow_handle` is vanishingly unlikely and
-// fails loudly as a duplicate-member error when the generated module is compiled,
-// which beats an unbounded name search that silently renames the factory (T1510).
-func borrowFactoryName(r Resource) string {
+// ancestors returns the resources r inherits from, nearest first, each parent
+// resolved among the module's resources, ending at a parent the module does not
+// define (the `is` clause still names it, so the module fails to compile with
+// `undefined type`) or where an inheritance cycle comes back around.
+func (g *generator) ancestors(r Resource) []Resource {
+	var chain []Resource
+	seen := map[string]bool{r.Name: true}
+	for a, ok := g.resources[r.Parent]; ok && !seen[a.Name]; a, ok = g.resources[a.Parent] {
+		seen[a.Name] = true
+		chain = append(chain, a)
+	}
+	return chain
+}
+
+// hasMemberNamed reports whether the type generated for r, which inherits from
+// ancestors (nearest first), already has a member called name that a `global
+// factory of that name would collide with: any member r declares other than its
+// constructor (emitted under its factory name), or an instance member an
+// ancestor declares — the factory would take over that inherited slot as an
+// override and must satisfy it (docs/language-design.md, "How Inheritance Maps
+// to Vtables"). An ancestor's static, constant or constructor is `global, and a
+// `global hides the parent's of its name (docs/wasm-bindings.md, "Shadowed
+// Members"), so none of those counts.
+func hasMemberNamed(r Resource, ancestors []Resource, name string) bool {
 	for _, m := range r.Methods {
-		// The constructor is emitted under its own factory name, which is
-		// checked separately by createFactoryName — it is never a member named
-		// "borrow", so it cannot collide here.
-		if m.Kind != FuncConstructor && m.Name == "borrow" {
-			return "borrow_handle"
+		if m.Kind != FuncConstructor && m.Name == name {
+			return true
 		}
+	}
+	for _, a := range ancestors {
+		for _, m := range a.Methods {
+			if m.Kind == FuncMethod && m.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// borrowFactoryName returns the name of the generated non-owning wrapper factory
+// for a resource, which inherits from ancestors — normally "borrow", falling back
+// to "borrow_handle" when the type already has a member of that name, its own or
+// an inherited instance member (hasMemberNamed). One fallback level is enough: a
+// type with both `borrow` and `borrow_handle` is vanishingly unlikely and fails
+// loudly when the generated module is compiled, which beats an unbounded name
+// search that silently renames the factory (T1510).
+func borrowFactoryName(r Resource, ancestors []Resource) string {
+	if hasMemberNamed(r, ancestors, "borrow") {
+		return "borrow_handle"
 	}
 	return "borrow"
 }
@@ -265,14 +308,13 @@ const createDoc = "Construct a new resource, taking ownership of the handle the 
 	"The returned wrapper releases that handle when it drops."
 
 // createFactoryName returns the name of the generated owning factory for a
-// resource — normally "create", falling back to "create_handle" when an IDL
-// member already generates a member of that name. Same single fallback level,
-// for the same reason, as borrowFactoryName (T1974).
-func createFactoryName(r Resource) string {
-	for _, m := range r.Methods {
-		if m.Kind != FuncConstructor && m.Name == "create" {
-			return "create_handle"
-		}
+// resource, which inherits from ancestors — normally "create", falling back to
+// "create_handle" when the type already has a member of that name, its own or an
+// inherited instance member (hasMemberNamed). Same single fallback level, for the
+// same reason, as borrowFactoryName (T1974).
+func createFactoryName(r Resource, ancestors []Resource) string {
+	if hasMemberNamed(r, ancestors, "create") {
+		return "create_handle"
 	}
 	return "create"
 }
@@ -282,12 +324,12 @@ func createFactoryName(r Resource) string {
 // the front end gave it, keeping the overload ordinal numberOverload appended —
 // `constructor_2` becomes `create_2`, or `create_handle_2` under the T1974
 // fallback (docs/wasm-bindings.md, "Overloaded Operations").
-func constructorFactoryName(r Resource, m Func) string {
+func constructorFactoryName(r Resource, ancestors []Resource, m Func) string {
 	ordinal, ok := strings.CutPrefix(m.Name, constructorName)
 	if !ok {
 		panic(fmt.Sprintf("bindgen: constructor %q of %s is not named %q", m.Name, r.Name, constructorName))
 	}
-	return createFactoryName(r) + ordinal
+	return createFactoryName(r, ancestors) + ordinal
 }
 
 func (g *generator) emitResource(r Resource, importModule string) {
@@ -318,7 +360,7 @@ func (g *generator) emitResource(r Resource, importModule string) {
 	// ownership. Used by the host-object roots (emitAmbientRoots) to wrap the
 	// loader's seeded handles, and to hand an existing wrapper's handle to an API
 	// expecting a different resource type, neither of which may be released twice.
-	borrowName := borrowFactoryName(r)
+	borrowName := borrowFactoryName(r, g.ancestors(r))
 	g.line("%s(i32 handle) %s `public `global%s {", borrowName, r.Name, docAnnot(borrowDoc))
 	g.indent++
 	g.line("return %s(_handle: handle, _owned: false);", r.Name)
@@ -391,7 +433,7 @@ func (g *generator) emitAmbientRoots(m *Module) {
 			}
 			g.line("get %s %s `public `target(%s)%s {", a.root, r.Name, g.target, docAnnot(a.doc))
 			g.indent++
-			g.line("return %s.%s(%d);", r.Name, borrowFactoryName(r), ambientHandle(i))
+			g.line("return %s.%s(%d);", r.Name, borrowFactoryName(r, g.ancestors(r)), ambientHandle(i))
 			g.indent--
 			g.line("}")
 			g.blank()
@@ -412,7 +454,7 @@ func (g *generator) emitResourceMethod(m Func, r Resource, importModule string) 
 
 	switch m.Kind {
 	case FuncConstructor:
-		g.emitConstructorWrapper(m, resourceName, constructorFactoryName(r, m), importModule)
+		g.emitConstructorWrapper(m, resourceName, constructorFactoryName(r, g.ancestors(r), m), importModule)
 	case FuncStatic:
 		g.emitStaticWrapper(m, resourceName, importModule)
 	default:

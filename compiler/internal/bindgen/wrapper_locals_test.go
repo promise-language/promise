@@ -107,6 +107,23 @@ func TestWrapperLocalsAvoidParams(t *testing.T) {
 			},
 		},
 		{
+			name:     "static returning a nullable interface",
+			generate: webidl("static Node? u(long handle);"),
+			want: []string{
+				"handle_ := _y_u(handle);",
+				"if handle_ == 0 { return none; }",
+				"return Node(_handle: handle_, _owned: true);",
+			},
+		},
+		{
+			name:     "static returning any",
+			generate: webidl("static any v(long ref);"),
+			want: []string{
+				"ref_ := _y_v(ref);",
+				"return JsValue.Object(_js_ref: ref_ as int);",
+			},
+		},
+		{
 			name:     "static returning a nullable object",
 			generate: webidl("static object? t(long ref);"),
 			want: []string{

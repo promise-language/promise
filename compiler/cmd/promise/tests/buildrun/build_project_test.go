@@ -938,6 +938,8 @@ interface Y {
 	any n(long ref);
 	object? o(long ref);
 	static Node s(long handle);
+	static Node? u(long handle);
+	static any v(long ref);
 	static object? t(long ref);
 };
 `,

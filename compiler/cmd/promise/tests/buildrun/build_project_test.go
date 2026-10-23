@@ -1718,6 +1718,89 @@ interface Rect : RectReadOnly {
 	}
 }
 
+// TestBindWebIdlInheritedFactoryNameCompilesClean is the end-to-end acceptance
+// for #684: a derived interface whose ancestor declares an instance `create` or
+// `borrow` — an operation or an attribute, on its parent or further up the
+// chain — must bind and compile, with the derived wrapper's `global factories
+// moved to `create_handle` / `borrow_handle` (docs/wasm-bindings.md, "WIT
+// Resources to Promise Ownership"), while the inherited members stay reachable
+// under their own names. Before the fix bind's self-check failed with "type C
+// cannot override inherited method 'create' from P".
+func TestBindWebIdlInheritedFactoryNameCompilesClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "dom.idl")
+	idl := `interface P {
+	undefined create(DOMString s);
+	undefined borrow(DOMString s);
+};
+
+interface C : P {
+	constructor(long x);
+};
+
+interface G {
+	undefined borrow(DOMString s);
+};
+
+interface M : G {};
+
+interface L : M {};
+
+interface Q {
+	readonly attribute DOMString borrow;
+};
+
+interface R : Q {};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", outDir, idlPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	userPath := filepath.Join(outDir, "use_factories.pr")
+	user := `main() {
+    made := C.create_handle(1i32);
+    made.create("s");
+    held := C.borrow_handle(2);
+    held.borrow("t");
+    leaf := L.borrow_handle(3);
+    leaf.borrow("u");
+    G root = leaf;
+    root.borrow("v");
+    attr := R.borrow_handle(4);
+    text := attr.borrow;
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	for _, want := range []string{
+		"@C.create_handle(", "@C.borrow_handle(", "@L.borrow_handle(", "@R.borrow_handle(",
+		"@p_create(", "@p_borrow(", "@g_borrow(", "@q_borrow(",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR is missing %q", want)
+		}
+	}
+}
+
 // TestBindWebIdlUnboundParentFailsLoudly is the error path: a derived interface
 // whose parent is not among the bound files must not compile into a wrapper
 // that silently lacks the inherited members — the failure T1507 reports. bind's

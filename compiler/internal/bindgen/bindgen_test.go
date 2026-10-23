@@ -5440,7 +5440,7 @@ func TestCodegenBorrowFactoryNameNoFalseCollision(t *testing.T) {
 			{Name: "read", Kind: FuncMethod, ImportName: "Slot.read"},
 		},
 	}
-	if got := borrowFactoryName(r); got != "borrow" {
+	if got := borrowFactoryName(r, nil); got != "borrow" {
 		t.Errorf("borrowFactoryName = %q, want \"borrow\" (a constructor emits `new`)", got)
 	}
 }
@@ -5525,7 +5525,7 @@ func TestCodegenCreateFactoryNameCollisionMemberKinds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := Resource{Name: "Slot", Drop: true, Methods: []Func{tc.member}}
-			if got := createFactoryName(r); got != tc.want {
+			if got := createFactoryName(r, nil); got != tc.want {
 				t.Errorf("createFactoryName = %q, want %q", got, tc.want)
 			}
 		})
@@ -5551,10 +5551,67 @@ func TestCodegenBorrowFactoryNameCollisionMemberKinds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := Resource{Name: "Slot", Drop: true, Methods: []Func{tc.member}}
-			if got := borrowFactoryName(r); got != tc.want {
+			if got := borrowFactoryName(r, nil); got != tc.want {
 				t.Errorf("borrowFactoryName = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCodegenFactoryNameInheritedMemberKinds is the inherited half of the two
+// tables above (#684). A derived wrapper is an `is` child, so an instance member
+// an ancestor declares — an operation or an accessor — is a slot the `global
+// factory of its name would take over as an override, and it pushes the factory
+// to its fallback name however far up the chain it is declared. An ancestor's
+// static — an operation or an attribute — or constructor is `global, which the
+// factory hides, so it leaves the default name free; so does a member whose
+// generated name merely starts with it. There is one fallback level: an ancestor
+// declaring the fallback name too does not rename the factory again.
+func TestCodegenFactoryNameInheritedMemberKinds(t *testing.T) {
+	factories := []struct {
+		stem string
+		name func(Resource, []Resource) string
+	}{
+		{"create", createFactoryName},
+		{"borrow", borrowFactoryName},
+	}
+	cases := []struct {
+		name    string
+		members func(stem string) []Func // declared on the farthest ancestor
+		depth   int                      // how many ancestors the chain holds
+		suffix  string                   // appended to the stem in the wanted name
+	}{
+		{"method", func(s string) []Func { return []Func{{Name: s, Kind: FuncMethod}} }, 1, "_handle"},
+		{"getter", func(s string) []Func { return []Func{{Name: s, Kind: FuncMethod, Accessor: AccessorGetter}} }, 1, "_handle"},
+		{"setter", func(s string) []Func { return []Func{{Name: s, Kind: FuncMethod, Accessor: AccessorSetter}} }, 1, "_handle"},
+		{"grandparent method", func(s string) []Func { return []Func{{Name: s, Kind: FuncMethod}} }, 2, "_handle"},
+		{"both names", func(s string) []Func {
+			return []Func{{Name: s, Kind: FuncMethod}, {Name: s + "_handle", Kind: FuncMethod}}
+		}, 1, "_handle"},
+		{"static", func(s string) []Func { return []Func{{Name: s, Kind: FuncStatic}} }, 1, ""},
+		{"static getter", func(s string) []Func { return []Func{{Name: s, Kind: FuncStatic, Accessor: AccessorGetter}} }, 1, ""},
+		{"constructor", func(s string) []Func { return []Func{{Name: s, Kind: FuncConstructor}} }, 1, ""},
+		{"numbered overload", func(s string) []Func { return []Func{{Name: s + "_2", Kind: FuncMethod}} }, 1, ""},
+		{"fallback name", func(s string) []Func { return []Func{{Name: s + "_handle", Kind: FuncMethod}} }, 1, ""},
+	}
+	for _, f := range factories {
+		for _, tc := range cases {
+			t.Run(f.stem+"/"+tc.name, func(t *testing.T) {
+				// Nearest first, each naming the next as its parent.
+				ancestors := make([]Resource, tc.depth)
+				for i := range ancestors {
+					ancestors[i] = Resource{Name: fmt.Sprintf("A%d", i+1), Drop: true}
+					if i > 0 {
+						ancestors[i-1].Parent = ancestors[i].Name
+					}
+				}
+				ancestors[tc.depth-1].Methods = tc.members(f.stem)
+				r := Resource{Name: "C", Parent: ancestors[0].Name, Drop: true}
+				if got, want := f.name(r, ancestors), f.stem+tc.suffix; got != want {
+					t.Errorf("%sFactoryName = %q, want %q", f.stem, got, want)
+				}
+			})
+		}
 	}
 }
 

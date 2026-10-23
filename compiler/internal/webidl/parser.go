@@ -918,9 +918,18 @@ func (p *Parser) parseUnionType() *TypeRef {
 	return ref
 }
 
-// Merge applies partial interfaces, mixins, and includes statements to the
-// file's main interfaces and mixins.
-func Merge(file *File) {
+// Merge applies partial interfaces, partial mixins, partial dictionaries and
+// includes statements to the definitions they extend. It returns an error for
+// each partial whose interface, mixin or dictionary is not in file, and for each
+// side of an includes statement that is not, after applying every one that
+// matches: nothing else would name the members they carry, so they would
+// otherwise vanish unreported.
+func Merge(file *File) []*ParseError {
+	var errs []*ParseError
+	unbound := func(pos Pos, what, name, kind string) {
+		errs = append(errs, &ParseError{Pos: pos, Msg: fmt.Sprintf("%s: %s is not %s in the bound IDL files", what, name, kind)})
+	}
+
 	// Build lookup maps
 	ifaceMap := make(map[string]*Interface)
 	for _, iface := range file.Interfaces {
@@ -948,10 +957,14 @@ func Merge(file *File) {
 		if partial.IsMixin {
 			if m, ok := mixinMap[partial.Name]; ok {
 				m.Members = append(m.Members, partial.Members...)
+			} else {
+				unbound(partial.Pos, "partial mixin "+partial.Name, partial.Name, "a mixin")
 			}
 		} else {
 			if iface, ok := ifaceMap[partial.Name]; ok {
 				iface.Members = append(iface.Members, partial.Members...)
+			} else {
+				unbound(partial.Pos, "partial interface "+partial.Name, partial.Name, "an interface")
 			}
 		}
 	}
@@ -964,19 +977,25 @@ func Merge(file *File) {
 	for _, pd := range file.PartialDicts {
 		if d, ok := dictMap[pd.Name]; ok {
 			d.Members = append(d.Members, pd.Members...)
+		} else {
+			unbound(pd.Pos, "partial dictionary "+pd.Name, pd.Name, "a dictionary")
 		}
 	}
 
 	// Apply includes statements (merge mixin members into target interface)
 	for _, inc := range file.Includes {
-		iface, ok := ifaceMap[inc.Target]
-		if !ok {
-			continue
+		statement := inc.Target + " includes " + inc.Mixin
+		iface, ifaceOK := ifaceMap[inc.Target]
+		if !ifaceOK {
+			unbound(inc.Pos, statement, inc.Target, "an interface")
 		}
-		m, ok := mixinMap[inc.Mixin]
-		if !ok {
-			continue
+		m, mixinOK := mixinMap[inc.Mixin]
+		if !mixinOK {
+			unbound(inc.Pos, statement, inc.Mixin, "a mixin")
 		}
-		iface.Members = append(iface.Members, m.Members...)
+		if ifaceOK && mixinOK {
+			iface.Members = append(iface.Members, m.Members...)
+		}
 	}
+	return errs
 }

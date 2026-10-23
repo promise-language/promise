@@ -351,7 +351,7 @@ interface Document : Node {
 
 #### Supported subset
 
-Top-level constructs: `interface` (with inheritance), `interface mixin` / standalone `mixin`, `dictionary` (with inheritance), `enum`, `typedef`, `callback`, `partial interface`, `partial mixin`, `partial dictionary`, and `includes` statements. `partial`/`mixin`/`includes` are merged into their targets by `webidl.Merge` before IR conversion.
+Top-level constructs: `interface` (with inheritance), `interface mixin` / standalone `mixin`, `dictionary` (with inheritance), `enum`, `typedef`, `callback`, `partial interface`, `partial mixin`, `partial dictionary`, and `includes` statements. `partial`/`mixin`/`includes` are merged into their targets by `webidl.Merge` before IR conversion. A partial definition extends the interface, mixin or dictionary of its name, and an `includes` statement names an interface and a mixin, so each must find them among the bound IDL files. One that does not is a `bind` error naming the definition, its position and what it lacks, reported for every such definition before anything is written. Nothing in the generated module would name its members, so, as with an unbound dictionary parent (§"WebIDL to Promise", dictionary inheritance), their absence could not surface as a compile error. The remedy is binding the spec that defines the target.
 
 Member-level features:
 

@@ -1796,6 +1796,69 @@ func TestBindWebIdlDictionaryUnboundParentFailsLoudly(t *testing.T) {
 	}
 }
 
+// TestBindWebIdlUnmatchedPartialFailsLoudly is the error path of #680: a spec
+// that extends definitions it does not bind — a partial interface, a partial
+// dictionary, an includes naming a missing mixin — would compile into a module
+// silently lacking those members, since nothing generated names them. bind
+// refuses it before writing anything, with or without its self-check, exits 1,
+// and reports every such definition at its position on stderr, leaving stdout,
+// which lists the files written, empty. The extending file is passed first; an
+// includes whose interface is bound names only its missing mixin.
+func TestBindWebIdlUnmatchedPartialFailsLoudly(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	extPath := filepath.Join(dir, "ext.idl")
+	basePath := filepath.Join(dir, "base.idl")
+	ext := `partial interface Element {
+	undefined focus();
+};
+partial dictionary ScrollOptions {
+	boolean smooth;
+};
+Node includes ParentNode;
+`
+	if err := os.WriteFile(extPath, []byte(ext), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(basePath, []byte("interface Node {\n\treadonly attribute DOMString nodeName;\n};\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		extPath + ":1:9: partial interface Element: Element is not an interface in the bound IDL files",
+		extPath + ":4:9: partial dictionary ScrollOptions: ScrollOptions is not a dictionary in the bound IDL files",
+		extPath + ":7:1: Node includes ParentNode: ParentNode is not a mixin in the bound IDL files",
+	}
+
+	for _, check := range [][]string{nil, {"-no-check"}} {
+		outDir := filepath.Join(dir, "out"+strings.Join(check, ""))
+		args := append(append([]string{"bind", "webidl"}, check...), "-name", "ext", "-o", outDir, extPath, basePath)
+		var stderr bytes.Buffer
+		bindCmd := exec.Command(bin, args...)
+		bindCmd.Stderr = &stderr
+		out, err := bindCmd.Output()
+		if err == nil {
+			t.Fatalf("bind %v succeeded on partials and an includes whose targets are unbound (want an error)\n%s%s", check, out, stderr.String())
+		}
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+			t.Errorf("bind %v: want exit code 1, got %v", check, err)
+		}
+		if len(out) != 0 {
+			t.Errorf("bind %v: stdout should be empty, got\n%s", check, out)
+		}
+		if got := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n"); !slices.Equal(got, want) {
+			t.Errorf("bind %v: stderr lines\n%q\nwant\n%q", check, got, want)
+		}
+		if _, err := os.Stat(outDir); !os.IsNotExist(err) {
+			t.Errorf("bind %v wrote %s despite the error (stat: %v)", check, outDir, err)
+		}
+	}
+}
+
 // TestBindWebIdlKeepListCompilesClean drives `bind webidl -keep` end to end
 // (#18): only the listed interfaces and members are generated, an unlisted
 // ancestor of a kept interface stays so its `is` clause resolves, members a

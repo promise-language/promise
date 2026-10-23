@@ -362,8 +362,15 @@ func runBindWebIdl(args []string) {
 		mergedFile.Append(file)
 	}
 
-	// Merge partials, mixins, and includes
-	webidl.Merge(mergedFile)
+	// Merge partials, mixins, and includes. One whose target is not bound is an
+	// error: nothing generated would name its members (docs/wasm-bindings.md
+	// §"Supported subset").
+	if errs := webidl.Merge(mergedFile); len(errs) > 0 {
+		for _, e := range errs {
+			fmt.Fprintln(os.Stderr, e.Error())
+		}
+		os.Exit(1)
+	}
 
 	// Reduce to the keep list after the merge, so a mixin's members are listed
 	// under the interfaces that include it.

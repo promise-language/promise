@@ -20,7 +20,9 @@ func keepIR(t *testing.T, src, list string) (*Module, []KeepDrop) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	webidl.Merge(file)
+	if errs := webidl.Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	keep, err := ParseKeepList("keep.txt", list)
 	if err != nil {
 		t.Fatalf("ParseKeepList: %v", err)

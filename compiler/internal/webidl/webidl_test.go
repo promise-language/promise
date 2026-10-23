@@ -451,7 +451,9 @@ func TestParseMerge(t *testing.T) {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
-	Merge(file)
+	if errs := Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 
 	// Navigator should now have the mixin's member
 	var nav *Interface
@@ -968,7 +970,9 @@ func TestMergePartialDictionary(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	Merge(file)
+	if errs := Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	dict := file.Dictionaries[0]
 	if len(dict.Members) != 3 {
 		t.Fatalf("expected 3 members after merge, got %d", len(dict.Members))
@@ -997,7 +1001,9 @@ func TestParseMergePartialMixin(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	Merge(file)
+	if errs := Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
 	var target *Interface
 	for _, iface := range file.Interfaces {
 		if iface.Name == "Target" {
@@ -1579,40 +1585,136 @@ func TestReadDefaultFloat(t *testing.T) {
 	}
 }
 
-func TestMergePartialDictUnmatched(t *testing.T) {
-	// Partial dictionary with no matching base is silently dropped
-	src := `dictionary Base {
-		DOMString name;
-	};
-	partial dictionary Unknown {
-		long extra;
-	};`
-	file, errs := Parse(src, "test.webidl")
-	if len(errs) > 0 {
-		t.Fatalf("unexpected errors: %v", errs)
-	}
-	Merge(file)
-	// Base should still have only its original member
-	if len(file.Dictionaries[0].Members) != 1 {
-		t.Errorf("expected 1 member in Base, got %d", len(file.Dictionaries[0].Members))
-	}
-}
-
-func TestMergePartialInterfaceUnmatched(t *testing.T) {
-	// Partial interface with no matching base is silently dropped
-	src := `interface Base {
-		readonly attribute DOMString name;
-	};
-	partial interface Unknown {
-		void extra();
-	};`
-	file, errs := Parse(src, "test.webidl")
-	if len(errs) > 0 {
-		t.Fatalf("unexpected errors: %v", errs)
-	}
-	Merge(file)
-	if len(file.Interfaces[0].Members) != 1 {
-		t.Errorf("expected 1 member in Base, got %d", len(file.Interfaces[0].Members))
+// TestMergeUnmatched pins #680: a partial whose interface, mixin or dictionary
+// is not in the file, and each missing side of an includes statement, is
+// reported at its position instead of being dropped, while every definition
+// that matches is still applied and reported for nothing. members gives the
+// member count each named interface or dictionary must have after the merge.
+func TestMergeUnmatched(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		src     string
+		want    []string
+		members map[string]int
+	}{
+		{
+			name: "partial interface",
+			src:  "interface Base { readonly attribute DOMString name; };\npartial interface Unknown { undefined extra(); };",
+			want: []string{
+				"test.webidl:2:9: partial interface Unknown: Unknown is not an interface in the bound IDL files",
+			},
+			members: map[string]int{"Base": 1},
+		},
+		{
+			name: "partial mixin",
+			src:  "partial mixin Unknown { undefined extra(); };",
+			want: []string{
+				"test.webidl:1:9: partial mixin Unknown: Unknown is not a mixin in the bound IDL files",
+			},
+		},
+		{
+			name: "partial interface mixin",
+			src:  "partial interface mixin Unknown { undefined extra(); };",
+			want: []string{
+				"test.webidl:1:9: partial mixin Unknown: Unknown is not a mixin in the bound IDL files",
+			},
+		},
+		{
+			// The standards' spelling, which the parser stores as an interface
+			// marked _mixin; the partial comes first, as it does when the
+			// extending spec is bound before the defining one.
+			name:    "partial interface mixin on an interface mixin",
+			src:     "partial interface mixin Mix { undefined b(); };\ninterface mixin Mix { undefined a(); };\ninterface Target {};\nTarget includes Mix;",
+			members: map[string]int{"Target": 2},
+		},
+		{
+			name: "partial dictionary",
+			src:  "dictionary Base { DOMString name; };\npartial dictionary Unknown { long extra; };",
+			want: []string{
+				"test.webidl:2:9: partial dictionary Unknown: Unknown is not a dictionary in the bound IDL files",
+			},
+			members: map[string]int{"Base": 1},
+		},
+		{
+			// The lookup is by kind: a dictionary of the name is not an interface.
+			name: "partial interface naming a dictionary",
+			src:  "dictionary Foo { DOMString name; };\npartial interface Foo { undefined extra(); };",
+			want: []string{
+				"test.webidl:2:9: partial interface Foo: Foo is not an interface in the bound IDL files",
+			},
+			members: map[string]int{"Foo": 1},
+		},
+		{
+			name: "includes with no interface",
+			src:  "interface mixin Mix { undefined extra(); };\nMissing includes Mix;",
+			want: []string{
+				"test.webidl:2:1: Missing includes Mix: Missing is not an interface in the bound IDL files",
+			},
+		},
+		{
+			name: "includes with no mixin",
+			src:  "interface Target {};\nTarget includes Missing;",
+			want: []string{
+				"test.webidl:2:1: Target includes Missing: Missing is not a mixin in the bound IDL files",
+			},
+			members: map[string]int{"Target": 0},
+		},
+		{
+			// The lookup is by kind on this side too: an interface is not a mixin.
+			name: "includes naming an interface as its mixin",
+			src:  "interface Base { undefined a(); };\ninterface Target {};\nTarget includes Base;",
+			want: []string{
+				"test.webidl:3:1: Target includes Base: Base is not a mixin in the bound IDL files",
+			},
+			members: map[string]int{"Target": 0},
+		},
+		{
+			name: "includes with neither side",
+			src:  "A includes B;",
+			want: []string{
+				"test.webidl:1:1: A includes B: A is not an interface in the bound IDL files",
+				"test.webidl:1:1: A includes B: B is not a mixin in the bound IDL files",
+			},
+		},
+		{
+			name: "matched applied beside unmatched",
+			src:  "interface Element { undefined click(); };\npartial interface Element { undefined focus(); };\npartial dictionary Opts { long extra; };\nElement includes ParentNode;",
+			want: []string{
+				"test.webidl:3:9: partial dictionary Opts: Opts is not a dictionary in the bound IDL files",
+				"test.webidl:4:1: Element includes ParentNode: ParentNode is not a mixin in the bound IDL files",
+			},
+			members: map[string]int{"Element": 2},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file, errs := Parse(tc.src, "test.webidl")
+			if len(errs) > 0 {
+				t.Fatalf("unexpected errors: %v", errs)
+			}
+			var got []string
+			for _, e := range Merge(file) {
+				got = append(got, e.Error())
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("Merge errors\n%q\nwant\n%q", got, tc.want)
+			}
+			for name, want := range tc.members {
+				count := -1
+				for _, iface := range file.Interfaces {
+					if iface.Name == name {
+						count = len(iface.Members)
+					}
+				}
+				for _, d := range file.Dictionaries {
+					if d.Name == name {
+						count = len(d.Members)
+					}
+				}
+				if count != want {
+					t.Errorf("%s has %d members after the merge, want %d", name, count, want)
+				}
+			}
+		})
 	}
 }
 

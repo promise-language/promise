@@ -928,10 +928,11 @@ func (p *Parser) parseUnionType() *TypeRef {
 // includes statements to the definitions they extend, then records on each
 // interface the members an interface inheriting from it redeclares
 // (Interface.Redeclared) and those a named property may hide
-// (Interface.OverriddenBuiltIns). It returns an error for each partial whose interface,
-// mixin or dictionary is not in file, and for each side of an includes
-// statement that is not, after applying every one that matches: nothing else
-// would name the members they carry, so they would otherwise vanish unreported.
+// (Interface.OverriddenBuiltIns). It returns an error for each partial whose
+// interface, mixin or dictionary is not in file, and for each side of an
+// includes statement that is not, after applying every one that matches:
+// nothing else would name the members they carry, so they would otherwise
+// vanish unreported.
 func Merge(file *File) []*ParseError {
 	var errs []*ParseError
 	unbound := func(pos Pos, what, name, kind string) {

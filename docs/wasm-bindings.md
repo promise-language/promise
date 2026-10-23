@@ -479,10 +479,10 @@ that interface's inheritance chain: those it inherits from, through a parent-typ
 those inheriting from it, whose objects implement it too. So every regular attribute and regular
 operation of an interface in such a chain is imported in the form above as well, redeclared or not:
 `Element`'s `id`, called on a form, reads the form's id whatever control is named `id`. In the
-platform IDL that is every member of `EventTarget`, `Node`, `Element`, `HTMLElement`,
-`HTMLFormElement` and `Document`, the mixin members each includes among them; an interface outside
-every such chain — `HTMLDivElement`, or `Window`, which shares only `EventTarget` — resolves on the
-object as before. A `[LegacyUnforgeable]` member is the exception: it lives on the object, and a
+platform IDL those interfaces are `EventTarget`, `Node`, `Element`, `HTMLElement`,
+`HTMLFormElement`, `Document` and `XMLDocument`, with the mixin members each includes; an
+interface outside every such chain — `HTMLDivElement`, or `Window`, which shares only
+`EventTarget` — resolves on the object as before. A `[LegacyUnforgeable]` member is the exception: it lives on the object, and a
 named property never hides it, so its import resolves on the object (`Document.location`). The
 chains are found as redeclarations are, in the whole input after merging and before a keep list.
 

@@ -478,14 +478,16 @@ interface Form {
 	getter Element (DOMString name);
 };`
 
-// An anonymous special operation's import names its keyword, so the glue calls
-// a member rather than emitting `obj.(...)`, which would not parse.
+// An anonymous special operation's import names its keyword, never an empty
+// member, which would emit `obj.(...)`; the glue reads the keyword, ordinal or
+// not, as property access keyed by the argument (#696).
 func TestWebIdlOverloadAnonymousSpecialGlue(t *testing.T) {
 	glue := GenerateJSGlue(overloadIR(t, anonymousGetterFixture))
 
 	assertContains(t, glue, `"Form.getter"(handle, index) {`)
-	assertContains(t, glue, "_refLoad(handle).getter(index)")
+	assertContains(t, glue, "_refLoad(handle)[index >>> 0]")
 	assertContains(t, glue, `"Form.getter.2"(handle, name_ptr, name_len) {`)
-	assertContains(t, glue, "_refLoad(handle).getter(_readString(name_ptr, name_len))")
+	assertContains(t, glue, "_refLoad(handle)[_readString(name_ptr, name_len)]")
 	assertNotContains(t, glue, ").(")
+	assertNotContains(t, glue, ".getter(")
 }

@@ -238,7 +238,7 @@ Entries are matched after partials and mixins are merged, so a mixin's member is
 
 Constants, iterable, maplike and setlike declarations, and anonymous special operations have no entry of their own: they go with their interface. An unlisted interface is dropped with its members, unless a kept interface inherits from it: an ancestor stays, with its listed members and the names its descendants keep (below), so the `is` clause resolves. Dictionaries, enums, typedefs and callbacks are never listed.
 
-A member name is the unit. All operations of one name are kept or dropped together, and so are all constructors, so the ordinals of [Overloaded Operations](#overloaded-operations) never depend on the list. The unit spans the inheritance chain, because a derived member is numbered after the instance members of its name it inherits ([Shadowed Members](#shadowed-members)): a name an interface keeps for a member it declares is kept on each of its ancestors too, listed there or not, and a name dropped from an interface for naming a dropped definition (below) is dropped from every kept interface inheriting from it. Constructors are never inherited, so `I.constructor` keeps only `I`'s.
+A member name is the unit. All operations of one name are kept or dropped together, and so are all constructors, so the ordinals of [Overloaded Operations](#overloaded-operations) never depend on the list. The unit spans the inheritance chain, because a derived member is numbered after the instance members of its name it inherits ([Shadowed Members](#shadowed-members)): a name an interface keeps for a member it declares is kept on each of its ancestors too, listed there or not, and a name dropped from an interface for naming a dropped definition (below) is dropped from every kept interface inheriting from it. Constructors are never inherited, so `I.constructor` keeps only `I`'s. Nor does the list change which JS member an import reaches: an import calls its declaring interface's own member when any interface in the input redeclares it, kept or not (§"WebIDL to Promise", interface inheritance).
 
 The subset never leaves a dangling reference. To a fixed point, a typedef whose type names a dropped definition is dropped, and so is a dictionary whose parent is dropped or whose `required` member names one. Then an optional dictionary member that names a dropped definition is removed, and an interface member that names one is dropped together with every member sharing its name. `bind` reports each of these on stderr, with the definition it named. A name inside a union, `Promise<T>` or `record<K, V>` is not a reference, because each of those lowers to `JsValue`. A definition absent from the input is not one the list dropped: a member naming it fails to compile with `undefined type`, as an unbound parent does (§"WebIDL to Promise", interface inheritance), and the remedy is binding the spec that defines it.
 
@@ -430,9 +430,10 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 wrappers model the IDL hierarchy (`EventTarget` → `Node` → `Element` → …). Each member — its public
 wrapper, its private extern and its JS import — is generated once, on the interface that declares
 it, and every derived wrapper inherits it: `Node.appendChild`'s one import serves an `Element`
-too, because the JS side resolves the call through the object's own prototype chain. A derived
-wrapper is accepted wherever its parent type is expected, so passing an `Element` to a
-`Node`-typed parameter needs no rewrapping of its handle. A derived interface that redeclares an
+too, because the JS side resolves the member on the object, through its own prototype chain, and
+reaches `Node`'s (except for a redeclared member, below). A derived wrapper is accepted wherever
+its parent type is expected, so passing an `Element` to a `Node`-typed parameter needs no
+rewrapping of its handle. A derived interface that redeclares an
 inherited member overrides it only when the two are exactly alike; any other redeclaration is a
 member of its own ([Shadowed Members](#shadowed-members)). Each wrapper still declares its own
 `borrow` factory — a derived type's `` `global `` of the same name hides the parent's, so
@@ -443,6 +444,30 @@ A parent interface is concrete (every wrapper is constructed field-wise), so it 
 parent that is not among the bound IDL files is still named in the `is` clause, so the generated
 module fails to compile with `undefined type` rather than silently omitting the inherited
 members.
+
+Resolving a member on the object reaches a different member when an interface between the
+declaring one and the object's real interface redeclares it, and that member's result would cross
+under the declaring interface's type. So the import of a member that any interface inheriting from
+the declaring one redeclares calls the declaring interface's own member instead, read from its
+interface prototype object with the object as receiver:
+
+- an attribute: `Reflect.get(Element.prototype, "className", obj)`, and
+  `Reflect.set(Element.prototype, "className", value, obj)`;
+- an operation: `Reflect.apply(HTMLCollection.prototype.namedItem, obj, args)`.
+
+Its result is the one the declaring interface specifies, under the type it declares: an `Element`
+wrapper over an SVG element reads its class string rather than `SVGElement`'s `SVGAnimatedString`,
+and `HTMLCollection`'s `named_item` on an `HTMLFormControlsCollection` returns an `Element`, never a
+`RadioNodeList`. A redeclaration counts whatever its signature, an exact one included: a derived
+interface that redeclares one overload of a set replaces the whole set on its prototype, and the
+overloads it leaves out must still reach the declaring interface's. It counts as a regular
+attribute, a regular operation or a constant — the members an interface prototype object carries.
+Redeclarations are found in the whole input, after partials and mixins are merged and before a keep
+list reduces it ([Generating a subset](#generating-a-subset)); one in IDL that is not bound is
+unknown, and the import resolves on the object. Static members, constants and constructors are
+reached through the interface object already. A `[LegacyUnforgeable]` member lives on the object
+rather than its prototype, but WebIDL forbids an inheriting interface to redeclare one, so none is
+affected.
 
 **Dictionary inheritance.** A derived dictionary's type is flattened, not an `is` child: it
 declares every member the dictionary has as a field of its own — its ancestors' first, from the
@@ -480,7 +505,7 @@ WebIDL lets a derived interface redeclare a member it inherits, with a different
 | `Element`: `attribute DOMString className;` | `class_name` | `_element_class_name` | `Element.className.get` |
 | `SVGElement : Element`: `readonly attribute SVGAnimatedString className;` | `class_name_2` | `_svg_element_class_name_2` | `SVGElement.className.get` |
 
-The inherited member stays: `HTMLFormControlsCollection` has `named_item`, typed as `HTMLCollection` declares it, beside its own `named_item_2`. A renamed attribute's getter and setter share its ordinal, and its import carries none: an interface declares an attribute once, so the import is unique already, and the glue reads the accessor from its last component. An exact redeclaration is an override, so `DOMRect` re-declaring `DOMRectReadOnly`'s readonly `x` as read-write overrides the getter and adds a setter.
+The inherited member stays: `HTMLFormControlsCollection` has `named_item`, typed as `HTMLCollection` declares it, beside its own `named_item_2`; its import calls `HTMLCollection`'s own `namedItem` (§"WebIDL to Promise", interface inheritance). A renamed attribute's getter and setter share its ordinal, and its import carries none: an interface declares an attribute once, so the import is unique already, and the glue reads the accessor from its last component. An exact redeclaration is an override, so `DOMRect` re-declaring `DOMRectReadOnly`'s readonly `x` as read-write overrides the getter and adds a setter.
 
 The test is identity, not the override rule's relaxed matching, so that a binding's names depend on the IDL and the [type mapping](#webidl-to-promise) alone: identity is an override under every version of that rule. A refinement the rule happens to admit is therefore a new member as well — a `CaptureTrack clone()` redeclaring `Track clone()` becomes `clone_2`, and a `start` that adds optional parameters becomes `start_2` — while the inherited `clone()` and `start()` still serve the derived wrapper. Static operations, static attributes, constants and constructors are `` `global ``, never inherited slots: a derived interface's static keeps its name and hides the parent's static of that name.
 

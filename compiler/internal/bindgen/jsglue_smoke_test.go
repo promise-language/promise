@@ -405,6 +405,76 @@ interface Target {
 	}
 }
 
+// TestGenerateJSGlueRedeclaredMemberReachesDeclaringInterface runs the imports
+// of members a derived interface redeclares against a real JS engine (#682).
+// Each must call P's own member on a D: resolved on the object, the getter
+// reads D's "shadow", the setter throws (D's accessor has no setter and the
+// glue is strict), m answers from D, and P's f(DOMString) reaches D's f, which
+// declares only f(long). D's own m_2 still resolves on the object.
+//
+// The driver defines host classes P and D extends P as globals, where D
+// redeclares P's v (getter only), m and f, and calls each import with a handle
+// to a D. It reports which class's member answered: the getter's value, the
+// setter's record (or the error the assignment threw), the "from" of each
+// stored m result, and f's record — f's string argument read from the smoke
+// module's data segment, "AB" at 0. P's members check their receiver as a
+// host's do, so an import that calls P's member on anything but the object
+// fails with "Illegal invocation".
+func TestGenerateJSGlueRedeclaredMemberReachesDeclaringInterface(t *testing.T) {
+	nodePath := requireNode(t)
+	src := `interface P {
+  attribute long v;
+  P? m(long i);
+  undefined f(long a);
+  undefined f(DOMString s);
+};
+interface D : P {
+  readonly attribute DOMString v;
+  D? m(long i);
+  undefined f(long a);
+};`
+	loader := smokeLoader{name: "glue", js: GenerateJSGlue(overloadIR(t, src)), initArgs: []string{"frontend.wasm"}}
+	result := runSmokeDriver(t, nodePath, loader, 0, importCallDriver(`
+  function brand(self) {
+    if (!(self instanceof P)) throw new TypeError("Illegal invocation");
+  }
+  class P {
+    get v() { brand(this); return 1; }
+    set v(x) { brand(this); this.setBy = ["P", x]; }
+    m(i) { brand(this); return { from: "P", i }; }
+    f(x) { brand(this); this.calledBy = ["P", x]; }
+  }
+  class D extends P {
+    get v() { return "shadow"; }
+    m(i) { return { from: "D", i }; }
+    f(x) { this.calledBy = ["D", x]; }
+  }
+  globalThis.P = P;
+  globalThis.D = D;
+
+  const env = imports.promise_env;
+  const obj = new D();
+  const handle = mod._refStore(obj);
+  const got = {};
+  got.get = env["P.v.get"](handle);
+  try {
+    env["P.v.set"](handle, 5);
+    got.set = obj.setBy;
+  } catch (e) {
+    got.set = e.constructor.name;
+  }
+  got.m = mod._refLoad(env["P.m"](handle, 3)).from;
+  got.m2 = mod._refLoad(env["D.m.2"](handle, 3)).from;
+  env["P.f.2"](handle, 0, 2);
+  got.f2 = obj.calledBy;
+  process.stdout.write("RESULT:" + JSON.stringify(got) + "\n");
+`))
+
+	if want := `RESULT:{"get":1,"set":["P",5],"m":"P","m2":"D","f2":["P","AB"]}`; result != want {
+		t.Errorf("imports reached %s, want %s", result, want)
+	}
+}
+
 // TestGenerateJSGlueAnonymousSpecialReachesHost calls the imports of
 // specialOpsFixture's Target against a host object with indexed and named
 // properties (#696). A legacy platform object is exotic, so a Proxy over a

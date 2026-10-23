@@ -233,7 +233,7 @@ func descendantKeeps(file *webidl.File, ifaces map[string]*webidl.Interface, kep
 			if !listed || unit == keepConstructor || !keep.members[d.Name+"."+unit] {
 				continue
 			}
-			for _, a := range ancestors(d, ifaces) {
+			for _, a := range webidl.Ancestors(d, ifaces) {
 				if units[a] == nil {
 					units[a] = make(map[string]bool)
 				}
@@ -242,18 +242,6 @@ func descendantKeeps(file *webidl.File, ifaces map[string]*webidl.Interface, kep
 		}
 	}
 	return units
-}
-
-// ancestors returns the interfaces iface inherits from, nearest first, ending at
-// an unbound parent or where an inheritance cycle comes back around.
-func ancestors(iface *webidl.Interface, ifaces map[string]*webidl.Interface) []*webidl.Interface {
-	var chain []*webidl.Interface
-	seen := map[*webidl.Interface]bool{iface: true}
-	for a := ifaces[iface.Parent]; a != nil && !seen[a]; a = ifaces[a.Parent] {
-		seen[a] = true
-		chain = append(chain, a)
-	}
-	return chain
 }
 
 // memberSelection is a kept interface's selected members, each with its unit,
@@ -301,7 +289,7 @@ func selectMembers(iface *webidl.Interface, selected func(unit string) bool, dro
 func keepMembers(iface *webidl.Interface, selections map[*webidl.Interface]*memberSelection, ifaces map[string]*webidl.Interface) []KeepDrop {
 	own := selections[iface]
 	dangling := maps.Clone(own.dangling)
-	for _, a := range ancestors(iface, ifaces) {
+	for _, a := range webidl.Ancestors(iface, ifaces) {
 		ancestor := selections[a]
 		if ancestor == nil {
 			continue

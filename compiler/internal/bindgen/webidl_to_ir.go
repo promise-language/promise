@@ -29,7 +29,8 @@ import (
 // (anonymousSpecialError), reporting every such dictionary and operation.
 //
 // Call webidl.Merge(file) before this function to apply partials, mixins, and
-// includes statements.
+// includes statements, and to record the members a derived interface
+// redeclares (webidl.Interface.Redeclared).
 func WebIdlToIR(file *webidl.File) ([]*Module, error) {
 	c := &webidlConverter{
 		file:      file,
@@ -256,6 +257,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 		case *webidl.Attribute:
 			idlName := iface.Name + "." + m.Name
 			doc := webidlDoc(m.Doc, "attribute", idlName)
+			redeclared := !m.Static && iface.Redeclared[m.Name]
 			// Getter
 			getter := Func{
 				Name:       idlToSnake(m.Name),
@@ -265,6 +267,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 				ImportName: idlName + ".get",
 				Results:    []TypeRef{convertWebIdlTypeRef(m.Type)},
 				Doc:        doc,
+				Redeclared: redeclared,
 			}
 			if m.Static {
 				getter.Kind = FuncStatic
@@ -284,6 +287,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 					ImportName: idlName + ".set",
 					Params:     []Param{{Name: "value", Type: convertWebIdlTypeRef(m.Type)}},
 					Doc:        doc,
+					Redeclared: redeclared,
 				}
 				if m.Static {
 					setter.Kind = FuncStatic
@@ -307,6 +311,10 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 					continue
 				}
 			}
+			// Redeclared is keyed by identifier; a static of the same one
+			// (Response.json beside json()) is reached through the interface
+			// object, not the prototype.
+			f.Redeclared = f.Kind == FuncMethod && iface.Redeclared[m.Name]
 			numberOverload(&f, names.operation(f))
 			res.Methods = append(res.Methods, f)
 

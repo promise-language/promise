@@ -394,7 +394,7 @@ func (g *jsGlueGenerator) emitMethodImport(resourceName string, f Func) {
 	case FuncStatic:
 		g.emitStaticBody(resourceName, importName, f)
 	default:
-		g.emitMethodBody(importName, f)
+		g.emitMethodBody(resourceName, importName, f)
 	}
 
 	g.write("    },\n")
@@ -471,9 +471,17 @@ func (g *jsGlueGenerator) emitStaticBody(resourceName, importName string, f Func
 	g.emitReturnConversion(f, call)
 }
 
-func (g *jsGlueGenerator) emitMethodBody(importName string, f Func) {
+// emitMethodBody implements an instance member's import. It resolves the member
+// on the object, through its own prototype chain — unless an interface
+// inheriting from the declaring one redeclares it (f.Redeclared), where that
+// lookup would reach the redeclaration and its result would cross under this
+// member's type. Such an import calls the declaring interface's own member,
+// read from its interface prototype object with the object as receiver
+// (docs/wasm-bindings.md, "WebIDL to Promise", interface inheritance).
+func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func) {
 	args := g.buildJSCallArgs(f)
 	member := importMember(importName)
+	const obj = "_refLoad(handle)"
 
 	// Check if this is an attribute getter/setter.
 	// Attribute import names have 3 parts: "Type.attrName.get/set"
@@ -481,12 +489,20 @@ func (g *jsGlueGenerator) emitMethodBody(importName string, f Func) {
 	// operation is the k-th of an overload set: "Type.methodName.k"
 	parts := strings.Split(importName, ".")
 	if len(parts) == 3 && parts[2] == "get" {
-		call := fmt.Sprintf("_refLoad(handle).%s", member)
+		call := fmt.Sprintf("%s.%s", obj, member)
+		if f.Redeclared {
+			call = fmt.Sprintf("Reflect.get(%s.prototype, \"%s\", %s)", resourceName, member, obj)
+		}
 		g.emitReturnConversion(f, call)
 		return
 	}
 	if len(parts) == 3 && parts[2] == "set" {
-		g.writef("      _refLoad(handle).%s = %s;\n", member, strings.Join(args, ", "))
+		value := strings.Join(args, ", ")
+		if f.Redeclared {
+			g.writef("      Reflect.set(%s.prototype, \"%s\", %s, %s);\n", resourceName, member, value, obj)
+		} else {
+			g.writef("      %s.%s = %s;\n", obj, member, value)
+		}
 		return
 	}
 
@@ -497,17 +513,20 @@ func (g *jsGlueGenerator) emitMethodBody(importName string, f Func) {
 	// rejected one that does not take exactly that key, and a setter its value.
 	switch member {
 	case "getter":
-		g.emitReturnConversion(f, fmt.Sprintf("_refLoad(handle)[%s]", propertyKey(f, args)))
+		g.emitReturnConversion(f, fmt.Sprintf("%s[%s]", obj, propertyKey(f, args)))
 		return
 	case "setter":
-		g.writef("      _refLoad(handle)[%s] = %s;\n", propertyKey(f, args), args[1])
+		g.writef("      %s[%s] = %s;\n", obj, propertyKey(f, args), args[1])
 		return
 	case "deleter":
-		g.emitReturnConversion(f, fmt.Sprintf("delete _refLoad(handle)[%s]", propertyKey(f, args)))
+		g.emitReturnConversion(f, fmt.Sprintf("delete %s[%s]", obj, propertyKey(f, args)))
 		return
 	}
 
-	call := fmt.Sprintf("_refLoad(handle).%s(%s)", member, strings.Join(args, ", "))
+	call := fmt.Sprintf("%s.%s(%s)", obj, member, strings.Join(args, ", "))
+	if f.Redeclared {
+		call = fmt.Sprintf("Reflect.apply(%s.prototype.%s, %s, [%s])", resourceName, member, obj, strings.Join(args, ", "))
+	}
 	g.emitReturnConversion(f, call)
 }
 

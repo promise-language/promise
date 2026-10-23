@@ -38,6 +38,14 @@ type Interface struct {
 	ExtAttrs []*ExtAttr
 	Doc      string
 	Pos      Pos
+	// Redeclared holds the identifiers of this interface's regular attributes
+	// and operations that an interface inheriting from it, directly or not,
+	// declares again as a regular attribute, regular operation or constant —
+	// the members an interface prototype object carries. Merge sets it from the
+	// whole merged file; nothing that later reduces the file clears it, so it
+	// still describes the input after a keep list drops the redeclaring
+	// interface.
+	Redeclared map[string]bool
 }
 
 // Dictionary represents a WebIDL dictionary declaration.

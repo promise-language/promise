@@ -531,6 +531,285 @@ func TestApplyKeepList(t *testing.T) {
 			types: map[string][]string{},
 			drops: []KeepDrop{{What: "P.constructor", Ref: "Fancy"}},
 		},
+		{
+			// #685: the unit is the Promise name, so fooBar and foo_bar are one
+			// overload set and one unit — listing either keeps both, and foo_bar
+			// keeps the ordinal the unfiltered IR gives it.
+			name: "differently spelled members of one Promise name are one unit",
+			src: `interface I {
+				undefined fooBar(long a);
+				undefined foo_bar(DOMString s);
+			};`,
+			list: "I\nI.foo_bar\n",
+			resources: map[string][]string{
+				"I": {"I.fooBar", "I.foo_bar.2"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// #685: C's constant goes with C and is numbered after the reset it
+			// inherits, so it keeps P's reset — the unit spans the chain whether
+			// an entry or a member that goes with its interface keeps it.
+			name: "a constant keeps the ancestor's member of its Promise name",
+			src: `interface P { undefined reset(); };
+			interface C : P { const long RESET = 1; };`,
+			list: "C\n",
+			resources: map[string][]string{
+				"P": {"P.reset"},
+				"C": {"C.RESET.2"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// The anonymous getter goes with its interface, and so does the rest
+			// of its unit: Getter, which numbers it second.
+			name: "a member that goes with its interface keeps its unit",
+			src: `interface E {};
+			interface I {
+				E Getter(DOMString s);
+				getter E (unsigned long i);
+			};`,
+			list: "I\nE\n",
+			resources: map[string][]string{
+				"E": nil,
+				"I": {"I.Getter", "I.getter.2"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// P's fooBar names a dropped definition, so its unit goes from P and
+			// from D, whose foo_bar is numbered after it.
+			name: "a dangling unit is dropped down the chain under another spelling",
+			src: `interface Fancy {};
+			interface P { undefined fooBar(Fancy f); };
+			interface D : P {
+				undefined foo_bar(DOMString s);
+				readonly attribute DOMString id;
+			};`,
+			list: "D\nD.foo_bar\nD.id\n",
+			resources: map[string][]string{
+				"P": nil,
+				"D": {"D.id.get"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "P.fooBar", Ref: "Fancy"},
+				{What: "D.foo_bar", Ref: "Fancy"},
+			},
+		},
+		{
+			// The unit is dropped whole, and each IDL name it drops is reported:
+			// the dangling one first, then the rest.
+			name: "a dangling unit reports each name it drops",
+			src: `interface Fancy {};
+			interface I {
+				undefined fooBar(DOMString s);
+				undefined foo_bar(Fancy f);
+				undefined other();
+			};`,
+			list: "I\nI.fooBar\nI.other\n",
+			resources: map[string][]string{
+				"I": {"I.other"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "I.foo_bar", Ref: "Fancy"},
+				{What: "I.fooBar", Ref: "Fancy"},
+			},
+		},
+		{
+			// A name whose own members name a dropped definition reports that
+			// one, not the first its unit names.
+			name: "each dangling name of a unit reports the definition it names",
+			src: `interface F1 {};
+			interface F2 {};
+			interface I {
+				undefined fooBar(F1 f);
+				undefined foo_bar(F2 g);
+				undefined other();
+			};`,
+			list: "I\nI.fooBar\nI.other\n",
+			resources: map[string][]string{
+				"I": {"I.other"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "I.fooBar", Ref: "F1"},
+				{What: "I.foo_bar", Ref: "F2"},
+			},
+		},
+		{
+			// A static is `global`, never an inherited slot, so C's constant is
+			// `reset` with or without it: P's dangling static does not drop it,
+			// and C keeping its unit does not keep the unlisted static.
+			name: "an ancestor's static is not inherited",
+			src: `interface Fancy {};
+			interface P { static undefined reset(Fancy f); };
+			interface C : P { const long RESET = 1; };`,
+			list: "C\n",
+			resources: map[string][]string{
+				"P": nil,
+				"C": {"C.RESET"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			name: "a kept name keeps no ancestor's static of it",
+			src: `interface P {
+				static undefined reset();
+				static attribute long fooBar;
+			};
+			interface C : P {
+				undefined reset();
+				attribute long foo_bar;
+			};`,
+			list: "C\nC.reset\nC.foo_bar\n",
+			resources: map[string][]string{
+				"P": nil,
+				"C": {"C.reset", "C.foo_bar.get", "C.foo_bar.set"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// An operation whose name snakes to `constructor` joins the
+			// constructors' overload set, so it is one unit with them.
+			name: "constructors and an operation named Constructor are one unit",
+			src: `interface Odd {
+				constructor();
+				undefined Constructor(long n);
+			};`,
+			list: "Odd\nOdd.Constructor\n",
+			resources: map[string][]string{
+				"Odd": {"Odd.constructor", "Odd.Constructor.2"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// D's constructor is numbered after the `constructor` P's operation
+			// is inherited as, so it keeps P's — an ancestor's unit holding an
+			// instance member is inherited.
+			name: "a constructor keeps an ancestor's operation of its Promise name",
+			src: `interface P { undefined Constructor(long n); };
+			interface D : P { constructor(); };`,
+			list: "D\nD.constructor\n",
+			resources: map[string][]string{
+				"P": {"P.Constructor"},
+				"D": {"D.constructor.2"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			name: "an ancestor's dangling operation drops a constructor of its Promise name",
+			src: `interface Fancy {};
+			interface P { undefined Constructor(Fancy f); };
+			interface D : P { constructor(); };`,
+			list: "D\nD.constructor\n",
+			resources: map[string][]string{
+				"P": nil,
+				"D": nil,
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "P.Constructor", Ref: "Fancy"},
+				{What: "D.constructor", Ref: "Fancy"},
+			},
+		},
+		{
+			// The rule is by the ancestor's member kind, not by name: P's
+			// Constructor is an instance operation, so D's entry reaches it.
+			name: "an operation named Constructor keeps the ancestor's",
+			src: `interface P { undefined Constructor(long n); };
+			interface D : P { undefined Constructor(DOMString s); };`,
+			list: "D\nD.Constructor\n",
+			resources: map[string][]string{
+				"P": {"P.Constructor"},
+				"D": {"D.Constructor.2"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// The iterable lowers to no member, so it shares no unit with the
+			// operation whose Promise name its keyword spells: going with its
+			// interface, it does not keep the unlisted Iterable.
+			name: "a member that lowers to none is a unit apart",
+			src: `interface I {
+				iterable<long>;
+				undefined Iterable();
+			};`,
+			list: "I\n",
+			resources: map[string][]string{
+				"I": nil,
+			},
+			types: map[string][]string{},
+		},
+		{
+			// An entry names an IDL member, as compat data does: I.foo_bar names
+			// nothing on an I declaring only fooBar, though both lower to foo_bar.
+			name: "an entry names an IDL member, not its Promise name",
+			src:  `interface I { undefined fooBar(); };`,
+			list: "I\nI.foo_bar\n",
+			resources: map[string][]string{
+				"I": nil,
+			},
+			types: map[string][]string{},
+		},
+		{
+			// The chain shape of #685 the other way: C's constant is numbered
+			// after the reset it inherits, so when P's reset names a dropped
+			// definition the constant goes too, though it names none itself.
+			name: "a constant is dropped with an ancestor's dangling member of its Promise name",
+			src: `interface Fancy {};
+			interface P { undefined reset(Fancy f); };
+			interface C : P { const long RESET = 1; };`,
+			list: "C\n",
+			resources: map[string][]string{
+				"P": nil,
+				"C": nil,
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "P.reset", Ref: "Fancy"},
+				{What: "C.RESET", Ref: "Fancy"},
+			},
+		},
+		{
+			// An instance attribute is an inherited slot as an operation is, so
+			// D's foo_bar, numbered after P's fooBar, keeps it.
+			name: "a kept name keeps an ancestor's attribute of it",
+			src: `interface P { attribute long fooBar; };
+			interface D : P { undefined foo_bar(DOMString s); };`,
+			list: "D\nD.foo_bar\n",
+			resources: map[string][]string{
+				"P": {"P.fooBar.get", "P.fooBar.set"},
+				"D": {"D.foo_bar.2"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// Neither an iterable nor an anonymous legacycaller lowers to a
+			// member, so neither is an inherited slot: P's, naming a dropped
+			// definition, are dropped and leave D's.
+			name: "an ancestor's dangling member that lowers to none leaves the descendant's",
+			src: `interface Fancy {};
+			interface P {
+				iterable<Fancy>;
+				legacycaller undefined (Fancy f);
+			};
+			interface D : P {
+				iterable<long>;
+				legacycaller undefined (long n);
+			};`,
+			list: "D\n",
+			resources: map[string][]string{
+				"P": nil,
+				"D": nil,
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "P.iterable", Ref: "Fancy"},
+				{What: "P.legacycaller", Ref: "Fancy"},
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

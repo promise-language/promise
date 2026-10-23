@@ -449,6 +449,69 @@ func TestGenerateJSGlueArgNamesMatchingGlueParamsReachHost(t *testing.T) {
 	}
 }
 
+// TestGenerateJSGlueArgNamesMatchingGlueLocalsSyntaxValid parses the glue for
+// arguments named like a local an import body declares (#690): the object a
+// constructor creates, and a nullable interface result. Each body used to
+// redeclare its parameter with `const`, so the whole module was a SyntaxError.
+func TestGenerateJSGlueArgNamesMatchingGlueLocalsSyntaxValid(t *testing.T) {
+	nodePath := requireNode(t)
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"constructed object", "interface Target {\n  constructor(long obj);\n};"},
+		{"nullable interface result", "interface Node {};\ninterface Target {\n  Node? f(long result);\n};"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			nodeCheckGlue(t, nodePath, GenerateJSGlue(overloadIR(t, c.src)))
+		})
+	}
+}
+
+// TestGenerateJSGlueArgNamesMatchingGlueLocalsReachHost calls the imports of a
+// constructor and a nullable-interface operation whose arguments are named like
+// the locals their bodies declare (#690). node --check cannot tell a body that
+// stores its local from one that stores the argument of the same name: both
+// parse, and the second hands the program a handle to a number.
+//
+// The driver defines the host class Target as a global, constructs one through
+// the constructor import with 7, and calls f on it with 9, for which the host
+// returns an object, and with 0, for which it returns null. It reports the
+// constructed object's argument, the found object's, and the handle the null
+// result crossed as.
+func TestGenerateJSGlueArgNamesMatchingGlueLocalsReachHost(t *testing.T) {
+	nodePath := requireNode(t)
+	src := `interface Node {};
+interface Target {
+  constructor(long obj);
+  Node? f(long result);
+};`
+	loader := smokeLoader{name: "glue", js: GenerateJSGlue(overloadIR(t, src)), initArgs: []string{"frontend.wasm"}}
+	result := runSmokeDriver(t, nodePath, loader, 0, importCallDriver(`
+  class Target {
+    constructor(v) { this.v = v; }
+    f(x) { return x === 0 ? null : { got: x }; }
+  }
+  globalThis.Target = Target;
+
+  const env = imports.promise_env;
+  const made = mod._refLoad(env["Target.constructor"](7));
+  const self = mod._refStore(new Target(1));
+  const found = mod._refLoad(env["Target.f"](self, 9));
+  const absent = env["Target.f"](self, 0);
+  process.stdout.write("RESULT:" + JSON.stringify({
+    constructed: made instanceof Target ? made.v : String(made),
+    found: found !== null && typeof found === "object" ? found.got : String(found),
+    absent,
+  }) + "\n");
+`))
+
+	if want := `RESULT:{"constructed":7,"found":9,"absent":0}`; result != want {
+		t.Errorf("Target's imports delivered %s, want %s", result, want)
+	}
+}
+
 // TestGenerateJSGlueReservedWordArgsReachHost calls the import of an operation
 // whose arguments are named `null`, `arguments` and `eval` (#675) and checks the
 // host member receives each value. node --check proves only that the glue

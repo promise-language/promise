@@ -44,13 +44,13 @@ func TestWebIdlAnonymousSpecialGlue(t *testing.T) {
 		header string
 		body   string
 	}{
-		{"indexed getter", `"Target.getter"($handle, index) {`, "const result = _refLoad($handle)[index >>> 0];"},
-		{"named getter", `"Target.getter.2"($handle, name$ptr, name$len) {`, "const result = _refLoad($handle)[_readString(name$ptr, name$len)];"},
+		{"indexed getter", `"Target.getter"($handle, index) {`, "const $result = _refLoad($handle)[index >>> 0];\n      if ($result == null) return 0;\n      return _refStore($result);"},
+		{"named getter", `"Target.getter.2"($handle, name$ptr, name$len) {`, "const $result = _refLoad($handle)[_readString(name$ptr, name$len)];"},
 		{"indexed setter", `"Target.setter"($handle, index, node) {`, "_refLoad($handle)[index >>> 0] = _refLoad(node);"},
 		{"named setter", `"Target.setter.2"($handle, name$ptr, name$len, node) {`, "_refLoad($handle)[_readString(name$ptr, name$len)] = _refLoad(node);"},
 		{"deleter", `"Target.deleter"($handle, name$ptr, name$len) {`, "delete _refLoad($handle)[_readString(name$ptr, name$len)];"},
 		// A named special operation is a regular operation: still a method call.
-		{"named special operation", `"Target.item"($handle, index) {`, "const result = _refLoad($handle).item(index);"},
+		{"named special operation", `"Target.item"($handle, index) {`, "const $result = _refLoad($handle).item(index);"},
 		{"string result", `"StringMap.getter"($handle, name$ptr, name$len, $retptr) {`, "_writeStringResult($retptr, _refLoad($handle)[_readString(name$ptr, name$len)]);"},
 		{"string value", `"StringMap.setter"($handle, name$ptr, name$len, value$ptr, value$len) {`, "_refLoad($handle)[_readString(name$ptr, name$len)] = _readString(value$ptr, value$len);"},
 		// Only a setter's result is rejected: a deleter declaring one binds, and

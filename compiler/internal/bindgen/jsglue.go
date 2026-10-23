@@ -494,10 +494,11 @@ func (g *jsGlueGenerator) emitStaticBody(resourceName, importName string, f Func
 }
 
 // emitMethodBody implements an instance member's import. It resolves the member
-// on the object, through its own prototype chain — unless an interface
-// inheriting from the declaring one redeclares it (f.Redeclared), where that
-// lookup would reach the redeclaration and its result would cross under this
-// member's type. Such an import calls the declaring interface's own member,
+// on the object, through its own prototype chain — unless another property may
+// answer under its name there (f.ViaPrototype): a redeclaration on an interface
+// inheriting from the declaring one, or a named property of an interface
+// carrying [LegacyOverrideBuiltIns]. Its result would then cross under this
+// member's type, so such an import calls the declaring interface's own member,
 // read from its interface prototype object with the object as receiver
 // (docs/wasm-bindings.md, "WebIDL to Promise", interface inheritance).
 func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func) {
@@ -512,7 +513,7 @@ func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func
 	parts := strings.Split(importName, ".")
 	if len(parts) == 3 && parts[2] == "get" {
 		call := fmt.Sprintf("%s.%s", obj, member)
-		if f.Redeclared {
+		if f.ViaPrototype {
 			call = fmt.Sprintf("Reflect.get(%s.prototype, \"%s\", %s)", resourceName, member, obj)
 		}
 		g.emitReturnConversion(f, call)
@@ -520,7 +521,7 @@ func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func
 	}
 	if len(parts) == 3 && parts[2] == "set" {
 		value := strings.Join(args, ", ")
-		if f.Redeclared {
+		if f.ViaPrototype {
 			g.writef("      Reflect.set(%s.prototype, \"%s\", %s, %s);\n", resourceName, member, value, obj)
 		} else {
 			g.writef("      %s.%s = %s;\n", obj, member, value)
@@ -546,7 +547,7 @@ func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func
 	}
 
 	call := fmt.Sprintf("%s.%s(%s)", obj, member, strings.Join(args, ", "))
-	if f.Redeclared {
+	if f.ViaPrototype {
 		call = fmt.Sprintf("Reflect.apply(%s.prototype.%s, %s, [%s])", resourceName, member, obj, strings.Join(args, ", "))
 	}
 	g.emitReturnConversion(f, call)

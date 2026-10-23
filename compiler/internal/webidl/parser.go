@@ -2,6 +2,7 @@ package webidl
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -73,7 +74,8 @@ func (p *Parser) parseFile() *File {
 	file := &File{}
 
 	for !p.at(TokenEOF) {
-		// Extended attributes at top level are kept only on interfaces.
+		// Extended attributes at top level are kept only on interfaces and
+		// partial interfaces.
 		doc, extAttrs := p.parseDeclStart()
 		tok := p.peek()
 
@@ -106,6 +108,7 @@ func (p *Parser) parseFile() *File {
 			switch partialTok.Kind {
 			case TokenInterface:
 				partial := p.parsePartialInterface(false)
+				partial.ExtAttrs = extAttrs
 				file.Partials = append(file.Partials, partial)
 			case TokenMixin:
 				partial := p.parsePartialMixin()
@@ -465,14 +468,17 @@ func (p *Parser) parseIncludes() *IncludesStatement {
 
 // parseMember parses a single interface/mixin member, with its doc comment.
 func (p *Parser) parseMember() Member {
-	// Extended attributes on members are skipped.
-	doc, _ := p.parseDeclStart()
+	// Extended attributes on members are kept on attributes and operations, the
+	// members [LegacyUnforgeable] applies to, and skipped on the rest.
+	doc, attrs := p.parseDeclStart()
 	member := p.parseMemberBody()
 	switch m := member.(type) {
 	case *Attribute:
 		m.Doc = doc
+		m.ExtAttrs = attrs
 	case *Operation:
 		m.Doc = doc
+		m.ExtAttrs = attrs
 	case *Constructor:
 		m.Doc = doc
 	case *Const:
@@ -921,7 +927,8 @@ func (p *Parser) parseUnionType() *TypeRef {
 // Merge applies partial interfaces, partial mixins, partial dictionaries and
 // includes statements to the definitions they extend, then records on each
 // interface the members an interface inheriting from it redeclares
-// (Interface.Redeclared). It returns an error for each partial whose interface,
+// (Interface.Redeclared) and those a named property may hide
+// (Interface.OverriddenBuiltIns). It returns an error for each partial whose interface,
 // mixin or dictionary is not in file, and for each side of an includes
 // statement that is not, after applying every one that matches: nothing else
 // would name the members they carry, so they would otherwise vanish unreported.
@@ -1001,7 +1008,70 @@ func Merge(file *File) []*ParseError {
 
 	// Last, so a member a partial or a mixin contributes counts on either side.
 	recordRedeclared(file, ifaceMap)
+	recordOverriddenBuiltIns(file, ifaceMap)
 	return errs
+}
+
+// recordOverriddenBuiltIns sets Interface.OverriddenBuiltIns on every interface
+// of a merged file whose inheritance chain — the interface and those it
+// inherits from — holds one carrying [LegacyOverrideBuiltIns], on its
+// definition or on a partial one. An object implementing that one may be passed
+// to the import of any member of the chain: an ancestor's through a
+// parent-typed wrapper, and the interface's own when it inherits from it. So
+// each interface of the chain records its regular attributes and operations,
+// all but the [LegacyUnforgeable] ones.
+func recordOverriddenBuiltIns(file *File, byName map[string]*Interface) {
+	const attr = "LegacyOverrideBuiltIns"
+	overrides := make(map[*Interface]bool)
+	for _, iface := range file.Interfaces {
+		if hasExtAttr(iface.ExtAttrs, attr) {
+			overrides[iface] = true
+		}
+	}
+	for _, partial := range file.Partials {
+		if iface, ok := byName[partial.Name]; ok && !partial.IsMixin && hasExtAttr(partial.ExtAttrs, attr) {
+			overrides[iface] = true
+		}
+	}
+	if len(overrides) == 0 {
+		return
+	}
+	for _, d := range file.Interfaces {
+		chain := append([]*Interface{d}, Ancestors(d, byName)...)
+		if !slices.ContainsFunc(chain, func(i *Interface) bool { return overrides[i] }) {
+			continue
+		}
+		for _, a := range chain {
+			for _, m := range a.Members {
+				id, ok := regularMember(m)
+				if !ok || unforgeable(m) {
+					continue
+				}
+				if a.OverriddenBuiltIns == nil {
+					a.OverriddenBuiltIns = make(map[string]bool)
+				}
+				a.OverriddenBuiltIns[id] = true
+			}
+		}
+	}
+}
+
+// unforgeable reports whether m is a [LegacyUnforgeable] attribute or
+// operation: one that lives on the object rather than its interface prototype
+// object.
+func unforgeable(m Member) bool {
+	switch m := m.(type) {
+	case *Attribute:
+		return hasExtAttr(m.ExtAttrs, "LegacyUnforgeable")
+	case *Operation:
+		return hasExtAttr(m.ExtAttrs, "LegacyUnforgeable")
+	}
+	return false
+}
+
+// hasExtAttr reports whether attrs holds an extended attribute named name.
+func hasExtAttr(attrs []*ExtAttr, name string) bool {
+	return slices.ContainsFunc(attrs, func(ea *ExtAttr) bool { return ea.Name == name })
 }
 
 // recordRedeclared sets Interface.Redeclared on every interface of a merged

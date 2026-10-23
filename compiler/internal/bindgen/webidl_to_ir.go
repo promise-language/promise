@@ -30,7 +30,8 @@ import (
 //
 // Call webidl.Merge(file) before this function to apply partials, mixins, and
 // includes statements, and to record the members a derived interface
-// redeclares (webidl.Interface.Redeclared).
+// redeclares (webidl.Interface.Redeclared) and those a named property may hide
+// (webidl.Interface.OverriddenBuiltIns).
 func WebIdlToIR(file *webidl.File) ([]*Module, error) {
 	c := &webidlConverter{
 		file:      file,
@@ -261,17 +262,17 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 		case *webidl.Attribute:
 			idlName := iface.Name + "." + m.Name
 			doc := webidlDoc(m.Doc, "attribute", idlName)
-			redeclared := !m.Static && iface.Redeclared[m.Name]
+			viaPrototype := !m.Static && callsDeclaringMember(iface, m.Name)
 			// Getter
 			getter := Func{
-				Name:       name,
-				Kind:       FuncMethod,
-				Accessor:   AccessorGetter,
-				OwnerType:  iface.Name,
-				ImportName: idlName + ".get",
-				Results:    []TypeRef{convertWebIdlTypeRef(m.Type)},
-				Doc:        doc,
-				Redeclared: redeclared,
+				Name:         name,
+				Kind:         FuncMethod,
+				Accessor:     AccessorGetter,
+				OwnerType:    iface.Name,
+				ImportName:   idlName + ".get",
+				Results:      []TypeRef{convertWebIdlTypeRef(m.Type)},
+				Doc:          doc,
+				ViaPrototype: viaPrototype,
 			}
 			if m.Static {
 				getter.Kind = FuncStatic
@@ -284,14 +285,14 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 			// Setter (unless readonly)
 			if !m.Readonly {
 				setter := Func{
-					Name:       name,
-					Kind:       FuncMethod,
-					Accessor:   AccessorSetter,
-					OwnerType:  iface.Name,
-					ImportName: idlName + ".set",
-					Params:     []Param{{Name: "value", Type: convertWebIdlTypeRef(m.Type)}},
-					Doc:        doc,
-					Redeclared: redeclared,
+					Name:         name,
+					Kind:         FuncMethod,
+					Accessor:     AccessorSetter,
+					OwnerType:    iface.Name,
+					ImportName:   idlName + ".set",
+					Params:       []Param{{Name: "value", Type: convertWebIdlTypeRef(m.Type)}},
+					Doc:          doc,
+					ViaPrototype: viaPrototype,
 				}
 				if m.Static {
 					setter.Kind = FuncStatic
@@ -308,10 +309,10 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 					continue
 				}
 			}
-			// Redeclared is keyed by identifier; a static of the same one
+			// Both marks are keyed by identifier; a static of the same one
 			// (Response.json beside json()) is reached through the interface
 			// object, not the prototype.
-			f.Redeclared = f.Kind == FuncMethod && iface.Redeclared[m.Name]
+			f.ViaPrototype = f.Kind == FuncMethod && callsDeclaringMember(iface, m.Name)
 			numberOverload(&f, names.operation(f))
 			res.Methods = append(res.Methods, f)
 
@@ -524,6 +525,14 @@ func memberName(m webidl.Member) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// callsDeclaringMember reports whether the import of iface's instance member
+// id calls iface's own member rather than resolving it on the object
+// (Func.ViaPrototype): an interface inheriting from iface redeclares it, or a
+// named property may hide it.
+func callsDeclaringMember(iface *webidl.Interface, id string) bool {
+	return iface.Redeclared[id] || iface.OverriddenBuiltIns[id]
 }
 
 // convertOperation converts op, named name (memberName).

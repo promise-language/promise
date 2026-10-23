@@ -46,6 +46,16 @@ type Interface struct {
 	// still describes the input after a keep list drops the redeclaring
 	// interface.
 	Redeclared map[string]bool
+	// OverriddenBuiltIns holds the identifiers of this interface's regular
+	// attributes and operations that a named property may hide on an object they
+	// are called on: this interface, one it inherits from, or one inheriting
+	// from it carries [LegacyOverrideBuiltIns], on its definition or a partial
+	// one, so such an object's supported named properties are its own, over its
+	// prototype chain. A [LegacyUnforgeable] member is never recorded: it lives
+	// on the object, and a named property never hides it. Merge sets it from the
+	// whole merged file; like Redeclared, nothing that later reduces the file
+	// clears it.
+	OverriddenBuiltIns map[string]bool
 }
 
 // Dictionary represents a WebIDL dictionary declaration.
@@ -94,10 +104,11 @@ type Typedef struct {
 
 // PartialInterface represents a partial interface or partial mixin definition.
 type PartialInterface struct {
-	Name    string
-	Members []Member
-	IsMixin bool
-	Pos     Pos
+	Name     string
+	Members  []Member
+	IsMixin  bool
+	ExtAttrs []*ExtAttr // written on the partial definition
+	Pos      Pos
 }
 
 // PartialDictionary represents a partial dictionary definition.
@@ -133,6 +144,7 @@ type Attribute struct {
 	Type     *TypeRef
 	Readonly bool
 	Static   bool
+	ExtAttrs []*ExtAttr // the member's leading extended attributes
 	Doc      string
 	Pos      Pos
 }
@@ -141,13 +153,14 @@ func (*Attribute) member() {}
 
 // Operation represents a WebIDL operation (method) member.
 type Operation struct {
-	Name    string
-	Params  []*Param
-	Return  *TypeRef
-	Static  bool
-	Special string // "getter", "setter", "deleter", "stringifier", "legacycaller" or ""
-	Doc     string
-	Pos     Pos
+	Name     string
+	Params   []*Param
+	Return   *TypeRef
+	Static   bool
+	Special  string     // "getter", "setter", "deleter", "stringifier", "legacycaller" or ""
+	ExtAttrs []*ExtAttr // the member's leading extended attributes
+	Doc      string
+	Pos      Pos
 }
 
 func (*Operation) member() {}

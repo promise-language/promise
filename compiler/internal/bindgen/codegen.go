@@ -433,9 +433,9 @@ type wrapperLocals struct{ handle, ref, tag string }
 // No fixed name is safe instead. A parameter is named after its IDL argument,
 // and an argument can be written as any lowercase identifier: idlToSnake keeps
 // one unchanged, the WebIDL lexer keeps a leading "_" (#693), and the WIT lexer
-// accepts "_" too. Promise identifiers have no character, like the glue's "$",
-// that an argument cannot carry. So the choice is made against the parameters
-// this wrapper actually declares.
+// accepts "_" too. A Promise identifier has no character that an argument
+// cannot carry, as "$" is in a JS one. So the choice is made against the
+// parameters this wrapper actually declares.
 func newWrapperLocals(params []Param) wrapperLocals {
 	distinct := func(name string) string {
 		for slices.ContainsFunc(params, func(p Param) bool { return p.Name == name }) {

@@ -253,6 +253,10 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 	names := newMemberNamer(inherited)
 
 	for _, member := range iface.Members {
+		name, ok := memberName(member)
+		if !ok {
+			continue // nothing to emit
+		}
 		switch m := member.(type) {
 		case *webidl.Attribute:
 			idlName := iface.Name + "." + m.Name
@@ -260,7 +264,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 			redeclared := !m.Static && iface.Redeclared[m.Name]
 			// Getter
 			getter := Func{
-				Name:       idlToSnake(m.Name),
+				Name:       name,
 				Kind:       FuncMethod,
 				Accessor:   AccessorGetter,
 				OwnerType:  iface.Name,
@@ -280,7 +284,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 			// Setter (unless readonly)
 			if !m.Readonly {
 				setter := Func{
-					Name:       idlToSnake(m.Name),
+					Name:       name,
 					Kind:       FuncMethod,
 					Accessor:   AccessorSetter,
 					OwnerType:  iface.Name,
@@ -297,14 +301,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 			}
 
 		case *webidl.Operation:
-			// Named operations, and the anonymous special operations (emitted
-			// under their special keyword). Anything else without a name — an
-			// anonymous stringifier or legacycaller — has no member to emit.
-			special := m.Special == "getter" || m.Special == "setter" || m.Special == "deleter"
-			if m.Name == "" && !special {
-				continue
-			}
-			f := c.convertOperation(iface.Name, m)
+			f := c.convertOperation(iface.Name, m, name)
 			if m.Name == "" {
 				if err := anonymousSpecialError(m, f); err != nil {
 					c.errs = append(c.errs, err)
@@ -327,7 +324,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 			// Constants become static getter-like functions
 			idlName := iface.Name + "." + m.Name
 			f := Func{
-				Name:       idlToSnake(m.Name),
+				Name:       name,
 				Kind:       FuncStatic,
 				OwnerType:  iface.Name,
 				ImportName: idlName,
@@ -503,8 +500,34 @@ func numberOverload(f *Func, k int) {
 	}
 }
 
-func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operation) Func {
-	name := idlToSnake(op.Name)
+// memberName returns the name of the Promise member m lowers to before
+// numberOverload numbers it — the name memberNamer counts its overload set by,
+// and the unit a keep list keeps or drops it with (keepUnit). An anonymous
+// getter, setter or deleter is named by its keyword; every constructor by
+// constructorName. It returns false for a member that lowers to none, having no
+// member to emit: an iterable declaration, or an anonymous stringifier or
+// legacycaller.
+func memberName(m webidl.Member) (string, bool) {
+	switch m := m.(type) {
+	case *webidl.Attribute:
+		return idlToSnake(m.Name), true
+	case *webidl.Const:
+		return idlToSnake(m.Name), true
+	case *webidl.Constructor:
+		return constructorName, true
+	case *webidl.Operation:
+		if m.Name != "" {
+			return idlToSnake(m.Name), true
+		}
+		if m.Special == "getter" || m.Special == "setter" || m.Special == "deleter" {
+			return m.Special, true
+		}
+	}
+	return "", false
+}
+
+// convertOperation converts op, named name (memberName).
+func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operation, name string) Func {
 	// The import names the JS member the glue calls. An anonymous special
 	// operation has no identifier and no JS member: it is named by its special
 	// keyword on both sides — never by an empty member — and the glue reads that
@@ -512,7 +535,6 @@ func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operatio
 	// docs/wasm-bindings.md, "Supported subset").
 	member := op.Name
 	if op.Special != "" && op.Name == "" {
-		name = op.Special
 		member = op.Special
 	}
 

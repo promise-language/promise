@@ -742,6 +742,74 @@ func TestApplyKeepList(t *testing.T) {
 			},
 			types: map[string][]string{},
 		},
+		{
+			// An entry names an IDL member, as compat data does: I.foo_bar names
+			// nothing on an I declaring only fooBar, though both lower to foo_bar.
+			name: "an entry names an IDL member, not its Promise name",
+			src:  `interface I { undefined fooBar(); };`,
+			list: "I\nI.foo_bar\n",
+			resources: map[string][]string{
+				"I": nil,
+			},
+			types: map[string][]string{},
+		},
+		{
+			// The chain shape of #685 the other way: C's constant is numbered
+			// after the reset it inherits, so when P's reset names a dropped
+			// definition the constant goes too, though it names none itself.
+			name: "a constant is dropped with an ancestor's dangling member of its Promise name",
+			src: `interface Fancy {};
+			interface P { undefined reset(Fancy f); };
+			interface C : P { const long RESET = 1; };`,
+			list: "C\n",
+			resources: map[string][]string{
+				"P": nil,
+				"C": nil,
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "P.reset", Ref: "Fancy"},
+				{What: "C.RESET", Ref: "Fancy"},
+			},
+		},
+		{
+			// An instance attribute is an inherited slot as an operation is, so
+			// D's foo_bar, numbered after P's fooBar, keeps it.
+			name: "a kept name keeps an ancestor's attribute of it",
+			src: `interface P { attribute long fooBar; };
+			interface D : P { undefined foo_bar(DOMString s); };`,
+			list: "D\nD.foo_bar\n",
+			resources: map[string][]string{
+				"P": {"P.fooBar.get", "P.fooBar.set"},
+				"D": {"D.foo_bar.2"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// Neither an iterable nor an anonymous legacycaller lowers to a
+			// member, so neither is an inherited slot: P's, naming a dropped
+			// definition, are dropped and leave D's.
+			name: "an ancestor's dangling member that lowers to none leaves the descendant's",
+			src: `interface Fancy {};
+			interface P {
+				iterable<Fancy>;
+				legacycaller undefined (Fancy f);
+			};
+			interface D : P {
+				iterable<long>;
+				legacycaller undefined (long n);
+			};`,
+			list: "D\n",
+			resources: map[string][]string{
+				"P": nil,
+				"D": nil,
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "P.iterable", Ref: "Fancy"},
+				{What: "P.legacycaller", Ref: "Fancy"},
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

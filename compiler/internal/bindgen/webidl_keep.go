@@ -85,9 +85,10 @@ type KeepDrop struct {
 // ordinals WebIdlToIR assigns never depend on the list: a derived member is
 // numbered after the instance members of its Promise name it inherits
 // (docs/wasm-bindings.md, "Shadowed Members"), so it keeps its ordinal only if
-// the list keeps exactly those. Constructors are never inherited, so a unit
-// reaches an ancestor — kept up the chain, or dropped down it — only where the
-// ancestor holds a member of it other than a constructor.
+// the list keeps exactly those. Only instance members are inherited — statics,
+// constants and constructors are not — so a unit reaches an ancestor — kept up
+// the chain, or dropped down it — only where the ancestor holds an instance
+// member of it.
 //
 // A reference is a name the lowered type carries (convertWebIdlTypeRef), so a
 // name inside a union, Promise<T> or record<K, V> — each lowered to JsValue — is
@@ -229,9 +230,10 @@ func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 // unitsOf returns the units of a kept interface's members that it keeps by
 // itself — each holding a member the list names, or one that goes with its
 // interface — and the units a descendant's members are numbered against: each
-// holding a member other than a constructor, since constructors are never
-// inherited. An entry naming a member the interface does not declare selects
-// nothing, here as everywhere.
+// holding an instance attribute or operation, the only members a descendant
+// inherits (memberNamer; statics, constants and constructors are `global`). An
+// entry naming a member the interface does not declare selects nothing, here
+// as everywhere.
 func unitsOf(iface *webidl.Interface, keep *KeepList) (own, inheritable map[memberUnit]bool) {
 	own = make(map[memberUnit]bool)
 	inheritable = make(map[memberUnit]bool)
@@ -240,8 +242,11 @@ func unitsOf(iface *webidl.Interface, keep *KeepList) (own, inheritable map[memb
 		if !listed || keep.members[iface.Name+"."+label] {
 			own[unit] = true
 		}
-		if _, ctor := m.(*webidl.Constructor); !ctor {
-			inheritable[unit] = true
+		switch m := m.(type) {
+		case *webidl.Attribute:
+			inheritable[unit] = inheritable[unit] || !m.Static
+		case *webidl.Operation:
+			inheritable[unit] = inheritable[unit] || !m.Static && unit.lowered
 		}
 	}
 	return own, inheritable
@@ -249,8 +254,8 @@ func unitsOf(iface *webidl.Interface, keep *KeepList) (own, inheritable map[memb
 
 // descendantKeeps returns, for each interface, the units a kept interface
 // inheriting from it keeps by itself (own). The unit spans the `is` chain, so an
-// ancestor keeps those units too — each one it holds a member of other than a
-// constructor (unitsOf), which ApplyKeepList checks.
+// ancestor keeps those units too — each one it holds an instance member of
+// (unitsOf), which ApplyKeepList checks.
 func descendantKeeps(own map[*webidl.Interface]map[memberUnit]bool, ifaces map[string]*webidl.Interface) map[*webidl.Interface]map[memberUnit]bool {
 	units := make(map[*webidl.Interface]map[memberUnit]bool)
 	for d, keeps := range own {
@@ -281,6 +286,7 @@ type selectedMember struct {
 	member webidl.Member
 	unit   memberUnit
 	label  string
+	ref    string // the dropped definition the member names, or ""
 }
 
 // selectMembers selects a kept interface's members — those of a unit selected
@@ -293,17 +299,15 @@ func selectMembers(iface *webidl.Interface, selected func(unit memberUnit) bool,
 		if !selected(unit) {
 			continue
 		}
-		member := selectedMember{member: m, unit: unit, label: label}
+		member := selectedMember{member: m, unit: unit, label: label, ref: droppedRef(types...)}
 		s.members = append(s.members, member)
-		if ordered[label] {
+		if member.ref == "" || ordered[label] {
 			continue
 		}
-		if ref := droppedRef(types...); ref != "" {
-			ordered[label] = true
-			s.order = append(s.order, member)
-			if _, seen := s.dangling[unit]; !seen {
-				s.dangling[unit] = ref
-			}
+		ordered[label] = true
+		s.order = append(s.order, member)
+		if _, seen := s.dangling[unit]; !seen {
+			s.dangling[unit] = member.ref
 		}
 	}
 	return s
@@ -311,10 +315,11 @@ func selectMembers(iface *webidl.Interface, selected func(unit memberUnit) bool,
 
 // keepMembers reduces a kept interface to its selected members, then drops each
 // unit whose members name a dropped definition — on the interface, or on an
-// ancestor it inherits the unit from, whose reference (the nearest such
-// ancestor's) it reports; an ancestor's unit of constructors alone is not
-// inherited. One KeepDrop per dropped label: those whose own members name a
-// dropped definition first, then the rest, each in member order.
+// ancestor it inherits the unit from; an ancestor's unit holding no instance
+// member is not inherited. One KeepDrop per dropped label: first those whose
+// own members name a dropped definition, each reporting the one it names, then
+// the rest, each reporting the one its unit was dropped for (the interface's
+// own, or else the nearest such ancestor's), each in member order.
 func keepMembers(iface *webidl.Interface, selections map[*webidl.Interface]*memberSelection, inheritable map[*webidl.Interface]map[memberUnit]bool, ifaces map[string]*webidl.Interface) []KeepDrop {
 	own := selections[iface]
 	dangling := maps.Clone(own.dangling)
@@ -332,19 +337,19 @@ func keepMembers(iface *webidl.Interface, selections map[*webidl.Interface]*memb
 
 	drops := make([]KeepDrop, 0, len(dangling))
 	reported := make(map[string]bool)
-	report := func(s selectedMember) {
+	report := func(s selectedMember, ref string) {
 		if !reported[s.label] {
 			reported[s.label] = true
-			drops = append(drops, KeepDrop{What: iface.Name + "." + s.label, Ref: dangling[s.unit]})
+			drops = append(drops, KeepDrop{What: iface.Name + "." + s.label, Ref: ref})
 		}
 	}
 	for _, s := range own.order {
-		report(s)
+		report(s, s.ref)
 	}
 	iface.Members = nil
 	for _, s := range own.members {
-		if _, drop := dangling[s.unit]; drop {
-			report(s)
+		if ref, drop := dangling[s.unit]; drop {
+			report(s, ref)
 			continue
 		}
 		iface.Members = append(iface.Members, s.member)

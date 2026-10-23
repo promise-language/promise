@@ -618,6 +618,59 @@ func TestApplyKeepList(t *testing.T) {
 			},
 		},
 		{
+			// A name whose own members name a dropped definition reports that
+			// one, not the first its unit names.
+			name: "each dangling name of a unit reports the definition it names",
+			src: `interface F1 {};
+			interface F2 {};
+			interface I {
+				undefined fooBar(F1 f);
+				undefined foo_bar(F2 g);
+				undefined other();
+			};`,
+			list: "I\nI.fooBar\nI.other\n",
+			resources: map[string][]string{
+				"I": {"I.other"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "I.fooBar", Ref: "F1"},
+				{What: "I.foo_bar", Ref: "F2"},
+			},
+		},
+		{
+			// A static is `global`, never an inherited slot, so C's constant is
+			// `reset` with or without it: P's dangling static does not drop it,
+			// and C keeping its unit does not keep the unlisted static.
+			name: "an ancestor's static is not inherited",
+			src: `interface Fancy {};
+			interface P { static undefined reset(Fancy f); };
+			interface C : P { const long RESET = 1; };`,
+			list: "C\n",
+			resources: map[string][]string{
+				"P": nil,
+				"C": {"C.RESET"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			name: "a kept name keeps no ancestor's static of it",
+			src: `interface P {
+				static undefined reset();
+				static attribute long fooBar;
+			};
+			interface C : P {
+				undefined reset();
+				attribute long foo_bar;
+			};`,
+			list: "C\nC.reset\nC.foo_bar\n",
+			resources: map[string][]string{
+				"P": nil,
+				"C": {"C.reset", "C.foo_bar.get", "C.foo_bar.set"},
+			},
+			types: map[string][]string{},
+		},
+		{
 			// An operation whose name snakes to `constructor` joins the
 			// constructors' overload set, so it is one unit with them.
 			name: "constructors and an operation named Constructor are one unit",
@@ -633,8 +686,8 @@ func TestApplyKeepList(t *testing.T) {
 		},
 		{
 			// D's constructor is numbered after the `constructor` P's operation
-			// is inherited as, so it keeps P's — an ancestor's unit holding more
-			// than constructors is inherited.
+			// is inherited as, so it keeps P's — an ancestor's unit holding an
+			// instance member is inherited.
 			name: "a constructor keeps an ancestor's operation of its Promise name",
 			src: `interface P { undefined Constructor(long n); };
 			interface D : P { constructor(); };`,
@@ -662,8 +715,8 @@ func TestApplyKeepList(t *testing.T) {
 			},
 		},
 		{
-			// The constructor rule is by member kind, not by name: D's operation
-			// is an instance member, so its unit reaches P's.
+			// The rule is by the ancestor's member kind, not by name: P's
+			// Constructor is an instance operation, so D's entry reaches it.
 			name: "an operation named Constructor keeps the ancestor's",
 			src: `interface P { undefined Constructor(long n); };
 			interface D : P { undefined Constructor(DOMString s); };`,

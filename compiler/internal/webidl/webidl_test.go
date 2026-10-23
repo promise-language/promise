@@ -1,7 +1,9 @@
 package webidl
 
 import (
+	"maps"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -1712,6 +1714,139 @@ func TestMergeUnmatched(t *testing.T) {
 				}
 				if count != want {
 					t.Errorf("%s has %d members after the merge, want %d", name, count, want)
+				}
+			}
+		})
+	}
+}
+
+// TestMergeRecordsRedeclared pins Interface.Redeclared (#682): Merge records on
+// each interface the identifiers of its regular attributes and operations that
+// an interface inheriting from it declares again on its prototype — as a
+// regular attribute, regular operation or constant, whatever the signature —
+// so the JS glue can call the declaring interface's own member. want lists,
+// per interface, the identifiers recorded; an interface it omits records none.
+func TestMergeRecordsRedeclared(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want map[string][]string
+	}{
+		{
+			name: "attribute redeclared with another type",
+			src: `interface SVGAnimatedString {};
+			interface Element { attribute DOMString className; attribute DOMString id; };
+			interface SVGElement : Element { readonly attribute SVGAnimatedString className; };`,
+			want: map[string][]string{"Element": {"className"}},
+		},
+		{
+			name: "named getter redeclared",
+			src: `interface Element {};
+			interface RadioNodeList {};
+			interface HTMLCollection { getter Element? namedItem(DOMString name); };
+			interface HTMLFormControlsCollection : HTMLCollection {
+				getter (RadioNodeList or Element)? namedItem(DOMString name);
+			};`,
+			want: map[string][]string{"HTMLCollection": {"namedItem"}},
+		},
+		{
+			// An exact redeclaration still replaces the member on the derived
+			// prototype, so it counts like any other.
+			name: "exact redeclaration",
+			src: `interface RectReadOnly { readonly attribute double x; };
+			interface Rect : RectReadOnly { attribute double x; };`,
+			want: map[string][]string{"RectReadOnly": {"x"}},
+		},
+		{
+			name: "attribute over operation and operation over attribute",
+			src: `interface P { undefined a(); attribute long b; };
+			interface C : P { attribute long a; undefined b(); };`,
+			want: map[string][]string{"P": {"a", "b"}},
+		},
+		{
+			// A constant lives on the interface prototype object too.
+			name: "constant over attribute",
+			src: `interface P { attribute long X; };
+			interface C : P { const long X = 1; };`,
+			want: map[string][]string{"P": {"X"}},
+		},
+		{
+			name: "grandchild redeclares past a parent that does not",
+			src: `interface A { undefined m(); undefined n(); };
+			interface B : A { undefined o(); };
+			interface C : B { undefined m(long x); };`,
+			want: map[string][]string{"A": {"m"}},
+		},
+		{
+			// Recorded after partials and includes are applied, on either side.
+			name: "members from a mixin and from partials",
+			src: `interface P { undefined m(); undefined n(); };
+			partial interface P { undefined p(); };
+			interface C : P {};
+			interface mixin M { undefined m(); };
+			C includes M;
+			partial interface C { undefined p(); };`,
+			want: map[string][]string{"P": {"m", "p"}},
+		},
+		{
+			// None of these is a regular attribute, regular operation or
+			// constant of the child. The iterable does put entries on C's
+			// prototype, but WebIDL forbids an iterable declaration on an
+			// interface that inherits a member named entries, so it is not
+			// counted. An anonymous getter names no property on either side.
+			name: "statics, constructor, anonymous getter and iterable on the child",
+			src: `interface P {
+				undefined s();
+				attribute long t;
+				undefined entries();
+				getter long (unsigned long index);
+			};
+			interface C : P {
+				static undefined s();
+				static attribute long t;
+				constructor();
+				getter long (unsigned long index);
+				iterable<long>;
+			};`,
+		},
+		{
+			// A static lives on the interface object, so the child's regular m
+			// and a shadow nothing the parent's imports resolve.
+			name: "statics on the parent",
+			src: `interface P { static undefined m(); static attribute long a; };
+			interface C : P { undefined m(); attribute long a; };`,
+		},
+		{
+			name: "siblings and an unrelated interface",
+			src: `interface P {};
+			interface A : P { undefined m(); };
+			interface B : P { undefined m(); };
+			interface U { undefined m(); };`,
+		},
+		{
+			name: "parent not in the file",
+			src:  `interface C : Missing { undefined m(); };`,
+		},
+		{
+			name: "inheritance cycle",
+			src: `interface A : B { undefined m(); };
+			interface B : A { undefined m(); };`,
+			want: map[string][]string{"A": {"m"}, "B": {"m"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			file, errs := Parse(tc.src, "test.webidl")
+			if len(errs) > 0 {
+				t.Fatalf("unexpected errors: %v", errs)
+			}
+			if errs := Merge(file); len(errs) > 0 {
+				t.Fatalf("merge errors: %v", errs)
+			}
+			for _, iface := range file.Interfaces {
+				got := slices.Sorted(maps.Keys(iface.Redeclared))
+				if want := tc.want[iface.Name]; !slices.Equal(got, want) {
+					t.Errorf("%s.Redeclared = %q, want %q", iface.Name, got, want)
 				}
 			}
 		})

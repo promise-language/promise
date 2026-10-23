@@ -919,11 +919,12 @@ func (p *Parser) parseUnionType() *TypeRef {
 }
 
 // Merge applies partial interfaces, partial mixins, partial dictionaries and
-// includes statements to the definitions they extend. It returns an error for
-// each partial whose interface, mixin or dictionary is not in file, and for each
-// side of an includes statement that is not, after applying every one that
-// matches: nothing else would name the members they carry, so they would
-// otherwise vanish unreported.
+// includes statements to the definitions they extend, then records on each
+// interface the members an interface inheriting from it redeclares
+// (Interface.Redeclared). It returns an error for each partial whose interface,
+// mixin or dictionary is not in file, and for each side of an includes
+// statement that is not, after applying every one that matches: nothing else
+// would name the members they carry, so they would otherwise vanish unreported.
 func Merge(file *File) []*ParseError {
 	var errs []*ParseError
 	unbound := func(pos Pos, what, name, kind string) {
@@ -997,5 +998,69 @@ func Merge(file *File) []*ParseError {
 			iface.Members = append(iface.Members, m.Members...)
 		}
 	}
+
+	// Last, so a member a partial or a mixin contributes counts on either side.
+	recordRedeclared(file, ifaceMap)
 	return errs
+}
+
+// recordRedeclared sets Interface.Redeclared on every interface of a merged
+// file: an identifier an interface declares on its prototype — as a regular
+// attribute, a regular operation or a constant — is recorded on each ancestor
+// that declares it as a regular attribute or operation. Each interface keeps
+// one set by identifier, rather than a mark on the member, because a mixin's
+// members are shared by every interface that includes it.
+func recordRedeclared(file *File, byName map[string]*Interface) {
+	for _, d := range file.Interfaces {
+		declared := make(map[string]bool)
+		for _, m := range d.Members {
+			if id, ok := regularMember(m); ok {
+				declared[id] = true
+			} else if c, ok := m.(*Const); ok {
+				declared[c.Name] = true
+			}
+		}
+		if len(declared) == 0 {
+			continue
+		}
+		for _, a := range Ancestors(d, byName) {
+			for _, m := range a.Members {
+				id, ok := regularMember(m)
+				if !ok || !declared[id] {
+					continue
+				}
+				if a.Redeclared == nil {
+					a.Redeclared = make(map[string]bool)
+				}
+				a.Redeclared[id] = true
+			}
+		}
+	}
+}
+
+// regularMember returns the identifier of a regular attribute or a named
+// regular operation: a member whose property lives on its interface prototype
+// object. A static member lives on the interface object instead, and an
+// anonymous special operation names no property.
+func regularMember(m Member) (string, bool) {
+	switch m := m.(type) {
+	case *Attribute:
+		return m.Name, !m.Static
+	case *Operation:
+		return m.Name, !m.Static && m.Name != ""
+	}
+	return "", false
+}
+
+// Ancestors returns the interfaces iface inherits from, nearest first, each
+// parent resolved through byName, ending at a parent byName does not hold (an
+// unbound one) or where an inheritance cycle comes back around.
+func Ancestors(iface *Interface, byName map[string]*Interface) []*Interface {
+	var chain []*Interface
+	seen := map[*Interface]bool{iface: true}
+	for a := byName[iface.Parent]; a != nil && !seen[a]; a = byName[a.Parent] {
+		seen[a] = true
+		chain = append(chain, a)
+	}
+	return chain
 }

@@ -324,7 +324,9 @@ func TestWebIdlShadowLeavesParentAndOrder(t *testing.T) {
 
 // TestWebIdlShadowCodegen pins what the renamed members generate: every name
 // derived from the member carries its ordinal, the parent's member is generated
-// unchanged, and the glue implements each import by calling the IDL member.
+// unchanged, and the glue implements each import by calling the IDL member —
+// the parent's own, since the child redeclares it (#682), and the shadow's on
+// the object.
 func TestWebIdlShadowCodegen(t *testing.T) {
 	modules := overloadIR(t, `interface Element { attribute DOMString className; };
 	interface RadioNodeList {};
@@ -356,7 +358,10 @@ func TestWebIdlShadowCodegen(t *testing.T) {
 	assertContains(t, js, `"HTMLFormControlsCollection.namedItem.2"(handle, name_ptr, name_len) {`)
 	assertContains(t, js, `"SVGElement.className.get"(handle) {`)
 	assertContains(t, js, "_refStore(_refLoad(handle).className)")
-	if n := strings.Count(js, "_refLoad(handle).namedItem(_readString(name_ptr, name_len))"); n != 2 {
-		t.Errorf("namedItem called by %d imports, want 2 (the parent's and the shadow's)\n%s", n, js)
+	assertContains(t, js, `_writeStringResult(retptr, Reflect.get(Element.prototype, "className", _refLoad(handle)));`)
+	assertContains(t, js, `Reflect.set(Element.prototype, "className", _readString(value_ptr, value_len), _refLoad(handle));`)
+	assertContains(t, js, "Reflect.apply(HTMLCollection.prototype.namedItem, _refLoad(handle), [_readString(name_ptr, name_len)])")
+	if n := strings.Count(js, "_refLoad(handle).namedItem(_readString(name_ptr, name_len))"); n != 1 {
+		t.Errorf("namedItem resolved on the object by %d imports, want 1 (the shadow's)\n%s", n, js)
 	}
 }

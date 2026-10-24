@@ -1630,6 +1630,17 @@ func TestMergeUnmatched(t *testing.T) {
 			members: map[string]int{"Target": 2},
 		},
 		{
+			// The same input spelled partial interface: an interface mixin is a
+			// mixin, not an interface, so the partial finds no interface and the
+			// mixin keeps only its own member.
+			name: "partial interface on an interface mixin",
+			src:  "partial interface X { undefined b(); };\ninterface mixin X { undefined a(); };\ninterface T {};\nT includes X;",
+			want: []string{
+				"test.webidl:1:9: partial interface X: X is not an interface in the bound IDL files",
+			},
+			members: map[string]int{"T": 1, "X": 1},
+		},
+		{
 			name: "partial dictionary",
 			src:  "dictionary Base { DOMString name; };\npartial dictionary Unknown { long extra; };",
 			want: []string{
@@ -1652,6 +1663,15 @@ func TestMergeUnmatched(t *testing.T) {
 			want: []string{
 				"test.webidl:2:1: Missing includes Mix: Missing is not an interface in the bound IDL files",
 			},
+		},
+		{
+			// The left side is an interface: an interface mixin of the name is not.
+			name: "includes with an interface mixin as its interface",
+			src:  "interface mixin X { undefined a(); };\ninterface mixin M { undefined c(); };\nX includes M;",
+			want: []string{
+				"test.webidl:3:1: X includes M: X is not an interface in the bound IDL files",
+			},
+			members: map[string]int{"X": 1},
 		},
 		{
 			name: "includes with no mixin",
@@ -1826,6 +1846,12 @@ func TestMergeRecordsRedeclared(t *testing.T) {
 		{
 			name: "parent not in the file",
 			src:  `interface C : Missing { undefined m(); };`,
+		},
+		{
+			// An interface mixin is not an interface, so it is no parent either.
+			name: "parent is an interface mixin",
+			src: `interface mixin M { undefined m(); };
+			interface C : M { undefined m(); };`,
 		},
 		{
 			name: "inheritance cycle",

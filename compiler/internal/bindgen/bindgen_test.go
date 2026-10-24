@@ -4230,19 +4230,21 @@ func TestJsParamNameReservedWords(t *testing.T) {
 	}
 }
 
-// TestWebIdlArgNameCannotSpellGlueParam checks the premise the glue's own
-// parameter names rest on (#689): no WebIDL argument can be written as one of
-// them. A method's receiver, a string result's return pointer, a string
-// argument's pointer/length pair and jsParamName's escape of a reserved word
+// TestWebIdlArgNameCannotSpellGlueName checks the premise the glue's own
+// parameter and local names rest on (#689, #690): no WebIDL argument can be
+// written as one of them. A method's receiver, a string result's return
+// pointer, a string argument's pointer/length pair, jsParamName's escape of a
+// reserved word, a constructor's created object and a nullable interface result
 // each contain a character a WebIDL identifier cannot, so naming an argument
-// after any of them is a parse error rather than a duplicate parameter.
-func TestWebIdlArgNameCannotSpellGlueParam(t *testing.T) {
+// after any of them is a parse error rather than a duplicate parameter or a
+// redeclared one.
+func TestWebIdlArgNameCannotSpellGlueName(t *testing.T) {
 	pointer, length := jsStringParams("x")
-	for _, name := range []string{jsReceiverParam, jsReturnPointerParam, pointer, length, jsParamName("class")} {
+	for _, name := range []string{jsReceiverParam, jsReturnPointerParam, pointer, length, jsParamName("class"), jsConstructedLocal, jsResultLocal} {
 		t.Run(name, func(t *testing.T) {
 			src := "interface Target {\n  undefined f(long " + name + ");\n};"
 			if _, errs := webidl.Parse(src, "glue.webidl"); len(errs) == 0 {
-				t.Errorf("an argument named %q parses, and the glue adds a parameter of that name", name)
+				t.Errorf("an argument named %q parses, and the glue introduces that name itself", name)
 			}
 		})
 	}

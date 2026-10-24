@@ -65,17 +65,17 @@ func TestWebIdlOverrideBuiltInsGlue(t *testing.T) {
 		// Carried on a partial interface; a mixin member of the chain; a
 		// descendant, whose objects are Documents too.
 		{"Document.cookie.get", `_writeStringResult($retptr, Reflect.get(Document.prototype, "cookie", _refLoad($handle)));`},
-		{"Document.querySelector", `const result = Reflect.apply(Document.prototype.querySelector, _refLoad($handle), [_readString(selectors$ptr, selectors$len)]);`},
+		{"Document.querySelector", `const $result = Reflect.apply(Document.prototype.querySelector, _refLoad($handle), [_readString(selectors$ptr, selectors$len)]);`},
 		{"XMLDocument.load", `Reflect.apply(XMLDocument.prototype.load, _refLoad($handle), [_readString(url$ptr, url$len)]);`},
 
 		// An unforgeable member lives on the object, and no named property
 		// hides it.
-		{"Document.location.get", `const result = _refLoad($handle).location;`},
+		{"Document.location.get", `const $result = _refLoad($handle).location;`},
 		// Outside every chain: a sibling of the form, an interface sharing only
 		// the root, and a mixin member included elsewhere.
 		{"HTMLDivElement.align.get", `_writeStringResult($retptr, _refLoad($handle).align);`},
 		{"Window.name.get", `_writeStringResult($retptr, _refLoad($handle).name);`},
-		{"DocumentFragment.querySelector", `const result = _refLoad($handle).querySelector(_readString(selectors$ptr, selectors$len));`},
+		{"DocumentFragment.querySelector", `const $result = _refLoad($handle).querySelector(_readString(selectors$ptr, selectors$len));`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key, func(t *testing.T) {

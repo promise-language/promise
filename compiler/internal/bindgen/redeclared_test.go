@@ -57,7 +57,7 @@ func TestWebIdlRedeclaredGlue(t *testing.T) {
 		// Redeclared by a derived interface: the declaring interface's own member.
 		{"Element.className.get", `_writeStringResult($retptr, Reflect.get(Element.prototype, "className", _refLoad($handle)));`},
 		{"Element.className.set", `Reflect.set(Element.prototype, "className", _readString(value$ptr, value$len), _refLoad($handle));`},
-		{"HTMLCollection.namedItem", `const result = Reflect.apply(HTMLCollection.prototype.namedItem, _refLoad($handle), [_readString(name$ptr, name$len)]);`},
+		{"HTMLCollection.namedItem", `const $result = Reflect.apply(HTMLCollection.prototype.namedItem, _refLoad($handle), [_readString(name$ptr, name$len)]);`},
 		// D redeclares only f(long), which replaces the whole set on its
 		// prototype: the overload it leaves out must still reach P's f.
 		{"P.f", `Reflect.apply(P.prototype.f, _refLoad($handle), [a]);`},
@@ -65,7 +65,7 @@ func TestWebIdlRedeclaredGlue(t *testing.T) {
 		{"P.g.2", `Reflect.apply(P.prototype.g, _refLoad($handle), [a]);`},
 
 		// Redeclared by no interface deriving from the declaring one: on the object.
-		{"HTMLFormControlsCollection.namedItem.2", `const result = _refLoad($handle).namedItem(_readString(name$ptr, name$len));`},
+		{"HTMLFormControlsCollection.namedItem.2", `const $result = _refLoad($handle).namedItem(_readString(name$ptr, name$len));`},
 		{"SVGElement.className.get", `return _refStore(_refLoad($handle).className);`},
 		{"D.f", `_refLoad($handle).f(a);`},
 		{"D.g.2", `_refLoad($handle).g(a);`},

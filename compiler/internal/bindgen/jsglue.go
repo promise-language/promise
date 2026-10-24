@@ -414,16 +414,20 @@ func (g *jsGlueGenerator) emitFreeFuncImport(f Func) {
 }
 
 // The names the glue gives its own parameters around a WebIDL operation's
-// arguments: the receiver handle a method takes first, and the return pointer a
-// string result comes back through, last. Each begins with a `$`, and a name
-// derived from a WebIDL argument never does: the WebIDL lexer's identifiers are
-// letters, digits and `_` (isIdentStart, isIdentContinue), idlToSnake and
-// sanitizeIdent add only `_`, and the one `$` such a name can carry is the one
-// jsParamName's escape puts at its end. So no argument can take one of these
-// names, whatever it is called (#689).
+// arguments — the receiver handle a method takes first, and the return pointer
+// a string result comes back through, last — and the locals an import body
+// declares beside them: the object a constructor creates, and a nullable
+// interface result tested for null before it is stored. Each begins with a `$`,
+// and a name derived from a WebIDL argument never does: the WebIDL lexer's
+// identifiers are letters, digits and `_` (isIdentStart, isIdentContinue),
+// idlToSnake and sanitizeIdent add only `_`, and the one `$` such a name can
+// carry is the one jsParamName's escape puts at its end. So no argument can
+// take one of these names, whatever it is called (#689, #690).
 const (
 	jsReceiverParam      = "$handle"
 	jsReturnPointerParam = "$retptr"
+	jsConstructedLocal   = "$obj"
+	jsResultLocal        = "$result"
 )
 
 // jsStringParams returns the names of the (pointer, length) pair a string
@@ -483,8 +487,8 @@ func returnsString(f Func) bool {
 func (g *jsGlueGenerator) emitConstructorBody(resourceName string, f Func, jsParams []string) {
 	// Convert parameters, call new Constructor(...), store ref
 	args := g.buildJSCallArgs(f)
-	g.writef("      const obj = new %s(%s);\n", resourceName, strings.Join(args, ", "))
-	g.write("      return _refStore(obj);\n")
+	g.writef("      const %s = new %s(%s);\n", jsConstructedLocal, resourceName, strings.Join(args, ", "))
+	g.writef("      return _refStore(%s);\n", jsConstructedLocal)
 }
 
 func (g *jsGlueGenerator) emitStaticBody(resourceName, importName string, f Func) {
@@ -619,9 +623,9 @@ func (g *jsGlueGenerator) emitReturnConversion(f Func, call string) {
 	}
 	if isRefType(ret) {
 		if isNullable {
-			g.writef("      const result = %s;\n", call)
-			g.write("      if (result == null) return 0;\n")
-			g.write("      return _refStore(result);\n")
+			g.writef("      const %s = %s;\n", jsResultLocal, call)
+			g.writef("      if (%s == null) return 0;\n", jsResultLocal)
+			g.writef("      return _refStore(%s);\n", jsResultLocal)
 		} else {
 			g.writef("      return _refStore(%s);\n", call)
 		}

@@ -428,8 +428,8 @@ func TestWebIdlOverloadConstructorCodegen(t *testing.T) {
 func TestWebIdlOverloadConstructorJSGlue(t *testing.T) {
 	glue := GenerateJSGlue(overloadIR(t, constructorOverloadFixture))
 
-	assertContains(t, glue, `"X.constructor"(n) {`+"\n      const obj = new X(n);")
-	assertContains(t, glue, `"X.constructor.2"(tag$ptr, tag$len) {`+"\n      const obj = new X(_readString(tag$ptr, tag$len));")
+	assertContains(t, glue, `"X.constructor"(n) {`+"\n      const $obj = new X(n);\n      return _refStore($obj);\n")
+	assertContains(t, glue, `"X.constructor.2"(tag$ptr, tag$len) {`+"\n      const $obj = new X(_readString(tag$ptr, tag$len));\n      return _refStore($obj);\n")
 	for _, key := range []string{`"X.constructor"(`, `"X.constructor.2"(`} {
 		if n := strings.Count(glue, key); n != 1 {
 			t.Errorf("import key %q appears %d times, want exactly once:\n%s", key, n, glue)

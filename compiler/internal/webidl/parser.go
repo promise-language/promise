@@ -925,6 +925,9 @@ func (p *Parser) parseUnionType() *TypeRef {
 // mixin or dictionary is not in file, and for each side of an includes
 // statement that is not, after applying every one that matches: nothing else
 // would name the members they carry, so they would otherwise vanish unreported.
+// An "interface mixin", which the parser stores as an Interface marked _mixin,
+// is a mixin and never an interface: a partial interface, the left side of an
+// includes statement or an inheriting interface does not resolve to it.
 func Merge(file *File) []*ParseError {
 	var errs []*ParseError
 	unbound := func(pos Pos, what, name, kind string) {
@@ -933,23 +936,27 @@ func Merge(file *File) []*ParseError {
 
 	// Build lookup maps
 	ifaceMap := make(map[string]*Interface)
-	for _, iface := range file.Interfaces {
-		ifaceMap[iface.Name] = iface
-	}
 	mixinMap := make(map[string]*Mixin)
 	for _, m := range file.Mixins {
 		mixinMap[m.Name] = m
 	}
-	// Also add "interface mixin" declarations to the mixin map
+	// An "interface mixin" declaration, an Interface marked _mixin, goes to the
+	// mixin map and never to the interface map: it is a mixin, not an interface.
 	for _, iface := range file.Interfaces {
+		mixin := false
 		for _, ea := range iface.ExtAttrs {
 			if ea.Name == "_mixin" {
-				mixinMap[iface.Name] = &Mixin{
-					Name:    iface.Name,
-					Members: iface.Members,
-				}
+				mixin = true
 				break
 			}
+		}
+		if mixin {
+			mixinMap[iface.Name] = &Mixin{
+				Name:    iface.Name,
+				Members: iface.Members,
+			}
+		} else {
+			ifaceMap[iface.Name] = iface
 		}
 	}
 

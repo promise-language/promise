@@ -90,8 +90,8 @@ func TestWebIdlRedeclaredMarksInstanceMembers(t *testing.T) {
 	p := overloadResource(t, overloadIR(t, redeclaredFixture), "P")
 	want := map[string]bool{"P.f": true, "P.f.2": true, "P.g": false, "P.g.2": true}
 	for _, m := range p.Methods {
-		if m.Redeclared != want[m.ImportName] {
-			t.Errorf("%s (%s) Redeclared = %v, want %v", m.ImportName, m.Name, m.Redeclared, want[m.ImportName])
+		if m.ViaPrototype != want[m.ImportName] {
+			t.Errorf("%s (%s) ViaPrototype = %v, want %v", m.ImportName, m.Name, m.ViaPrototype, want[m.ImportName])
 		}
 	}
 }

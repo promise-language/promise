@@ -56,11 +56,14 @@ type Func struct {
 	Accessor   AccessorKind // for WebIDL attributes — orthogonal to Kind
 	OwnerType  string       // for methods/constructors/statics
 	Doc        string
-	// Redeclared marks a WebIDL instance member that an interface inheriting
-	// from OwnerType redeclares, so the host import calls OwnerType's own
-	// member rather than resolving it on the object (docs/wasm-bindings.md,
-	// "WebIDL to Promise", interface inheritance).
-	Redeclared bool
+	// ViaPrototype marks a WebIDL instance member whose host import calls
+	// OwnerType's own member, read from its interface prototype object with the
+	// object as receiver, rather than resolving it on the object, where another
+	// property may answer under its name: an interface inheriting from
+	// OwnerType redeclares it (webidl.Interface.Redeclared), or a named
+	// property may hide it (webidl.Interface.OverriddenBuiltIns) —
+	// docs/wasm-bindings.md, "WebIDL to Promise", interface inheritance.
+	ViaPrototype bool
 }
 
 // FuncKind distinguishes free functions from resource methods.

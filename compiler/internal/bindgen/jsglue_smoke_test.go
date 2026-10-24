@@ -613,6 +613,78 @@ interface D : P {
 	}
 }
 
+// TestGenerateJSGlueOverriddenBuiltInReachesPrototype runs the imports of a
+// [LegacyOverrideBuiltIns] interface and of the one it inherits from against an
+// object whose named properties hide their members (#697). Each must call the
+// declaring interface's own member: resolved on the object, the getters read
+// the "control" a named property holds, and the operations throw a TypeError,
+// for the control is not callable. Form's [LegacyUnforgeable] u still resolves
+// on the object, where it lives.
+//
+// The driver defines host classes Base and Form extends Base as globals, gives
+// a Form own data properties v, m, w and n holding a control — the named
+// properties a form's controls give it, over the prototype's members — and an
+// own accessor u, then calls each import with a handle to it, reporting what it
+// returned or the constructor of the error it threw. The members check their
+// receiver as a host's do, so an import calling one on anything but the object
+// fails with "Illegal invocation".
+func TestGenerateJSGlueOverriddenBuiltInReachesPrototype(t *testing.T) {
+	nodePath := requireNode(t)
+	src := `interface Base {
+  readonly attribute long v;
+  long m(long i);
+};
+[LegacyOverrideBuiltIns] interface Form : Base {
+  readonly attribute long w;
+  long n(long i);
+  [LegacyUnforgeable] readonly attribute long u;
+};`
+	loader := smokeLoader{name: "glue", js: GenerateJSGlue(overloadIR(t, src)), initArgs: []string{"frontend.wasm"}}
+	result := runSmokeDriver(t, nodePath, loader, 0, importCallDriver(`
+  function brand(self) {
+    if (!(self instanceof Base)) throw new TypeError("Illegal invocation");
+  }
+  class Base {
+    get v() { brand(this); return 1; }
+    m(i) { brand(this); return i + 1; }
+  }
+  class Form extends Base {
+    get w() { brand(this); return 2; }
+    n(i) { brand(this); return i * 10; }
+  }
+  globalThis.Base = Base;
+  globalThis.Form = Form;
+
+  const env = imports.promise_env;
+  const form = new Form();
+  Object.defineProperty(form, "u", { get() { brand(this); return 3; }, enumerable: true });
+  const control = { tag: "control" };
+  for (const key of ["v", "m", "w", "n"]) {
+    Object.defineProperty(form, key, { value: control, enumerable: true });
+  }
+  const handle = mod._refStore(form);
+  const call = (f) => {
+    try {
+      return f();
+    } catch (e) {
+      return e.constructor.name;
+    }
+  };
+  const got = {
+    v: call(() => env["Base.v.get"](handle)),
+    m: call(() => env["Base.m"](handle, 3)),
+    w: call(() => env["Form.w.get"](handle)),
+    n: call(() => env["Form.n"](handle, 3)),
+    u: call(() => env["Form.u.get"](handle)),
+  };
+  process.stdout.write("RESULT:" + JSON.stringify(got) + "\n");
+`))
+
+	if want := `RESULT:{"v":1,"m":4,"w":2,"n":30,"u":3}`; result != want {
+		t.Errorf("imports reached %s, want %s", result, want)
+	}
+}
+
 // TestGenerateJSGlueAnonymousSpecialReachesHost calls the imports of
 // specialOpsFixture's Target against a host object with indexed and named
 // properties (#696). A legacy platform object is exotic, so a Proxy over a

@@ -1879,6 +1879,155 @@ func TestMergeRecordsRedeclared(t *testing.T) {
 	}
 }
 
+// TestMergeRecordsOverriddenBuiltIns pins Interface.OverriddenBuiltIns (#697):
+// an object implementing an interface that carries [LegacyOverrideBuiltIns]
+// has its supported named properties as its own, over every member of its
+// prototype chain, so Merge records the regular attributes and operations of
+// each interface in that interface's inheritance chain — its ancestors, itself
+// and its descendants — but not the [LegacyUnforgeable] ones, which live on the
+// object. want lists, per interface, the identifiers recorded; an interface it
+// omits records none.
+func TestMergeRecordsOverriddenBuiltIns(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want map[string][]string
+	}{
+		{
+			name: "on the definition, through every ancestor",
+			src: `interface Node { undefined remove(); };
+			interface Element : Node { attribute DOMString id; };
+			interface HTMLElement : Element { attribute DOMString title; };
+			[Exposed=Window, LegacyOverrideBuiltIns, LegacyUnenumerableNamedProperties]
+			interface HTMLFormElement : HTMLElement {
+				attribute DOMString action;
+				undefined submit();
+				getter Element (unsigned long index);
+				getter (RadioNodeList or Element) (DOMString name);
+			};`,
+			want: map[string][]string{
+				"Node":            {"remove"},
+				"Element":         {"id"},
+				"HTMLElement":     {"title"},
+				"HTMLFormElement": {"action", "submit"},
+			},
+		},
+		{
+			// HTML puts it on a partial Document; the partial's members count
+			// as well as the definition's.
+			name: "on a partial interface",
+			src: `interface Node { undefined remove(); };
+			interface Document : Node { attribute DOMString cookie; };
+			[LegacyOverrideBuiltIns]
+			partial interface Document { attribute DOMString title; getter object (DOMString name); };`,
+			want: map[string][]string{"Node": {"remove"}, "Document": {"cookie", "title"}},
+		},
+		{
+			name: "unforgeable members",
+			src: `interface Location {};
+			[LegacyOverrideBuiltIns] interface Document {
+				[PutForwards=href, LegacyUnforgeable] readonly attribute Location? location;
+				[LegacyUnforgeable] undefined reload();
+				attribute DOMString cookie;
+			};`,
+			want: map[string][]string{"Document": {"cookie"}},
+		},
+		{
+			// An XMLDocument is a Document, named properties included.
+			name: "descendant",
+			src: `[LegacyOverrideBuiltIns] interface Document { attribute DOMString cookie; };
+			interface XMLDocument : Document { undefined load(DOMString url); };`,
+			want: map[string][]string{"Document": {"cookie"}, "XMLDocument": {"load"}},
+		},
+		{
+			// Neither a sibling nor an interface sharing only the root is ever
+			// one of the form's interfaces.
+			name: "sibling and an interface sharing the root",
+			src: `interface EventTarget { undefined addEventListener(DOMString type); };
+			interface Node : EventTarget { undefined remove(); };
+			interface Element : Node {};
+			interface HTMLElement : Element {};
+			[LegacyOverrideBuiltIns] interface HTMLFormElement : HTMLElement {};
+			interface HTMLDivElement : HTMLElement { attribute DOMString align; };
+			interface Window : EventTarget { readonly attribute DOMString name; };`,
+			want: map[string][]string{"EventTarget": {"addEventListener"}, "Node": {"remove"}},
+		},
+		{
+			// Recorded per including interface: a mixin member lives on each
+			// includer's prototype, and only Element's is in the chain.
+			name: "mixin members",
+			src: `interface Node {};
+			interface Element : Node {};
+			interface DocumentFragment : Node {};
+			[LegacyOverrideBuiltIns] interface HTMLFormElement : Element {};
+			interface mixin ParentNode { Element? querySelector(DOMString selectors); };
+			Element includes ParentNode;
+			DocumentFragment includes ParentNode;`,
+			want: map[string][]string{"Element": {"querySelector"}},
+		},
+		{
+			// Statics, constants and constructors are reached through the
+			// interface object, and an anonymous special operation names no
+			// property.
+			name: "statics, constant, constructor and anonymous specials",
+			src: `[LegacyOverrideBuiltIns] interface F {
+				static undefined s();
+				static attribute long t;
+				const long C = 1;
+				constructor();
+				getter long (unsigned long index);
+				setter undefined (DOMString name, long value);
+				deleter undefined (DOMString name);
+				undefined m();
+			};`,
+			want: map[string][]string{"F": {"m"}},
+		},
+		{
+			name: "DOMStringMap",
+			src: `[Exposed=Window, LegacyOverrideBuiltIns]
+			interface DOMStringMap {
+				getter DOMString (DOMString name);
+				setter undefined (DOMString name, DOMString value);
+				deleter undefined (DOMString name);
+			};`,
+		},
+		{
+			name: "no interface carries it",
+			src: `interface Node { undefined remove(); };
+			[Exposed=Window] interface Element : Node { attribute DOMString id; };
+			[Exposed=Window] partial interface Element { attribute DOMString title; };`,
+		},
+		{
+			name: "parent not in the file",
+			src:  `[LegacyOverrideBuiltIns] interface F : Missing { attribute long a; };`,
+			want: map[string][]string{"F": {"a"}},
+		},
+		{
+			name: "inheritance cycle",
+			src: `[LegacyOverrideBuiltIns] interface A : B { undefined m(); };
+			interface B : A { undefined n(); };`,
+			want: map[string][]string{"A": {"m"}, "B": {"n"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			file, errs := Parse(tc.src, "test.webidl")
+			if len(errs) > 0 {
+				t.Fatalf("unexpected errors: %v", errs)
+			}
+			if errs := Merge(file); len(errs) > 0 {
+				t.Fatalf("merge errors: %v", errs)
+			}
+			for _, iface := range file.Interfaces {
+				got := slices.Sorted(maps.Keys(iface.OverriddenBuiltIns))
+				if want := tc.want[iface.Name]; !slices.Equal(got, want) {
+					t.Errorf("%s.OverriddenBuiltIns = %q, want %q", iface.Name, got, want)
+				}
+			}
+		})
+	}
+}
+
 // TestFileAppendCopiesEveryField walks File's fields by reflection rather than
 // listing them, so a field added to File that Append does not copy fails here
 // (#656: bind's hand-kept list dropped PartialDicts).

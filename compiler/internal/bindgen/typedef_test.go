@@ -88,17 +88,19 @@ func TestWebIdlTypedefInlinedAsTarget(t *testing.T) {
 			};`,
 		},
 		{
-			name: "inside optional, sequence and FrozenArray",
+			name: "inside optional, sequence, FrozenArray and ObservableArray",
 			typedefs: `typedef DOMString Name;
 			interface A {
 				undefined take(optional Name n);
 				sequence<Name> names();
 				FrozenArray<Name> frozen();
+				attribute ObservableArray<Name> observed;
 			};`,
 			inline: `interface A {
 				undefined take(optional DOMString n);
 				sequence<DOMString> names();
 				FrozenArray<DOMString> frozen();
+				attribute ObservableArray<DOMString> observed;
 			};`,
 		},
 		{

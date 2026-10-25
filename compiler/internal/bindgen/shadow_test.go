@@ -75,6 +75,19 @@ func TestWebIdlShadowedMemberNames(t *testing.T) {
 			},
 		},
 		{
+			// A typedef is its target (#721), so the redeclaration is exactly
+			// the inherited attribute and overrides it.
+			name: "a typedef of the inherited type is exactly alike",
+			src: `typedef DOMString Name;
+			interface P { attribute DOMString label; };
+			interface C : P { attribute Name label; };`,
+			resource: "C",
+			want: []overloadMethod{
+				{"label", "C.label.get", FuncMethod, ""},
+				{"label", "C.label.set", FuncMethod, "string"},
+			},
+		},
+		{
 			name: "exact redeclaration overrides, parameter names aside",
 			src: `interface P { undefined m(DOMString name); };
 			interface C : P { undefined m(DOMString key); };`,

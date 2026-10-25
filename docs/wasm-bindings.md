@@ -422,9 +422,23 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 | `dictionary D : P` | `type D { ... }` | Carries `P`'s members, and its ancestors', as fields of its own; no `is` (see below) |
 | `enum` | `enum { ... }` | With string mapping for JS |
 | `callback` | `(Args) Return` | Lambda type |
+| `typedef T N` | the type `T` binds as | Inlined at each use of `N`; no type is named `N` (see below) |
 | `ArrayBuffer` | `u8[]` | |
 | `any` | `JsValue` | Tagged enum (see below) |
 | `object` | `JsValue` | Same enum, `Object` variant |
+
+**Typedefs.** A typedef names no Promise type. Each use of it binds as its target written in its
+place, through any number of typedefs: with `typedef DOMString Name;`, `attribute Name label;` is a
+`string` attribute, and with `typedef Name? MaybeName;`, a `MaybeName` parameter is a `string?`.
+A use written `?` is nullable over its target, and a target that is nullable already stays
+nullable once, since WebIDL allows no nullable of a nullable type. A union target binds as
+`JsValue`, as a union written in place does, and a callback target as that callback (the
+`callback` row): HTML's `EventHandler` is `EventHandlerNonNull?`. Being its target, a typedef is
+that type wherever two types are compared, so a member redeclared with a typedef of the type it
+inherits is exactly alike ([Shadowed Members](#shadowed-members)). A typedef that refers to itself,
+directly or through other typedefs, cannot be inlined: it is a `bind` error naming it and its
+position, reported for every typedef on the cycle before anything is written. A name inside a
+union, `Promise<T>` or `record<K, V>` is not followed, because each of those binds as `JsValue`.
 
 **Interface inheritance.** A derived interface is an `is` child of its parent, so the generated
 wrappers model the IDL hierarchy (`EventTarget` → `Node` → `Element` → …). Each member — its public

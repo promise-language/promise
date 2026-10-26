@@ -97,7 +97,7 @@ func TestLexerStringLiteral(t *testing.T) {
 }
 
 func TestLexerNumbers(t *testing.T) {
-	src := `42 -1 0xFF 3.14`
+	src := `42 -1 0xFF 3.14 -1.5 -Infinity;`
 	lex := NewLexer(src, "test.webidl")
 
 	cases := []struct {
@@ -108,6 +108,10 @@ func TestLexerNumbers(t *testing.T) {
 		{TokenInteger, "-1"},
 		{TokenInteger, "0xFF"},
 		{TokenFloat, "3.14"},
+		{TokenFloat, "-1.5"},
+		// -Infinity also matches the identifier token, but it is a float literal.
+		{TokenFloat, "-Infinity"},
+		{TokenSemicolon, ";"},
 		{TokenEOF, ""},
 	}
 	for _, c := range cases {
@@ -134,6 +138,54 @@ func TestLexerIdentifier(t *testing.T) {
 		if tok.Value != exp {
 			t.Errorf("expected %q, got %q", exp, tok.Value)
 		}
+	}
+}
+
+// TestLexerHyphenatedIdentifier pins #719: the identifier token is
+// /[_-]?[A-Za-z][0-9A-Z_a-z-]*/, so a `-` continues an identifier and may lead
+// one, as CSSOM's dashed attribute names (`margin-top`) need. A `-` before
+// anything but a letter still starts a number, as it did before.
+func TestLexerHyphenatedIdentifier(t *testing.T) {
+	type tok struct {
+		kind  TokenKind
+		value string
+	}
+	cases := []struct {
+		name string
+		src  string
+		want []tok
+	}{
+		{"inner hyphen", "margin-top", []tok{{TokenIdent, "margin-top"}}},
+		{"leading hyphen", "-webkit-foo", []tok{{TokenIdent, "-webkit-foo"}}},
+		{"leading underscore", "_underscored", []tok{{TokenIdent, "_underscored"}}},
+		{"hyphen before a digit", "a-1", []tok{{TokenIdent, "a-1"}}},
+		{"trailing hyphen", "foo-;", []tok{{TokenIdent, "foo-"}, {TokenSemicolon, ";"}}},
+		// A keyword is looked up on the whole token: CSS's `object-fit` is not
+		// the type keyword `object` followed by `-fit`.
+		{"keyword before a hyphen", "object-fit", []tok{{TokenIdent, "object-fit"}}},
+		{"spaced negative literal", "x = -1", []tok{{TokenIdent, "x"}, {TokenEquals, "="}, {TokenInteger, "-1"}}},
+		{"hyphen before an underscore", "-_x", []tok{{TokenInteger, "-"}, {TokenIdent, "_x"}}},
+		{"hyphen before a space", "- 1", []tok{{TokenInteger, "-"}, {TokenInteger, "1"}}},
+		// The look past a `-` for a letter stops at the end of the input.
+		{"hyphen at end of input", "x -", []tok{{TokenIdent, "x"}, {TokenInteger, "-"}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			lex := NewLexer(c.src, "test.webidl")
+			var got []tok
+			for next := lex.Next(); next.Kind != TokenEOF; next = lex.Next() {
+				got = append(got, tok{next.Kind, next.Value})
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("tokens = %v, want %v", got, c.want)
+			}
+		})
+	}
+
+	// A leading hyphen is part of the token, so the token starts at it.
+	lex := NewLexer("  -webkit-foo", "test.webidl")
+	if tok := lex.Next(); tok.Pos.Line != 1 || tok.Pos.Column != 3 {
+		t.Errorf("-webkit-foo at %d:%d, want 1:3", tok.Pos.Line, tok.Pos.Column)
 	}
 }
 
@@ -1403,6 +1455,118 @@ func TestParseDefaultValues(t *testing.T) {
 		if !op.Params[0].Optional {
 			t.Errorf("expected optional param in %s", op.Name)
 		}
+	}
+}
+
+// TestParseNegativeLiterals pins the negative literals a `-` still starts now
+// that one may also lead an identifier (#719): `-Infinity` used to lex as the
+// integer `-` followed by the identifier `Infinity`, so a constant or default
+// written with it did not parse.
+func TestParseNegativeLiterals(t *testing.T) {
+	src := `interface Foo {
+		const unrestricted double NEG = -Infinity;
+		const long MINUS_ONE = -1;
+		undefined f(optional unrestricted double a = -Infinity, optional double b = -1.5, optional long c = -1);
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	members := file.Interfaces[0].Members
+	if len(members) != 3 {
+		t.Fatalf("expected 3 members, got %d", len(members))
+	}
+	var got []string
+	for _, m := range members[:2] {
+		got = append(got, m.(*Const).Value)
+	}
+	for _, p := range members[2].(*Operation).Params {
+		got = append(got, p.Default)
+	}
+	if want := []string{"-Infinity", "-1", "-Infinity", "-1.5", "-1"}; !slices.Equal(got, want) {
+		t.Errorf("values = %q, want %q", got, want)
+	}
+}
+
+// TestParseHyphenatedNames pins #719: an attribute, an operation and an
+// argument may each be named by an identifier containing `-`, or led by one.
+func TestParseHyphenatedNames(t *testing.T) {
+	src := `interface Foo {
+		attribute DOMString margin-top;
+		readonly attribute DOMString -webkit-foo;
+		undefined set-property(DOMString property-name, optional long a-1 = -1);
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	members := file.Interfaces[0].Members
+	if len(members) != 3 {
+		t.Fatalf("expected 3 members, got %d", len(members))
+	}
+	if got := members[0].(*Attribute).Name; got != "margin-top" {
+		t.Errorf("attribute name = %q, want margin-top", got)
+	}
+	if got := members[1].(*Attribute).Name; got != "-webkit-foo" {
+		t.Errorf("attribute name = %q, want -webkit-foo", got)
+	}
+	op := members[2].(*Operation)
+	if op.Name != "set-property" {
+		t.Errorf("operation name = %q, want set-property", op.Name)
+	}
+	var params []string
+	for _, p := range op.Params {
+		params = append(params, p.Name)
+	}
+	if want := []string{"property-name", "a-1"}; !slices.Equal(params, want) {
+		t.Errorf("params = %q, want %q", params, want)
+	}
+	if got := op.Params[1].Default; got != "-1" {
+		t.Errorf("default = %q, want -1", got)
+	}
+}
+
+// TestParseWebrefCSSPageDescriptors parses the CSSPageDescriptors interface
+// verbatim from webref's cssom.idl (@webref/idl 3.83.0, lines 113–129), which
+// declares each margin both camel-cased and dashed. Before #719, line 120's
+// `margin-top` failed to parse, and with it every file bound together.
+func TestParseWebrefCSSPageDescriptors(t *testing.T) {
+	src := `[Exposed=Window]
+interface CSSPageDescriptors : CSSStyleDeclaration {
+  attribute [LegacyNullToEmptyString] CSSOMString margin;
+  attribute [LegacyNullToEmptyString] CSSOMString marginTop;
+  attribute [LegacyNullToEmptyString] CSSOMString marginRight;
+  attribute [LegacyNullToEmptyString] CSSOMString marginBottom;
+  attribute [LegacyNullToEmptyString] CSSOMString marginLeft;
+  attribute [LegacyNullToEmptyString] CSSOMString margin-top;
+  attribute [LegacyNullToEmptyString] CSSOMString margin-right;
+  attribute [LegacyNullToEmptyString] CSSOMString margin-bottom;
+  attribute [LegacyNullToEmptyString] CSSOMString margin-left;
+  attribute [LegacyNullToEmptyString] CSSOMString size;
+  attribute [LegacyNullToEmptyString] CSSOMString pageOrientation;
+  attribute [LegacyNullToEmptyString] CSSOMString page-orientation;
+  attribute [LegacyNullToEmptyString] CSSOMString marks;
+  attribute [LegacyNullToEmptyString] CSSOMString bleed;
+};`
+	file, errs := Parse(src, "cssom.idl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	var names []string
+	for _, m := range file.Interfaces[0].Members {
+		attr := m.(*Attribute)
+		if attr.Type.Name != "CSSOMString" {
+			t.Errorf("%s: type %q, want CSSOMString", attr.Name, attr.Type.Name)
+		}
+		names = append(names, attr.Name)
+	}
+	want := []string{
+		"margin", "marginTop", "marginRight", "marginBottom", "marginLeft",
+		"margin-top", "margin-right", "margin-bottom", "margin-left",
+		"size", "pageOrientation", "page-orientation", "marks", "bleed",
+	}
+	if !slices.Equal(names, want) {
+		t.Errorf("attributes = %q\nwant         %q", names, want)
 	}
 }
 

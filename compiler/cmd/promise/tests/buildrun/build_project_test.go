@@ -1250,6 +1250,80 @@ func TestBindWebIdlKeywordArgNamesCompileClean(t *testing.T) {
 	}
 }
 
+// TestBindWebIdlHyphenatedMembersCompileClean is the end-to-end acceptance for
+// #719: webref's `CSSPageDescriptors` declares dashed attributes
+// (`margin-top`, `page-orientation`). Before the fix the lexer ended an
+// identifier at its first `-`, and `bind` exited 1 for the whole input. Each
+// name generates its Promise name with `_` for `-` and a leading `-` dropped,
+// and its import keeps the IDL spelling, which the glue reaches by bracket
+// access.
+func TestBindWebIdlHyphenatedMembersCompileClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "page.idl")
+	idl := `[Exposed=Window]
+interface CSSPageDescriptors {
+  attribute [LegacyNullToEmptyString] DOMString margin-top;
+  attribute [LegacyNullToEmptyString] DOMString page-orientation;
+  attribute DOMString -webkit-foo;
+  undefined set-property(DOMString property-name);
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "webidl", "-name", "page", "-o", outDir, idlPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	glue, err := os.ReadFile(filepath.Join(outDir, "page.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`_refLoad($handle)["margin-top"]`, `_refLoad($handle)["-webkit-foo"] = `, `_refLoad($handle)["set-property"](`} {
+		if !strings.Contains(string(glue), want) {
+			t.Errorf("generated glue is missing %q:\n%s", want, glue)
+		}
+	}
+
+	userPath := filepath.Join(outDir, "use_page.pr")
+	user := `main() {
+    d := CSSPageDescriptors.borrow(2);
+    d.margin_top = "1px";
+    orientation := d.page_orientation;
+    d.webkit_foo = orientation;
+    d.set_property("color");
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	for _, want := range []string{
+		`"wasm-import-name"="CSSPageDescriptors.margin-top.set"`,
+		`"wasm-import-name"="CSSPageDescriptors.page-orientation.get"`,
+		`"wasm-import-name"="CSSPageDescriptors.-webkit-foo.set"`,
+		`"wasm-import-name"="CSSPageDescriptors.set-property"`,
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR is missing %q", want)
+		}
+	}
+}
+
 // TestBindWebIdlLegacyCallerCompilesClean is the end-to-end acceptance for #651:
 // webref's `HTMLAllCollection` declares `legacycaller … item(…)`. Before the fix
 // the parser rejected `legacycaller` and `bind` exited 1 for the whole input. A

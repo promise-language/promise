@@ -480,6 +480,11 @@ func (l *Lexer) nextToken() Token {
 		return l.readString(pos)
 	}
 
+	// An identifier may begin with a `-` before its first letter (`-webkit-foo`).
+	if r == '-' && l.pos+1 < len(l.src) && isASCIILetter(l.src[l.pos+1]) {
+		return l.readIdent(pos)
+	}
+
 	// Number literal (including negative)
 	if r == '-' || (r >= '0' && r <= '9') {
 		return l.readNumber(pos)
@@ -596,6 +601,11 @@ func (l *Lexer) readIdent(pos Pos) Token {
 	if kind, ok := keywords[value]; ok {
 		return Token{Kind: kind, Value: value, Pos: pos}
 	}
+	// `-Infinity` matches the identifier token too, but the grammar makes it a
+	// float literal (FloatLiteral).
+	if value == "-Infinity" {
+		return Token{Kind: TokenFloat, Value: value, Pos: pos}
+	}
 
 	return Token{Kind: TokenIdent, Value: value, Pos: pos}
 }
@@ -604,8 +614,14 @@ func isIdentStart(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' || (r > 127 && unicode.IsLetter(r))
 }
 
+// isIdentContinue accepts `-` as the identifier token does
+// (`[0-9A-Z_a-z-]*`), so `margin-top` is one identifier.
 func isIdentContinue(r rune) bool {
-	return isIdentStart(r) || (r >= '0' && r <= '9')
+	return isIdentStart(r) || (r >= '0' && r <= '9') || r == '-'
+}
+
+func isASCIILetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 func isHexDigit(r rune) bool {

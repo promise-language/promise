@@ -2995,6 +2995,15 @@ func TestIdlToSnake(t *testing.T) {
 		{"tagName", "tag_name"},
 		{"URL", "url"},
 		{"simple", "simple"},
+		// #719: a `-` separates words as `_` does; a leading one writes nothing,
+		// so a dashed CSS name generates its camel-cased spellings' name.
+		{"margin-top", "margin_top"},
+		{"page-orientation", "page_orientation"},
+		{"-webkit-transform", "webkit_transform"},
+		{"webkitTransform", "webkit_transform"},
+		{"WebkitTransform", "webkit_transform"},
+		{"foo-Bar", "foo__bar"},
+		{"foo_Bar", "foo__bar"},
 	}
 	for _, tt := range tests {
 		got := idlToSnake(tt.in)

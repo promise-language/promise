@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/promise-language/promise/compiler/internal/webidl"
 )
@@ -24,11 +23,12 @@ import (
 // place (convertWebIdlTypeRef). The file produces a single module named from the
 // first interface, or "web" if no interfaces are present.
 //
-// It fails when a dictionary's inheritance cannot be flattened — an ancestor
-// that is not a dictionary in the file, or a cycle — when a typedef refers to
-// itself (typedefTargets), or when an anonymous getter, setter or deleter
-// cannot be reached by property access (anonymousSpecialError), reporting every
-// such dictionary, typedef and operation.
+// It fails when two values of one enum generate the same variant
+// (convertEnum), when a dictionary's inheritance cannot be flattened — an
+// ancestor that is not a dictionary in the file, or a cycle — when a typedef
+// refers to itself (typedefTargets), or when an anonymous getter, setter or
+// deleter cannot be reached by property access (anonymousSpecialError),
+// reporting every such value, dictionary, typedef and operation.
 //
 // Call webidl.Merge(file) before this function to apply partials, mixins, and
 // includes statements, and to record the members a derived interface
@@ -112,7 +112,9 @@ func (c *webidlConverter) convert() ([]*Module, error) {
 
 	// Convert enums
 	for _, e := range c.file.Enums {
-		m.Types = append(m.Types, c.convertEnum(e))
+		t, enumErrs := c.convertEnum(e)
+		errs = append(errs, enumErrs...)
+		m.Types = append(m.Types, t)
 	}
 
 	// Convert dictionaries as records
@@ -178,18 +180,28 @@ func webidlDoc(comment, construct, idlName string) string {
 	return "`" + idlName + "` (WebIDL " + construct + ")"
 }
 
-func (c *webidlConverter) convertEnum(e *webidl.Enum) Type {
+// convertEnum converts an enum to an IR Enum with one case per value, named by
+// idlEnumValueToPascal. Two values that generate one variant cannot both be
+// cases: each value after the first is reported, at the enum's position (the
+// parser records none per value).
+func (c *webidlConverter) convertEnum(e *webidl.Enum) (Type, []error) {
 	t := Type{
 		Name: e.Name,
 		Kind: TypeEnum,
 		Doc:  webidlDoc(e.Doc, "enum", e.Name),
 	}
+	var errs []error
+	generatedBy := make(map[string]string) // variant name → the first value generating it
 	for _, v := range e.Values {
-		t.Cases = append(t.Cases, Case{
-			Name: idlEnumValueToPascal(v),
-		})
+		name := idlEnumValueToPascal(v)
+		if first, ok := generatedBy[name]; ok {
+			errs = append(errs, &webidl.ParseError{Pos: e.Pos, Msg: fmt.Sprintf("enum %s: values %q and %q both generate variant %s", e.Name, first, v, name)})
+			continue
+		}
+		generatedBy[name] = v
+		t.Cases = append(t.Cases, Case{Name: name})
 	}
-	return t
+	return t, errs
 }
 
 // convertDictionary converts a dictionary to a Record holding every member the
@@ -856,27 +868,30 @@ func sanitizeIdent(s string) string {
 	return s
 }
 
-// idlEnumValueToPascal converts WebIDL string enum values to PascalCase.
-// "read-write" → "ReadWrite", "auto" → "Auto"
+// idlEnumValueToPascal names the variant a WebIDL enum value generates
+// (docs/wasm-bindings.md, "WebIDL to Promise", enums). A value is any string, so
+// the rule is total: a word is a maximal run of ASCII letters and digits, every
+// other character separates words and is dropped, and the variant is the words
+// in order, each with its first letter upper-cased — "read-write" → "ReadWrite",
+// "text/html" → "TextHtml". A name that would begin with a digit is prefixed
+// with "V" ("2d" → "V2d"), and a value with no letter or digit is "Empty".
 func idlEnumValueToPascal(s string) string {
-	// Split on hyphens and underscores
-	parts := strings.FieldsFunc(s, func(r rune) bool {
-		return r == '-' || r == '_' || r == ' '
+	words := strings.FieldsFunc(s, func(r rune) bool {
+		return !('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9')
 	})
 	var b strings.Builder
-	for _, part := range parts {
-		if len(part) == 0 {
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(part)
-		b.WriteRune(unicode.ToUpper(r))
-		b.WriteString(part[size:])
+	for _, w := range words {
+		b.WriteString(strings.ToUpper(w[:1]))
+		b.WriteString(w[1:])
 	}
-	result := b.String()
-	if result == "" {
+	name := b.String()
+	switch {
+	case name == "":
 		return "Empty"
+	case '0' <= name[0] && name[0] <= '9':
+		return "V" + name
 	}
-	return result
+	return name
 }
 
 // eachName calls fn with every NamedKind name in ref, depth-first, stopping at

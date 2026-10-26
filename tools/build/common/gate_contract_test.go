@@ -457,3 +457,32 @@ func TestJoinIncomplete(t *testing.T) {
 		}
 	}
 }
+
+// TestSumMetrics_ACompositionSumsSharedNames: a name more than one part reports
+// is said once, as the sum — `tested` reports one failed_tests, not one per
+// toolchain — and a name only one part reports is carried as that part said it.
+// A proportion, or one name reported as two kinds of number, is refused rather
+// than added.
+func TestSumMetrics_ACompositionSumsSharedNames(t *testing.T) {
+	got, err := sumMetrics(
+		[]Metric{Count("failed_tests", 2), Count("go_failed_tests", 2)},
+		[]Metric{Count("failed_tests", 3), Count("promise_failed_tests", 3)})
+	if err != nil {
+		t.Fatalf("sumMetrics: %v", err)
+	}
+	want := map[string]int64{"failed_tests": 5, "go_failed_tests": 2, "promise_failed_tests": 3}
+	if g := metricInts(got); len(got) != len(want) || fmt.Sprint(g) != fmt.Sprint(want) {
+		t.Errorf("summed = %v (%d metrics), want %v", g, len(got), want)
+	}
+	for _, tc := range []struct {
+		name     string
+		into, in Metric
+	}{
+		{"a proportion", Percent("statement_coverage", 50), Percent("statement_coverage", 60)},
+		{"two kinds of number", Count("cas_network_bytes", 1), Size("cas_network_bytes", 1, unitBytes)},
+	} {
+		if _, err := sumMetrics([]Metric{tc.into}, []Metric{tc.in}); err == nil {
+			t.Errorf("%s reported by two parts was summed; want it refused", tc.name)
+		}
+	}
+}

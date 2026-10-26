@@ -7,7 +7,7 @@
 # the generated parser is committed.
 set -euo pipefail
 
-# wasmtime — the runtime for `bin/test --wasm` and the `wasm-test` gate. The
+# wasmtime — the runtime for `bin/test --wasm` and `bin/run tested:wasm`. The
 # pre-commit gate is `bin/verify`, which is host-scoped and does not need it.
 # CI installs it via the bytecode-alliance
 # action; there is no devcontainer feature for it, so use the official script.

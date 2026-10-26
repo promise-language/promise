@@ -11,8 +11,9 @@
 > support — see
 > [promise-language/promise#25](https://github.com/promise-language/promise/issues/25)
 > — but nothing there is WebIDL-specific or bindgen-specific. Sections 18
-> through 22 specify the application path around it: build output and hosting,
-> the `web` module, DOM access, size and startup, and testing.
+> through 23 specify the application path around it: build output and hosting,
+> the `web` module, DOM access, host-resolved operations, size and startup, and
+> testing.
 >
 > Related: [wasm-bindings.md](wasm-bindings.md) owns the IDL→bindings story and
 > the `promise bind` pipeline; [runtime-architecture.md](runtime-architecture.md)
@@ -455,7 +456,7 @@ pumping.
 ## Blocking that the host must resolve
 
 Any wait a handler performs must be satisfiable by some *future host entry* — an
-event, a timer, a resolved fetch. A wait that could only be satisfied by
+event, a timer, a resolved fetch ([Host resolved operations](#host-resolved-operations)). A wait that could only be satisfied by
 continuing to run right now cannot be satisfied at all, because the pump has to
 return.
 
@@ -691,8 +692,8 @@ finished, not that the program ended; [Program lifetime and termination](#progra
 
 ## The web module
 
-`web.events`, `web.on`, the subscription type and `web.terminate` — the surface
-[The delivery surface event channels](#the-delivery-surface-event-channels), [Queue semantics and overflow](#queue-semantics-and-overflow) and [Program lifetime and termination](#program-lifetime-and-termination) specify — are the public API of a module named `web`, which an
+`web.events`, `web.on`, the subscription type, `web.terminate` and `web.fetch` — the surface
+[The delivery surface event channels](#the-delivery-surface-event-channels), [Queue semantics and overflow](#queue-semantics-and-overflow), [Program lifetime and termination](#program-lifetime-and-termination) and [Host resolved operations](#host-resolved-operations) specify — are the public API of a module named `web`, which an
 application reaches with `use web;`.
 
 **That module is external.** It is not embedded in the compiler and does not
@@ -707,11 +708,11 @@ The module has two halves, produced differently:
 | Half | Origin | Specified by |
 |---|---|---|
 | Web API types — `web.document`, `web.console`, elements, events | generated from WebIDL ([Reaching the DOM](#reaching-the-dom)) | the IDL |
-| `web.events`, `web.on`, the subscription type and its `dropped` count, `web.terminate` | hand-written over the Layer 1 surface of [Layer 1 the exported surface](#layer-1-the-exported-surface) | [The delivery surface event channels](#the-delivery-surface-event-channels), [Queue semantics and overflow](#queue-semantics-and-overflow), [Program lifetime and termination](#program-lifetime-and-termination) |
+| `web.events`, `web.on`, the subscription type and its `dropped` count, `web.terminate`, `web.fetch` with its request, response and error types | hand-written over the Layer 1 surface of [Layer 1 the exported surface](#layer-1-the-exported-surface) | [The delivery surface event channels](#the-delivery-surface-event-channels), [Queue semantics and overflow](#queue-semantics-and-overflow), [Program lifetime and termination](#program-lifetime-and-termination), [Host resolved operations](#host-resolved-operations) |
 
 The second row is the load-bearing one: **no IDL describes the reactor
 surface.** It is ordinary Promise code written against the two exports and one
-import of [Layer 1 the exported surface](#layer-1-the-exported-surface), it ships in the same module as the generated half so that an
+import of [Layer 1 the exported surface](#layer-1-the-exported-surface) and, for `web.fetch`, the host imports [Host resolved operations](#host-resolved-operations) specifies; it ships in the same module as the generated half so that an
 application needs one `use`, and this document is what specifies it.
 
 ## Reaching the DOM
@@ -750,6 +751,224 @@ binding, never something an application constructs.
 Handles are owned: a wrapper releases its handle when it drops, so exactly one
 wrapper exists per handle. Events are the same machinery, and [Resource lifetime across the boundary](#resource-lifetime-across-the-boundary) specifies how
 that interacts with the queue and with subscription close.
+
+## Host resolved operations
+
+A host-resolved operation is one the guest starts and the host completes in a
+later task: a JS promise that settles after the call that started it has
+returned. Its settlement reaches Promise code the way an event does
+([Delivery JS enqueues and Promise code consumes](#delivery-js-enqueues-and-promise-code-consumes)): the host stores the outcome in the reference table, enqueues its
+handle on a subscription that belongs to the operation alone, and the goroutine
+parked on that subscription's channel resumes. Completion adds nothing to the
+host→guest direction — no export, no trampoline per operation — so
+[Layer 1 the exported surface](#layer-1-the-exported-surface) is the same with it as without it. What an operation adds is
+guest→host imports of its own ([Crossing the boundary](#crossing-the-boundary)).
+
+`web.fetch` is the operation this document specifies. It belongs to the
+hand-written half of the `web` module ([The web module](#the-web-module)). It is not how a WebIDL
+operation returning `Promise<T>` is lowered; [wasm-bindings.md](wasm-bindings.md)
+§"WebIDL to Promise" owns that mapping.
+
+### The request and its result
+
+A request is an ordinary value:
+
+| `web.FetchRequest` field | Meaning |
+|---|---|
+| `url` | Resolved against the page, as `fetch` resolves it: `"/echo"` names the page's own origin. |
+| `method` | `"GET"` unless set. |
+| `headers` | `web.FetchHeader[]`, each a `name` and a `value`, appended to the request in order. A repeated name is combined as `Headers.append` combines it. |
+| `body` | `string?`: the text body, or none. |
+
+Every other option a `fetch` init can carry takes the platform's default.
+
+`web.fetch(FetchRequest move request) PendingFetch` starts the request and
+returns at once. `PendingFetch.wait!(~this) FetchResponse` parks until the
+request's one terminal result arrives ([One result then close](#one-result-then-close)). A `FetchResponse` carries
+`status`, `body` (the whole response body, read to its end, as text) and
+`is_success` (a 2xx status). A failure raises `web.FetchError`, an `is error`
+type whose `kind` is a `web.FetchFailure` and whose message is the platform's
+description of the failure.
+
+There are four outcomes, and a caller tells each from the other three:
+
+| Outcome | What the caller sees |
+|---|---|
+| A response, whatever its status | `wait` returns a `FetchResponse`. A 404 or a 500 is a response, not an error: `is_success` is false and `status` says which. |
+| The request is rejected and no response exists: a network failure, a CORS refusal, or a URL, header or body the platform refuses | `wait` raises `FetchError` with kind `FetchFailure.Rejected`. |
+| The response arrives but reading its body fails | `wait` raises `FetchError` with kind `FetchFailure.Body`. |
+| The body is not the JSON the caller expected | The caller's own `json.decode_string` or `json.parse_value` raises std's `DecodeError`. `web.fetch` never parses a body. |
+
+```promise
+use json;
+use web;
+
+type Echo `serializable {
+  string text;
+  int received_at;
+}
+
+post_echo!(string move body) Echo {
+  request := web.FetchRequest(url: "/echo", method: "POST",
+    headers: [web.FetchHeader(name: "Content-Type", value: "application/json")],
+    body: move body);
+  pending := web.fetch(move request);
+  response := pending.wait();                                 // FetchError: Rejected or Body
+  if !response.is_success {
+    raise error(message: "echo: HTTP {response.status}");     // a response, not a FetchError
+  }
+  return json.decode_string[Echo](response.body);             // DecodeError: the caller's
+}
+```
+
+None of these names is the name of a definition in the IDL the generated half
+binds. The module holds both halves under one namespace, and the Fetch
+standard's own `Request`, `Response` and `Headers` are the generated half's to
+bind.
+
+### Crossing the boundary
+
+The Promise half reaches the host through eight imports from `promise_env`.
+Their names are held once on the compiler side, in `compiler/internal/wasmweb`,
+beside the other names the runtime and the loaders share ([One name one definition](#one-name-one-definition)).
+The module's `wasm_import` declarations spell the same names, and this table is
+the contract between the two:
+
+| Import | Signature | Contract |
+|---|---|---|
+| `web_fetch_open` | `(sub_id: i32, method: string, url: string) -> void` | Creates the host's record of the request. Issues nothing. |
+| `web_fetch_header` | `(sub_id: i32, name: string, value: string) -> void` | Appends one header to the record, in call order. |
+| `web_fetch_send` | `(sub_id: i32, has_body: i32, body: string) -> void` | Issues the request; `body` is ignored unless `has_body` is 1. From here, completion is the host's. |
+| `web_fetch_abort` | `(sub_id: i32) -> void` | Abandons the request: aborts the transfer and forgets the record. Does nothing for a request the host has already forgotten. |
+| `web_fetch_result_kind` | `(result: i32) -> i32` | 0 = response, 1 = rejected, 2 = body read failed. |
+| `web_fetch_result_status` | `(result: i32) -> i32` | The HTTP status of a response or of a body failure; 0 for a rejection. |
+| `web_fetch_result_text` | `(result: i32) -> string` | A response's whole body; for a failure, its description as the platform reports it. |
+| `web_fetch_release` | `(result: i32) -> void` | Releases the result's reference-table handle. |
+
+The host knows a request by its subscription id and a result by its
+reference-table handle. The `web_fetch_` prefix keeps these names apart from
+the `Interface.member` and `[resource-drop]…` names that the generated half's
+imports carry in the same `promise_env` object.
+
+**Strings** cross under the `wasm_import` convention of
+[wasm-bindings.md](wasm-bindings.md) §"Helper Symbols and Their ABI", in both directions:
+
+- **Into the host:** the method, the URL, header names and values, and the
+  body. A string is UTF-8 in linear memory for the length of the call. The host
+  decodes it during the import with the loader's UTF-8 decoder and keeps no view
+  of linear memory afterwards: the bytes are Promise's, and growing memory
+  detaches any view into it. The body goes out as that text, UTF-8-encoded by
+  the platform, and its content type is `text/plain;charset=UTF-8` unless a
+  header sets one. A header name or value the platform does not accept (one
+  outside the ByteString range HTTP allows, for instance) makes the request
+  rejected, not a host error.
+- **Out of the host:** a result's text. For a response it is what
+  `Response.text()` produced, which decodes the body as UTF-8 whatever charset
+  the response declares and replaces a malformed sequence with U+FFFD. Either
+  way the host encodes it with the loader's UTF-8 encoder, so what Promise
+  receives is always valid UTF-8. The host writes it into a buffer it allocates
+  through `cabi_realloc`, and the caller frees that buffer once it has copied
+  the bytes into its own string. That buffer is the only Promise memory
+  `web.fetch`'s host half allocates, and it never outlives the Promise-side
+  call that received it.
+
+**No import throws into the guest.** A request the platform refuses
+synchronously (an unparsable URL, a forbidden header, a body on a `GET`) settles
+as rejected exactly as an asynchronous rejection does. Its result is delivered
+after the import that issued the request has returned, like every other result:
+delivery never happens inside an import.
+
+**Handles.** A result is a host object in the reference table from settlement
+until `web_fetch_release`, and its handle has one owner at a time: first the
+subscription's queue entry, then the pending fetch that receives it, which
+releases it once it has read the result into Promise values. The request
+itself, its headers and its abort controller, is host state keyed by the
+subscription id and never a handle. Promise has nothing to release for it, and
+the host discards it when the request settles or is abandoned
+([Lifetime of a request](#lifetime-of-a-request)).
+
+### One result then close
+
+Each request is a subscription of its own, opened with capacity 1 and the
+`DropNewest` policy of [Queue semantics and overflow](#queue-semantics-and-overflow). The host enqueues on it exactly once:
+when the body has been read to its end or its read has failed, never when the
+response headers arrive. With one entry for one slot the overflow policy is
+never consulted, so completion cannot be lost to it. `DropNewest`, rather than
+the default `DropOldest`, keeps that true even against a defective host: a
+second entry could only be refused, never displace the result. When
+`promise_web_enqueue` refuses a result, the host still owns its handle and
+releases it.
+
+`wait` receives that one entry, reads it, and closes the subscription and its
+channel before it returns or raises. A pending fetch therefore yields one
+outcome: calling `wait` on it again panics, because a second outcome would be
+indistinguishable from a real failure of the request.
+
+### Lifetime of a request
+
+> **A request holds exactly one live host registration, from `web.fetch` until
+> its result is received or its pending fetch is dropped, and the host refers
+> to the request only while that registration is held.**
+
+- **Liveness.** The request's subscription is the pending host operation that
+  [The liveness rule](#the-liveness-rule) counts. It is opened before the host is asked to issue
+  anything, so it covers the whole request: connection, headers, body
+  consumption and the delivery of the result. It is released exactly once, on
+  whichever terminal path the request takes: by `wait` once the result is
+  received, or by the pending fetch's drop. A request that never settles keeps
+  its instance alive for as long as its pending fetch exists, which is the
+  liveness rule's answer for any registration that could still deliver.
+- **Receiver closure is the cancellation.** There is no separate cancel call.
+  Dropping a pending fetch whose result has not been received abandons the
+  request, in this order:
+  1. `web_fetch_abort`, so the host marks the request cancelled, aborts the
+     transfer and any body read in progress, and forgets the request;
+  2. the release of a result already queued, which
+     [Resource lifetime across the boundary](#resource-lifetime-across-the-boundary) requires of everything queued at close;
+  3. the release of the registration.
+
+  Abandoning a request does not undo it: the server may already have received
+  and acted on it.
+- **No stale delivery.** The host forgets a request before it enqueues the
+  request's result, and when the request is abandoned. Both happen before the
+  guest releases the subscription, so the host never enqueues on a subscription
+  id after it has been released, and a later subscription that reuses the id
+  never receives another request's result. This does not depend on the guest
+  rejecting a stale id.
+- **Late settlement.** A settlement for a request the host has forgotten (the
+  abort's own rejection, or a race with it) stores nothing in the reference
+  table and enqueues nothing. Every rejection a request can produce, from
+  `fetch`, from the body read or from the abort, is handled by the host half;
+  none surfaces as an unhandled rejection.
+- **Termination.** When the instance exits, whether through `web.terminate`
+  ([Program lifetime and termination](#program-lifetime-and-termination)), a panic ([Failure inside a handler](#failure-inside-a-handler)) or any other exit, the
+  loader aborts and forgets every request still open, and a settlement after
+  that delivers nothing. The exit adds no release of its own: a registration
+  still held when the instance exits ends with the instance, so none is
+  released twice. An exit that unwinds out of the pump a delivery calls is
+  caught the way every host entry catches it.
+
+### Where the host half lives
+
+**The host half of `web.fetch`, the JS behind the imports above, is the
+compiler's, in this repository.** The compiler generates it into the loaders,
+beside the reference table, string marshalling, pump scheduling and exit
+handling it is written against. Which loader carries it is part of the artifact
+contract that [wasm-bindings.md](wasm-bindings.md) §"Browser JS Glue" owns. The `web` module owns
+the Promise half (the types, `web.fetch` and `wait`) and ships no JS of its own:
+its glue stays generated output ([Reaching the DOM](#reaching-the-dom)).
+
+There are three reasons, each sufficient on its own:
+
+- **The host half is written against the generated loader's internals:** its
+  reference table, its string helpers, its pump scheduling and its handling of
+  an exit. A host half in a second repository would be written against names no
+  contract publishes, and would drift from them silently.
+- **A mismatch would surface only in a browser.** The headless harness stubs
+  every import it does not know ([Testing a web application](#testing-a-web-application)), so a host half and a
+  Promise half that disagreed would still link and pass every headless test.
+- **Termination belongs to the loader.** Aborting every open request on exit is
+  part of the loader's exit path, which nothing outside the loader can hook.
 
 ## Size and startup
 

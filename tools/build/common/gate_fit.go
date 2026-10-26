@@ -11,8 +11,20 @@ package common
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 )
+
+// unlinkMetricName is the one fit metric only some platforms measure
+// (gate_fit_unlink_unix.go). Named here, on every platform, because the terms
+// file is one file for every platform and must be able to name it everywhere.
+const unlinkMetricName = "worktree_hides_unlinked_files"
+
+// fitMetricSpecs is what fit declares on this platform: the worktree's free
+// space, what the unlink probe reports where it runs, and the build cache's.
+func fitMetricSpecs() []MetricSpec {
+	return slices.Concat(bytesSpecs("worktree_free_bytes"), unlinkMetricSpecs, bytesSpecs("cache_free_bytes"))
+}
 
 // measureFit reports free space on the two filesystems this project's work
 // writes to: the worktree (the change, and .promise-home/ with its build and
@@ -22,29 +34,46 @@ import (
 // what unlinkMetrics measures of that filesystem — before the build cache, so a
 // run left incomplete by an unknown cache location still carries everything it
 // knows about the worktree.
-func measureFit(root string) ([]Metric, string, error) {
+func measureFit(root string) (measurement, error) {
+	return measureFitWith(root, captureSplit)
+}
+
+// measureFitWith is measureFit with the `go env` child as a parameter, so a
+// test can stand in for a toolchain that cannot say where its cache is. Each
+// path measured is a group carrying its own figure.
+func measureFitWith(root string, capture captureFunc) (measurement, error) {
 	free, err := freeBytesNear(root)
 	if err != nil {
-		return nil, "", fmt.Errorf("free space at %s: %w", root, err)
+		return measurement{}, fmt.Errorf("free space at %s: %w", root, err)
 	}
-	metrics := []Metric{Size("worktree_free_bytes", free, "bytes")}
+	worktree := Size("worktree_free_bytes", free, unitBytes)
+	m := measurement{
+		metrics: []Metric{worktree},
+		groups:  []Group{{Name: root, Metrics: []Metric{worktree}}},
+	}
 	unlink, err := unlinkMetrics(root)
 	if err != nil {
-		return nil, "", fmt.Errorf("unlink semantics at %s: %w", root, err)
+		return measurement{}, fmt.Errorf("unlink semantics at %s: %w", root, err)
 	}
-	metrics = append(metrics, unlink...)
+	m.metrics = append(m.metrics, unlink...)
+	m.groups[0].Metrics = append(m.groups[0].Metrics, unlink...)
 
-	cache, why := goBuildCache(root)
+	cache, why := goBuildCache(root, capture)
 	if why != "" {
 		// Named rather than omitted: one filesystem of two is a run that
 		// measured less than a full one, and an incomplete run is never a pass.
-		return metrics, "the Go build cache location is unknown, so only the worktree filesystem was measured: " + why, nil
+		m.groups = append(m.groups, Group{Name: "GOCACHE", Members: []Member{newMember("go env GOCACHE", OutcomeNotRun, why)}})
+		m.incomplete = "the Go build cache location is unknown, so only the worktree filesystem was measured: " + why
+		return m, nil
 	}
 	free, err = freeBytesNear(cache)
 	if err != nil {
-		return nil, "", fmt.Errorf("free space at %s: %w", cache, err)
+		return measurement{}, fmt.Errorf("free space at %s: %w", cache, err)
 	}
-	return append(metrics, Size("build_cache_free_bytes", free, "bytes")), "", nil
+	cacheFree := Size("cache_free_bytes", free, unitBytes)
+	m.metrics = append(m.metrics, cacheFree)
+	m.groups = append(m.groups, Group{Name: cache, Metrics: []Metric{cacheFree}})
+	return m, nil
 }
 
 // goBuildCache asks the toolchain where it writes what it reuses. `go env
@@ -52,8 +81,8 @@ func measureFit(root string) ([]Metric, string, error) {
 // on every machine that configured it. The value is read from stdout alone —
 // go writes diagnostics and toolchain-download notices to stderr, and a path
 // read from the combined stream has the warning glued to its front.
-func goBuildCache(root string) (path, why string) {
-	stdout, stderr, err := captureSplit(root, "go", "env", "GOCACHE")
+func goBuildCache(root string, capture captureFunc) (path, why string) {
+	stdout, stderr, err := capture(root, "go", "env", "GOCACHE")
 	cache := strings.TrimSpace(stdout)
 	if err != nil || cache == "" {
 		if line := firstLine(strings.TrimSpace(stderr)); line != "" {

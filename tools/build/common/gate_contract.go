@@ -17,7 +17,8 @@ package common
 //
 // `--envelope` and `--list` are flags of the bin/gate BINARY, not part of any
 // gate's name and not modifiers of one: the runner appends --envelope when it
-// asks for a measurement, and --list asks what this project provides.
+// asks for a measurement, and --list asks what this project provides. RunGate
+// (gate.go) holds the command line; this file holds what it reaches.
 
 import (
 	"bytes"
@@ -26,7 +27,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,6 +44,12 @@ const (
 	MetricInt MetricType = "int"
 	// MetricFloat measures a quantity that is not whole.
 	MetricFloat MetricType = "float"
+)
+
+// The units a metric may carry. A count carries none.
+const (
+	unitBytes   = "bytes"
+	unitPercent = "percent"
 )
 
 // Metric is one number a gate measured. The type travels with the value, and a
@@ -68,9 +77,24 @@ func Size(name string, n int64, unit string) Metric {
 
 // Percent is a proportion, out of a hundred. Held as a float because it is one:
 // coverage that moved from 71.4 to 71.9 is a real change, and rounding it to a
-// whole number would report the two runs as identical.
+// whole number would report the two runs as identical. The unit is a word, not
+// "%", so a reader keying on it compares names rather than punctuation.
 func Percent(name string, v float64) Metric {
-	return Metric{Name: name, Type: MetricFloat, Float: v, Unit: "%"}
+	return Metric{Name: name, Type: MetricFloat, Float: v, Unit: unitPercent}
+}
+
+// sharedCount reports one count twice: under the name every language's gate
+// shares, and under this toolchain's own. A composition sums the shared name
+// across its parts — `tested` reports one failed_tests for Go and Promise
+// together — while each language's figure stays readable by itself.
+func sharedCount(toolchain, name string, n int) []Metric {
+	return []Metric{Count(name, n), Count(toolchain+"_"+name, n)}
+}
+
+// sharedPercent is sharedCount for a proportion. Proportions are never summed,
+// so its shared name must come from exactly one part of any composition.
+func sharedPercent(toolchain, name string, v float64) []Metric {
+	return []Metric{Percent(name, v), Percent(toolchain+"_"+name, v)}
 }
 
 // Number is the value as a float, for comparison against a threshold. Widening
@@ -135,6 +159,115 @@ func (m *Metric) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// MetricSpec is one metric a gate DECLARES: its name and what kind of number it
+// is, without a value. The listing carries a gate's declarations, so a reader
+// can write terms for a gate it has never run; and every leaf's output is held
+// to them (checkAgainstDeclaration), so the listing cannot come to describe a
+// gate other than the one that runs.
+type MetricSpec struct {
+	Name string     `json:"name"`
+	Type MetricType `json:"type"`
+	Unit string     `json:"unit,omitempty"`
+}
+
+// specOf is what a measured metric would have had to be declared as.
+func specOf(m Metric) MetricSpec { return MetricSpec{Name: m.Name, Type: m.Type, Unit: m.Unit} }
+
+// describe renders a spec's kind for a message: "int", "int in bytes".
+func (s MetricSpec) describe() string {
+	if s.Unit == "" {
+		return string(s.Type)
+	}
+	return string(s.Type) + " in " + s.Unit
+}
+
+// The declaration constructors mirror the metric constructors, so a gate's
+// declaration reads like the calls that emit what it declares.
+func countSpecs(names ...string) []MetricSpec { return specs(MetricInt, "", names) }
+func bytesSpecs(names ...string) []MetricSpec { return specs(MetricInt, unitBytes, names) }
+
+// sharedCountSpecs declares what sharedCount emits, for each name.
+func sharedCountSpecs(toolchain string, names ...string) []MetricSpec {
+	var out []MetricSpec
+	for _, n := range names {
+		out = append(out, countSpecs(n, toolchain+"_"+n)...)
+	}
+	return out
+}
+
+// sharedPercentSpecs declares what sharedPercent emits, for each name.
+func sharedPercentSpecs(toolchain string, names ...string) []MetricSpec {
+	var out []MetricSpec
+	for _, n := range names {
+		out = append(out, specs(MetricFloat, unitPercent, []string{n, toolchain + "_" + n})...)
+	}
+	return out
+}
+
+func specs(t MetricType, unit string, names []string) []MetricSpec {
+	out := make([]MetricSpec, 0, len(names))
+	for _, n := range names {
+		out = append(out, MetricSpec{Name: n, Type: t, Unit: unit})
+	}
+	return out
+}
+
+// Group is evidence under one name — a test file, a Go package — beside the
+// numbers: the metrics that belong to it, and the members it holds. The
+// metrics say how many; the members say which, so a reader told "3 failing"
+// is handed the three rather than sent to find them.
+type Group struct {
+	Name    string   `json:"name"`
+	Metrics []Metric `json:"metrics,omitempty"`
+	Members []Member `json:"members,omitempty"`
+}
+
+// Member is one thing a group holds — a test — and what became of it.
+type Member struct {
+	Name    string  `json:"name"`
+	Outcome string  `json:"outcome"`
+	Detail  string  `json:"detail,omitempty"`
+	Elapsed float64 `json:"elapsed,omitempty"`
+}
+
+// The outcomes a member may have. The set is closed, and is the runner's own
+// record vocabulary (`promise test --json`), so a record maps onto a member
+// without a translation that could drift.
+const (
+	OutcomePass     = "pass"
+	OutcomeFail     = "fail"
+	OutcomeTimeout  = "timeout"
+	OutcomeLeak     = "leak"
+	OutcomeMemory   = "memory"
+	OutcomeExcluded = "excluded"
+	OutcomeNotRun   = "not-run"
+)
+
+// memberOutcomes is every outcome above, for the check that holds a leaf's
+// members to the vocabulary.
+var memberOutcomes = []string{
+	OutcomePass, OutcomeFail, OutcomeTimeout, OutcomeLeak, OutcomeMemory, OutcomeExcluded, OutcomeNotRun,
+}
+
+// validOutcome reports whether o is one of memberOutcomes.
+func validOutcome(o string) bool { return slices.Contains(memberOutcomes, o) }
+
+// newMember is a member with its detail bounded: one test's output, a whole IR
+// dump included, cannot swell the envelope past what a runner drains
+// (clampContext). An empty detail is left out of the wire.
+func newMember(name, outcome, detail string) Member {
+	return Member{Name: name, Outcome: outcome, Detail: clampContext(strings.TrimSpace(detail))}
+}
+
+// relToRoot names a path under root as a person addresses it from there, and
+// leaves any other path as it is.
+func relToRoot(root, path string) string {
+	if rel, err := filepath.Rel(root, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return filepath.ToSlash(rel)
+	}
+	return path
+}
+
 // Envelope is what a contract gate prints on stdout: one JSON object, written
 // whole, so a run killed part-way leaves output that does not parse — which is
 // how the runner tells "measured nothing" from "measured and reported".
@@ -148,6 +281,9 @@ type Envelope struct {
 	// Target is what these measurements speak for. One run reports one target.
 	Target  string   `json:"target"`
 	Metrics []Metric `json:"metrics"`
+	// Groups is the evidence behind the metrics, when a gate has any. Nothing
+	// judges it: the verdict rests on the metrics alone.
+	Groups []Group `json:"groups,omitempty"`
 	// Incomplete names why this run measured less than a full one, and is empty
 	// when it did not. Completeness is the absence of a reason, so there is no
 	// separate flag that could disagree with it. A baseline never moves from an
@@ -168,13 +304,38 @@ type Envelope struct {
 // EnvelopeSchemaVersion is the wire version of the envelope above.
 const EnvelopeSchemaVersion = 1
 
+// measurement is what one leaf gate measured: its metrics, the evidence behind
+// them, and why it measured less than a full run when it did.
+type measurement struct {
+	metrics    []Metric
+	groups     []Group
+	incomplete string
+}
+
 // contractGateDef is either a leaf that measures, or a composition of other
 // gates. A composition's parts stay separately runnable, which is what lets a
 // step fixing one area re-run that area rather than the whole set.
 type contractGateDef struct {
 	summary string
-	measure func(root string) ([]Metric, string, error)
+	measure func(root string) (measurement, error)
 	parts   []string
+	// metrics is what a leaf declares it reports. A composition declares
+	// nothing of its own: it reports what its parts do (declaredMetrics).
+	metrics []MetricSpec
+	// treeMetrics is the part of a leaf's declaration that depends on what the
+	// tree holds — size:wasm reports one metric per canary file — and so is read
+	// from the tree rather than spelled. Nil for every other gate.
+	treeMetrics func(root string) []MetricSpec
+	// remedy is what a person does about a number this LEAF reports: one
+	// sentence naming the command to run, and the one that re-measures. A
+	// composition has none of its own; a metric's remedy is that of the leaves
+	// declaring it.
+	remedy string
+	// serialize is the exclusion the gate must hold while it measures: "host"
+	// for one whose numbers depend on what else the machine is doing, "" for
+	// none. The listing declares it, so an orchestrator takes it before spawning
+	// the gate; runContractGate takes it too, so a hand-run gate queues with them.
+	serialize string
 	// measuresMachine marks the gate whose subject is the HOST rather than the
 	// tree, and which therefore does not build first (gate_build.go). The
 	// default — build — is the safe one, so a gate added later inherits it
@@ -187,6 +348,10 @@ type contractGateDef struct {
 // bin/verify's test phase, and blessIfPassed, which refuses to bless anything
 // else (blessing.go).
 const integrationGate = "integration"
+
+// serializeHost is the host-scope exclusion: one holder on the machine at a
+// time, the one bin/verify holds (acquireHostScope).
+const serializeHost = "host"
 
 // contractGates is CLOSED, and holds only gates. A name absent here is refused
 // rather than guessed at, because a runner asking for a gate this project does
@@ -203,10 +368,14 @@ var contractGates = map[string]contractGateDef{
 	"formatted:go": {
 		summary: "Go files gofmt would rewrite",
 		measure: measureFormattedGo,
+		metrics: sharedCountSpecs("go", "unformatted_files"),
+		remedy:  "run `bin/format` (gofmt -w); `bin/run formatted:go` re-measures",
 	},
 	"formatted:promise": {
 		summary: "Promise files `promise format` would rewrite",
 		measure: measureFormattedPromise,
+		metrics: sharedCountSpecs("promise", "unformatted_files"),
+		remedy:  "run `bin/format` (`promise format`); `bin/run formatted:promise` re-measures",
 	},
 	"formatted": {
 		summary: "files either formatter would rewrite",
@@ -215,44 +384,64 @@ var contractGates = map[string]contractGateDef{
 	"builds": {
 		summary: "Go packages that fail to compile",
 		measure: measureBuilds,
+		metrics: append(countSpecs("build_failures"), sharedCountSpecs("go", "unbuildable_packages")...),
+		remedy:  "fix what each member names, rebuilding the compiler to confirm; `bin/run builds` re-measures",
 	},
 	"checked:go": {
 		summary: "go vet diagnostics",
 		measure: measureCheckedGo,
+		metrics: sharedCountSpecs("go", "check_findings"),
+		remedy:  "fix each finding `bin/check` reports (go vet); `bin/run checked:go` re-measures",
 	},
 	"checked:promise": {
 		summary: "Promise semantic and ownership diagnostics",
 		measure: measureCheckedPromise,
+		metrics: append(sharedCountSpecs("promise", "check_findings"),
+			countSpecs("promise_check_failures", "promise_check_warnings", "promise_check_units")...),
+		remedy: "fix each diagnostic `bin/promise check` reports; `bin/run checked:promise` re-measures",
 	},
 	"checked": {
 		summary: "diagnostics from every language's checker",
 		parts:   []string{"checked:go", "checked:promise"},
 	},
+	// The suites hold the host scope: a suite run beside another verify or
+	// runner on the same machine reports that machine's load as timeouts.
 	"tested:go": {
-		summary: "failing tests in every Go module's suite",
-		measure: measureTestedGo,
+		summary:   "failing tests in every Go module's suite",
+		measure:   measureTestedGo,
+		metrics:   sharedCountSpecs("go", "failed_tests", "failed_packages", "test_count"),
+		remedy:    "fix the failing tests, re-running them with `bin/test go`; `bin/run tested:go` re-measures",
+		serialize: serializeHost,
 	},
 	"tested:promise": {
-		summary: "failing tests in the host Promise suite",
-		measure: measureTestedPromise,
+		summary:   "failing tests in the host Promise suite",
+		measure:   measureTestedPromise,
+		metrics:   suiteSummarySpecs("promise"),
+		remedy:    "fix the failing tests, re-running them with `bin/test promise`; `bin/run tested:promise` re-measures",
+		serialize: serializeHost,
 	},
 	"tested": {
-		summary: "failing tests in the host suites",
-		parts:   []string{"tested:go", "tested:promise"},
+		summary:   "failing tests in the host suites",
+		parts:     []string{"tested:go", "tested:promise"},
+		serialize: serializeHost,
 	},
 	// integration is what a landing decision rests on: the whole, measured at
 	// once, with nothing repaired on the way. Its parts stay separately
 	// runnable — a step fixing one failing area re-runs that area, not the set.
 	integrationGate: {
-		summary: "everything that must hold before a change may land (host)",
-		parts:   []string{"formatted", "builds", "checked", "tested"},
+		summary:   "everything that must hold before a change may land (host)",
+		parts:     []string{"formatted", "builds", "checked", "tested"},
+		serialize: serializeHost,
 	},
 	// fit measures the machine, not the code: whether it may be given work at
 	// all. Deliberately NOT part of integration — a machine that cannot build
-	// is not a change that may not land.
+	// is not a change that may not land — and it never holds the host scope,
+	// because it must answer on a machine whose holder is wedged.
 	"fit": {
 		summary:         "free space where this project's work writes, and whether its filesystem lets a removed file's name go",
 		measure:         measureFit,
+		metrics:         fitMetricSpecs(),
+		remedy:          "free space on the filesystem each group names (`bin/clean` empties this worktree's caches); `bin/run fit` re-measures",
 		measuresMachine: true,
 	},
 
@@ -261,47 +450,73 @@ var contractGates = map[string]contractGateDef{
 	// exactly one. Deliberately NOT parts of integration: the wasm suite alone
 	// runs longer than every host gate combined.
 	"tested:wasm": {
-		summary: "failing tests in the wasm32-wasi suite",
-		measure: measureTestedWasm,
+		summary:   "failing tests in the wasm32-wasi suite",
+		measure:   measureTestedWasm,
+		metrics:   suiteSummarySpecs(wasmSuite.prefix),
+		remedy:    "fix the failing tests, re-running them with `bin/test promise --wasm`; `bin/run tested:wasm` re-measures",
+		serialize: serializeHost,
 	},
 	"tested:wasm-web": {
-		summary: "failing tests in the wasm32-web suite, under Node",
-		measure: measureTestedWasmWeb,
+		summary:   "failing tests in the wasm32-web suite, under Node",
+		measure:   measureTestedWasmWeb,
+		metrics:   suiteSummarySpecs(wasmWebSuite.prefix),
+		remedy:    "fix the failing tests, re-running them with `bin/test promise --wasm-web`; `bin/run tested:wasm-web` re-measures",
+		serialize: serializeHost,
 	},
 	"tested:stress": {
-		summary: "tests that do not agree with themselves across repeated runs",
-		measure: measureTestedStress,
+		summary:   "tests that do not agree with themselves across repeated runs",
+		measure:   measureTestedStress,
+		metrics:   countSpecs("stress_flaky_count", "stress_iterations"),
+		remedy:    "make each flaky test agree with itself, repeating it with `bin/stress`; `bin/run tested:stress` re-measures",
+		serialize: serializeHost,
 	},
 	"covered": {
 		summary: "how much of each language's source the suites reach",
 		measure: measureCovered,
+		metrics: append(sharedPercentSpecs("go", "statement_coverage"),
+			sharedPercentSpecs("promise", "block_coverage")...),
+		remedy:    "test what `bin/coverage` reports unreached; `bin/run covered` re-measures",
+		serialize: serializeHost,
 	},
 
 	// Outside flow's closed vocabulary, and listed anyway: the SDK skips a name
-	// it does not recognise, while the tracker addresses these by name. A gate
-	// the flow cannot ask for is still a gate this project has, and a listing
-	// that omitted it would describe a machine that does not exist.
+	// it does not recognise, and a listing that omitted these would describe a
+	// machine that does not exist.
 	//
 	// The instance half is carried even though the concept is ours, because
 	// each of these measures ONE of several things it could: the canaries are
 	// built for wasm32-wasi and nothing stops a later `size:native` or
 	// `size:wasm-web`, and the install is of the thin variant beside a `full`
-	// the subcommand already accepts. A bare `size` would claim to measure what
-	// this project produces while measuring one target's canaries — and the
-	// name would have to change the day the second instance arrives, which is
-	// the rename an instance suffix exists to avoid.
+	// one. A bare `size` would claim to measure what this project produces
+	// while measuring one target's canaries — and the name would have to change
+	// the day the second instance arrives, which is the rename an instance
+	// suffix exists to avoid.
 	"size:wasm": {
-		summary: "what the wasm32-wasi canaries compile to, per canary",
-		measure: measureSizeWasm,
+		summary:     "what the wasm32-wasi canaries compile to, per canary",
+		measure:     measureSizeWasm,
+		treeMetrics: sizeWasmMetricSpecs,
+		remedy:      "shrink what the grown canary pulls in, rebuilding it with `bin/promise build -target wasm32-wasi -release`; `bin/run size:wasm` re-measures",
 	},
 	"install:thin": {
 		summary:         "installing a published thin release, end to end",
-		measure:         measureInstallThin,
+		measure:         measureInstall("thin"),
+		metrics:         installMetricSpecs("thin"),
+		remedy:          "fix the release the failing phase names and re-publish it with `bin/release`; `bin/run install:thin` re-measures",
+		measuresMachine: true,
+	},
+	// The full variant also proves the installed toolchain compiles offline.
+	"install:full": {
+		summary:         "installing a published full release, end to end, and compiling with the network down",
+		measure:         measureInstall("full"),
+		metrics:         installMetricSpecs("full"),
+		remedy:          "fix the release the failing phase names and re-publish it with `bin/release`; `bin/run install:full` re-measures",
 		measuresMachine: true,
 	},
 	"latest-invariant": {
 		summary:         "whether `releases/latest` resolves to an epoch-* release",
 		measure:         measureLatestInvariant,
+		metrics:         countSpecs("latest_is_epoch"),
+		remedy:          "demote the release `latest` resolves to with `gh release edit <tag> --prerelease`; `bin/run latest-invariant` re-measures",
 		measuresMachine: true,
 	},
 }
@@ -323,12 +538,73 @@ func IsContractGate(name string) bool { _, ok := contractGates[name]; return ok 
 // ContractGateSummary is the one-line description of a gate, for usage text.
 func ContractGateSummary(name string) string { return contractGates[name].summary }
 
+// gateSerialize is the exclusion a gate declares it must hold while it
+// measures: "host", or "" for none.
+func gateSerialize(name string) string { return contractGates[name].serialize }
+
+// leafMetrics is what a LEAF itself declares: its spelled list, then whatever
+// it reads from the tree. Nil for a composition, which declares nothing of its
+// own. root is the tree a tree-dependent declaration is read from.
+func leafMetrics(root, name string) []MetricSpec {
+	def := contractGates[name]
+	out := slices.Clone(def.metrics)
+	if def.treeMetrics != nil {
+		out = append(out, def.treeMetrics(root)...)
+	}
+	return out
+}
+
+// declaredMetrics is every metric gate name's envelope carries: a leaf's own
+// declaration; for a composition, the union over its parts in part order, a
+// name more than one part reports listed once — the composition sums it
+// (MeasureContractGateParts). A gate whose subject is the tree also carries
+// what the run cost the store, which runContractGate adds around the whole
+// measurement (storeMetricSpecs). Empty, never nil, for a name that is not a
+// gate.
+func declaredMetrics(root, name string) []MetricSpec {
+	def, ok := contractGates[name]
+	if !ok {
+		return []MetricSpec{}
+	}
+	out := ownMetrics(root, name)
+	if !def.measuresMachine {
+		out = appendNewSpecs(out, storeMetricSpecs)
+	}
+	return out
+}
+
+// ownMetrics is declaredMetrics without the store's two.
+func ownMetrics(root, name string) []MetricSpec {
+	def := contractGates[name]
+	if def.measure != nil {
+		return leafMetrics(root, name)
+	}
+	out := []MetricSpec{}
+	for _, part := range def.parts {
+		out = appendNewSpecs(out, ownMetrics(root, part))
+	}
+	return out
+}
+
+// appendNewSpecs appends each of add whose name into does not already hold.
+func appendNewSpecs(into, add []MetricSpec) []MetricSpec {
+	for _, s := range add {
+		if !slices.ContainsFunc(into, func(have MetricSpec) bool { return have.Name == s.Name }) {
+			into = append(into, s)
+		}
+	}
+	return into
+}
+
 // unknownContractGate is the one refusal both bin/gate and bin/run give for a
 // name this project does not measure, so a caller that mistyped is told the
-// same thing whichever program it typed it at.
+// same thing whichever program it typed it at. A usage error — the command line
+// named nothing that exists — and it points at the listing rather than copying
+// it, which would bury the one fact the caller needs.
 func unknownContractGate(name string) error {
-	return fmt.Errorf("no gate named %q in this project; gates: %s",
-		name, strings.Join(ContractGateNames(), ", "))
+	return &UsageError{Tool: "gate", Problems: []string{
+		fmt.Sprintf("no gate named %q in this project; `gate --list` names them", name),
+	}}
 }
 
 // PartResult is what ONE leaf gate measured, for a caller rendering a summary
@@ -371,7 +647,7 @@ func MeasureContractGateParts(root, name string) (Envelope, []PartResult, error)
 	if !ok {
 		return Envelope{}, nil, unknownContractGate(name)
 	}
-	// Every gate but the machine one measures the tree AS IT IS NOW, so the
+	// Every gate but the machine ones measures the tree AS IT IS NOW, so the
 	// build comes first — gate_build.go says why, and RunBuild's own quick
 	// check makes it cost about 0.1s on an already-built tree. The outcome is
 	// not consulted here: each measurement that reads build artifacts asks
@@ -381,39 +657,38 @@ func MeasureContractGateParts(root, name string) (Envelope, []PartResult, error)
 	if !def.measuresMachine {
 		_ = ensureGateBuild(root)
 	}
-	if def.measure != nil {
-		start := time.Now()
-		metrics, incomplete, err := def.measure(root)
-		elapsed := time.Since(start)
-		if err != nil {
-			return Envelope{}, nil, err
-		}
-		if metrics == nil {
-			metrics = []Metric{}
-		}
-		env := Envelope{
-			SchemaVersion: EnvelopeSchemaVersion,
-			Gate:          name,
-			Target:        HostTarget(),
-			Metrics:       metrics,
-			Incomplete:    incomplete,
-		}
-		return env, []PartResult{{
-			Gate:       name,
-			Metrics:    metrics,
-			Incomplete: incomplete,
-			Elapsed:    elapsed,
-		}}, nil
-	}
-	// A composition. Each part is measured by the same path a caller asking for
-	// that part alone would take, so the whole cannot disagree with its parts
-	// about how anything is measured.
 	env := Envelope{
 		SchemaVersion: EnvelopeSchemaVersion,
 		Gate:          name,
 		Target:        HostTarget(),
 		Metrics:       []Metric{},
 	}
+	if def.measure != nil {
+		start := time.Now()
+		m, err := def.measure(root)
+		elapsed := time.Since(start)
+		if err != nil {
+			return Envelope{}, nil, err
+		}
+		if m, err = checkAgainstDeclaration(root, name, m); err != nil {
+			return Envelope{}, nil, err
+		}
+		if m.metrics != nil {
+			env.Metrics = m.metrics
+		}
+		env.Groups, env.Incomplete = m.groups, m.incomplete
+		return env, []PartResult{{
+			Gate:       name,
+			Metrics:    env.Metrics,
+			Incomplete: env.Incomplete,
+			Elapsed:    elapsed,
+		}}, nil
+	}
+	// A composition. Each part is measured by the same path a caller asking for
+	// that part alone would take, so the whole cannot disagree with its parts
+	// about how anything is measured. A name more than one part reports is
+	// summed into one: the envelope says each thing once, and `tested` reporting
+	// failed_tests twice would leave a reader to add them up.
 	var reasons []string
 	var parts []PartResult
 	for _, part := range def.parts {
@@ -421,7 +696,10 @@ func MeasureContractGateParts(root, name string) (Envelope, []PartResult, error)
 		if err != nil {
 			return Envelope{}, nil, fmt.Errorf("%s: %w", part, err)
 		}
-		env.Metrics = append(env.Metrics, sub.Metrics...)
+		if env.Metrics, err = sumMetrics(env.Metrics, sub.Metrics); err != nil {
+			return Envelope{}, nil, fmt.Errorf("%s: %w", part, err)
+		}
+		env.Groups = append(env.Groups, sub.Groups...)
 		parts = append(parts, subParts...)
 		if sub.Incomplete != "" {
 			reasons = append(reasons, part+": "+sub.Incomplete)
@@ -429,6 +707,81 @@ func MeasureContractGateParts(root, name string) (Envelope, []PartResult, error)
 	}
 	env.Incomplete = strings.Join(reasons, "; ")
 	return env, parts, nil
+}
+
+// sumMetrics adds each of add into into: a name into does not hold is
+// appended, one it holds is summed. Only whole counts and sizes sum — a
+// proportion added to a proportion is not one — and two parts reporting one
+// name as different kinds of number are measuring different things under it.
+// Either is a definition bug, refused rather than resolved.
+func sumMetrics(into, add []Metric) ([]Metric, error) {
+	for _, m := range add {
+		i := slices.IndexFunc(into, func(have Metric) bool { return have.Name == m.Name })
+		if i < 0 {
+			into = append(into, m)
+			continue
+		}
+		have := into[i]
+		switch {
+		case specOf(have) != specOf(m):
+			return nil, fmt.Errorf("%q is reported by more than one part, as %s and as %s, so the two cannot be summed",
+				m.Name, specOf(have).describe(), specOf(m).describe())
+		case m.Type != MetricInt:
+			return nil, fmt.Errorf("%q is a %s reported by more than one part; only whole numbers are summed", m.Name, m.Type)
+		}
+		into[i].Int += m.Int
+	}
+	return into, nil
+}
+
+// checkAgainstDeclaration holds one leaf's output to what it declares.
+//
+// A metric the leaf does not declare, or reports as another kind of number than
+// it declares, is a DEFINITION bug: the listing would describe a gate other than
+// the one that ran, and terms written against the listing would judge the wrong
+// thing. That is an error, not a number. So is a member outcome outside the
+// vocabulary.
+//
+// A declared metric the leaf did not report, from a run that claims to be
+// complete, makes the run incomplete instead: whoever read the listing was
+// promised that number, and its absence must not pass for nothing being wrong.
+// A run that is already incomplete has said why it measured less.
+func checkAgainstDeclaration(root, name string, m measurement) (measurement, error) {
+	declared := leafMetrics(root, name)
+	reported := map[string]bool{}
+	for _, metric := range m.metrics {
+		i := slices.IndexFunc(declared, func(s MetricSpec) bool { return s.Name == metric.Name })
+		switch {
+		case i < 0:
+			return measurement{}, fmt.Errorf("reported %q, which this gate does not declare", metric.Name)
+		case declared[i] != specOf(metric):
+			return measurement{}, fmt.Errorf("reported %q as %s, which this gate declares as %s",
+				metric.Name, specOf(metric).describe(), declared[i].describe())
+		case reported[metric.Name]:
+			return measurement{}, fmt.Errorf("reported %q twice", metric.Name)
+		}
+		reported[metric.Name] = true
+	}
+	for _, g := range m.groups {
+		for _, member := range g.Members {
+			if !validOutcome(member.Outcome) {
+				return measurement{}, fmt.Errorf("reported %s in %s with outcome %q, which is not one of %s",
+					member.Name, g.Name, member.Outcome, strings.Join(memberOutcomes, ", "))
+			}
+		}
+	}
+	if m.incomplete == "" {
+		var missing []string
+		for _, s := range declared {
+			if !reported[s.Name] {
+				missing = append(missing, s.Name)
+			}
+		}
+		if len(missing) > 0 {
+			m.incomplete = "these declared metrics were not reported: " + strings.Join(missing, ", ")
+		}
+	}
+	return m, nil
 }
 
 // joinIncomplete adds one more reason to a run's incomplete reason. A run may
@@ -445,56 +798,46 @@ func joinIncomplete(existing, add string) string {
 	}
 }
 
-// parseContractGateArgs reads `<name> [--envelope]`: exactly one name, and
-// whether the caller asked for an envelope. An unknown flag is refused rather
-// than ignored, and a second name refused rather than dropped — two callers
-// asking the same thing must not get different answers and both be right.
-func parseContractGateArgs(args []string) (name string, envelope bool, err error) {
-	for _, raw := range args {
-		flag, isFlag := flagName(raw)
-		switch {
-		case isFlag && flag == "envelope":
-			envelope = true
-		case isFlag:
-			return "", false, fmt.Errorf("use of unknown flag %q", raw)
-		case name != "":
-			return "", false, fmt.Errorf("unexpected argument %q; a gate is asked for by name, once", raw)
-		default:
-			name = raw
-		}
-	}
-	if !IsContractGate(name) {
-		return "", false, unknownContractGate(name)
-	}
-	return name, envelope, nil
-}
-
-// runContractGate is `bin/gate <name> [--envelope]`.
+// runContractGate is `bin/gate <name> --envelope`, once RunGate has accepted
+// the command line: it measures, and writes the one envelope to stdout.
 //
-// Without --envelope it prints nothing on stdout and fails: a bare run that
-// printed measurements and exited 0 would be read as a pass by the first script
-// that wrapped it. Every error path leaves stdout untouched, so a runner reads
-// one envelope or nothing.
-func runContractGate(root string, args []string, stdout io.Writer) error {
-	name, envelope, err := parseContractGateArgs(args)
-	if err != nil {
-		return err
+// Stdout carries that envelope and nothing else, so for the whole measurement
+// os.Stdout points at the narration instead: the build, a blob fetch, and
+// anything else in this process that prints with fmt.Println cannot put a line
+// in front of the object, however deep in the call it sits. The envelope is
+// written once, whole, to the stream the caller handed in — the real stdout —
+// so a run killed part-way leaves output that does not parse, and every error
+// path leaves stdout untouched.
+func runContractGate(root, name string, stdout io.Writer) error {
+	def, known := contractGates[name]
+	if !known {
+		return unknownContractGate(name)
 	}
-	if !envelope {
-		return fmt.Errorf("refusing to measure %q without --envelope; run `bin/run %s` for a result meant for a person", name, name)
+	saved := os.Stdout
+	os.Stdout = Narration()
+	defer func() { os.Stdout = saved }()
+
+	// A gate that declares the host scope holds it for the whole measurement.
+	// An orchestrator that read the declaration has already taken it for this
+	// arena, so this re-enters rather than queues; run by hand, the gate queues
+	// with every verify and runner on the machine instead of measuring their
+	// load. Taken after the redirect, so the line saying who it waits for is
+	// narration too.
+	if def.serialize == serializeHost {
+		release, err := acquireHostScope(root)
+		if err != nil {
+			return fmt.Errorf("%s: taking the host-scope exclusion: %w", name, err)
+		}
+		defer release()
 	}
+
 	// What this RUN costs the content-addressed store, added once, around
 	// everything (T2143). It belongs here and not in MeasureContractGate: it is
 	// a property of the whole process, a composition's parts all draw on the
 	// same store, and the window is a side effect no function call should carry.
-	// fit is the exception — it measures the machine, must answer on one that
+	// A machine gate is the exception — fit must answer on a machine that
 	// cannot build, and so neither warms a toolchain nor opens a window.
-	// A name this project does not have opens no window either: the refusal
-	// comes from MeasureContractGate below, and resetting somebody's ledger on
-	// the way to an error would be the same side effect on a path that measures
-	// nothing at all.
-	def, known := contractGates[name]
-	measured := known && !def.measuresMachine
+	measured := !def.measuresMachine
 	var store casWindow
 	var beforeTree string
 	if measured {
@@ -519,7 +862,7 @@ func runContractGate(root string, args []string, stdout io.Writer) error {
 		env.Tree = tree
 		env.Incomplete = joinIncomplete(env.Incomplete, moved)
 	}
-	out, err := json.Marshal(env)
+	out, err := encodeEnvelope(env)
 	if err != nil {
 		return fmt.Errorf("could not encode the %s envelope: %w", name, err)
 	}
@@ -528,45 +871,64 @@ func runContractGate(root string, args []string, stdout io.Writer) error {
 	return err
 }
 
-// parseListArgs recognises a listing request: `--list` (or `list`/`-list`),
-// optionally with `--json`, and nothing else. ok is false when this argv is not
-// a listing request at all, so the caller falls through to its own gates.
-func parseListArgs(args []string) (list, jsonOut, ok bool) {
-	for _, raw := range args {
-		flag, isFlag := flagName(raw)
-		if !isFlag {
-			// The bare word too: `bin/gate list` is what a person types, and a
-			// person who guessed right must not be told the gate does not exist.
-			flag = raw
+// maxEnvelopeBytes bounds what one envelope may weigh, and maxMembersPerGroup
+// is how many members a group keeps when it must be cut. A runner reads a
+// gate's stdout whole, and evidence is the one part that grows without limit: a
+// tree where everything fails names every test, with its output.
+const (
+	maxEnvelopeBytes   = 1 << 20
+	maxMembersPerGroup = 50
+)
+
+// encodeEnvelope marshals env within maxEnvelopeBytes, giving up evidence in
+// the order it matters least: every member's detail first, then the members
+// past the first maxMembersPerGroup of each group. The metrics — what is
+// judged — and the groups' own metrics are never touched.
+func encodeEnvelope(env Envelope) ([]byte, error) {
+	out, err := json.Marshal(env)
+	for _, cut := range []bool{false, true} {
+		if err != nil || len(out) <= maxEnvelopeBytes {
+			break
 		}
-		switch flag {
-		case "list":
-			list = true
-		case "json":
-			jsonOut = true
-		default:
-			return false, false, false
-		}
+		env.Groups = trimEvidence(env.Groups, cut)
+		out, err = json.Marshal(env)
 	}
-	return list, jsonOut, list || jsonOut
+	return out, err
 }
 
-// flagName splits a leading "-" or "--" off an argument, reporting whether it
-// was one. The RAW argument is what every message quotes back: a person who
-// typed `--json` and is told `-json` is being corrected in a spelling they did
-// not use, and the one-dash form is not even what this accepts everywhere else.
-func flagName(raw string) (string, bool) {
-	if after, ok := strings.CutPrefix(raw, "--"); ok {
-		return after, true
+// trimEvidence is groups without any member's detail, and with each group's
+// members cut to maxMembersPerGroup when cut is set. A copy: the measurement
+// the caller holds keeps everything.
+func trimEvidence(groups []Group, cut bool) []Group {
+	out := make([]Group, len(groups))
+	for i, g := range groups {
+		members := slices.Clone(g.Members)
+		for j := range members {
+			members[j].Detail = ""
+		}
+		if cut && len(members) > maxMembersPerGroup {
+			members = members[:maxMembersPerGroup]
+		}
+		g.Members = members
+		out[i] = g
 	}
-	if after, ok := strings.CutPrefix(raw, "-"); ok {
-		return after, true
-	}
-	return raw, false
+	return out
 }
 
-// writeGateList prints the gates this project provides: one name per line, or
-// one JSON object under --json.
+// listedGate is one row of `bin/gate --list -json`.
+type listedGate struct {
+	Name    string       `json:"name"`
+	Summary string       `json:"summary"`
+	Metrics []MetricSpec `json:"metrics"`
+	// Requires is what a gate needs in place before it can be asked for. This
+	// project declares nothing there yet; the field is present and empty so a
+	// reader never has to tell "requires nothing" from "did not say".
+	Requires  []string `json:"requires"`
+	Serialize string   `json:"serialize,omitempty"`
+}
+
+// writeGateList prints the gates this project provides: one name per line for
+// a person, or one JSON object.
 //
 // An orchestrator must not hold a second copy of this list — a copy goes stale
 // silently — so asking the entry point is the only way to learn it. Listing is
@@ -578,36 +940,39 @@ func flagName(raw string) (string, bool) {
 // has"). A bare array of names parses as JSON and still answers nothing: the
 // SDK unmarshals into a struct with a `name` field, gets zero gates out of a
 // list of strings, and reads the repository as a machine with no gates at all —
-// a silent discovery failure rather than a loud parse error. The summary rides
-// along for whoever reads the listing; the name is what a caller addresses, and
-// a field added here later is ignored by the SDK rather than refused.
-func writeGateList(w io.Writer, jsonOut bool) error {
+// a silent discovery failure rather than a loud parse error. Each row carries
+// what the gate reports (declaredMetrics), so terms can be written against a
+// gate nobody has run yet, and the exclusion it holds, so a runner takes it
+// before spawning the gate.
+func writeGateList(w io.Writer, root string, mode OutputMode) error {
 	names := ContractGateNames()
-	if !jsonOut {
+	if mode == ModeHuman {
+		var b bytes.Buffer
 		for _, n := range names {
-			if _, err := fmt.Fprintln(w, n); err != nil {
-				return err
-			}
+			b.WriteString(n + "\n")
 		}
-		return nil
-	}
-	type listedGate struct {
-		Name    string `json:"name"`
-		Summary string `json:"summary"`
+		_, err := w.Write(b.Bytes())
+		return err
 	}
 	gates := make([]listedGate, 0, len(names))
 	for _, n := range names {
-		gates = append(gates, listedGate{Name: n, Summary: ContractGateSummary(n)})
+		gates = append(gates, listedGate{
+			Name:      n,
+			Summary:   ContractGateSummary(n),
+			Metrics:   declaredMetrics(root, n),
+			Requires:  []string{},
+			Serialize: gateSerialize(n),
+		})
 	}
 	return writeJSONLine(w, struct {
 		Gates []listedGate `json:"gates"`
 	}{Gates: gates})
 }
 
-// HostTarget names the platform a run's measurements speak for, in the same
-// spelling the baselines are keyed by.
+// HostTarget names the platform a run's measurements speak for: Go's own
+// os/arch pair, the spelling flow names targets by.
 func HostTarget() string {
-	return strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
+	return runtime.GOOS + "/" + runtime.GOARCH
 }
 
 // writeJSONLine marshals whole, then writes once: a failure leaves the stream
@@ -636,22 +1001,23 @@ func captureSplit(dir, name string, args ...string) (stdout, stderr string, err 
 	return out.String(), errBuf.String(), err
 }
 
-// captureSplitTee is captureSplit with the child's output COPIED to our stderr
-// as it arrives, and captured as well.
+// captureSplitTee is captureSplit with the child's output COPIED to the
+// narration as it arrives, and captured as well.
 //
 // For the measurements that take minutes. A gate that holds a twenty-minute
 // suite's output until it is over is indistinguishable from a wedged one while
-// it runs, and when it finally reports `go_test_failures = 3` the three names
+// it runs, and when it finally reports `go_failed_tests = 3` the three names
 // are in a buffer nobody prints — the reader is told a number and sent to find
-// the tests themselves. judge.go makes the same argument about a gate's own
-// stderr, which is where this goes: OUR stdout carries the envelope and nothing
-// else, and docs/gate-system.md puts human-readable progress on stderr.
+// the tests themselves. OUR stdout carries the envelope and nothing else, so
+// the copy is narration: on stderr for whoever is watching, and nowhere for a
+// run nobody is.
 func captureSplitTee(dir, name string, args ...string) (stdout, stderr string, err error) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	var out, errBuf bytes.Buffer
-	cmd.Stdout = io.MultiWriter(os.Stderr, &out)
-	cmd.Stderr = io.MultiWriter(os.Stderr, &errBuf)
+	narration := Narration()
+	cmd.Stdout = io.MultiWriter(narration, &out)
+	cmd.Stderr = io.MultiWriter(narration, &errBuf)
 	err = cmd.Run()
 	return out.String(), errBuf.String(), err
 }

@@ -115,7 +115,7 @@ tree, which is what the commit guard checks. **Always run it before
 committing**, and do not commit if it fails.
 
 It takes no variant flags. The WASM suites are other targets' measurements, run
-by name: `bin/test --wasm`, or the `bin/gate wasm-test` / `bin/gate wasm-web-test`
+by name: `bin/test --wasm`, or the `bin/run tested:wasm` / `bin/run tested:wasm-web`
 gates.
 
 ## 7. Gates & git hooks

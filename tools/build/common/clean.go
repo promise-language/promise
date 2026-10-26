@@ -29,13 +29,13 @@ func CleanTarget(root string) string {
 // A run that must not reuse saved results asks its own `go test` for that
 // instead (goTestFlags).
 //
-// Clean takes the host-scope exclusion (acquireVerifyLock) before removing
+// Clean takes the host-scope exclusion (acquireHostScope) before removing
 // anything, so it never clears a home a verify is measuring in. Callers that
 // already hold it (e.g. RunVerify with --clean) must use cleanLocked instead: a
 // second acquisition re-enters only when the checkout has an arena record, and
 // in a checkout with none it queues behind its own holder forever.
 func Clean(root string, opts CleanOptions) error {
-	unlock, err := acquireVerifyLock(root, 0)
+	unlock, err := acquireHostScope(root)
 	if err != nil {
 		return fmt.Errorf("acquire verify lock: %w", err)
 	}

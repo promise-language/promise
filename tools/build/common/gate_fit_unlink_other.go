@@ -11,3 +11,6 @@ package common
 func unlinkMetrics(string) ([]Metric, error) {
 	return nil, nil
 }
+
+// unlinkMetricSpecs declares nothing off Unix, where nothing is measured.
+var unlinkMetricSpecs []MetricSpec

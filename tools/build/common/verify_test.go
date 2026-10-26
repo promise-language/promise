@@ -1,15 +1,12 @@
 package common
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,150 +14,63 @@ import (
 	"github.com/promise-language/promise/tools/build/internal/hostscope"
 )
 
-// TestRunVerify_UnknownFlagReturnsUsageError verifies that passing an unknown
-// flag causes RunVerify to return the usage error immediately (before any lock
-// or filesystem side effects). Also confirms the usage string includes [--push].
-// This is the wiring pin: parsing happens ahead of every side effect, so a
-// mistyped flag cannot take the lock, clean, build or push.
-func TestRunVerify_UnknownFlagReturnsUsageError(t *testing.T) {
-	err := RunVerify(t.TempDir(), []string{"--unknown"})
-	if err == nil {
-		t.Fatal("expected error for unknown flag, got nil")
-	}
-	const want = verifyUsage
-	if err.Error() != want {
-		t.Errorf("got %q, want %q", err.Error(), want)
-	}
-}
-
-// TestParseVerifyArgs_EveryFlagSetsItsOption checks that every documented flag
-// parses into the option it names, and into no other.
-//
-// It asserts on parseVerifyArgs rather than running RunVerify, which is what
-// this coverage used to do (T2084). Running the pipeline to prove a flag parsed
-// was both destructive and weak: `--shared --clean` resolved CleanHome to the
-// host's ~/.promise and deleted it — the installed toolchain included — and the
-// only assertion (the error is not a "usage:" error) was equally satisfied by a
-// flag parsed into the wrong field, or by an ErrLockTimeout returned before the
-// pipeline it claimed to exercise ever started.
-func TestParseVerifyArgs_EveryFlagSetsItsOption(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		args []string
-		want verifyOptions
-	}{
-		{"clean", []string{"--clean"}, verifyOptions{clean: true}},
-		{"push", []string{"--push"}, verifyOptions{push: true}},
-		{"lock-timeout", []string{"--lock-timeout=100ms"}, verifyOptions{lockTimeout: 100 * time.Millisecond}},
-		{"lock-timeout separate value", []string{"--lock-timeout", "10m"}, verifyOptions{lockTimeout: 10 * time.Minute}},
-		{"single dash", []string{"-clean"}, verifyOptions{clean: true}},
-		{"none", nil, verifyOptions{}},
-		// 0 is not "do not wait" — it is the zero value the absent flag leaves
-		// behind, which acquireVerifyLock reads as "wait indefinitely". Anyone
-		// reaching for --lock-timeout=0 to make verify give up immediately gets
-		// the opposite, so the collision is pinned rather than left to be
-		// rediscovered.
-		{"zero timeout is the unbounded sentinel", []string{"--lock-timeout=0s"}, verifyOptions{}},
-		{"repeated flag", []string{"--clean", "--clean"}, verifyOptions{clean: true}},
-		{"last timeout wins", []string{"--lock-timeout=1s", "--lock-timeout=2s"}, verifyOptions{lockTimeout: 2 * time.Second}},
-		{
-			"all together",
-			[]string{"--clean", "--push", "--lock-timeout=1s"},
-			verifyOptions{clean: true, push: true, lockTimeout: time.Second},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseVerifyArgs(tc.args)
-			if err != nil {
-				t.Fatalf("parseVerifyArgs(%v) = %v", tc.args, err)
-			}
-			if got != tc.want {
-				t.Errorf("parseVerifyArgs(%v) = %+v, want %+v", tc.args, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestParseVerifyArgs_VariantOptionsAreRefused is the flag half of "one
-// measurement, one meaning of blessed" (T2170).
-//
-// --wasm, --wasm-web, --shared and --local each used to change what a run
-// measured or where it measured it, while the record it wrote said none of it:
-// `bin/verify` and `bin/verify --shared --wasm` blessed the same tree id for two
-// different measurements. They are REFUSED rather than ignored — a silent no-op
-// would leave every caller that still passes one believing it got the suite it
-// asked for, and the WASM suites are real measurements, addressed by name
-// (`bin/gate wasm-test`, `bin/gate wasm-web-test`).
-func TestParseVerifyArgs_VariantOptionsAreRefused(t *testing.T) {
-	for _, tc := range []struct {
-		args []string
-		// names is what the refusal must point the caller at: losing a flag and
-		// losing a suite are different facts, and the two WASM suites are still
-		// measured, by name, on a schedule.
-		names string
-	}{
-		{[]string{"--wasm"}, "bin/gate wasm-test"},
-		{[]string{"--wasm-web"}, "bin/gate wasm-web-test"},
-		{[]string{"--shared"}, "no command run from a worktree addresses ~/.promise"},
-		{[]string{"--local"}, ".promise-home/"},
-		{[]string{"--clean", "--wasm"}, "bin/gate wasm-test"},
-		{[]string{"--shared", "--clean"}, "no command run from a worktree addresses ~/.promise"},
-		{[]string{"-wasm"}, "bin/gate wasm-test"},
-	} {
-		got, err := parseVerifyArgs(tc.args)
-		if err == nil {
-			t.Errorf("parseVerifyArgs(%v) = %+v, want a refusal", tc.args, got)
-			continue
+// TestRunVerify_UsageErrorsWriteNothing: verify takes no flag of its own, so
+// every flag outside the built-ins — a typo, or one the tool contract retired —
+// is a usage error (exit 2) found before any lock or filesystem side effect,
+// with nothing on stdout. A retired flag is told apart from a typo by nothing
+// but its name: neither changes what is measured, and both are refused.
+func TestRunVerify_UsageErrorsWriteNothing(t *testing.T) {
+	cliObserved(t, Observed()) // RunVerify records whether anyone watches
+	for _, argv := range [][]string{{"--unknown"}, {"--clean"}, {"--push"}, {"--lock-timeout=10m"}, {"--wasm"}, {"stray"}, {"-json", "-human"}} {
+		var out bytes.Buffer
+		err := RunVerify(t.TempDir(), argv, &out)
+		if got := ExitCode(err); got != 2 {
+			t.Errorf("%v: exit = %d (%v), want 2", argv, got, err)
 		}
-		if !strings.Contains(err.Error(), tc.names) {
-			t.Errorf("parseVerifyArgs(%v) = %q, want it to name %q", tc.args, err, tc.names)
-		}
-		if !strings.Contains(err.Error(), verifyUsage) {
-			t.Errorf("parseVerifyArgs(%v) = %q, want it to carry the usage line", tc.args, err)
-		}
-		if got != (verifyOptions{}) {
-			t.Errorf("a rejected command line must yield zero options, got %+v", got)
+		if out.Len() != 0 {
+			t.Errorf("%v: a usage error wrote %q on stdout", argv, out.String())
 		}
 	}
 }
 
-// TestParseVerifyArgs_ATypoIsNotARetiredFlag: the two refusals are different on
-// purpose. A retired option names where its measurement went; a mistyped one has
-// nowhere to point, and inventing a destination for it would be a lie.
-func TestParseVerifyArgs_ATypoIsNotARetiredFlag(t *testing.T) {
-	_, err := parseVerifyArgs([]string{"--wsam"})
-	if err == nil || err.Error() != verifyUsage {
-		t.Errorf("parseVerifyArgs(--wsam) = %v, want exactly the usage line", err)
+// TestRunVerify_HelpAndVersionAnswerWithoutRunning: -help names no command and
+// -version the stamped hash, and neither takes the lock or builds anything.
+func TestRunVerify_HelpAndVersionAnswerWithoutRunning(t *testing.T) {
+	var out bytes.Buffer
+	if err := RunVerify("/nowhere", []string{"-help", "-json"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var help struct {
+		Project  string            `json:"project"`
+		Commands []json.RawMessage `json:"commands"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &help); err != nil || help.Project != "promise" || help.Commands == nil || len(help.Commands) != 0 {
+		t.Errorf("-help -json = %s (%v), want project promise and \"commands\": []", out.String(), err)
+	}
+	out.Reset()
+	if err := RunVerify("/nowhere", []string{"-version", "-json"}, &out); err != nil || !strings.HasPrefix(out.String(), `{"project":"promise","text":`) {
+		t.Errorf("-version -json = %q, %v", out.String(), err)
 	}
 }
 
-// TestParseVerifyArgs_Rejections covers the error paths: an unknown flag gets
-// the usage string, and a bad --lock-timeout value gets a flag-specific message
-// naming the offending flag rather than the generic usage line.
-func TestParseVerifyArgs_Rejections(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		args []string
-		want string
-	}{
-		{"unknown flag", []string{"--unknown"}, "usage: bin/verify"},
-		{"missing value", []string{"--lock-timeout"}, "-lock-timeout requires a duration value"},
-		{"unparseable value", []string{"--lock-timeout=nope"}, "-lock-timeout: invalid duration"},
-		{"negative value", []string{"--lock-timeout=-5s"}, "-lock-timeout: invalid duration"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseVerifyArgs(tc.args)
-			if err == nil {
-				t.Fatalf("parseVerifyArgs(%v) = %+v, want an error", tc.args, got)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error %q should contain %q", err.Error(), tc.want)
-			}
-			if got != (verifyOptions{}) {
-				t.Errorf("a rejected command line must yield zero options, got %+v", got)
-			}
-		})
+// errQueued is acquireWithin's answer for an exclusion not granted in time.
+var errQueued = errors.New("queued past the bound")
+
+// acquireWithin takes the host scope for root as acquireHostScope does, giving
+// up after d (0 waits as long as it takes). Asking with a bound is how a test
+// asks "would this queue?" of an acquire that, in production, never gives up.
+func acquireWithin(root string, d time.Duration) (func(), error) {
+	ctx := context.Background()
+	if d > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d)
+		defer cancel()
 	}
+	release, err := acquireHostScopeCtx(ctx, root)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, errQueued
+	}
+	return release, err
 }
 
 // arenaRoot is a checkout this test owns, provisioned as the arena id names:
@@ -193,16 +103,16 @@ func provisionHost(t *testing.T, content string) {
 // provisionedHost is the record of the machine the test arenas are on.
 const provisionedHost = `{"kind":"host","id":"` + testHostID + `","label":"test"}`
 
-// TestAcquireVerifyLock_NamesThisCheckoutsArena: the record a refused party
+// TestAcquireHostScope_NamesThisCheckoutsArena: the record a refused party
 // reads names the arena this checkout is, so a runner of the same arena can
 // recognise it — and nothing else, since the arena is what the exclusion is
 // re-entered on.
-func TestAcquireVerifyLock_NamesThisCheckoutsArena(t *testing.T) {
+func TestAcquireHostScope_NamesThisCheckoutsArena(t *testing.T) {
 	cleanTestHome(t)
 	provisionHost(t, provisionedHost)
 	root := arenaRoot(t, testArenaID)
 
-	unlock, err := acquireVerifyLock(root, 0)
+	unlock, err := acquireWithin(root, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,41 +125,19 @@ func TestAcquireVerifyLock_NamesThisCheckoutsArena(t *testing.T) {
 	}
 }
 
-// TestAcquireVerifyLock_TimesOutWhenAPeerHoldsIt: another checkout holds the
-// exclusion, and a bounded acquire returns ErrLockTimeout (not a verification
-// failure) once its bound elapses.
-func TestAcquireVerifyLock_TimesOutWhenAPeerHoldsIt(t *testing.T) {
-	cleanTestHome(t)
-	provisionHost(t, provisionedHost)
-	unlock, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unlock()
-
-	start := time.Now()
-	_, err = acquireVerifyLock(arenaRoot(t, testArenaID), 150*time.Millisecond)
-	if !errors.Is(err, ErrLockTimeout) {
-		t.Fatalf("err = %v, want ErrLockTimeout", err)
-	}
-	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
-		t.Errorf("returned after %v, want it to wait ~the lock timeout before giving up", elapsed)
-	}
-}
-
-// TestAcquireVerifyLock_UnboundedAcquiresAfterRelease confirms lockTimeout=0
+// TestAcquireHostScope_UnboundedAcquiresAfterRelease confirms lockTimeout=0
 // waits (does not time out) and succeeds once the holder releases. The waiter
 // has no arena record — a contributor clone — and still queues like any party.
-func TestAcquireVerifyLock_UnboundedAcquiresAfterRelease(t *testing.T) {
+func TestAcquireHostScope_UnboundedAcquiresAfterRelease(t *testing.T) {
 	cleanTestHome(t)
-	unlock, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 0)
+	unlock, err := acquireWithin(arenaRoot(t, peerArenaID), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	acquired := make(chan error, 1)
 	go func() {
-		inner, ierr := acquireVerifyLock(t.TempDir(), 0)
+		inner, ierr := acquireWithin(t.TempDir(), 0)
 		if ierr == nil {
 			inner()
 		}
@@ -275,7 +163,7 @@ func TestAcquireVerifyLock_UnboundedAcquiresAfterRelease(t *testing.T) {
 	}
 }
 
-// TestAcquireVerifyLock_LetsTheHoldingArenaStraightThrough is the runner case
+// TestAcquireHostScope_LetsTheHoldingArenaStraightThrough is the runner case
 // (#96): a flow runner holds the exclusion for this checkout's arena and spawns
 // bin/verify, which must be let straight through rather than queue behind its
 // own parent inside the run's allowance. Its release must not hand the machine
@@ -286,7 +174,7 @@ func TestAcquireVerifyLock_UnboundedAcquiresAfterRelease(t *testing.T) {
 // never as hostscope.ArenaAt's answer, which would derive both sides the same
 // way and pass however verify named itself (#642: the copy derived the host
 // from the host name, and every runner's verify queued behind its parent).
-func TestAcquireVerifyLock_LetsTheHoldingArenaStraightThrough(t *testing.T) {
+func TestAcquireHostScope_LetsTheHoldingArenaStraightThrough(t *testing.T) {
 	cleanTestHome(t)
 	provisionHost(t, provisionedHost)
 	root := arenaRoot(t, testArenaID)
@@ -298,28 +186,28 @@ func TestAcquireVerifyLock_LetsTheHoldingArenaStraightThrough(t *testing.T) {
 	}
 	defer runner()
 
-	nested, err := acquireVerifyLock(root, 5*time.Second)
+	nested, err := acquireWithin(root, 5*time.Second)
 	if err != nil {
 		t.Fatalf("a verify in the holding arena could not enter the exclusion its arena holds: %v", err)
 	}
 	nested()
 
-	if _, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 150*time.Millisecond); !errors.Is(err, ErrLockTimeout) {
+	if _, err := acquireWithin(arenaRoot(t, peerArenaID), 150*time.Millisecond); !errors.Is(err, errQueued) {
 		t.Fatalf("a peer was not excluded after the nested release (err = %v); the runner still holds it", err)
 	}
 }
 
-// TestAcquireVerifyLock_AHandRunVerifyHoldsOffARunner is the other direction of
+// TestAcquireHostScope_AHandRunVerifyHoldsOffARunner is the other direction of
 // #96: a verify run by hand in one checkout holds the exclusion, and a runner of
 // another arena — taking it exactly as flow does, before it spawns its own verify
 // — queues behind it and is granted when it ends, with the queue reported as a
 // wait (what the SDK files as CommandRun.Waited, outside the allowance). The
 // defect this replaced was a hand-run verify holding a lock of its own that the
 // runner's acquisition never saw.
-func TestAcquireVerifyLock_AHandRunVerifyHoldsOffARunner(t *testing.T) {
+func TestAcquireHostScope_AHandRunVerifyHoldsOffARunner(t *testing.T) {
 	cleanTestHome(t)
 	provisionHost(t, provisionedHost)
-	hand, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 0)
+	hand, err := acquireWithin(arenaRoot(t, peerArenaID), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,68 +259,70 @@ func TestAcquireVerifyLock_AHandRunVerifyHoldsOffARunner(t *testing.T) {
 	}
 }
 
-// TestAcquireVerifyLock_CheckoutsWithNoArenaRecordExcludeEachOther: a checkout no
+// TestAcquireHostScope_CheckoutsWithNoArenaRecordExcludeEachOther: a checkout no
 // flow provisioned (a contributor clone, a CI runner) has no arena to re-enter
 // on, so it is a party like any other — two of them exclude each other, and so
 // does a second acquisition from the same one, which is why `verify --clean`
 // calls cleanLocked rather than Clean.
-func TestAcquireVerifyLock_CheckoutsWithNoArenaRecordExcludeEachOther(t *testing.T) {
+func TestAcquireHostScope_CheckoutsWithNoArenaRecordExcludeEachOther(t *testing.T) {
 	cleanTestHome(t)
 	root := t.TempDir()
-	unlock, err := acquireVerifyLock(root, 0)
+	unlock, err := acquireWithin(root, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer unlock()
 
-	if _, err := acquireVerifyLock(t.TempDir(), 150*time.Millisecond); !errors.Is(err, ErrLockTimeout) {
-		t.Errorf("another checkout with no arena record: err = %v, want ErrLockTimeout", err)
+	if _, err := acquireWithin(t.TempDir(), 150*time.Millisecond); !errors.Is(err, errQueued) {
+		t.Errorf("another checkout with no arena record: err = %v, want errQueued", err)
 	}
-	if _, err := acquireVerifyLock(root, 150*time.Millisecond); !errors.Is(err, ErrLockTimeout) {
-		t.Errorf("the same checkout again: err = %v, want ErrLockTimeout — nothing re-enters an unnamed holder", err)
+	if _, err := acquireWithin(root, 150*time.Millisecond); !errors.Is(err, errQueued) {
+		t.Errorf("the same checkout again: err = %v, want errQueued — nothing re-enters an unnamed holder", err)
 	}
 }
 
-// TestAcquireVerifyLock_SaysWhoItWaitsForOnlyWhenItWaits: the line a queued
+// TestAcquireHostScope_SaysWhoItWaitsForOnlyWhenItWaits: the line a queued
 // verify prints names the arena it is behind, and a verify that is not queued —
 // the exclusion was free, or its runner's arena already holds it — prints
 // nothing, so a runner's verify never claims to be waiting.
-func TestAcquireVerifyLock_SaysWhoItWaitsForOnlyWhenItWaits(t *testing.T) {
+func TestAcquireHostScope_SaysWhoItWaitsForOnlyWhenItWaits(t *testing.T) {
 	cleanTestHome(t)
 	provisionHost(t, provisionedHost)
 	root := arenaRoot(t, testArenaID)
+	// The line is narration, which goes to stderr when someone is watching.
+	cliObserved(t, true)
 
 	var err error
 	var unlock func()
-	if out := captureStdout(t, func() { unlock, err = acquireVerifyLock(root, 0) }); err != nil || out != "" {
+	if out := captureStderr(t, func() { unlock, err = acquireWithin(root, 0) }); err != nil || out != "" {
 		t.Fatalf("a free exclusion: err = %v, printed %q, want nothing", err, out)
 	}
 	defer unlock()
 
 	var nested func()
-	if out := captureStdout(t, func() { nested, err = acquireVerifyLock(root, 5*time.Second) }); err != nil || out != "" {
+	if out := captureStderr(t, func() { nested, err = acquireWithin(root, 5*time.Second) }); err != nil || out != "" {
 		t.Fatalf("re-entering this arena's own exclusion: err = %v, printed %q, want nothing", err, out)
 	}
 	nested()
 
-	out := captureStdout(t, func() { _, err = acquireVerifyLock(arenaRoot(t, peerArenaID), 150*time.Millisecond) })
-	if !errors.Is(err, ErrLockTimeout) {
-		t.Fatalf("a peer: err = %v, want ErrLockTimeout", err)
+	out := captureStderr(t, func() { _, err = acquireWithin(arenaRoot(t, peerArenaID), 150*time.Millisecond) })
+	if !errors.Is(err, errQueued) {
+		t.Fatalf("a peer: err = %v, want errQueued", err)
 	}
 	if !strings.Contains(out, "Waiting") || !strings.Contains(out, testArenaID) {
 		t.Errorf("a queued verify printed %q, want a waiting line naming the holder's arena %s", out, testArenaID)
 	}
 }
 
-// TestAcquireVerifyLock_ABadArenaRecordIsRefused: a record that exists and does
+// TestAcquireHostScope_ABadArenaRecordIsRefused: a record that exists and does
 // not name an arena is refused, never read around — reading around it would
 // give the checkout a second identity, one its runner would not recognise.
-func TestAcquireVerifyLock_ABadArenaRecordIsRefused(t *testing.T) {
+func TestAcquireHostScope_ABadArenaRecordIsRefused(t *testing.T) {
 	cleanTestHome(t)
 	root := t.TempDir()
 	writeFile(t, root, ".workspace/arena.json", `{"id":"not-an-arena"}`)
 
-	unlock, err := acquireVerifyLock(root, 100*time.Millisecond)
+	unlock, err := acquireWithin(root, 100*time.Millisecond)
 	if err == nil {
 		unlock()
 		t.Fatal("a malformed arena record was read around")
@@ -440,9 +330,9 @@ func TestAcquireVerifyLock_ABadArenaRecordIsRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "arena.json") {
 		t.Errorf("the refusal must name the record, got: %v", err)
 	}
-	// Not the timeout: bin/verify maps ErrLockTimeout to "retry later", and a
+	// Not the timeout: bin/verify maps errQueued to "retry later", and a
 	// broken record is broken on every retry.
-	if errors.Is(err, ErrLockTimeout) {
+	if errors.Is(err, errQueued) {
 		t.Errorf("err = %v; a malformed record is a refusal, not a wait that timed out", err)
 	}
 	if path, ok := hostscope.Path(); ok && Exists(path) {
@@ -450,17 +340,17 @@ func TestAcquireVerifyLock_ABadArenaRecordIsRefused(t *testing.T) {
 	}
 }
 
-// TestAcquireVerifyLock_NoHostRecordQueuesAsAnUnnamedParty: an arena checkout
+// TestAcquireHostScope_NoHostRecordQueuesAsAnUnnamedParty: an arena checkout
 // on a machine with no host identity record cannot name its arena, so it takes
 // the exclusion as a party nothing re-enters — granted when it is free, never
 // refused for the missing record, and queued even behind a runner holding it
 // for the same arena id. No runner holds it for such a machine: flow refuses to
 // run without the host record, so the last case costs nothing real.
-func TestAcquireVerifyLock_NoHostRecordQueuesAsAnUnnamedParty(t *testing.T) {
+func TestAcquireHostScope_NoHostRecordQueuesAsAnUnnamedParty(t *testing.T) {
 	cleanTestHome(t)
 	root := arenaRoot(t, testArenaID)
 
-	unlock, err := acquireVerifyLock(root, 5*time.Second)
+	unlock, err := acquireWithin(root, 5*time.Second)
 	if err != nil {
 		t.Fatalf("a machine with no host record was refused a free exclusion: %v", err)
 	}
@@ -474,20 +364,20 @@ func TestAcquireVerifyLock_NoHostRecordQueuesAsAnUnnamedParty(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runner()
-	if _, err := acquireVerifyLock(root, 150*time.Millisecond); !errors.Is(err, ErrLockTimeout) {
-		t.Errorf("err = %v, want ErrLockTimeout — nothing re-enters on an arena with no host", err)
+	if _, err := acquireWithin(root, 150*time.Millisecond); !errors.Is(err, errQueued) {
+		t.Errorf("err = %v, want errQueued — nothing re-enters on an arena with no host", err)
 	}
 }
 
-// TestAcquireVerifyLock_ABadHostRecordIsRefused: a host record that exists and
+// TestAcquireHostScope_ABadHostRecordIsRefused: a host record that exists and
 // does not name a machine is refused, never read around — reading around it
 // would name the arena differently from its runner, which refuses it too.
-func TestAcquireVerifyLock_ABadHostRecordIsRefused(t *testing.T) {
+func TestAcquireHostScope_ABadHostRecordIsRefused(t *testing.T) {
 	cleanTestHome(t)
 	provisionHost(t, `{"kind":"host","id":"livingroom-ubuntu"}`)
 	root := arenaRoot(t, testArenaID)
 
-	unlock, err := acquireVerifyLock(root, 100*time.Millisecond)
+	unlock, err := acquireWithin(root, 100*time.Millisecond)
 	if err == nil {
 		unlock()
 		t.Fatal("a malformed host record was read around")
@@ -495,7 +385,7 @@ func TestAcquireVerifyLock_ABadHostRecordIsRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "identity.json") {
 		t.Errorf("the refusal must name the record, got: %v", err)
 	}
-	if errors.Is(err, ErrLockTimeout) {
+	if errors.Is(err, errQueued) {
 		t.Errorf("err = %v; a malformed record is a refusal, not a wait that timed out", err)
 	}
 	if path, ok := hostscope.Path(); ok && Exists(path) {
@@ -512,18 +402,18 @@ type stepLog struct {
 }
 
 func (l *stepLog) step(name string, err error) verifyStep {
-	return verifyStep{name, func() error {
+	return verifyStep{"stage", name, func() error {
 		l.ran = append(l.ran, name)
 		return err
 	}}
 }
 
-// verifyStepNames is the pipeline as a caller would read it.
-func verifyStepNames(opts verifyOptions) []string {
-	r := &verifyRun{root: "/nowhere", opts: opts}
+// verifyStepNames is the pipeline as a caller would read it: stage/step.
+func verifyStepNames() []string {
+	r := &verifyRun{root: "/nowhere"}
 	var names []string
 	for _, s := range r.steps() {
-		names = append(names, s.name)
+		names = append(names, s.stage+"/"+s.name)
 	}
 	return names
 }
@@ -531,38 +421,16 @@ func verifyStepNames(opts verifyOptions) []string {
 // TestVerifySteps_Order pins the sequence, which is where verify's guarantees
 // live: the blessing is cleared before anything can change the tree, the build
 // precedes the repairs (so `promise format` is the formatter `integration` then
-// measures), the measurement precedes the record, and the record precedes the
-// push.
+// measures), and the measurement precedes the record.
 func TestVerifySteps_Order(t *testing.T) {
 	want := []string{
-		"lock", "clear", "cache", "build",
-		"format go", "format promise",
-		"check go", "check structure",
-		"integration", "record",
+		"prepare/lock", "prepare/clear", "prepare/cache", "prepare/build",
+		"repair/gofmt", "repair/promise format",
+		"check/go vet", "check/structure",
+		"measure/integration", "record/verified tree",
 	}
-	if got := verifyStepNames(verifyOptions{}); !slices.Equal(got, want) {
+	if got := verifyStepNames(); !slices.Equal(got, want) {
 		t.Errorf("steps = %v, want %v", got, want)
-	}
-}
-
-// TestVerifySteps_OptionalStepsSitWhereTheyBelong covers the two conditional
-// steps. --clean must run before the cache is set up (it recreates the home
-// empty), and --push must be last of all, after the record.
-func TestVerifySteps_OptionalStepsSitWhereTheyBelong(t *testing.T) {
-	both := verifyStepNames(verifyOptions{clean: true, push: true})
-	if i, j := slices.Index(both, "clean"), slices.Index(both, "cache"); i < 0 || i > j {
-		t.Errorf("clean at %d, cache at %d — clean must precede the cache setup: %v", i, j, both)
-	}
-	if got, want := both[len(both)-1], "push"; got != want {
-		t.Errorf("last step = %q, want %q: %v", got, want, both)
-	}
-	if got, want := both[len(both)-2], "record"; got != want {
-		t.Errorf("step before push = %q, want %q: %v", got, want, both)
-	}
-	for _, name := range []string{"clean", "push"} {
-		if slices.Contains(verifyStepNames(verifyOptions{}), name) {
-			t.Errorf("%q must not run without its flag", name)
-		}
 	}
 }
 
@@ -571,41 +439,29 @@ func TestVerifySteps_OptionalStepsSitWhereTheyBelong(t *testing.T) {
 // so nothing downstream has to re-check what happened upstream.
 func TestRunVerifySteps_StopsAtTheFirstFailureAndNamesIt(t *testing.T) {
 	var l stepLog
-	boom := errors.New("boom")
-	failed, err := runVerifySteps([]verifyStep{
+	got := runVerifySteps([]verifyStep{
 		l.step("build", nil),
-		l.step("check go", boom),
+		l.step("go vet", errors.New("boom")),
 		l.step("integration", nil),
 	})
-	if failed != "check go" {
-		t.Errorf("failed step = %q, want %q", failed, "check go")
+	if len(got) != 1 {
+		t.Fatalf("stages = %+v, want the one stage the steps share", got)
 	}
-	if !errors.Is(err, boom) {
-		t.Errorf("err = %v, want it to wrap boom", err)
+	var statuses []string
+	for _, s := range got[0].Steps {
+		statuses = append(statuses, s.Name+"="+s.Status)
 	}
-	if !strings.HasPrefix(err.Error(), "check go: ") {
-		t.Errorf("err = %q, want it to name the step that failed", err)
+	if want := []string{"build=passed", "go vet=failed", "integration=not-run"}; !slices.Equal(statuses, want) {
+		t.Errorf("steps = %v, want %v", statuses, want)
 	}
-	if want := []string{"build", "check go"}; !slices.Equal(l.ran, want) {
+	if d := got[0].Steps[1].Detail; d != "boom" {
+		t.Errorf("the failed step's detail = %q, want what it said", d)
+	}
+	if want := []string{"build", "go vet"}; !slices.Equal(l.ran, want) {
 		t.Errorf("ran %v, want %v — nothing may run after a failure", l.ran, want)
 	}
-}
-
-// TestRunVerifySteps_PushNeedsARecordedBlessing pins the one step whose effect
-// leaves the machine: --push is downstream of the record, so a blessing that
-// could not be written stops the run before anything is published.
-func TestRunVerifySteps_PushNeedsARecordedBlessing(t *testing.T) {
-	var l stepLog
-	_, err := runVerifySteps([]verifyStep{
-		l.step("integration", nil),
-		l.step("record", errors.New("not gitignored")),
-		l.step("push", nil),
-	})
-	if err == nil {
-		t.Fatal("a failed record must fail the run")
-	}
-	if slices.Contains(l.ran, "push") {
-		t.Errorf("pushed after a record that failed: %v", l.ran)
+	if res := (verifyResult{Stages: got}); failedStep(res.Stages) != "go vet" {
+		t.Errorf("failedStep = %q, want go vet", failedStep(res.Stages))
 	}
 }
 
@@ -614,203 +470,52 @@ func TestRunVerifySteps_PushNeedsARecordedBlessing(t *testing.T) {
 func TestRunVerifySteps_InterruptStopsBeforeTheNextStep(t *testing.T) {
 	t.Cleanup(func() { interrupted.Store(0) })
 	var l stepLog
-	failed, err := runVerifySteps([]verifyStep{
+	got := runVerifySteps([]verifyStep{
 		l.step("build", nil),
-		{"check go", func() error {
-			l.ran = append(l.ran, "check go")
+		{"stage", "go vet", func() error {
+			l.ran = append(l.ran, "go vet")
 			interrupted.Store(1)
 			return nil
 		}},
 		l.step("integration", nil),
 	})
-	if !errors.Is(err, errInterrupted) {
-		t.Fatalf("err = %v, want errInterrupted", err)
+	if failedStep(got) != "go vet" || got[0].Steps[1].Detail != errInterrupted.Error() {
+		t.Errorf("steps = %+v, want go vet failed as interrupted", got[0].Steps)
 	}
-	if failed != "check go" {
-		t.Errorf("failed step = %q, want the step the run had reached", failed)
-	}
-	if want := []string{"build", "check go"}; !slices.Equal(l.ran, want) {
+	if want := []string{"build", "go vet"}; !slices.Equal(l.ran, want) {
 		t.Errorf("ran %v, want %v", l.ran, want)
 	}
 }
 
-// TestRunVerify_HonoursTheParsedLockTimeout is the accepted-command-line half
-// of the wiring, as TestRunVerify_UnknownFlagReturnsUsageError is the rejected
-// half: --lock-timeout has to survive the trip from parseVerifyArgs into
-// acquireVerifyLock, and the resulting ErrLockTimeout has to come back
-// unwrapped.
-//
-// Both halves are load-bearing for the tracker runner, which distinguishes
-// "another verify held the lock, retry next turn" from "verification failed" by
-// errors.Is on this value. A regression that dropped opts.lockTimeout would not
-// fail anything visibly — it would wait forever, which is exactly how the bug
-// this test guards against would present.
-//
-// The exclusion is this test's own: the user dirs are redirected, so
-// acquireVerifyLock resolves to a private cache dir rather than the host's,
-// whose exclusion an outer bin/verify holds while these tests run. The holder
-// is a peer checkout taking it through acquireVerifyLock — the same function
-// the run reaches — so this test keeps no second spelling of where it lives.
-func TestRunVerify_HonoursTheParsedLockTimeout(t *testing.T) {
-	cleanTestHome(t)
-
-	unlock, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 0)
-	if err != nil {
-		t.Fatalf("acquireVerifyLock: %v", err)
-	}
-
-	// A stale blessing to watch: clearBlessing is RunVerify's first step
-	// after the lock, so this file surviving proves the run gave up at the lock
-	// and never entered the pipeline.
-	root := t.TempDir()
-	writeFile(t, root, ".workspace/verified-tree", "stale-blessing\n")
-
-	done := make(chan error, 1)
-	go func() { done <- RunVerify(root, []string{"--lock-timeout=100ms"}) }()
-
-	select {
-	case err := <-done:
-		unlock()
-		if !errors.Is(err, ErrLockTimeout) {
-			t.Fatalf("RunVerify = %v, want ErrLockTimeout", err)
+// TestStepRoll_EndsWithTheVerdictLine: the human summary always ends with the
+// one line saying whether the tree may be committed, after the failed step's
+// own words, so a tail read carries all the evidence.
+func TestStepRoll_EndsWithTheVerdictLine(t *testing.T) {
+	stages := []stageResult{{Name: "check", Steps: []stepResult{
+		{Name: "go vet", Status: stepFailed, ElapsedSeconds: "1.500", Detail: "x.go:3: unreachable code"},
+		{Name: "structure", Status: stepNotRun, ElapsedSeconds: "0"},
+	}}}
+	failed := stepRoll(verifyResult{OK: false, Stages: stages})
+	for _, want := range []string{"FAIL     go vet", "not-run  structure", "go vet failed:\n  x.go:3: unreachable code"} {
+		if !strings.Contains(failed, want) {
+			t.Errorf("roll lacks %q:\n%s", want, failed)
 		}
-	case <-time.After(30 * time.Second):
-		// Deliberately not unlocking: the run is still blocked on the lock, and
-		// releasing it now would send a verify with a broken timeout into the
-		// pipeline — format, build, test and push — on a temp root, after
-		// t.Setenv has already restored the real HOME.
-		t.Fatal("RunVerify ignored --lock-timeout=100ms and is still waiting for the lock")
 	}
-
-	if !Exists(filepath.Join(root, ".workspace", "verified-tree")) {
-		t.Error("a run that timed out on the lock must not have started the pipeline")
+	if !strings.HasSuffix(failed, "❌ Verify FAILED: not safe to commit\n") {
+		t.Errorf("a failed roll must end with the FAILED line:\n%s", failed)
+	}
+	if ok := stepRoll(verifyResult{OK: true, Tree: "abc"}); !strings.HasSuffix(ok, "✅ OK to Commit\n") || !strings.Contains(ok, "blessed tree abc") {
+		t.Errorf("a passing roll must name the tree and end with OK:\n%s", ok)
 	}
 }
 
-// runVerifyStringArgs returns every string literal appearing inside each call to
-// RunVerify in the given file, keyed by call site. Collecting literals from the
-// whole call expression rather than matching an argument shape keeps it working
-// for both RunVerify(dir, []string{...}) and any future spelling.
-func runVerifyStringArgs(fset *token.FileSet, file *ast.File) map[string][]string {
-	sites := map[string][]string{}
-	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		id, ok := call.Fun.(*ast.Ident)
-		if !ok || id.Name != "RunVerify" {
-			return true
-		}
-		site := fset.Position(call.Pos()).String()
-		var args []string
-		ast.Inspect(call, func(n ast.Node) bool {
-			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-				if s, err := strconv.Unquote(lit.Value); err == nil {
-					args = append(args, s)
-				}
-			}
-			return true
-		})
-		sites[site] = NormalizeArgs(args)
-		return true
-	})
-	return sites
-}
-
-// TestRunVerifyStringArgs exercises the scanner against synthetic source, so
-// TestNoTestDrivesRunVerifyWithPush means something. Run only over the real
-// (clean) tree, the scanner could match nothing at all — a typo'd function name,
-// or a walk that never descends into the argument slice — and stay green
-// forever.
-func TestRunVerifyStringArgs(t *testing.T) {
-	const src = `package p
-func f() {
-	RunVerify(dir, []string{"--clean", "--lock-timeout=30s"})
-	RunVerify(dir, []string{"--push"})
-	RunVerify(dir, nil)
-	RunClean(dir, []string{"--push"})
-	notRunVerify(dir, []string{"--push"})
-}`
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "synthetic_test.go", src, 0)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-
-	sites := runVerifyStringArgs(fset, file)
-	if len(sites) != 3 {
-		t.Fatalf("found %d RunVerify call sites, want 3: %v", len(sites), sites)
-	}
-
-	var withPush, total int
-	for _, args := range sites {
-		total++
-		if slices.Contains(args, "-push") {
-			withPush++
-		}
-	}
-	if withPush != 1 {
-		t.Errorf("%d of %d call sites pass --push, want exactly 1 — the scanner is not reading the argument slice", withPush, total)
-	}
-	// --lock-timeout=30s must arrive normalized, the same way the parser sees it.
-	var sawTimeout bool
-	for _, args := range sites {
-		if slices.Contains(args, "-lock-timeout") && slices.Contains(args, "30s") {
-			sawTimeout = true
-		}
-	}
-	if !sawTimeout {
-		t.Error("literals must be normalized like a real command line (--lock-timeout=30s → -lock-timeout 30s)")
-	}
-}
-
-// TestNoTestDrivesRunVerifyWithPush forbids this package's tests from handing
-// RunVerify the one flag whose effect leaves the machine.
-//
-// The TestMain guard watches ~/.promise and the Go test cache, so a test that
-// reached the clean is caught after the fact. A push cannot be caught that way:
-// it publishes to the real remote, from whatever checkout the test pointed at,
-// and there is nothing to compare afterwards. Before T2084 a flag-acceptance
-// test did pass --push, and was harmless only because FormatGo happened to fail
-// first on an empty temp root — one reordering away from a real push.
-//
-// Flag acceptance is a parser question: assert on parseVerifyArgs.
-func TestNoTestDrivesRunVerifyWithPush(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("read package dir: %v", err)
-	}
-	fset := token.NewFileSet()
-	var scanned int
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
-			continue
-		}
-		file, err := parser.ParseFile(fset, e.Name(), nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", e.Name(), err)
-		}
-		scanned++
-		for site, args := range runVerifyStringArgs(fset, file) {
-			if slices.Contains(args, "-push") {
-				t.Errorf("%s: RunVerify must never be driven with --push from a test; "+
-					"assert on parseVerifyArgs instead", site)
-			}
-		}
-	}
-	if scanned == 0 {
-		t.Fatal("scanned no _test.go files — the guard is looking in the wrong place")
-	}
-}
-
-// TestAcquireVerifyLock_NoCacheDirectoryRefuses covers a host with no user
+// TestAcquireHostScope_NoCacheDirectoryRefuses covers a host with no user
 // cache directory: there is nowhere to hold the host-scope exclusion, and
 // acquireVerifyLock refuses rather than running unserialized. A silent free pass
 // would let two verifies interleave over the same machine with nothing to say
 // so, and a runner's measurement beside them would report the load as much as
 // the code (flow docs/gates-and-commands.md § Two scopes).
-func TestAcquireVerifyLock_NoCacheDirectoryRefuses(t *testing.T) {
+func TestAcquireHostScope_NoCacheDirectoryRefuses(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("USERPROFILE", "") // os.UserHomeDir on Windows
 	t.Setenv("XDG_CACHE_HOME", "")
@@ -819,22 +524,22 @@ func TestAcquireVerifyLock_NoCacheDirectoryRefuses(t *testing.T) {
 		t.Skipf("this host still resolves the exclusion (%s) with every variable blanked", path)
 	}
 
-	unlock, err := acquireVerifyLock(t.TempDir(), 100*time.Millisecond)
+	unlock, err := acquireWithin(t.TempDir(), 100*time.Millisecond)
 	if err == nil {
 		unlock()
 		t.Fatal("a host with nowhere to hold the exclusion ran unserialized")
 	}
-	if errors.Is(err, ErrLockTimeout) {
+	if errors.Is(err, errQueued) {
 		t.Errorf("err = %v; a missing directory is a refusal, not a wait that timed out", err)
 	}
 }
 
-// TestVerifyLock_CreatesNothingUnderTheSharedHome (#102): taking the host-scope
+// TestHostScope_CreatesNothingUnderTheSharedHome (#102): taking the host-scope
 // exclusion — by bin/verify or by bin/clean — creates nothing under ~/.promise,
 // which belongs to the installed CLI. The exclusion is the orchestrator's and
 // lives where flow keeps it (hostscope.Path). A fresh, redirected home makes
 // "nothing" exact: ~/.promise must not even exist afterwards.
-func TestVerifyLock_CreatesNothingUnderTheSharedHome(t *testing.T) {
+func TestHostScope_CreatesNothingUnderTheSharedHome(t *testing.T) {
 	home := cleanTestHome(t)
 	shared := filepath.Join(home, ".promise")
 
@@ -849,7 +554,7 @@ func TestVerifyLock_CreatesNothingUnderTheSharedHome(t *testing.T) {
 		t.Fatalf("hostscope.Path = %q, which is under the shared home %q", lockPath, shared)
 	}
 
-	unlock, err := acquireVerifyLock(t.TempDir(), time.Second)
+	unlock, err := acquireWithin(t.TempDir(), time.Second)
 	if err != nil {
 		t.Fatalf("acquireVerifyLock: %v", err)
 	}

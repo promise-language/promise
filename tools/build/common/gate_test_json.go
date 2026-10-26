@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -40,9 +41,10 @@ type TestFileGroup struct {
 	Tests []TestRecord `json:"tests"`
 }
 
-// GateOutput is the JSON envelope a test gate writes to stdout. All records
-// belong to a single target (the invariant: one gate invocation = one target),
-// so target is stamped once at the top rather than on every record.
+// GateOutput is one suite's records, grouped by file, with the counts derived
+// from them. The install gate aggregates into it (buildInstallGateOutput). All
+// records belong to a single target (the invariant: one suite run = one
+// target), so target is stamped once at the top rather than on every record.
 type GateOutput struct {
 	Target   string             `json:"target"`
 	Metrics  map[string]float64 `json:"metrics"`
@@ -52,6 +54,8 @@ type GateOutput struct {
 
 // statusMetricSuffix maps a record status to its metric-name suffix. Statuses
 // not present here are still grouped into Files but contribute no metric.
+// Every suffix is seeded under a prefix (statusMetricNames), so a count that is
+// zero this run is reported as zero rather than left out.
 var statusMetricSuffix = map[string]string{
 	"pass":     "test_count",
 	"fail":     "test_failures",
@@ -60,6 +64,20 @@ var statusMetricSuffix = map[string]string{
 	"memory":   "memory_count",
 	"excluded": "excluded_count",
 	"not-run":  "not_run_count",
+}
+
+// statusMetricName is the metric one status suffix counts under prefix.
+func statusMetricName(prefix, suffix string) string { return prefix + "_" + suffix }
+
+// statusMetricNames is every metric BuildGateOutput reports under prefix,
+// sorted: the declaration of a gate that reports them is read from here.
+func statusMetricNames(prefix string) []string {
+	names := make([]string, 0, len(statusMetricSuffix))
+	for _, suffix := range statusMetricSuffix {
+		names = append(names, statusMetricName(prefix, suffix))
+	}
+	sort.Strings(names)
+	return names
 }
 
 // ParseTestJSONL parses newline-delimited JSON test records, skipping blank or
@@ -115,8 +133,16 @@ func ParsePromiseCoverageJSONL(jsonl string) (pct float64, passed, failed int) {
 			failed++
 		}
 	}
+	if covered, total := promiseCoverageTotals(jsonl); total > 0 {
+		pct = math.Round(float64(covered)/float64(total)*1000) / 10
+	}
+	return pct, passed, failed
+}
 
-	covered, total := 0, 0
+// promiseCoverageTotals sums the stream's coverage records: blocks reached, and
+// blocks there are. A total of zero means no file reported coverage at all —
+// no profile, which is a different fact from a profile that reached nothing.
+func promiseCoverageTotals(jsonl string) (covered, total int) {
 	for _, line := range strings.Split(jsonl, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -129,10 +155,7 @@ func ParsePromiseCoverageJSONL(jsonl string) (pct float64, passed, failed int) {
 		covered += c.Covered
 		total += c.Total
 	}
-	if total > 0 {
-		pct = math.Round(float64(covered)/float64(total)*1000) / 10
-	}
-	return pct, passed, failed
+	return covered, total
 }
 
 // Context bounds for a single test record (T0777). A failure's context is
@@ -155,7 +178,7 @@ const (
 // clampContext bounds ctx to maxContextLines lines and maxContextBytes bytes,
 // appending a marker when it trims. It is a no-op on already-small contexts and
 // is applied at every site that builds a TestRecord's Context, so no gate
-// subcommand can emit a context line large enough to deadlock the runner drain.
+// caller can emit a context line large enough to deadlock the runner drain.
 func clampContext(ctx string) string {
 	if ctx == "" {
 		return ctx
@@ -178,10 +201,10 @@ func clampContext(ctx string) string {
 
 // BuildGateOutput parses the runner's JSONL, relativizes file paths against
 // base, groups records by file (preserving stream order), and derives metrics
-// named with the given prefix (e.g. "host" → host_test_count). metricKeys lists
-// every metric this prefix can emit so absent statuses are reported as 0 (a
-// gate must report a stable metric set, not omit a metric just because its
-// count happens to be zero this run).
+// named with the given prefix (e.g. "install_thin" → install_thin_test_count).
+// Every metric this prefix can emit is seeded (statusMetricNames), so absent
+// statuses are reported as 0 (a gate must report a stable metric set, not omit
+// a metric just because its count happens to be zero this run).
 //
 // base is the directory the test runner ran in — for host/wasm gates this is
 // the dev repo root; for the install gate this is the worktree srcDir. A path
@@ -191,8 +214,8 @@ func BuildGateOutput(base, target, metricPrefix, complete, jsonl string) (*GateO
 	records := ParseTestJSONL(jsonl)
 
 	metrics := map[string]float64{}
-	for _, suffix := range statusMetricSuffix {
-		metrics[metricPrefix+"_"+suffix] = 0
+	for _, name := range statusMetricNames(metricPrefix) {
+		metrics[name] = 0
 	}
 
 	var files []TestFileGroup
@@ -215,7 +238,7 @@ func BuildGateOutput(base, target, metricPrefix, complete, jsonl string) (*GateO
 			Context: clampContext(r.Context),
 		})
 		if suffix, ok := statusMetricSuffix[r.Status]; ok {
-			metrics[metricPrefix+"_"+suffix]++
+			metrics[statusMetricName(metricPrefix, suffix)]++
 		}
 	}
 

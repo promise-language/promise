@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -158,57 +159,30 @@ func openCASWindow(root string) casWindow {
 	return casWindow{root: root, open: true}
 }
 
+// The two metrics the window adds to a contract envelope (Metrics), named once.
+const (
+	casNetworkBytesMetric = "cas_network_bytes"
+	casHomeCountMetric    = "cas_home_count"
+)
+
+// storeMetricSpecs declares what Metrics reports: the listing carries it on
+// every gate whose subject is the tree (declaredMetrics), and verify's sidecar
+// filter reads it (isContractStoreMetric), so the three cannot disagree about
+// which numbers are the store's.
+var storeMetricSpecs = []MetricSpec{
+	{Name: casNetworkBytesMetric, Type: MetricInt, Unit: unitBytes},
+	{Name: casHomeCountMetric, Type: MetricInt},
+}
+
 // isContractStoreMetric reports whether a name is one of the two the window
 // adds to a contract envelope, for the one caller that has an envelope and
 // needs to tell them from the gate's own metrics (verify's gate values).
-//
-// Spelled here rather than shared with Metrics through a constant: a metric
-// name exists by being written into a Count/Size call, which is the only place
-// the drift scanner in gate_contract_test.go can see one. So this is a second
-// spelling on purpose, and TestContractStoreMetricPredicateMatchesMetrics is
-// what keeps it honest — the same bargain casLedgerName already makes with
-// casmetrics.LedgerName.
 func isContractStoreMetric(name string) bool {
-	return name == "cas_network_bytes" || name == "cas_home_count"
+	return slices.ContainsFunc(storeMetricSpecs, func(s MetricSpec) bool { return s.Name == name })
 }
 
-// Values folds the window into the gate values a tracker gate reports. The four
-// are always present, zeros included: a counter that appears only when non-zero
-// cannot be judged against a baseline of zero.
-//
-// An unopened window contributes nothing at all rather than four zeros, and
-// says why — numbers about nothing read exactly like a clean run.
-func (w casWindow) Values() (map[string]float64, string) {
-	l, why := w.fold()
-	if l == nil {
-		return nil, why
-	}
-	return map[string]float64{
-		"cas_network_bytes":      float64(l.NetworkBytes),
-		"cas_materialized_bytes": float64(l.MaterializedBytes),
-		"cas_materializations":   float64(l.Materializations),
-		"cas_home_count":         float64(len(l.Homes)),
-	}, ""
-}
-
-// AddTo merges this window's values into a gate's own. Called once, last, so a
-// gate's store cost covers everything it did. A window that could not be opened
-// contributes no keys and says so on stderr — four zeros would read exactly
-// like a clean run.
-func (w casWindow) AddTo(values map[string]float64) {
-	vals, incomplete := w.Values()
-	if vals == nil {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", incomplete)
-		return
-	}
-	for k, v := range vals {
-		values[k] = v
-	}
-}
-
-// fold reads the window's ledger: the one read Values and Metrics both start
-// from. Nil, with the reason, when the window was never opened or the ledger
-// cannot be read.
+// fold reads the window's ledger: the one read Metrics starts from. Nil, with
+// the reason, when the window was never opened or the ledger cannot be read.
 func (w casWindow) fold() (*casLedgerFold, string) {
 	if !w.open {
 		return nil, w.why
@@ -224,8 +198,8 @@ func (w casWindow) fold() (*casLedgerFold, string) {
 // state is an absolute are reported here — no bytes over the wire, one home per
 // run — because docs/gate-system.md requires every metric `integration` reports
 // to carry an enforced term on every target, and a byte or population count is
-// legitimately non-zero the first time a clone builds. The other two go to the
-// tracker gates and to `promise test`, where no term is owed.
+// legitimately non-zero the first time a clone builds. What was materialized
+// is bin/verify's summary line, and `promise test`'s, where no term is owed.
 //
 // A run that reached a Promise home outside the worktree reports both numbers
 // AND an incomplete reason naming that home (#102). The count alone caught
@@ -238,8 +212,8 @@ func (w casWindow) Metrics() ([]Metric, string) {
 		return nil, why
 	}
 	return []Metric{
-		Size("cas_network_bytes", l.NetworkBytes, "bytes"),
-		Count("cas_home_count", len(l.Homes)),
+		Size(casNetworkBytesMetric, l.NetworkBytes, unitBytes),
+		Count(casHomeCountMetric, len(l.Homes)),
 	}, foreignHomesReason(w.root, l.Homes)
 }
 

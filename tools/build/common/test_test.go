@@ -323,7 +323,6 @@ func TestRunPromiseTests_ForwardsProgressMode(t *testing.T) {
 		run  func(string, string) (string, error)
 	}{
 		{"RunPromiseTests", RunPromiseTests},
-		{"RunPromiseTestsCapture", RunPromiseTestsCapture},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, target := range []string{"", "wasm32-wasi"} {

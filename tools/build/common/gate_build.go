@@ -75,11 +75,13 @@ func (b *onceBuild) ensure(root string) error {
 			return
 		}
 		b.runs++
-		// RunBuild prints progress with fmt.Println to stdout, which carries
-		// the envelope and nothing else — one JSON object, or a runner reads
-		// this gate as broken.
+		// RunBuild prints progress with fmt.Println to stdout. Under bin/gate,
+		// runContractGate has already pointed stdout at the narration for the
+		// whole measurement; this is for the other caller, bin/verify, which
+		// measures in process and whose own stdout is its summary. Narration
+		// either way: a build line is progress, for whoever is watching.
 		saved := os.Stdout
-		os.Stdout = os.Stderr
+		os.Stdout = Narration()
 		defer func() { os.Stdout = saved }()
 		// NO flags. -release or -generate would skip RunBuild's quick
 		// up-to-date check and make every gate run pay for a full build.

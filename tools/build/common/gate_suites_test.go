@@ -1,8 +1,10 @@
 package common
 
 import (
+	"encoding/json"
 	"errors"
-	"slices"
+	"maps"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -41,50 +43,66 @@ func stubRuntimeMissing(t *testing.T, name string) {
 	t.Cleanup(func() { findRuntime = saved })
 }
 
+// suiteRecords is a `promise test --json` stream over files under root: one
+// record per (file, test, status), in that order.
+func suiteRecords(root string, records ...[3]string) string {
+	var b strings.Builder
+	for _, r := range records {
+		line, _ := json.Marshal(map[string]any{
+			"file": filepath.Join(root, r[0]), "test": r[1], "status": r[2], "elapsed": 0.01,
+			"context": "panic: " + r[1] + " went wrong",
+		})
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 // The cross-target suites take minutes and need a toolchain this host may not
-// have, so the runner is a seam: these tests pin which summary field becomes
-// which metric, which is the part that silently reports the wrong number.
+// have, so the runner is a seam: these tests pin which record becomes which
+// metric, which is the part that silently reports the wrong number.
 //
 // The fixtures name a runtime NO machine can have. That is the regression
 // guard: if the probe ever goes back to consulting PATH directly, every test
 // naming it fails on every host — where naming the real wasmtime/node would
 // leave them green on any machine that happens to have those, which is the
 // whole bug.
-func TestTargetSuite_SummaryFieldsBecomeTheBaselinedMetrics(t *testing.T) {
-	const summary = "10586 passed, 3 failed, 930 skipped, 2 leaked (814 files, 270.680s)"
-	stub := func(root, target string) (string, error) { return summary, nil }
-
+func TestTargetSuite_RecordsBecomeTheMetrics(t *testing.T) {
 	stubGateBuild(t, &fakeBuild{})
-	for _, tc := range []struct {
-		suite targetSuite
-		want  map[string]int64
-	}{
-		{targetSuite{target: "wasm32-wasi", runtime: "stub-runtime", prefix: "wasm"}, map[string]int64{
-			"wasm_test_failures": 3, "wasm_leak_count": 2, "wasm_test_count": 10586,
-		}},
-		{targetSuite{target: "wasm32-web", runtime: "stub-runtime", prefix: "wasm_web"}, map[string]int64{
-			"wasm_web_test_failures": 3, "wasm_web_leak_count": 2, "wasm_web_test_count": 10586,
-		}},
-	} {
-		metrics, incomplete, err := measureTargetSuite(t.TempDir(), tc.suite, stub)
+	for _, prefix := range []string{"wasm", "wasm_web"} {
+		root := t.TempDir()
+		jsonl := suiteRecords(root,
+			[3]string{"tests/a.pr", "ok_one", "pass"}, [3]string{"tests/a.pr", "ok_two", "pass"},
+			[3]string{"tests/a.pr", "broken", "fail"}, [3]string{"tests/b.pr", "slow", "timeout"},
+			[3]string{"tests/b.pr", "leaky", "leak"}, [3]string{"tests/b.pr", "skipped", "excluded"})
+		stub := func(root, target string) (string, error) { return jsonl, errors.New("exit status 1") }
+		suite := targetSuite{target: "wasm32-wasi", runtime: "stub-runtime", prefix: prefix}
+		m, err := measureTargetSuite(root, suite, stub)
 		if err != nil {
-			t.Fatalf("%s: %v", tc.suite.target, err)
+			t.Fatalf("%s: %v", prefix, err)
 		}
-		if incomplete != "" {
-			t.Errorf("%s: incomplete = %q, want empty", tc.suite.target, incomplete)
-			continue
+		if m.incomplete != "" {
+			t.Errorf("%s: incomplete = %q, want empty", prefix, m.incomplete)
 		}
-		if len(metrics) != len(tc.want) {
-			t.Fatalf("%s: got %d metrics %+v, want %d", tc.suite.target, len(metrics), metrics, len(tc.want))
+		want := map[string]int64{
+			"failed_tests": 2, prefix + "_failed_tests": 2,
+			"leaked_tests": 1, prefix + "_leaked_tests": 1,
+			"test_count": 2, prefix + "_test_count": 2,
 		}
 		got := map[string]int64{}
-		for _, m := range metrics {
-			got[m.Name] = m.Int
+		for _, metric := range m.metrics {
+			got[metric.Name] = metric.Int
 		}
-		for name, want := range tc.want {
-			if got[name] != want {
-				t.Errorf("%s: %s = %d, want %d", tc.suite.target, name, got[name], want)
-			}
+		if !maps.Equal(got, want) {
+			t.Errorf("%s: metrics = %v, want %v", prefix, got, want)
+		}
+		// A group per file, a member per record that did not pass, carrying
+		// the runner's own words.
+		if len(m.groups) != 2 || m.groups[0].Name != "tests/a.pr" || len(m.groups[1].Members) != 3 {
+			t.Fatalf("%s: groups = %+v", prefix, m.groups)
+		}
+		if mem := m.groups[0].Members[0]; mem.Name != "broken" || mem.Outcome != OutcomeFail || mem.Detail != "panic: broken went wrong" {
+			t.Errorf("%s: member = %+v", prefix, mem)
 		}
 	}
 }
@@ -100,12 +118,13 @@ func TestTargetSuite_AMissingRuntimeMeasuresNothing(t *testing.T) {
 		return "", nil
 	}
 	suite := targetSuite{target: "wasm32-wasi", runtime: "no-such-runtime-anywhere", prefix: "wasm"}
-	metrics, incomplete, err := measureTargetSuite(t.TempDir(), suite, stub)
+	m, err := measureTargetSuite(t.TempDir(), suite, stub)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(metrics) != 0 {
-		t.Errorf("metrics = %v, want none: nothing was measured", metrics)
+	incomplete := m.incomplete
+	if len(m.metrics) != 0 {
+		t.Errorf("metrics = %v, want none: nothing was measured", m.metrics)
 	}
 	if !strings.Contains(incomplete, "no-such-runtime-anywhere") {
 		t.Errorf("incomplete = %q, want it to name the missing runtime", incomplete)
@@ -123,18 +142,20 @@ func TestTargetSuite_AMissingRuntimeMeasuresNothing(t *testing.T) {
 	}
 }
 
-// A suite that printed no summary is a gate that could not answer, which is an
+// A suite that reported no records is a gate that could not answer, which is an
 // error — distinct from an incomplete run, which answered about less.
-func TestTargetSuite_NoSummaryIsAnError(t *testing.T) {
+func TestTargetSuite_NoRecordsIsAnError(t *testing.T) {
 	stubGateBuild(t, &fakeBuild{})
-	stub := func(root, target string) (string, error) { return "nothing parseable here", nil }
-	suite := targetSuite{target: "wasm32-wasi", runtime: "stub-runtime", prefix: "wasm"}
-	metrics, _, err := measureTargetSuite(t.TempDir(), suite, stub)
-	if err == nil {
-		t.Fatalf("a suite that printed no summary measured %+v", metrics)
+	stub := func(root, target string) (string, error) {
+		return "nothing parseable here", errors.New("exit status 2")
 	}
-	if !strings.Contains(err.Error(), "no summary line") {
-		t.Errorf("error = %v, want it to name the missing summary line", err)
+	suite := targetSuite{target: "wasm32-wasi", runtime: "stub-runtime", prefix: "wasm"}
+	m, err := measureTargetSuite(t.TempDir(), suite, stub)
+	if err == nil {
+		t.Fatalf("a suite that reported no records measured %+v", m.metrics)
+	}
+	if !strings.Contains(err.Error(), "no test records") || !strings.Contains(err.Error(), "exit status 2") {
+		t.Errorf("error = %v, want it to name the missing records and the runner's exit", err)
 	}
 }
 
@@ -170,36 +191,6 @@ func TestIntegration_ExcludesTheScheduledGates(t *testing.T) {
 		}
 		if !IsContractGate(name) {
 			t.Errorf("%q is not a gate, so nothing can ask for it by name", name)
-		}
-	}
-}
-
-// The two names that are both a contract gate and an older subcommand must
-// answer to BOTH spellings while the schedules that use the older one still
-// exist. Routing a bare `bin/gate install` to a contract gate that refuses its
-// arguments would take those schedules red without measuring anything.
-func TestLegacySubcommands_AnswerToBothSpellings(t *testing.T) {
-	for name := range legacySubcommands {
-		if !IsContractGate(name) {
-			t.Errorf("%q is in legacySubcommands but is not a contract gate, so the exception protects nothing", name)
-		}
-		if hasEnvelopeFlag([]string{name}) {
-			t.Errorf("a bare %q was read as an envelope request", name)
-		}
-		for _, spelling := range []string{"--envelope", "-envelope"} {
-			if !hasEnvelopeFlag([]string{name, spelling}) {
-				t.Errorf("%q %s was not read as an envelope request", name, spelling)
-			}
-		}
-	}
-	// Every OTHER contract gate answers only to the contract spelling: the
-	// exception is a migration seam, not a precedent.
-	for _, name := range ContractGateNames() {
-		if legacySubcommands[name] {
-			continue
-		}
-		if slices.Contains([]string{"test", "wasm-test", "wasm-web-test", "wasm-size", "go-test", "stress", "coverage", "schema"}, name) {
-			t.Errorf("gate %q shares a name with an older subcommand and is not declared in legacySubcommands, so one of the two is unreachable", name)
 		}
 	}
 }

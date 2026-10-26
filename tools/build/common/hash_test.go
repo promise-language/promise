@@ -135,9 +135,9 @@ func TestWorktreeHash_ExcludesPromiseHome(t *testing.T) {
 // so it must not be part of the tree identity that run validated.
 func TestWorktreeHash_ExcludesBaselines(t *testing.T) {
 	root := worktreeRepo(t)
-	writeFile(t, root, baselinesFile, "{}\n")
+	writeFile(t, root, BaselinesFile, "{}\n")
 	before := hashOf(t, root)
-	writeFile(t, root, baselinesFile, `{"linux-amd64":{}}`+"\n")
+	writeFile(t, root, BaselinesFile, `{"linux-amd64":{}}`+"\n")
 	if after := hashOf(t, root); after != before {
 		t.Error("rewriting baselines.json changed the worktree hash")
 	}

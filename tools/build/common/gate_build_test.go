@@ -219,7 +219,7 @@ func TestContractGate_PinsWorktreeHome(t *testing.T) {
 
 			root := t.TempDir()
 			var out bytes.Buffer
-			if err := runContractGate(root, []string{"builds", "--envelope"}, &out); err != nil {
+			if err := runContractGate(root, "builds", &out); err != nil {
 				t.Fatalf("runContractGate: %v", err)
 			}
 			var env Envelope
@@ -273,7 +273,7 @@ func TestContractGate_UnpinnableHomeIsNotBuiltInto(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := runContractGate(root, []string{"builds", "--envelope"}, &out); err != nil {
+	if err := runContractGate(root, "builds", &out); err != nil {
 		t.Fatalf("runContractGate: %v", err)
 	}
 	var env Envelope
@@ -355,7 +355,7 @@ func TestGateBuild_ProgressNeverReachesStdout(t *testing.T) {
 	savedStdout := os.Stdout
 	os.Stdout = write
 	var envelope strings.Builder
-	gateErr := runContractGate(root, []string{"builds", "--envelope"}, &envelope)
+	gateErr := runContractGate(root, "builds", &envelope)
 	os.Stdout = savedStdout
 	write.Close()
 	leaked, _ := io.ReadAll(read)
@@ -383,7 +383,8 @@ func TestGateBuild_ProgressNeverReachesStdout(t *testing.T) {
 func TestBuilds_BuildFailureIsAMeasurement(t *testing.T) {
 	stubGateBuild(t, buildFails())
 
-	metrics, incomplete, err := measureBuilds(t.TempDir())
+	meas, err := measureBuilds(t.TempDir())
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatalf("a build that failed is a measurement, not a failure to measure: %v", err)
 	}
@@ -397,8 +398,8 @@ func TestBuilds_BuildFailureIsAMeasurement(t *testing.T) {
 	if byName["build_failures"] != 1 {
 		t.Errorf("build_failures = %d, want 1", byName["build_failures"])
 	}
-	if _, reported := byName["unbuildable_go_packages"]; reported {
-		t.Error("unbuildable_go_packages was reported after a failed build; the sweep did not run, and a zero there is a number about nothing")
+	if _, reported := byName["go_unbuildable_packages"]; reported {
+		t.Error("go_unbuildable_packages was reported after a failed build; the sweep did not run, and a zero there is a number about nothing")
 	}
 }
 
@@ -406,7 +407,8 @@ func TestBuilds_BuildFailureIsAMeasurement(t *testing.T) {
 func TestBuilds_BuildFailureNamesTheReason(t *testing.T) {
 	stubGateBuild(t, &fakeBuild{err: errors.New("generate parser: java not found")})
 
-	_, incomplete, err := measureBuilds(t.TempDir())
+	meas, err := measureBuilds(t.TempDir())
+	incomplete := meas.incomplete
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,8 +448,8 @@ func TestFormattedGo_MeasuresWithoutABuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(env.Metrics) != 1 || env.Metrics[0].Name != "unformatted_go_files" {
-		t.Errorf("formatted:go reported %+v, want unformatted_go_files even though the build failed", env.Metrics)
+	if got := metricInts(env.Metrics); len(got) != 2 || got["unformatted_files"] != 0 || got["go_unformatted_files"] != 0 {
+		t.Errorf("formatted:go reported %+v, want unformatted_files and go_unformatted_files even though the build failed", env.Metrics)
 	}
 	if env.Incomplete != "" {
 		t.Errorf("incomplete = %q, want empty: gofmt needs no build", env.Incomplete)
@@ -463,7 +465,8 @@ func TestFormattedGo_MeasuresWithoutABuild(t *testing.T) {
 func TestFormattedPromise_ABuiltTreeWithNoCompilerIsNotACleanZero(t *testing.T) {
 	stubGateBuild(t, &fakeBuild{})
 
-	metrics, incomplete, err := measureFormattedPromise(t.TempDir())
+	meas, err := measureFormattedPromise(t.TempDir())
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,15 +491,16 @@ func TestFormattedPromise_ReportsANumberOnceBuilt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	metrics, incomplete, err := measureFormattedPromise(root)
+	meas, err := measureFormattedPromise(root)
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatal(err)
 	}
 	if incomplete != "" {
 		t.Errorf("incomplete = %q, want empty: the compiler is there and the tree has no .pr files", incomplete)
 	}
-	if len(metrics) != 1 || metrics[0].Name != "unformatted_promise_files" || metrics[0].Int != 0 {
-		t.Errorf("got %+v, want unformatted_promise_files = 0", metrics)
+	if got := metricInts(metrics); len(got) != 2 || got["unformatted_files"] != 0 || got["promise_unformatted_files"] != 0 {
+		t.Errorf("got %+v, want unformatted_files = promise_unformatted_files = 0", metrics)
 	}
 }
 
@@ -506,7 +510,8 @@ func TestFormattedPromise_ReportsANumberOnceBuilt(t *testing.T) {
 func TestTestedPromise_BuildOutcomeIsTheOnlyRefusal(t *testing.T) {
 	stubGateBuild(t, buildFails())
 
-	metrics, incomplete, err := measureTestedPromise(t.TempDir())
+	meas, err := measureTestedPromise(t.TempDir())
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,24 +529,33 @@ func TestTestedPromise_BuildOutcomeIsTheOnlyRefusal(t *testing.T) {
 	}
 }
 
-// Which summary field becomes which metric. Three numbers of the same type in
-// one line are exactly what a transposition hides: host_test_failures carrying
-// the leak count would still be a plausible-looking envelope, and the baselines
-// for both are 0, so nothing downstream would notice until a real failure was
-// reported as a leak.
+// Which record becomes which metric. Three counts of the same type are exactly
+// what a transposition hides: promise_failed_tests carrying the leak count would
+// still be a plausible-looking envelope, and the terms for both are 0, so
+// nothing downstream would notice until a real failure was reported as a leak.
+// Every outcome that is neither a pass, a leak nor an exclusion is a failure.
 func TestTestedPromise_MapsTheSummaryToItsMetrics(t *testing.T) {
 	stubGateBuild(t, &fakeBuild{})
-	const output = "some progress\n11186 passed, 3 failed, 2 leaked (117 files, 30.810s)\n"
+	root := t.TempDir()
+	var output strings.Builder
+	for i, status := range []string{"pass", "pass", "pass", "pass", "fail", "timeout", "memory", "not-run", "leak", "leak", "excluded"} {
+		fmt.Fprintf(&output, `{"file":%q,"test":"test_%d","status":%q,"elapsed":0.001}`+"\n", filepath.Join(root, "tests", "a.pr"), i, status)
+	}
 
-	metrics, incomplete, err := measureTestedPromiseWith(t.TempDir(),
-		func(string, string) (string, error) { return output, nil })
+	meas, err := measureTestedPromiseWith(root,
+		func(string, string) (string, error) { return output.String(), nil })
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatalf("failing tests are a measurement: %v", err)
 	}
 	if incomplete != "" {
 		t.Errorf("incomplete = %q, want empty", incomplete)
 	}
-	want := map[string]int64{"host_test_failures": 3, "host_leak_count": 2, "host_test_count": 11186}
+	want := map[string]int64{
+		"failed_tests": 4, "promise_failed_tests": 4,
+		"leaked_tests": 2, "promise_leaked_tests": 2,
+		"test_count": 4, "promise_test_count": 4,
+	}
 	if len(metrics) != len(want) {
 		t.Fatalf("got %d metrics %+v, want %d", len(metrics), metrics, len(want))
 	}
@@ -558,12 +572,13 @@ func TestTestedPromise_MapsTheSummaryToItsMetrics(t *testing.T) {
 func TestTestedPromise_NoSummaryIsNotZeroFailures(t *testing.T) {
 	stubGateBuild(t, &fakeBuild{})
 
-	metrics, _, err := measureTestedPromiseWith(t.TempDir(),
+	meas, err := measureTestedPromiseWith(t.TempDir(),
 		func(string, string) (string, error) { return "the binary crashed\n", nil })
+	metrics := meas.metrics
 	if err == nil {
 		t.Fatalf("a suite that printed no summary measured %+v", metrics)
 	}
-	if !strings.Contains(err.Error(), "no summary line") {
+	if !strings.Contains(err.Error(), "no test records") {
 		t.Errorf("error %q does not say what was missing", err)
 	}
 }
@@ -577,8 +592,9 @@ func TestCheckedPromise_MapsTheSummaryToItsMetrics(t *testing.T) {
 	root := rootWithCompiler(t)
 	const output = "FAIL modules/std (18 errors)\n\n851 checked, 1 warned, 9 failed (861 units, 27 errors, 1 warning, 42.173s)\n"
 
-	metrics, incomplete, err := measureCheckedPromiseWith(root,
+	meas, err := measureCheckedPromiseWith(root,
 		func(string) (string, error) { return output, nil })
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatalf("diagnostics are a measurement: %v", err)
 	}
@@ -586,8 +602,9 @@ func TestCheckedPromise_MapsTheSummaryToItsMetrics(t *testing.T) {
 		t.Errorf("incomplete = %q, want empty", incomplete)
 	}
 	want := map[string]int64{
+		"check_findings":         27,
+		"promise_check_findings": 27,
 		"promise_check_failures": 9,
-		"promise_check_errors":   27,
 		"promise_check_warnings": 1,
 		"promise_check_units":    861,
 	}
@@ -607,8 +624,9 @@ func TestCheckedPromise_NoSummaryIsNotZeroFailures(t *testing.T) {
 	stubGateBuild(t, &fakeBuild{})
 	root := rootWithCompiler(t)
 
-	metrics, _, err := measureCheckedPromiseWith(root,
+	meas, err := measureCheckedPromiseWith(root,
 		func(string) (string, error) { return "the compiler crashed\n", nil })
+	metrics := meas.metrics
 	if err == nil {
 		t.Fatalf("a sweep that printed no summary measured %+v", metrics)
 	}
@@ -623,8 +641,9 @@ func TestCheckedPromise_NoSummaryIsNotZeroFailures(t *testing.T) {
 func TestCheckedPromise_MissingCompilerIsNotClean(t *testing.T) {
 	stubGateBuild(t, &fakeBuild{})
 
-	metrics, incomplete, err := measureCheckedPromiseWith(t.TempDir(),
+	meas, err := measureCheckedPromiseWith(t.TempDir(),
 		func(string) (string, error) { t.Fatal("the sweep must not run without a compiler"); return "", nil })
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatalf("a missing binary is a reason, not an error: %v", err)
 	}
@@ -641,8 +660,9 @@ func TestCheckedPromise_MissingCompilerIsNotClean(t *testing.T) {
 func TestCheckedPromise_BuildFailureReportsNoNumbers(t *testing.T) {
 	stubGateBuild(t, buildFails())
 
-	metrics, incomplete, err := measureCheckedPromiseWith(rootWithCompiler(t),
+	meas, err := measureCheckedPromiseWith(rootWithCompiler(t),
 		func(string) (string, error) { t.Fatal("the sweep must not run behind a failed build"); return "", nil })
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatalf("a failed build is a reason, not an error: %v", err)
 	}
@@ -698,15 +718,16 @@ func TestCheckedGo_CountsRealVetFindings(t *testing.T) {
 	writeGoModule(t, filepath.Join(root, "compiler"), "compiler",
 		"package compiler\n\nimport \"fmt\"\n\nfunc F() { fmt.Printf(\"%d\\n\", \"not an int\") }\n")
 
-	metrics, incomplete, err := measureCheckedGo(root)
+	meas, err := measureCheckedGo(root)
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatalf("a vet finding is a measurement: %v", err)
 	}
 	if incomplete != "" {
 		t.Errorf("incomplete = %q, want empty", incomplete)
 	}
-	if len(metrics) != 1 || metrics[0].Int != 1 {
-		t.Errorf("got %+v, want vet_findings = 1 — the real `go vet` output is not parsed as expected", metrics)
+	if got := metricInts(metrics); len(got) != 2 || got["check_findings"] != 1 || got["go_check_findings"] != 1 {
+		t.Errorf("got %+v, want check_findings = go_check_findings = 1 — the real `go vet` output is not parsed as expected", metrics)
 	}
 }
 
@@ -800,10 +821,10 @@ func TestIntegration_ABuildFailureIsReportedWhole(t *testing.T) {
 	if byName["build_failures"] != 1 {
 		t.Errorf("build_failures = %d, want 1", byName["build_failures"])
 	}
-	if _, reported := byName["unformatted_go_files"]; !reported {
+	if _, reported := byName["go_unformatted_files"]; !reported {
 		t.Error("formatted:go withheld its number; gofmt needs no build and still has an honest answer")
 	}
-	for _, withheld := range []string{"unformatted_promise_files", "vet_findings", "go_test_failures", "host_test_failures"} {
+	for _, withheld := range []string{"promise_unformatted_files", "go_check_findings", "go_failed_tests", "promise_failed_tests"} {
 		if _, reported := byName[withheld]; reported {
 			t.Errorf("%s was reported after a failed build; that number is about the previous build", withheld)
 		}
@@ -828,7 +849,7 @@ func TestBuilds_ErrorSkipsTheDownloadNotice(t *testing.T) {
 		errs: map[string]error{modules[0]: errors.New("exit status 1")},
 	}
 
-	_, _, err := measureBuildsWith(root, fake.capture)
+	_, err := measureBuildsWith(root, fake.capture)
 	if err == nil {
 		t.Fatal("a go build that named no package was reported as zero unbuildable packages")
 	}

@@ -1,229 +1,329 @@
 package common
 
-// bin/run — the judging layer for this project's gates (gate_contract.go).
+// The judging layer for this project's gates (gate_contract.go), which bin/run
+// carries (run.go).
 //
 // It is a DIFFERENT PROGRAM from bin/gate on purpose: the party under judgement
 // must not hold what judges it. So the terms live beside the gates but outside
-// them — person-edited caps in tools/gates/thresholds.json and ratcheting
-// baselines in tools/gates/baselines.json — and only this layer reads either.
-//
-// Two modes, and the difference is who ran the gate:
-//
-//   - `bin/run <gate>` measures (by executing bin/gate, the same process
-//     boundary a runner crosses) and then judges, for a person at a terminal.
-//     No decision rests on it.
-//   - `bin/run <gate> --verdict` judges an envelope it is GIVEN on stdin and
-//     spawns nothing. This is what the flow SDK asks: it spawned the gate, so
-//     it is the runner, and the runner may not come from the tree.
-//
-// Both reach the verdict through judge(), so they cannot disagree.
+// them (terms.go), and only this layer reads them. It spawns nothing: a verdict
+// is reached from the envelope it is handed and the terms files, so anyone
+// holding both reaches the same one.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"slices"
-	"sort"
-	"strconv"
 	"strings"
 )
 
-// Direction is the sense in which a measurement is compared to its cap. The
-// set is closed: an unknown value is refused when the manifest is loaded.
-type Direction string
-
-const (
-	AtMost  Direction = "at_most"  // value must not exceed cap (counts of bad things)
-	AtLeast Direction = "at_least" // value must not fall below cap (floors such as free space)
-)
-
-// Threshold is one entry in the thresholds manifest.
-type Threshold struct {
-	Direction Direction `json:"direction"`
-	Cap       float64   `json:"cap"`
+// appliedTerm is one metric's judgement as the verdict carries it: the
+// direction, and each bound that applied — a cap, a baseline, or both — so a
+// reader holding the envelope can re-check the verdict without the files.
+type appliedTerm struct {
+	Direction Direction    `json:"direction"`
+	Cap       *json.Number `json:"cap,omitempty"`
+	Baseline  *json.Number `json:"baseline,omitempty"`
 }
 
-// ThresholdsFile is the thresholds manifest, repo-relative. It sits with the
-// project's other gate configuration (tools/gates/, beside baselines.json and
-// edit_gates.json — docs/gate-system.md) and is versioned with the tree it
-// judges, so a commit carries the terms it was judged on and any machine
-// reaches the same verdict for that commit, offline.
-//
-// It is a distinct artefact from the gates on purpose: a gate holding its own
-// thresholds can be passed by editing the gate.
-var ThresholdsFile = filepath.Join("tools", "gates", "thresholds.json")
-
-// loadThresholds reads the manifest. An absent file is an error — a project
-// with a judge must have one — and so is an unknown direction.
-func loadThresholds(root string) (map[string]Threshold, error) {
-	data, err := os.ReadFile(filepath.Join(root, ThresholdsFile))
-	if err != nil {
-		return nil, fmt.Errorf("loading thresholds manifest: %w", err)
+// failures names each bound m is outside of, in the words a verdict uses:
+// "cap at_most 0". Empty when m is within every bound.
+func (t appliedTerm) failures(m Metric) []string {
+	var out []string
+	if t.Cap != nil && !holds(m, t.Direction, *t.Cap) {
+		out = append(out, fmt.Sprintf("cap %s %s", t.Direction, *t.Cap))
 	}
-	var manifest map[string]Threshold
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return nil, fmt.Errorf("parsing thresholds manifest: %w", err)
+	if t.Baseline != nil && !holds(m, t.Direction, *t.Baseline) {
+		out = append(out, fmt.Sprintf("baseline %s %s", t.Direction, *t.Baseline))
 	}
-	for name, t := range manifest {
-		if t.Direction != AtMost && t.Direction != AtLeast {
-			return nil, fmt.Errorf("thresholds manifest: metric %q has unknown direction %q (must be %q or %q)",
-				name, t.Direction, AtMost, AtLeast)
-		}
-	}
-	return manifest, nil
+	return out
 }
 
-// term is one applied judgement, carried back in the verdict so anyone holding
-// the envelope and this tree can recompute it. Kind separates the two sources,
-// which move for different reasons and by different hands.
-type term struct {
-	Kind      string  `json:"kind"`      // "cap" — person-edited; "baseline" — ratcheted
-	Direction string  `json:"direction"` // at_most/at_least for a cap; up/down/exact for a baseline
-	Value     float64 `json:"value"`
+// describe is every bound of the term, for a person reading a metric beside it.
+func (t appliedTerm) describe() []string {
+	var out []string
+	if t.Cap != nil {
+		out = append(out, fmt.Sprintf("cap %s %s", t.Direction, *t.Cap))
+	}
+	if t.Baseline != nil {
+		out = append(out, fmt.Sprintf("baseline %s %s", t.Direction, *t.Baseline))
+	}
+	return out
 }
 
-// judge compares one envelope against the two kinds of terms this project
-// holds, and returns only the ones it actually applied: a verdict must travel
-// with what it was reached from, and terms the measurement never mentioned had
-// no part in it.
+// Verdict is what --verdict prints: one JSON object, whole. Thresholds is never
+// omitted and never null — a verdict travels with the terms it was reached
+// from, and flow refuses one that carries none.
+type Verdict struct {
+	Acceptable bool                   `json:"acceptable"`
+	Thresholds map[string]appliedTerm `json:"thresholds"`
+	Detail     string                 `json:"detail,omitempty"`
+}
+
+// maxEvidence is how many members a refusal's detail names before it counts
+// the rest: enough to start on, few enough to read.
+const maxEvidence = 5
+
+// storeRemedy is what a person does about the two metrics every tree gate
+// carries for the content-addressed store (casledger.go), which no leaf declares.
+const storeRemedy = "a run that fetched store blobs or exploded a second toolchain home asked for content the warm-up did not stage: find what the tree now needs from `PROMISE_CACHE_DEBUG=1 bin/test`, and re-measure"
+
+// judge applies every term the envelope's metrics carry and says what came of
+// it. Every cap and every baseline a metric has is applied, and all must hold:
+// a cap looser than the baseline beside it would otherwise forgive exactly the
+// regression the ratchet exists to catch.
 //
-// A cap is declared by a person and changes only when one edits it. A baseline
-// is derived — the best a metric has been — and ratchets in its declared
-// direction. A metric carrying both must satisfy both: a cap looser than the
-// baseline beside it would otherwise forgive exactly the regression the ratchet
-// exists to catch. The verdict records the term that DECIDED it — the one that
-// failed, or the cap when both hold — because one metric carries one term on
-// the wire and it has to be the one the answer rests on.
+// AN INCOMPLETE RUN IS NOT ACCEPTABLE. A run that did not measure its whole
+// subject has no grounds for a verdict: "the part I measured was fine" is not
+// "this is safe to land", and the difference is invisible exactly where it
+// matters most — a build that died, a suite that never ran, a tree that moved
+// mid-measurement.
 //
-// AN INCOMPLETE RUN IS NOT ACCEPTABLE. A verdict is a claim about a subject,
-// and a run that did not measure its whole subject has no grounds to make one:
-// "the part I measured was fine" is not "this is safe to land", and the
-// difference is invisible at the call site precisely where it matters most —
-// a build that died, a suite that never ran, a tree that moved mid-measurement.
-// Reporting that as acceptable turns the one gate a landing decision rests on
-// into a coin flip weighted by how much of it happened to run.
-//
-// The cost is real and is the right cost: a gate that cannot measure its
-// subject blocks, loudly, naming what it could not measure, instead of passing
-// a change nothing checked. What an incomplete run ALSO may not do is move a
-// floor — honest numbers that understate the subject would lower a bar for a
-// reason that is not about the code, and a ratchet by construction never moves
-// back. This judge never moves a baseline at all, and nothing else in this
-// repository does either: advancing one is the workspace's job.
-//
-// AN UNJUDGED MEASUREMENT IS NOT A PASS EITHER. A gate whose metrics carry
-// neither a cap nor a baseline has reported numbers nobody set a rule for, and
-// answering "acceptable" to that is a guess wearing a verdict's clothes.
-func judge(env Envelope, caps map[string]Threshold, baselines map[string]Baseline) (acceptable bool, terms map[string]term, detail string) {
-	terms = map[string]term{}
-	var failed []string
+// A refusal's detail says three things, in order: the judgement (metric, value
+// and term), the evidence (the members that did not pass, up to maxEvidence),
+// and the remedy each gate states once in its own definition.
+func judge(root string, env Envelope, terms Terms) Verdict {
+	v := Verdict{Acceptable: true, Thresholds: map[string]appliedTerm{}}
+	var judgements []string
+	var failing []string
 	for _, m := range env.Metrics {
-		t, capped := caps[m.Name]
-		// Enforced baselines only: a Pending entry has no value to compare
-		// against yet, and an Informational one is tracked and never blocks.
-		b, tracked := baselines[m.Name]
-		enforced := tracked && b.Value != nil && b.Direction != "" && b.Type != "informational"
+		t, ok := termFor(m.Name, env.Target, terms)
+		if !ok {
+			continue // no term of either kind: this metric is not judged
+		}
+		v.Thresholds[m.Name] = t
+		failed := t.failures(m)
+		if len(failed) == 0 {
+			continue
+		}
+		failing = append(failing, m.Name)
+		judgements = append(judgements, fmt.Sprintf("%s is %s, %s%s", m.Name, m.String(), strings.Join(failed, " and "), whereFrom(env.Groups, m.Name)))
+	}
+	if env.Incomplete != "" {
+		judgements = append(judgements, "this run measured less than a full one, so it cannot be acceptable: "+env.Incomplete)
+	}
+	if len(judgements) == 0 {
+		v.Detail = "every judged metric is within its terms"
+		return v
+	}
+	v.Acceptable = false
+	var b strings.Builder
+	evidence, rest := refusalEvidence(env.Groups)
+	for i, j := range judgements {
+		b.WriteString(j)
+		if i == len(judgements)-1 && len(evidence) == 0 {
+			b.WriteString(", and the gate reported nothing about why")
+		}
+		b.WriteString(".\n")
+	}
+	for _, e := range evidence {
+		b.WriteString(e + "\n")
+	}
+	if rest > 0 {
+		fmt.Fprintf(&b, "… and %d more that did not pass.\n", rest)
+	}
+	for _, r := range remedies(root, env.Gate, failing, env.Incomplete) {
+		b.WriteString(capitalize(r) + ".\n")
+	}
+	v.Detail = strings.TrimRight(b.String(), "\n")
+	return v
+}
 
-		capFailed := capped && !withinCap(m, t)
-		baseFailed := enforced && !checkRatchet(b.Direction, *b.Value, m.Number())
-
-		// Each term is built only when it exists, so neither can be recorded
-		// from a map miss's zero value if this priority list is ever reordered.
-		var capTerm, baseTerm term
-		if capped {
-			capTerm = term{Kind: "cap", Direction: string(t.Direction), Value: t.Cap}
-		}
-		if enforced {
-			baseTerm = term{Kind: "baseline", Direction: b.Direction, Value: *b.Value}
-		}
-		// The verdict carries the term that decided it: the one that failed, or
-		// the cap when both hold — it is the requirement, while the baseline
-		// beside it only records how far the metric has come.
-		switch {
-		case capFailed:
-			terms[m.Name] = capTerm
-		case baseFailed:
-			terms[m.Name] = baseTerm
-		case capped:
-			terms[m.Name] = capTerm
-		case enforced:
-			terms[m.Name] = baseTerm
-		default:
-			continue // no term of either kind — this metric is not judged
-		}
-		if capFailed {
-			failed = append(failed, fmt.Sprintf("%s is %s, cap %s %s", m.Name, m.String(), t.Direction, formatCap(t.Cap)))
-		}
-		if baseFailed {
-			failed = append(failed, fmt.Sprintf("%s is %s, baseline %s %s", m.Name, m.String(), b.Direction, formatCap(*b.Value)))
+// termFor is the term the metric carries on target: its cap, its baseline
+// there, or both.
+func termFor(name, target string, terms Terms) (appliedTerm, bool) {
+	c, capped := terms.Caps[name]
+	b, tracked := terms.Baselines[name]
+	var t appliedTerm
+	if capped {
+		n := c.Cap
+		t.Direction, t.Cap = c.Direction, &n
+	}
+	if tracked {
+		if n, ok := b.at(target); ok {
+			t.Direction, t.Baseline = b.Direction, &n
 		}
 	}
-	incomplete := ""
-	if env.Incomplete != "" {
-		incomplete = "; this run measured less than a full one, so no baseline may move from it: " + env.Incomplete
+	return t, t.Cap != nil || t.Baseline != nil
+}
+
+// whereFrom names the groups that carry the metric, so "worktree_free_bytes is
+// 3 GiB" is told which filesystem.
+func whereFrom(groups []Group, metric string) string {
+	var where []string
+	for _, g := range groups {
+		for _, m := range g.Metrics {
+			if m.Name == metric {
+				where = append(where, fmt.Sprintf("%s (%s)", g.Name, m.String()))
+			}
+		}
+	}
+	if len(where) == 0 {
+		return ""
+	}
+	if len(where) > maxEvidence {
+		where = append(where[:maxEvidence], fmt.Sprintf("%d more", len(where)-maxEvidence))
+	}
+	return ", in " + strings.Join(where, ", ")
+}
+
+// refusalEvidence is the first maxEvidence members that neither passed nor were
+// excluded, each with its own words beneath it, and how many more there were.
+func refusalEvidence(groups []Group) (lines []string, rest int) {
+	shown := 0
+	for _, g := range groups {
+		for _, m := range g.Members {
+			if m.Outcome == OutcomePass || m.Outcome == OutcomeExcluded {
+				continue
+			}
+			if shown == maxEvidence {
+				rest++
+				continue
+			}
+			shown++
+			line := fmt.Sprintf("%s: %s (%s)", g.Name, m.Name, m.Outcome)
+			if m.Detail != "" {
+				line += "\n    " + strings.ReplaceAll(m.Detail, "\n", "\n    ")
+			}
+			lines = append(lines, line)
+		}
+	}
+	return lines, rest
+}
+
+// remedies is what to do about the failing metrics of gate: the remedy of each
+// leaf declaring one of them, once each, in the gate's own order. An incomplete
+// run adds the remedy of each leaf its reason names — a composition prefixes a
+// part's reason with the part — or, naming none, of every leaf.
+func remedies(root, gate string, failing []string, incomplete string) []string {
+	leaves := leafGates(gate)
+	var out []string
+	add := func(r string) {
+		if r != "" && !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	for _, leaf := range leaves {
+		for _, s := range leafMetrics(root, leaf) {
+			if slices.Contains(failing, s.Name) {
+				add(contractGates[leaf].remedy)
+				break
+			}
+		}
+	}
+	if slices.ContainsFunc(failing, isContractStoreMetric) {
+		add(storeRemedy + "; `bin/run " + gate + "` re-measures")
+	}
+	if incomplete != "" {
+		named := false
+		for _, leaf := range leaves {
+			if len(leaves) == 1 || strings.Contains(incomplete, leaf+": ") {
+				add(contractGates[leaf].remedy)
+				named = true
+			}
+		}
+		if !named {
+			for _, leaf := range leaves {
+				add(contractGates[leaf].remedy)
+			}
+		}
+	}
+	return out
+}
+
+// leafGates is every leaf a gate is made of, in declaration order: the gate
+// itself when it measures.
+func leafGates(name string) []string {
+	def, ok := contractGates[name]
+	if !ok {
+		return nil
+	}
+	if def.measure != nil {
+		return []string{name}
+	}
+	var out []string
+	for _, part := range def.parts {
+		for _, leaf := range leafGates(part) {
+			if !slices.Contains(out, leaf) {
+				out = append(out, leaf)
+			}
+		}
+	}
+	return out
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// readEnvelopeToJudge is an envelope this judge will reach a verdict on, or the
+// reason it reaches none. Each refusal is a measurement nobody can judge: what
+// arrived is not an envelope, is one of a version this judge does not read, is
+// another gate's, names a metric twice, reports a metric as other than its
+// gate declares it, claims to be complete while lacking a metric its gate
+// declares, or carries nothing a term speaks to.
+func readEnvelopeToJudge(root, name string, data []byte, terms Terms) (Envelope, error) {
+	var head struct {
+		SchemaVersion *int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(data, &head); err != nil {
+		return Envelope{}, fmt.Errorf("what arrived on stdin is not an envelope: %w", err)
 	}
 	switch {
-	case len(failed) > 0:
-		return false, terms, strings.Join(failed, "; ") + incomplete
-	case env.Incomplete != "":
-		return false, terms, "this run did not measure its whole subject, so it cannot report the change safe to land: " + env.Incomplete
-	case len(terms) == 0:
-		return false, terms, "no metric this gate reported carries a cap or a baseline, so nothing was judged — an unjudged measurement is not a pass"
-	default:
-		return true, terms, "every judged metric is within its terms"
+	case head.SchemaVersion == nil:
+		return Envelope{}, fmt.Errorf("the envelope carries no schema_version")
+	case *head.SchemaVersion != EnvelopeSchemaVersion:
+		return Envelope{}, fmt.Errorf("the envelope is schema_version %d, and this judge reads %d", *head.SchemaVersion, EnvelopeSchemaVersion)
 	}
+	var env Envelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		return Envelope{}, fmt.Errorf("what arrived on stdin is not an envelope: %w", err)
+	}
+	// Only this layer knows which gate the terms it applies belong to.
+	if env.Gate != name {
+		return Envelope{}, fmt.Errorf("asked to judge %q against the terms for %q; a measurement is judged against its own gate's terms", env.Gate, name)
+	}
+	declared := declaredMetrics(root, name)
+	seen := map[string]bool{}
+	termed := false
+	for _, m := range env.Metrics {
+		if seen[m.Name] {
+			return Envelope{}, fmt.Errorf("the envelope reports %q twice", m.Name)
+		}
+		seen[m.Name] = true
+		if i := slices.IndexFunc(declared, func(s MetricSpec) bool { return s.Name == m.Name }); i >= 0 && declared[i] != specOf(m) {
+			return Envelope{}, fmt.Errorf("the envelope reports %q as %s, which %s declares as %s", m.Name, specOf(m).describe(), name, declared[i].describe())
+		}
+		if _, ok := termFor(m.Name, env.Target, terms); ok {
+			termed = true
+		}
+	}
+	if env.Incomplete != "" {
+		return env, nil // judged, and never acceptable: the reason is the verdict's
+	}
+	var missing []string
+	for _, s := range declared {
+		if !seen[s.Name] {
+			missing = append(missing, s.Name)
+		}
+	}
+	if len(missing) > 0 {
+		return Envelope{}, fmt.Errorf("the envelope claims a complete run of %s but lacks %s, which it declares", name, strings.Join(missing, ", "))
+	}
+	if !termed {
+		return Envelope{}, fmt.Errorf("no metric of the %s envelope carries a cap or a baseline, so nothing can be judged — and an unjudged measurement is not a pass", name)
+	}
+	return env, nil
 }
 
-// projectTerms loads both sources of terms for the platform this run measured
-// on. An unreadable baselines file is not fatal: the caps still judge, and a
-// metric with neither term is simply not judged.
-func projectTerms(root string) (map[string]Threshold, map[string]Baseline, error) {
-	caps, err := loadThresholds(root)
-	if err != nil {
-		return nil, nil, err
-	}
-	all, err := LoadBaselines(root)
-	if err != nil {
-		return caps, map[string]Baseline{}, nil
-	}
-	if b, ok := all[HostTarget()]; ok {
-		return caps, b, nil
-	}
-	return caps, map[string]Baseline{}, nil
-}
-
-// metricWithinTerm reports whether m satisfies the term it was judged on. One
-// spelling, because two readers of the same verdict — bin/run's per-metric table
-// and bin/verify's per-part summary — must agree about which metric failed.
-func metricWithinTerm(m Metric, t term) bool {
-	if t.Kind == "cap" {
-		return withinCap(m, Threshold{Direction: Direction(t.Direction), Cap: t.Value})
-	}
-	return checkRatchet(t.Direction, t.Value, m.Number())
-}
-
-func withinCap(m Metric, t Threshold) bool {
-	if t.Direction == AtLeast {
-		return m.Number() >= t.Cap
-	}
-	return m.Number() <= t.Cap
-}
-
-// verdictWire is what --verdict prints: one JSON object, whole. Thresholds is
-// never omitted and never null — the SDK refuses a verdict without the terms
-// it was reached from, since nothing could re-check it.
-type verdictWire struct {
-	Acceptable bool            `json:"acceptable"`
-	Thresholds map[string]term `json:"thresholds"`
-	Detail     string          `json:"detail,omitempty"`
-}
-
-// JudgeStdin judges an envelope this program did NOT produce and writes one
-// verdict object to out. Nothing reaches out on any error path: a caller reads
-// one object or none.
+// JudgeStdin is `bin/run <gate> --verdict`: it judges an envelope this program
+// did NOT produce and writes one verdict object to out. Nothing reaches out on
+// any error path: a caller reads one object or none.
 func JudgeStdin(root, name string, in io.Reader, out io.Writer) error {
 	if !IsContractGate(name) {
 		return unknownContractGate(name)
@@ -232,61 +332,25 @@ func JudgeStdin(root, name string, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("reading the envelope to judge: %w", err)
 	}
-	var env Envelope
-	if err := json.Unmarshal(data, &env); err != nil {
-		return fmt.Errorf("what arrived on stdin is not an envelope: %w", err)
-	}
-	// Only this layer knows which gate the terms it applies belong to.
-	if env.Gate != name {
-		return fmt.Errorf("asked to judge %q against the terms for %q; a measurement is judged against its own gate's caps", env.Gate, name)
-	}
-	caps, baselines, err := projectTerms(root)
+	terms, err := LoadTerms(root)
 	if err != nil {
 		return err
 	}
-	acceptable, terms, detail := judge(env, caps, baselines)
-	body, err := json.Marshal(verdictWire{Acceptable: acceptable, Thresholds: terms, Detail: detail})
+	env, err := readEnvelopeToJudge(root, name, data, terms)
 	if err != nil {
+		return err
+	}
+	v := judge(root, env, terms)
+	var body bytes.Buffer
+	if err := encodeLine(&body, v); err != nil {
 		return fmt.Errorf("rendering the verdict for %s: %w", name, err)
 	}
 	// The flow's path: it spawned the gate, so this is the first party in the
 	// tree that knows the measurement passed. Before the write, and on stderr if
 	// it fails, so the one object this prints on stdout is unaffected either way.
-	reportBlessing(root, env, acceptable)
-	_, err = out.Write(append(body, '\n'))
+	reportBlessing(root, env, v.Acceptable)
+	_, err = out.Write(body.Bytes())
 	return err
-}
-
-// runOneGate is the by-hand path: execute bin/gate as a process — the same
-// boundary a runner crosses, so a gate broken only across it (prints to
-// stdout, exits without an envelope) is broken here too — then judge and print.
-func runOneGate(root, name string, stdout io.Writer) error {
-	cmd := exec.Command(filepath.Join(root, "bin", "gate"+ExeSuffix()), name, "--envelope")
-	cmd.Dir = root
-	// The gate's progress goes straight to our stderr, not into a buffer
-	// printed afterwards: a working gate and a wedged one look the same while
-	// output is held.
-	cmd.Stderr = os.Stderr
-	out, runErr := cmd.Output()
-
-	var env Envelope
-	if err := json.Unmarshal(out, &env); err != nil {
-		if runErr != nil {
-			return fmt.Errorf("%s did not measure anything: %w", name, runErr)
-		}
-		return fmt.Errorf("%s printed something that is not an envelope: %s", name, firstLine(string(out)))
-	}
-	caps, baselines, err := projectTerms(root)
-	if err != nil {
-		return err
-	}
-	fmt.Fprint(stdout, renderVerdict(env, caps, baselines))
-	acceptable, _, detail := judge(env, caps, baselines)
-	reportBlessing(root, env, acceptable)
-	if !acceptable {
-		return fmt.Errorf("%s: %s", name, detail)
-	}
-	return nil
 }
 
 // reportBlessing records the blessing a passing verdict earns, and tells the
@@ -308,285 +372,40 @@ func reportBlessing(root string, env Envelope, acceptable bool) {
 	}
 }
 
-// renderVerdict prints each measurement beside the term it was judged on. This
-// is the only layer that can: it holds the caps and the baselines, so it can
-// put a number next to what the number was judged against. A gate could only
-// ever print the left-hand column.
-func renderVerdict(env Envelope, caps map[string]Threshold, baselines map[string]Baseline) string {
+// renderVerdict prints each measurement beside every term it was judged on,
+// then the verdict. This is the only layer that can: it holds the terms, so it
+// can put a number next to what the number was judged against. A gate could
+// only ever print the left-hand column.
+func renderVerdict(env Envelope, v Verdict) string {
 	var sb strings.Builder
 	width := 0
 	for _, m := range env.Metrics {
 		width = max(width, len(m.Name))
 	}
-	_, terms, _ := judge(env, caps, baselines)
 	for _, m := range env.Metrics {
 		judged, mark := "not judged", " "
-		if t, ok := terms[m.Name]; ok {
-			judged, mark = t.Kind+" "+t.Direction+" "+formatCap(t.Value), "✗"
-			if metricWithinTerm(m, t) {
-				mark = "✓"
+		if t, ok := v.Thresholds[m.Name]; ok {
+			judged, mark = strings.Join(t.describe(), ", "), "✓"
+			if len(t.failures(m)) > 0 {
+				mark = "✗"
 			}
 		}
-		fmt.Fprintf(&sb, "  %-*s  %14s  %-28s %s\n", width, m.Name, m.String()+unitSuffix(m.Unit), judged, mark)
+		fmt.Fprintf(&sb, "  %-*s  %14s  %-40s %s\n", width, m.Name, m.String()+unitSuffix(m.Unit), judged, mark)
 	}
-	if env.Incomplete != "" {
-		fmt.Fprintf(&sb, "\n  measured less than a full run: %s\n  no baseline may move from this run\n", env.Incomplete)
+	if v.Acceptable {
+		sb.WriteString("\nacceptable: " + v.Detail + "\n")
+	} else {
+		sb.WriteString("\nnot acceptable:\n  " + strings.ReplaceAll(v.Detail, "\n", "\n  ") + "\n")
 	}
 	return sb.String()
-}
-
-func formatCap(v float64) string {
-	if v == float64(int64(v)) {
-		return strconv.FormatInt(int64(v), 10)
-	}
-	return strconv.FormatFloat(v, 'f', 1, 64)
 }
 
 func unitSuffix(unit string) string {
-	if unit == "bytes" {
+	switch unit {
+	case unitBytes:
 		return " B"
+	case unitPercent:
+		return " %"
 	}
 	return ""
-}
-
-// parseRunArgs reads `<gate> [--verdict]`. An unknown flag is refused rather
-// than ignored: a caller that meant --verdict and mistyped it must not silently
-// get the measuring mode, which spawns a gate.
-func parseRunArgs(args []string) (name string, verdict bool, err error) {
-	for _, raw := range args {
-		flag, isFlag := flagName(raw)
-		switch {
-		case isFlag && flag == "verdict":
-			verdict = true
-		case isFlag:
-			return "", false, fmt.Errorf("use of unknown flag %q", raw)
-		case name != "":
-			return "", false, fmt.Errorf("unexpected argument %q; one gate at a time", raw)
-		default:
-			name = raw
-		}
-	}
-	if !IsContractGate(name) {
-		return "", false, unknownContractGate(name)
-	}
-	return name, verdict, nil
-}
-
-func runUsage(root string) string {
-	var sb strings.Builder
-	sb.WriteString("usage: bin/run <gate>              measure one gate and judge it (for a person)\n")
-	sb.WriteString("       bin/run <gate> --verdict    judge the envelope on stdin; print one JSON verdict\n")
-	sb.WriteString("       bin/run --list [--json]     the gates and commands this project provides\n\n")
-	sb.WriteString("Gates:\n")
-	for _, n := range ContractGateNames() {
-		fmt.Fprintf(&sb, "  %-18s %s\n", n, ContractGateSummary(n))
-	}
-	// Both sources, because a reader who knows only one cannot tell why a
-	// metric was judged — or why one was not judged at all.
-	caps, baselines, err := projectTerms(root)
-	if err != nil {
-		return sb.String()
-	}
-	fmt.Fprintf(&sb, "\nCaps (%s, edited by hand): %s\n", ThresholdsFile, strings.Join(sortedMapKeys(caps), ", "))
-	var ratcheted []string
-	for name, b := range baselines {
-		if b.Value != nil && b.Direction != "" && b.Type != "informational" {
-			ratcheted = append(ratcheted, name)
-		}
-	}
-	sort.Strings(ratcheted)
-	fmt.Fprintf(&sb, "Baselines (%s, %s, ratcheted): %s\n", baselinesFile, HostTarget(), strings.Join(ratcheted, ", "))
-	sb.WriteString("A metric with neither is reported and not judged.\n")
-	return sb.String()
-}
-
-// sortedKeys is the map's keys in a stable order, so usage text reads the same
-// on every run.
-func sortedMapKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// metaBuilderName is the one cmd/ directory that is not a command: ./make
-// builds the others and is not itself installed into bin/, so it can collide
-// with nothing and belongs in no listing.
-const metaBuilderName = "make"
-
-// SupportedCommands lists the commands this project BUILDS: one directory per
-// command under tools/build/cmd, minus the meta-builder. Every one of them,
-// not a filtered subset.
-//
-// The filter this used to apply — flow's closed {setup, verify, cleanup} — was
-// answering a different question than the one the listing is asked. Flow's set
-// is closed because flow decides WHEN each runs and has no place to run a
-// fourth. The workspace asks this list something else entirely: which names in
-// bin/ belong to the project's own builder. It uses the answer to refuse a
-// release that would install over one of them, and to decide which recorded
-// names it may delete — so a project that under-reports gets its own tools
-// silently overwritten by `workspace setup`, or removed by `workspace update`,
-// with the one-name-one-builder refusal that exists to prevent exactly that
-// never firing (workspace tool-contract.md §5).
-//
-// It reports what the project builds, not what is built: bin/ is empty in a
-// fresh clone, and the claim has to exist before either builder has run.
-func SupportedCommands(root string) []string {
-	entries, err := os.ReadDir(filepath.Join(root, "tools", "build", "cmd"))
-	if err != nil {
-		// No command directory is a project with no commands. That is what the
-		// caller needs to know, and it is not an error to report here.
-		return nil
-	}
-	var out []string
-	for _, e := range entries {
-		if e.IsDir() && e.Name() != metaBuilderName {
-			out = append(out, e.Name())
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// CommandGateCollisions returns the names that are both a command this project
-// builds and a gate it answers, sorted as SupportedCommands sorts.
-//
-// `bin/run <name>` dispatches both kinds, so such a name would mean one of two
-// things. It is an error rather than a precedence rule: precedence would make
-// the shadowed name silently unreachable while both still appeared in --list.
-func CommandGateCollisions(root string) []string {
-	gates := ContractGateNames()
-	var both []string
-	for _, c := range SupportedCommands(root) {
-		if slices.Contains(gates, c) {
-			both = append(both, c)
-		}
-	}
-	return both
-}
-
-// commandSerialize is the exclusion each command declares it must hold while
-// it runs, by command name; a command absent here declares none. Only the
-// project can say what its commands cost, so the declaration is the project's
-// (flow docs/gates-and-commands.md § Two scopes). verify holds the host-scope
-// exclusion: a runner takes it before spawning verify and reports the queue as
-// waiting, outside the run's allowance — and acquireVerifyLock joins that same
-// exclusion rather than a lock of its own, so the runner's queue is the only
-// one (#96).
-var commandSerialize = map[string]string{"verify": "host"}
-
-// commandRow is a command that declares an exclusion, as `bin/run --list
-// --json` writes it.
-type commandRow struct {
-	Name      string `json:"name"`
-	Serialize string `json:"serialize"`
-}
-
-// commandRows is the `commands` half of the JSON listing: a row for a command
-// that declares an exclusion, the bare name for one that declares none — the
-// two forms flow's DiscoverCommands and the workspace's build-set probe both
-// read. An absent list is an empty one rather than null: a reader asking what
-// this project provides gets an answer.
-func commandRows(commands []string) []any {
-	rows := make([]any, 0, len(commands))
-	for _, c := range commands {
-		if s, ok := commandSerialize[c]; ok {
-			rows = append(rows, commandRow{Name: c, Serialize: s})
-			continue
-		}
-		rows = append(rows, c)
-	}
-	return rows
-}
-
-// writeRunList prints what this project provides: the gates — the same list
-// `bin/gate --list` prints, from the same registry, so the two cannot drift —
-// and the commands, which the gate entry point knows nothing about.
-func writeRunList(root string, w io.Writer, jsonOut bool) error {
-	gates, commands := ContractGateNames(), SupportedCommands(root)
-	if jsonOut {
-		return writeJSONLine(w, struct {
-			Gates    []string `json:"gates"`
-			Commands []any    `json:"commands"`
-		}{Gates: gates, Commands: commandRows(commands)})
-	}
-	fmt.Fprintln(w, "gates:")
-	for _, g := range gates {
-		fmt.Fprintf(w, "  %s\n", g)
-	}
-	fmt.Fprintln(w, "commands:")
-	for _, c := range commands {
-		fmt.Fprintf(w, "  %s\n", c)
-	}
-	return nil
-}
-
-// RunRun is the bin/run CLI entry.
-func RunRun(root string, args []string) error {
-	if slices.ContainsFunc(args, func(a string) bool { return a == "-h" || a == "-help" || a == "--help" }) {
-		fmt.Print(runUsage(root))
-		return nil
-	}
-	if list, jsonOut, ok := parseListArgs(args); ok {
-		if !list {
-			return fmt.Errorf("use of unknown flag; run `bin/run --list [--json]` to list what this project provides")
-		}
-		return writeRunList(root, os.Stdout, jsonOut)
-	}
-	// A command is dispatched before a gate is looked for, because the two
-	// share one namespace and a name cannot be both (CommandGateCollisions).
-	// `run <name>` dispatching only gates would list sixteen commands it
-	// refuses to run, which is a listing that describes a different tool.
-	if name := firstPositional(args); name != "" && slices.Contains(SupportedCommands(root), name) {
-		return runProjectCommand(root, name, args)
-	}
-	name, verdict, err := parseRunArgs(args)
-	if err != nil {
-		return fmt.Errorf("%w\n%s", err, runUsage(root))
-	}
-	if verdict {
-		return JudgeStdin(root, name, os.Stdin, os.Stdout)
-	}
-	return runOneGate(root, name, os.Stdout)
-}
-
-// firstPositional returns the first argument that is not a flag, or "". None of
-// this tool's own flags takes a value, so the first word not starting with "-"
-// is the name: there is no `-flag value` pair for this to mistake a value for.
-func firstPositional(args []string) string {
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			return a
-		}
-	}
-	return ""
-}
-
-// runProjectCommand execs bin/<name>, passing through every argument but the
-// name, and makes the child's exit status this process's.
-//
-// It measures and judges NOTHING: no envelope is read and no terms are loaded.
-// A `run` that interpreted a command's output would be deciding something no
-// gate measured, which is the whole separation the gate/judge split exists for.
-func runProjectCommand(root, name string, args []string) error {
-	rest := make([]string, 0, len(args))
-	dropped := false
-	for _, a := range args {
-		if !dropped && a == name {
-			dropped = true
-			continue
-		}
-		rest = append(rest, a)
-	}
-	bin := filepath.Join(root, "bin", name+ExeSuffix())
-	if !Exists(bin) {
-		return fmt.Errorf("this project builds %s, but bin/%s is not there — run ./make",
-			name, name+ExeSuffix())
-	}
-	cmd := exec.Command(bin, rest...)
-	cmd.Dir = root
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
 }

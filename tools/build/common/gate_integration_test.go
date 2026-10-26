@@ -58,7 +58,11 @@ func goModulesRoot(t *testing.T) (root string, modules []string) {
 	return root, modules
 }
 
-const passingGoTest = "ok  \texample.com/x\t0.010s\n"
+// goEvents is a `go test -json` stream, one event per line.
+func goEvents(events ...string) string { return strings.Join(events, "\n") + "\n" }
+
+// passingGoTest is a module whose one package passed, with no tests to count.
+var passingGoTest = goEvents(`{"Action":"pass","Package":"example.com/x","Elapsed":0.01}`)
 
 // A gate that measured one module would report honest numbers about part of its
 // subject — `./...` is module-scoped, so a change breaking the tools suite would
@@ -72,7 +76,7 @@ func TestTestedGo_MeasuresEveryGoModule(t *testing.T) {
 		fake.stdout[dir] = passingGoTest
 	}
 
-	if _, _, err := measureTestedGoWith(root, fake.capture); err != nil {
+	if _, err := measureTestedGoWith(root, fake.capture); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(fake.dirs, modules) {
@@ -89,41 +93,55 @@ func TestTestedGo_RunsWhatVerifyRuns(t *testing.T) {
 	for _, dir := range modules {
 		fake.stdout[dir] = passingGoTest
 	}
-	if _, _, err := measureTestedGoWith(root, fake.capture); err != nil {
+	if _, err := measureTestedGoWith(root, fake.capture); err != nil {
 		t.Fatal(err)
 	}
 
+	// -json changes what it prints, not what it runs: it is the form that says
+	// which test each line belongs to.
 	want := append([]string{"go", "test", "-timeout", "30m"}, goTestConcurrencyArgs()...)
-	want = append(want, "./...")
+	want = append(want, "-json", "./...")
 	for i, got := range fake.argv {
 		if !slices.Equal(got, want) {
-			t.Errorf("module %d ran %v, want %v (RunGoTests / RunToolsGoTests)", i, got, want)
+			t.Errorf("module %d ran %v, want %v (RunGoTests / RunToolsGoTests, plus -json)", i, got, want)
 		}
 	}
 }
 
-// Failures are summed across modules, the way unbuildable_go_packages and
-// vet_findings already are: one suite's numbers alone are not the tree's.
+// Failures are summed across modules, the way go_unbuildable_packages and
+// go_check_findings already are: one suite's numbers alone are not the tree's.
 func TestTestedGo_SumsAcrossModules(t *testing.T) {
 	root, modules := goModulesRoot(t)
 	fake := &fakeGoTest{
 		stdout: map[string]string{
-			modules[0]: "--- FAIL: TestOne (0.00s)\n--- FAIL: TestTwo (0.00s)\nFAIL\nFAIL\texample.com/a\t0.012s\n",
-			modules[1]: "--- FAIL: TestThree (0.00s)\nFAIL\nFAIL\texample.com/b\t0.004s\n",
+			modules[0]: goEvents(
+				`{"Action":"fail","Package":"example.com/a","Test":"TestOne"}`,
+				`{"Action":"fail","Package":"example.com/a","Test":"TestTwo"}`,
+				`{"Action":"fail","Package":"example.com/a","Elapsed":0.012}`,
+			),
+			modules[1]: goEvents(
+				`{"Action":"fail","Package":"example.com/b","Test":"TestThree"}`,
+				`{"Action":"fail","Package":"example.com/b","Elapsed":0.004}`,
+			),
 		},
 		// go test exits non-zero when a test fails, which is a successful
 		// measurement of a failing tree — never an error from the gate.
 		errs: map[string]error{modules[0]: errors.New("exit status 1"), modules[1]: errors.New("exit status 1")},
 	}
 
-	metrics, incomplete, err := measureTestedGoWith(root, fake.capture)
+	meas, err := measureTestedGoWith(root, fake.capture)
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatalf("failing tests are a measurement, not a failure to measure: %v", err)
 	}
 	if incomplete != "" {
 		t.Errorf("incomplete = %q, want empty", incomplete)
 	}
-	want := map[string]int64{"go_test_failures": 3, "go_test_packages_failed": 2}
+	want := map[string]int64{
+		"failed_tests": 3, "go_failed_tests": 3,
+		"failed_packages": 2, "go_failed_packages": 2,
+		"test_count": 0, "go_test_count": 0,
+	}
 	if len(metrics) != len(want) {
 		t.Fatalf("got %d metrics %+v, want %d", len(metrics), metrics, len(want))
 	}
@@ -145,7 +163,8 @@ func TestTestedGo_ReportsACompleteRun(t *testing.T) {
 		fake.stdout[dir] = passingGoTest
 	}
 
-	metrics, incomplete, err := measureTestedGoWith(root, fake.capture)
+	meas, err := measureTestedGoWith(root, fake.capture)
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +190,7 @@ func TestTestedGo_ARunThatDidNotHappenNamesTheModule(t *testing.T) {
 		errs:   map[string]error{modules[1]: errors.New("exit status 1")},
 	}
 
-	_, _, err := measureTestedGoWith(root, fake.capture)
+	_, err := measureTestedGoWith(root, fake.capture)
 	if err == nil {
 		t.Fatal("a module whose suite never ran was reported as zero failures")
 	}
@@ -223,18 +242,87 @@ func TestTestedGo_CountsRealGoTestOutput(t *testing.T) {
 	writeTrivialModule(t, filepath.Join(root, "compiler"), "compiler", true)
 	writeTrivialModule(t, filepath.Join(root, "tools", "build"), "build", false)
 
-	metrics, incomplete, err := measureTestedGo(root)
+	meas, err := measureTestedGo(root)
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatalf("a module that ran and failed a test is a measurement: %v", err)
 	}
 	if incomplete != "" {
 		t.Errorf("incomplete = %q, want empty", incomplete)
 	}
-	want := map[string]int64{"go_test_failures": 1, "go_test_packages_failed": 1}
+	want := map[string]int64{
+		"failed_tests": 1, "go_failed_tests": 1,
+		"failed_packages": 1, "go_failed_packages": 1,
+		"test_count": 1, "go_test_count": 1,
+	}
+	if len(metrics) != len(want) {
+		t.Fatalf("got %d metrics %+v, want %d", len(metrics), metrics, len(want))
+	}
 	for _, m := range metrics {
 		if m.Int != want[m.Name] {
 			t.Errorf("%s = %d, want %d — the real `go test` output is not parsed as expected", m.Name, m.Int, want[m.Name])
 		}
+	}
+}
+
+// A test that runs `go test` on a fixture and prints what that child said —
+// its `--- FAIL:` lines included — has not failed: in a -json stream that text
+// is the output of the test that printed it, and its own result is what counts.
+// In -v text it was indistinguishable from a failure, which is how a passing
+// tools suite reported a failing test.
+func TestParseGoTestJSON_AChildsOutputIsNotATestResult(t *testing.T) {
+	run := parseGoTestJSON(goEvents(
+		`{"Action":"run","Package":"example.com/p","Test":"TestRunsAFixture"}`,
+		`{"Action":"output","Package":"example.com/p","Test":"TestRunsAFixture","Output":"--- FAIL: TestIt (0.00s)\n"}`,
+		`{"Action":"output","Package":"example.com/p","Test":"TestRunsAFixture","Output":"FAIL\texample.com/build\t0.002s\n"}`,
+		`{"Action":"pass","Package":"example.com/p","Test":"TestRunsAFixture","Elapsed":0.4}`,
+		`{"Action":"pass","Package":"example.com/p","Test":"TestRunsAFixture/sub","Elapsed":0.1}`,
+		`{"Action":"pass","Package":"example.com/p","Elapsed":0.5}`,
+	))
+	if run.failedTests != 0 || run.failedPackages != 0 || run.passedTests != 1 || len(run.groups) != 0 {
+		t.Errorf("run = %+v, want one passing top-level test and nothing failed", run)
+	}
+}
+
+// A failing test is a member in its package's group, carrying what it — and
+// the subtest that failed it — printed, without go's own framing lines; a
+// package that failed to build is a member too, carrying the compiler's words.
+func TestParseGoTestJSON_FailuresCarryTheirOwnWords(t *testing.T) {
+	run := parseGoTestJSON(goEvents(
+		`{"Action":"run","Package":"github.com/promise-language/promise/compiler/internal/codegen","Test":"TestLower"}`,
+		`{"Action":"output","Package":"github.com/promise-language/promise/compiler/internal/codegen","Test":"TestLower","Output":"=== RUN   TestLower\n"}`,
+		`{"Action":"output","Package":"github.com/promise-language/promise/compiler/internal/codegen","Test":"TestLower/call","Output":"    lower_test.go:41: got i32, want i64\n"}`,
+		`{"Action":"fail","Package":"github.com/promise-language/promise/compiler/internal/codegen","Test":"TestLower/call","Elapsed":0.1}`,
+		`{"Action":"fail","Package":"github.com/promise-language/promise/compiler/internal/codegen","Test":"TestLower","Elapsed":0.12}`,
+		`{"Action":"fail","Package":"github.com/promise-language/promise/compiler/internal/codegen","Elapsed":0.2}`,
+		`{"ImportPath":"example.com/broken [example.com/broken.test]","Action":"build-output","Output":"broken.go:3:1: syntax error\n"}`,
+		`{"ImportPath":"example.com/broken [example.com/broken.test]","Action":"build-fail"}`,
+		`{"Action":"fail","Package":"example.com/broken","Elapsed":0,"FailedBuild":"example.com/broken [example.com/broken.test]"}`,
+		"not an event",
+	))
+	if run.failedTests != 1 || run.failedPackages != 2 {
+		t.Fatalf("run = %+v, want one failing test and two failing packages", run)
+	}
+	got := mustJSON(t, run.groups)
+	want := mustJSON(t, []Group{
+		{Name: "compiler/internal/codegen", Members: []Member{{Name: "TestLower", Outcome: OutcomeFail, Detail: "lower_test.go:41: got i32, want i64", Elapsed: 0.12}}},
+		{Name: "example.com/broken", Members: []Member{{Name: "(package)", Outcome: OutcomeFail, Detail: "broken.go:3:1: syntax error"}}},
+	})
+	if got != want {
+		t.Errorf("groups =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// What a person watching sees is the text the tests printed, not the events.
+func TestGoTestNarrator_WritesTheOutputText(t *testing.T) {
+	var b strings.Builder
+	n := &goTestNarrator{to: &b}
+	n.Write([]byte(`{"Action":"output","Output":"=== RUN   TestA\n"}` + "\n" + `{"Action":"pa`))
+	n.Write([]byte(`ss","Test":"TestA"}` + "\n" + "go: downloading x\n"))
+	n.Write([]byte(`{"Action":"output","Output":"ok\n"}`))
+	n.flush()
+	if got, want := b.String(), "=== RUN   TestA\ngo: downloading x\nok\n"; got != want {
+		t.Errorf("narration = %q, want %q", got, want)
 	}
 }
 
@@ -247,13 +335,13 @@ func TestTestedGo_ARunThatDidNotHappenFallsBackToStdout(t *testing.T) {
 		errs:   map[string]error{modules[0]: errors.New("exit status 1")},
 	}
 
-	_, _, err := measureTestedGoWith(root, fake.capture)
+	_, err := measureTestedGoWith(root, fake.capture)
 	if err == nil || !strings.Contains(err.Error(), "build constraints exclude all Go files") {
 		t.Fatalf("err = %v, want the stdout detail", err)
 	}
 }
 
-// vet_findings is the SIZE of the list bin/check prints, over the real
+// go_check_findings is the SIZE of the list bin/check prints, over the real
 // repository — not a second count reached its own way. Asserted through the two
 // entry points a person and a runner actually use, so a future change that gave
 // either mode a measurement of its own fails here.
@@ -276,16 +364,18 @@ func TestCheckedGo_CountsExactlyWhatBinCheckReports(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bin/check mode: %v", err)
 	}
-	metrics, gateIncomplete, err := measureCheckedGoWith(root, captureSplit)
+	meas, err := measureCheckedGoWith(root, captureSplit)
+	metrics, gateIncomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatalf("checked:go mode: %v", err)
 	}
 
-	if len(metrics) != 1 || metrics[0].Name != "vet_findings" {
-		t.Fatalf("checked:go reported %+v, want one vet_findings metric", metrics)
+	got := metricInts(metrics)
+	if len(got) != 2 {
+		t.Fatalf("checked:go reported %+v, want check_findings and go_check_findings", metrics)
 	}
-	if got, want := metrics[0].Int, int64(len(findings)); got != want {
-		t.Errorf("vet_findings = %d, but bin/check reports %d findings: %v", got, want, findings)
+	if got["go_check_findings"] != int64(len(findings)) || got["check_findings"] != int64(len(findings)) {
+		t.Errorf("checked:go reported %v, but bin/check reports %d findings: %v", got, len(findings), findings)
 	}
 	if toolIncomplete != gateIncomplete {
 		t.Errorf("bin/check says incomplete %q, checked:go says %q", toolIncomplete, gateIncomplete)
@@ -301,7 +391,8 @@ func TestCheckedGo_ARunThatCouldNotHappenIsNotZeroFindings(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "compiler"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	metrics, _, err := measureCheckedGoWith(root, vetSaying(""))
+	meas, err := measureCheckedGoWith(root, vetSaying(""))
+	metrics := meas.metrics
 	if err == nil {
 		t.Fatalf("got metrics %+v, want an error: the module could not be listed", metrics)
 	}
@@ -323,14 +414,14 @@ func TestCheckedGo_IsWhatTheContractGateMeasures(t *testing.T) {
 	if env.Gate != "checked:go" {
 		t.Errorf("gate = %q", env.Gate)
 	}
-	if len(env.Metrics) != 1 || env.Metrics[0].Name != "vet_findings" {
-		t.Fatalf("metrics = %+v, want one vet_findings", env.Metrics)
+	if got := metricInts(env.Metrics); len(got) != 2 || got["check_findings"] != got["go_check_findings"] {
+		t.Fatalf("metrics = %+v, want check_findings and go_check_findings", env.Metrics)
 	}
 	findings, _, err := GoCheckFindings(root, captureSplit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := env.Metrics[0].Int, int64(len(findings)); got != want {
+	if got, want := metricInts(env.Metrics)["go_check_findings"], int64(len(findings)); got != want {
 		t.Errorf("the gate reported %d, bin/check reports %d findings: %v", got, want, findings)
 	}
 }
@@ -356,7 +447,8 @@ func TestBuilds_NamesAModuleItCouldNotMeasure(t *testing.T) {
 	// flows/ with no flow-sdk/ beside it: present, unresolvable, left out.
 	write(filepath.Join(root, "flows"), "go.mod", "module example.com/flows\n\ngo 1.21\n")
 
-	metrics, incomplete, err := measureBuilds(root)
+	meas, err := measureBuilds(root)
+	metrics, incomplete := meas.metrics, meas.incomplete
 	if err != nil {
 		t.Fatalf("measureBuilds: %v", err)
 	}
@@ -387,7 +479,8 @@ func TestBuilds_AWholeSweepIsComplete(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_, incomplete, err := measureBuilds(root)
+	meas, err := measureBuilds(root)
+	incomplete := meas.incomplete
 	if err != nil {
 		t.Fatalf("measureBuilds: %v", err)
 	}

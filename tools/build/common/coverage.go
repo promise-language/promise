@@ -87,7 +87,7 @@ func runGoCoverage(compilerDir, pkg string) error {
 	defer os.Remove(covFile)
 
 	// Run tests with coverage. -coverpkg is what makes the number agree with
-	// bin/gate coverage: without it `go test` instruments only the package under
+	// the covered gate: without it `go test` instruments only the package under
 	// test, so a suite living in a sibling package is credited to nothing.
 	err = RunIn(compilerDir, "go", "test", testPkgs,
 		"-coverpkg="+coverPkgs, "-coverprofile="+covFile, "-count=1")
@@ -115,7 +115,7 @@ func runGoCoverage(compilerDir, pkg string) error {
 // `go test ./internal/codegen/` alone reports 54.6% where the package actually
 // stands at 86.7%.
 //
-// For the whole tree, this matches bin/gate coverage exactly — every package
+// For the whole tree, this matches the covered gate exactly — every package
 // but the generated parser. For a named package, the measurement stays scoped
 // to what the caller asked about while the tests come from its whole subtree.
 func goCoverageScope(compilerDir, pkg string) (coverPkgs, testPkgs string, err error) {

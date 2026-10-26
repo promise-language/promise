@@ -118,17 +118,19 @@ After a successful `bin/verify`, a sidecar file `.promise-home/gate-values.json`
 ```json
 {
   "timestamp": "2026-04-11T12:00:00Z",
-  "platform": "darwin-arm64",
+  "platform": "darwin/arm64",
   "worktree": "9f2c...e1",
   "values": {
-    "unformatted_go_files": 0,
-    "unformatted_promise_files": 0,
+    "unformatted_files": 0,
+    "go_unformatted_files": 0,
+    "promise_unformatted_files": 0,
     "build_failures": 0,
-    "vet_findings": 0,
-    "go_test_failures": 0,
-    "host_test_count": 11186,
-    "host_leak_count": 0,
-    "host_test_failures": 0
+    "check_findings": 0,
+    "go_check_findings": 0,
+    "failed_tests": 0,
+    "go_failed_tests": 0,
+    "promise_test_count": 11186,
+    "promise_leaked_tests": 0
   }
 }
 ```
@@ -155,75 +157,45 @@ This is what makes gate values *fresh*, and it replaces the wall-clock window th
 
 Baselines live in `tools/gates/baselines.json` committed to the repo. This avoids the race condition where an agent updates a remote baseline before pushing the code -- other agents would trip the gate on stale code. Baselines travel with the code.
 
-Each baseline entry has one of three states:
-
-| State | Fields | Behavior |
-|-------|--------|----------|
-| **Enforced** | `direction` + `value` + `updated` | Ratchet-checked against gate values |
-| **Pending** | `direction` only (no `value`) | Value auto-populated from next gate values run |
-| **Informational** | `type: "informational"` | Tracked but not enforced; user adds `direction` to promote |
-
-**Per-platform baselines** (WASM has more skipped tests, Windows excludes some tests, etc.):
+A baseline is the best a metric has been. The file is keyed by metric, and each entry is an inclusive bound in one direction — `at_least` for a number that must not fall (a test count), `at_most` for one that must not rise:
 
 ```json
 {
-  "darwin-arm64": {
-    "host_test_count": { "value": 3656, "direction": "up", "updated": "2026-04-11" },
-    "host_leak_count": { "value": 0, "direction": "down", "updated": "2026-04-06" },
-    "host_test_failures": { "value": 0, "direction": "exact", "updated": "2026-04-06" },
-    "wasm_test_count": { "value": 3397, "direction": "up", "updated": "2026-04-11" },
-    "wasm_test_failures": { "value": 0, "direction": "exact", "updated": "2026-04-06" },
-    "coverage": { "direction": "up" },
-    "binary_size": { "type": "informational" }
-  }
+  "promise_leaked_tests": { "direction": "at_most", "value": 0 },
+  "promise_test_count":   { "direction": "at_least",
+                            "targets": { "darwin/arm64": 11186, "linux/amd64": 10708 } }
 }
 ```
 
-The `coverage` entry above is **Pending** (has direction but no value -- will be auto-populated). The `binary_size` entry is **Informational** (tracked but not enforced).
-
-**Ratchet directions:**
-- `up`: value can only increase (more tests = better)
-- `down`: value can only decrease (fewer leaks = better)
-- `exact`: value must match exactly (zero failures)
+- **One `value` holds on every target.** A metric that genuinely differs by platform records its baselines per target, under `targets`, keyed `os/arch` as an envelope names its target; never both. A target with no figure is not judged by that baseline.
+- **There is no informational or pending state.** A metric with no term is simply not judged, so tracking a number nobody judges needs no entry, and an entry is always a rule.
+- **One metric has one direction** across `thresholds.json` and `baselines.json`.
+- **The judge reads the file strictly** ([terms files](#the-contract-gates-and-the-judge)): an unknown key, a missing field, an unknown direction, both `value` and `targets`, or a metric no gate declares is refused, naming the file and the entry.
 
 **A count of things being wrong is capped at zero, never baselined.** A metric that counts
 something that should not happen — a failure, a leak, a diagnostic, an unformatted or
 unbuildable file — is not a quality that improves over time: the only correct value is `0`, so
-each is written as an `at_most 0` **cap** in `thresholds.json`. Which metrics those are is not
-a second list to keep in step: every metric `integration`'s parts must carry a term for is one
-of them, and `TestCorrectnessMetricsAreCappedAtZero` holds the caps and that set equal.
-A `down` ratchet from a non-zero value would be a standing allowance — it says "this many are
+each is written as an `at_most 0` **cap** in `thresholds.json`, on its own name or on the shared
+total it is part of. Which metrics those are is not a second list to keep in step: every metric
+`integration` reports is one of them unless `integrationUnjudged` or `integrationCosts` says why
+not, and `TestCorrectnessMetricsAreCappedAtZero` holds the caps and that set equal.
+A ratchet from a non-zero value would be a standing allowance — it says "this many are
 fine" and leaves a number a later reader can edit — so a measurement worse than the term is a
 **defect to fix, never a number to write down**: resolving an item may not move a baseline to
 gain forgiveness. Such a metric may still carry a baseline, and it still ratchets; it records
 progress and never grants permission.
 
-**How it works:**
-1. Reads `.promise-home/gate-values.json` and requires its recorded `worktree` identity to equal the current one -- values are valid at any age while the tree is unchanged, and rejected the moment it changes
-2. Reads `tools/gates/baselines.json` for current platform
-3. Auto-registers unknown gate values as **Informational** entries
-4. Auto-populates **Pending** entries with the current value
-5. Ratchet-checks **Enforced** entries against gate values
-6. If regression: prints clear message, exits non-zero (commit blocked)
-7. If improvement: updates `baselines.json` in-place, stages it with the commit
-8. Queries tracker for active exceptions (gate ID + tracker bug ID + expiry)
+**Nothing in this repository moves a baseline.** Advancing one, from gate values whose `worktree` identity matches the tree being committed, is the workspace's job, uniform across every managed repository.
 
-**Defense-in-depth:** The `.githooks/pre-commit` hook runs a lightweight check that `baselines.json` values only improve vs. the committed version. It compares the staged file against `HEAD:tools/gates/baselines.json` across **every platform's block**, not just the host's, and refuses a removal as well as a raise — so neither editing an Enforced entry nor deleting it gets a commit through:
-
-```
-workspace: ratcheted-baselines: metric(s) moved the wrong way:
-  windows-amd64/promise_check_warnings: ratcheted-down metric increased from 1 to 2
-```
-
-Informational and Pending entries are skipped. The hook also rejects commits when running the formatter would introduce changes, so unformatted code never reaches origin and surfaces as a spurious diff the next time someone runs verify. Both are the commit gate's, not this repository's — see [build-tools.md](build-tools.md#pre-commit-hook).
+**Defense-in-depth:** The `.githooks/pre-commit` hook refuses a staged `baselines.json` that moves any enforced metric the wrong way against `HEAD`, on every target rather than only the host's, and refuses a removal as well as a raise — so neither editing an entry nor deleting it gets a commit through. The hook also rejects commits when running the formatter would introduce changes, so unformatted code never reaches origin and surfaces as a spurious diff the next time someone runs verify. Both are the commit gate's, not this repository's — see [build-tools.md](build-tools.md#pre-commit-hook).
 
 **Key files:**
-- `tools/build/common/verify_summary.go` -- `GateValues` type + IO, `ParseTestSummaryLine`
+- `tools/build/common/verify_summary.go` -- `GateValues` type + IO, and the `Verify Summary` block
 - `tools/build/common/hash.go` -- `WorktreeHash`, the content identity gate values are stamped with
-- `tools/build/common/baselines.go` -- `Baseline` struct (3-state), and the ratchet directions `bin/run` judges against. Reading only: nothing here moves a baseline.
+- `tools/build/common/terms.go` -- reads `thresholds.json` and `baselines.json`, strictly, into the terms `bin/run` judges against. Reading only: nothing here moves a baseline.
 - `tools/build/common/verify.go` -- measures `integration` in-process, judges it, and writes that envelope's metrics to `gate-values.json`
 - `tools/build/common/blessing.go` -- the blessing: the tree identity, the record, and the one rule under which a passing `integration` verdict is recorded
-- `tools/gates/baselines.json` -- per-platform baseline state
+- `tools/gates/thresholds.json`, `tools/gates/baselines.json` -- the caps and the baselines
 - `.claude/skills/commit/SKILL.md` -- workflow integration
 
 ---
@@ -238,18 +210,18 @@ Informational and Pending entries are skipped. The hook also rejects commits whe
 
 | Gate | Schedule | Filter | Command | Needs AI? |
 |------|----------|--------|---------|-----------|
-| `stress-mac` | Daily | os: darwin | `bin/gate stress` | No |
-| `stress-linux` | Daily | os: linux | `bin/gate stress` | No |
-| `stress-windows` | Daily | os: windows | `bin/gate stress` | No |
+| `stress-mac` | Daily | os: darwin | `bin/run tested:stress` | No |
+| `stress-linux` | Daily | os: linux | `bin/run tested:stress` | No |
+| `stress-windows` | Daily | os: windows | `bin/run tested:stress` | No |
 | `stress-wasm` | Every 8h | any | `bin/promise test -target wasm32-wasi -stress 500 tests/...` | No |
-| `size-wasm` | After every commit | any | `bin/size-report.sh --check` | No |
-| `coverage-full` | Daily | any | `bin/coverage.sh` | Yes (analyze gaps) |
+| `size-wasm` | After every commit | any | `bin/run size:wasm` | No |
+| `coverage-full` | Daily | any | `bin/run covered` | Yes (analyze gaps) |
 | `exception-audit` | Daily | any | `tools/gates/audit_exceptions.sh` | No |
 | `agent-learning-cost` | Weekly | any | `tools/gates/learning_cost.sh` | Yes |
-| `install-thin` | Daily | per-platform | `bin/gate install --variant thin --system` | No |
-| `install-full` | Daily | per-platform | `bin/gate install --variant full --system` | No |
+| `install-thin` | Daily | per-platform | `bin/run install:thin` | No |
+| `install-full` | Daily | per-platform | `bin/run install:full` | No |
 
-**Install gates (T0803).** `install-thin` / `install-full` validate the real end-to-end user install path — fetch the published install script, run it (download → checksum → decompress → `promise install`), sanity-check, then run the full test suite through the freshly **installed** binary (not `bin/promise`). Each runs in a clean ephemeral arena (hence `--system`: the arena *is* the clean environment). The **thin** variant exercises the first-compile blob-fetch path (network up); the **full** variant runs the suite online too (some tests legitimately fetch external catalog modules like `wasi_preview_2`), and *additionally* proves offline operation via a separate self-contained compile+run under a network blackhole (the `offline` phase) — confirming the host LLVM toolchain blobs were pre-staged at install. While the repo is private they point `PROMISE_BASE_URL` at the prebuilts dist bucket ([release-automation.md](release-automation.md), under [End to end install gate](release-automation.md#end-to-end-install-gate); removed by T0804). Heavy (full install + full suite), so daily.
+**Install gates (T0803).** `install:thin` / `install:full` validate the real end-to-end user install path — fetch the published install script, run it (download → checksum → decompress → `promise install`), sanity-check, then run the full test suite through the freshly **installed** binary (not `bin/promise`). Each installs into a sandbox of its own, never into the machine's `~/.promise`. The **thin** variant exercises the first-compile blob-fetch path (network up); the **full** variant runs the suite online too (some tests legitimately fetch external catalog modules like `wasi_preview_2`), and *additionally* proves offline operation via a separate self-contained compile+run under a network blackhole (the `offline` phase) — confirming the host LLVM toolchain blobs were pre-staged at install. They install straight from GitHub releases ([release-automation.md](release-automation.md), under [End to end install gate](release-automation.md#end-to-end-install-gate)). Heavy (full install + full suite), so daily.
 
 **Filter model:** Each gate can filter by:
 - `os`: darwin, linux, windows (detected from agent environment)
@@ -295,59 +267,37 @@ WASM is cross-platform (the pinned `wasmtime` is staged for every supported host
 
 ---
 
-## Gate Output Schema
+## Test records
 
-The tracker gates (`test`, `wasm-test`, `wasm-web-test`, `go-test`, `stress`, `coverage`, `wasm-size`, `install`, `latest-invariant`) emit a single JSON envelope (`GateOutput`) on stdout. The contract gates ([below](#the-contract-gates-and-the-judge)) emit the flow envelope instead. Human-readable progress goes to stderr either way, so stdout is always clean machine-readable JSON. This section is the contract: it is not printed by any command, because a command printing an embedded copy is a second copy that drifts from this one silently.
-
-### One envelope for all subcommands
-
-| subcommand  | `target`       | `files` (per-test) | metrics |
-|-------------|----------------|--------------------|---------|
-| `test`      | host           | yes (Promise tests) | `host_*` |
-| `wasm-test` | `wasm32-wasi`  | yes (Promise tests) | `wasm_*` |
-| `wasm-web-test` | `wasm32-web`  | yes (Promise tests) | `wasm_web_*` |
-| `go-test`   | host           | yes (Go tests, grouped by package) | `go_test_*` |
-| `stress`    | host           | no                 | `stress_*` |
-| `coverage`  | host           | no                 | `*_coverage_pct`, `go_test_*`, `promise_test_*` |
-| `wasm-size` | host           | no                 | `wasm_size_*` |
-
-Metric-only gates (`stress`, `coverage`, `wasm-size`) omit `files`. Test gates populate it. The envelope shape is identical so the tracker ingests one schema. Every row above also carries the four `cas_*` [store metrics](#store-metrics), which describe what the run cost rather than what it measured.
+The suite gates — `tested:go`, `tested:promise`, `tested:wasm`, `tested:wasm-web`, and the suite `install:*` runs through an installed compiler — read one record per test and turn the records into an [envelope](#the-contract-gates-and-the-judge): a **group** per test file (per Go package), a **member** per test that did not pass, and the counts. This section is the contract for those records and that mapping. It is not printed by any command, because a command printing an embedded copy is a second copy that drifts from this one silently.
 
 ### Single target invariant
 
-One gate invocation reports exactly one target, stamped once at the top of the envelope — never per record. `bin/gate test` reports the host (e.g. `linux-amd64`) and is host-only; `bin/gate wasm-test` reports `wasm32-wasi`; `bin/gate wasm-web-test` reports `wasm32-web`; `go-test`/`stress`/`coverage`/`wasm-size` report the host they ran on. Any unknown argument (including `-wasm` to `bin/gate test`) is rejected — wasm tests are separate single-target gates (`bin/gate wasm-test`, `bin/gate wasm-web-test`).
+One gate run reports exactly one target, stamped once at the top of the envelope — never per record — as Go's own `os/arch` pair of the host it ran on (`linux/amd64`). The WASM suites are gates of their own, `tested:wasm` (wasm32-wasi, under the pinned `wasmtime`) and `tested:wasm-web` (wasm32-web, under the pinned Node 20+ and the embedded harness `compiler/cmd/promise/wasm_web_harness.js`), each reporting the host it ran on and judged against that host's terms. Both runtimes are pinned prebuilts staged on demand, not host installs ([runtime-architecture.md](runtime-architecture.md#wasm-runtime-sources)) — so what a gate can report does not turn on what a machine happens to have. Keeping them apart still matters: a host that cannot obtain one runtime reports the other, rather than the pair failing together.
 
-The two wasm targets are separate gates because they run under different runtimes: `wasm-test` runs the module under the pinned `wasmtime`, while `wasm-web-test` runs it under the pinned Node (20+) plus the embedded harness (`compiler/cmd/promise/wasm_web_harness.js`). Both runtimes are pinned prebuilts staged on demand, not host installs ([runtime-architecture.md](runtime-architecture.md#wasm-runtime-sources)) — so what a gate can report no longer turns on what a machine happens to have. Keeping them apart still matters: a host that cannot obtain one runtime reports the other, rather than the pair failing together.
-
-### Envelope
+### Suite envelope
 
 ```json
 {
-  "target": "linux-amd64",
-  "metrics": {
-    "host_test_count": 6133,
-    "host_test_failures": 0,
-    "host_leak_count": 0,
-    "host_timeout_count": 0,
-    "host_memory_count": 0,
-    "host_excluded_count": 0,
-    "host_not_run_count": 0
-  },
-  "files": [
-    {
-      "file": "tests/std/bool_test.pr",
-      "tests": [
-        { "test": "test_and", "status": "pass", "elapsed": 0.001 },
-        { "test": "test_or",  "status": "fail", "elapsed": 0.002,
-          "context": "panic: assertion failed: ..." }
-      ]
-    },
-    {
-      "file": "tests/e2e/hello.pr",
-      "tests": [ { "test": "main", "status": "pass", "elapsed": 0.02 } ]
-    }
+  "schema_version": 1,
+  "gate": "tested:promise",
+  "target": "linux/amd64",
+  "metrics": [
+    { "name": "failed_tests", "type": "int", "value": 1 },
+    { "name": "promise_failed_tests", "type": "int", "value": 1 },
+    { "name": "leaked_tests", "type": "int", "value": 0 },
+    { "name": "promise_leaked_tests", "type": "int", "value": 0 },
+    { "name": "test_count", "type": "int", "value": 6133 },
+    { "name": "promise_test_count", "type": "int", "value": 6133 }
   ],
-  "complete": "promise-tests"
+  "groups": [
+    {
+      "name": "tests/std/bool_test.pr",
+      "members": [
+        { "name": "test_or", "outcome": "fail", "detail": "panic: assertion failed: ...", "elapsed": 0.002 }
+      ]
+    }
+  ]
 }
 ```
 
@@ -360,7 +310,7 @@ Identity is the pair **(`file`, `test`)** and is **stable across runs** — it n
 
 Tests excluded from compilation by a `` `target(...) `` **declaration** annotation are never compiled and produce **no record**. A `test(exclude: <target>)` test is compiled but skipped for the matching target and is reported with status `excluded` (see below).
 
-For **`go-test`**, `file` is the Go package as a repo-relative directory (the module prefix `github.com/promise-language/promise/` is stripped, so `.../compiler/internal/codegen` → `compiler/internal/codegen`) and `test` is the Go test-function name (subtests use `TestFoo/sub`). Go `SKIP` maps to status `excluded`.
+For **`tested:go`**, `file` is the Go package as a repo-relative directory (the module prefix `github.com/promise-language/promise/` is stripped, so `.../compiler/internal/codegen` → `compiler/internal/codegen`) and `test` is the Go test-function name (subtests use `TestFoo/sub`). Go `SKIP` maps to status `excluded`.
 
 ### Status vocabulary
 
@@ -384,17 +334,16 @@ Tests that completed before the abort keep their real result.
 
 ### Metrics
 
-Metrics are **derived by counting records**, so they always agree with the `files` data. Each is prefixed by the target family (`host_` or `wasm_`); the full set is always present, even when a count is zero (a gate reports a stable metric set rather than omitting a zero). Whatever advances a baseline consumes these reported values directly — it does not re-count records.
+Metrics are **derived by counting records**, so they always agree with the members. Each suite reports its counts twice: under the name every suite shares and under its toolchain's own (`promise_`, `wasm_`, `wasm_web_`, `go_`), so a composition can total the shared name while each toolchain's figure stays readable by itself. The full set is always present, even when a count is zero: a gate reports a stable metric set rather than omitting a zero.
 
-| metric                | counts records with status |
-|-----------------------|----------------------------|
-| `<p>_test_count`      | `pass` |
-| `<p>_test_failures`   | `fail` |
-| `<p>_leak_count`      | `leak` |
-| `<p>_timeout_count`   | `timeout` |
-| `<p>_memory_count`    | `memory` |
-| `<p>_excluded_count`  | `excluded` |
-| `<p>_not_run_count`   | `not-run` |
+| metric | counts records with status |
+|--------|----------------------------|
+| `test_count`, `<toolchain>_test_count` | `pass` |
+| `failed_tests`, `<toolchain>_failed_tests` | `fail`, `timeout`, `memory`, `not-run` |
+| `leaked_tests`, `<toolchain>_leaked_tests` | `leak` (the Promise suites) |
+| `failed_packages`, `go_failed_packages` | Go packages `go test` reported `FAIL` (the Go suites) |
+
+An `excluded` record is counted by none of them, and is never a member: a test skipped for this target did not fail.
 
 ### Store metrics
 
@@ -402,18 +351,18 @@ Metrics are **derived by counting records**, so they always agree with the `file
 
 | metric | what it counts | end state |
 |---|---|---|
-| `cas_network_bytes` | bytes transferred over the wire into the store | `exact: 0` — a run that reaches the network for a blob is a cache-population defect, not a slow day |
-| `cas_home_count` | distinct Promise homes the run reached the toolchain from | `down`, from `1` — one warm home per run |
-| `cas_materialized_bytes` | bytes written making delivered content usable | tracked; differs by platform by construction |
-| `cas_materializations` | distinct view/tree populations | tracked; moves with how warm the host was |
+| `cas_network_bytes` | bytes transferred over the wire into the store | `at_most 0` — a run that reaches the network for a blob is a cache-population defect, not a slow day |
+| `cas_home_count` | distinct Promise homes the run reached the toolchain from | `at_most 1` — one warm home per run |
+| `cas_materialized_bytes` | bytes written making delivered content usable | reported by `promise test` only; differs by platform by construction |
+| `cas_materializations` | distinct view/tree populations | reported by `promise test` only; moves with how warm the host was |
 
 - **Counted as spent, not as declared.** A transfer contributes the bytes that actually moved — a compressed source its compressed size, a transfer that failed verification what it pulled before failing — and a store hit contributes nothing. A count taken from manifest sizes would read the same warm or cold, which is the one distinction these exist to make.
-- **A link costs nothing, and says so.** Linux symlinks its toolchain view and Windows hardlinks it; only macOS owns its bytes, because it patches and re-signs them. `cas_materialized_bytes` therefore differs by platform by construction, which is why baselines are per-platform — and why `cas_home_count`, which does not, is the one that carries the enforced ratchet.
+- **A link costs nothing, and says so.** Linux symlinks its toolchain view and Windows hardlinks it; only macOS owns its bytes, because it patches and re-signs them. `cas_materialized_bytes` therefore differs by platform by construction, which is why it is no gate's metric — and why `cas_home_count`, which does not, is the one that carries the enforced term.
 - **The window is the measured phase.** A gate brings the build up to date, materializes the toolchain once, empties the ledger, and only then measures. A fresh clone must stage a toolchain at some point; charging the first run for it would make the numbers describe the machine. Anything fetched or exploded *after* that point is work the tree asked for a second time.
-- **Zero is a legitimate, visible value.** The full set is reported on every run, zeros included: a counter that appeared only when non-zero could not be judged against a baseline of zero.
+- **Zero is a legitimate, visible value.** The full set is reported on every run, zeros included: a counter that appeared only when non-zero could not be judged against a term of zero.
 - **Where they cannot be measured, they are omitted and the reason is given** — never reported as zeros, which read exactly like a clean run.
 - **A home outside the worktree is refused by name, whatever the count.** Every tree gate measures in the worktree's own home, pinned by the build it performs first ([build-tools.md](build-tools.md#test-sandboxing)), so a ledger naming any other home — `~/.promise`, or a directory the caller exported — means the run measured the machine's shared state rather than only the tree. The envelope still carries both numbers, and its `incomplete` names each such home. The count alone could not say this: a run whose every compiler used `~/.promise` counts one home and reads as clean.
-- **`integration` carries the two whose end state is an absolute.** `cas_network_bytes` and `cas_home_count` describe what a run ought never to do, so they belong with the numbers a landing decision rests on. The byte and population totals move with how warm the host was and with which platform links rather than copies; they are reported by the tracker gates and by `promise test`, where no term is owed.
+- **`integration` carries the two whose end state is an absolute.** `cas_network_bytes` and `cas_home_count` describe what a run ought never to do, so they belong with the numbers a landing decision rests on. The byte and population totals move with how warm the host was and with which platform links rather than copies; they are reported by `promise test`, where no term is owed.
 - **A number is judged where it is reproducible; it *ratchets* only where it is stable.** The gates measure with `-count=1`, so each reports the same figure every time and a term on it means something. `bin/verify` judges these two on the same terms — its verdict is the judge's verdict on `integration`'s envelope, and a metric the gate enforced while verify ignored it would be a change verify blesses and `bin/run integration` rejects — but it deliberately keeps them out of its gate values, because its Go phase replays whatever the test cache holds and a ratchet fed from a cached run settles below every full one.
 - **The install gate reports none of them.** It deliberately runs an installed compiler under a sandbox home, so its home count is two by construction and describes the gate rather than the tree.
 
@@ -421,92 +370,112 @@ The single source for all four is a ledger the compiler appends to, one line per
 
 ### Runner stream
 
-The gate is built on `promise test --json`, which streams one JSON record per line (newline-delimited JSON) as each test completes — robust to abrupt termination, since only a trailing partial line can be lost. Each line carries an **absolute** `file`, plus `test`, `status`, `elapsed`, and optional `context`. The gate parses these, relativizes the paths, groups by file, and derives the metrics above.
+The Promise suite gates are built on `promise test --json`, which streams one JSON record per line (newline-delimited JSON) as each test completes — robust to abrupt termination, since only a trailing partial line can be lost. Each line carries an **absolute** `file`, plus `test`, `status`, `elapsed`, and optional `context`. The gate parses these, relativizes the paths, groups by file, and derives the metrics above; a record's `context` becomes its member's `detail`.
 
-Under `-coverage` the same stream also carries one **coverage record** per file — `{"kind":"coverage","file":…,"covered":N,"total":M}` — counting executed and total instrumented blocks. A coverage record has a `kind` and no test identity, so a reader keying on (`file`, `test`) skips it and the two record kinds coexist on one stream. Only `bin/gate coverage` runs the runner this way; the test gates never pass `-coverage`.
+Under `-coverage` the same stream also carries one **coverage record** per file — `{"kind":"coverage","file":…,"covered":N,"total":M}` — counting executed and total instrumented blocks. A coverage record has a `kind` and no test identity, so a reader keying on (`file`, `test`) skips it and the two record kinds coexist on one stream. Only `covered` runs the runner this way; the test gates never pass `-coverage`.
 
 The stream also carries exactly one **store record** — `{"kind":"cas","network_bytes":N,"materialized_bytes":M,"materializations":K,"available":true}` — reporting what that run cost the store ([above](#store-metrics)). Like the coverage record it carries a `kind` and no test identity, and unlike the human output it is emitted on every run with its zeros present. On the human path the same numbers are one line after the summary block, printed **only when something was actually spent**: a zero-valued counter must not cost every warm run a line of a tail-read.
 
-A record's `context` is bounded (≈50 lines / 4 KB, with a `… (truncated)` marker) before it enters the envelope. A failure that dumps a large body (e.g. a Go test printing the full generated IR) would otherwise JSON-encode onto a single multi-MB line, which the runner's line-oriented drain cannot consume — deadlocking the gate to its wall-clock timeout (T0777). The full, untruncated output still reaches the gate's stderr/console log.
+A record's `context` is bounded (≈50 lines / 4 KB, with a `… (truncated)` marker) before it enters the envelope, and the envelope as a whole within 1 MiB — past that, members' details go first, then members past the fiftieth of a group; the metrics are never touched. A failure that dumps a large body (e.g. a Go test printing the full generated IR) would otherwise JSON-encode onto a single multi-MB line, which the runner's line-oriented drain cannot consume — deadlocking the gate to its wall-clock timeout (T0777). The full, untruncated output still reaches the gate's stderr/console log.
 
 ---
 
 ## The contract gates and the judge
 
-These gates speak the contract the flow SDK and BASE share, and the SDK **fails closed**: a gate or judge that cannot answer means *no*.
+These are the tools the organization's tooling reaches a project through — `bin/gate`, `bin/run`, `bin/verify` and `./make` — and each answers the same contract, so a runner, a release trial and a person at a terminal all meet one surface. The runners **fail closed**: a gate or judge that cannot answer means *no*.
 
-| | Exec line | Reads | Prints on stdout |
-|---|---|---|---|
-| Gate | `bin/gate <name> --envelope` | nothing | one envelope: `{"gate","metrics":[{"name","type","value","unit"?}…],"incomplete"?,"tree"?}` |
-| Judge | `bin/run <name> --verdict` | the envelope, on stdin | one verdict: `{"acceptable":bool,"thresholds":{…},"detail":"…"}` |
-| Listing | `bin/gate --list [--json]` | nothing | the gate names, one per line (or `{"gates":[{"name","summary"}…]}`) |
-| Listing | `bin/run --list [--json]` | nothing | the same gates, plus every command `./make` builds |
-| Command | `bin/run <command> [args…]` | nothing | whatever `bin/<command>` prints; its exit status becomes this one's |
+| | Invocation | Reads | Stdout | Status |
+|---|---|---|---|---|
+| Gate | `bin/gate <name> --envelope` | nothing | one [envelope](#envelope) | 0 if written, whatever it measured; 1 if nothing could be measured |
+| Judge | `bin/run <name> --verdict` | the envelope, on stdin | one verdict | 0 if written, whatever it says; 1 if none can be reached |
+| By hand | `bin/run <name>` | nothing | each metric beside every term; in JSON `{"envelope","verdict"}` | 0 acceptable; 1 not, or nothing measured |
+| Listing | `bin/gate --list` | nothing | `{"gates":[{"name","summary","metrics","requires","serialize"?}…]}` | 0 |
+| Listing | `bin/run --list` | nothing | `{"commands":[{"name","serialize"?}…],"gates":[names…]}` | 0 |
+| Command | `bin/run <command> [args…]` | nothing | whatever `bin/<command>` prints | its own; 3 `unbuilt` if `bin/<command>` is absent |
+| Verify | `bin/verify` | nothing | the summary: the stage roll, or `{"ok","stages","tree"?}` | 0 every stage passed; 1 otherwise |
 
-`--envelope`, `--list` and `--json` are flags of the **binary**. They are not gate names and not modifiers of one; a runner appends `--envelope` last when it asks for a measurement.
+### Conventions every tool follows
 
-**`tree` is this project's own field**, as `gate` is: the git tree id the measurement speaks for, stamped only when the identity before and after the run agreed, and absent on a gate whose subject is the machine. The judging layer blesses from it ([build-tools.md](build-tools.md#the-blessing)); nothing outside this repository reads it, and the SDK carries the envelope through to the judge without decoding it.
+- **Flags.** `-name` and `--name` are one flag; names are lowercase whole words (`-h` is not a flag); a value follows `=` or is the next argument. The command path comes first — the gate name, or the gate or command name — and flags after it in any order; `--` ends the flags.
+- **Usage errors exit 2**, write nothing on stdout, and name every problem on stderr: an unknown flag (with the closest real one and a pointer to `-help`), an unknown command, a flag given twice, `-json` with `-human`. A bare `bin/gate` or `bin/run` is one too: it says what it expects, its `-version` line and its description.
+- **Output mode.** JSON when stdout is not a terminal, human when it is; `-json` and `-human` force one. `--envelope` and `--verdict` fix their output by a contract of their own, so they refuse either. Stdout carries only the result; progress is narration, on stderr only when someone is watching — stderr is a terminal, or `-narrate` was given.
+- **`-json-input <path>`** reads the parameters from one JSON object: a key per parameter, `true`/`false` for a boolean, `"output-mode"` for `-json`/`-human`, and `"args"` for the command path (`{"envelope": true, "args": ["tested:go"]}` is `tested:go --envelope`). An unknown key is an unknown flag, and a parameter given both there and on the command line is refused — there is no precedence.
+- **`-help`** prints every flag with its spellings and type, and the command class with the command that lists its members — never the members. **`-version`** prints `{"project":"promise","text":"<tools source hash>"}`, the hash the staleness check compares.
+- **Four exit statuses**, and no other: 0 done; 1 could not complete, or the subject failed; 2 malformed invocation; 3 refused.
+- **A tool not fit to act refuses**, before it reads its command line, `-help` and `-version` included: `stale` (the tools source changed since `./make` built it), `unstamped` (not built by `./make`), `repository-unreachable` (its stamped root is gone), and `unbuilt` (`bin/run <command>` with no binary). It exits 3 with `{"condition","recovery":"./make"}` as its result; in the two protocol modes, `--envelope` and `--verdict`, stdout stays empty and the status and one stderr line carry it. A runner that meets one runs `./make` and asks once more. `./make` itself is never stale.
 
-**The JSON listing is an array of objects, not of names.** A caller addresses a gate by `name`; the `summary` is for whoever reads the listing, and a field added later is ignored by a reader rather than refused — that is what an additive interface means. The distinction is not cosmetic: the flow SDK's discovery unmarshals each entry into a struct with a `name`, so a bare `["tested", …]` still parses, yields nothing, and the repository is discovered as **a machine with no gates** — a silent failure with no parse error anywhere to explain it.
+### The listing
 
-**The gates.** A name is a concept and an optional instance (`checked:go`), and every row is separately runnable — that is what narrowing means here:
+**Every row carries what the gate reports.** `metrics` is every metric its envelope carries, with its `type` (`int` or `float`) and `unit` (`bytes`, `percent`, or none), so terms can be written against a gate nobody has run yet; `requires` is always present, `[]` while the gate runs no fetched program; `serialize: "host"` marks a gate that holds the machine's exclusion while it measures, which a runner takes before spawning it. `bin/run --list` names exactly the gates `bin/gate --list` does, and every command `./make` builds as an object row — `verify` declaring `serialize: "host"` — so the listing answers in a fresh clone; a name that is both is an error. **The command set is closed**: nothing answers outside the listing.
+
+**The JSON listing is an array of objects, not of names.** A caller addresses a gate by `name`; a field added later is ignored by a reader rather than refused. The distinction is not cosmetic: flow's discovery unmarshals each entry into a struct with a `name`, so a bare `["tested", …]` still parses, yields nothing, and the repository is discovered as **a machine with no gates** — a silent failure with no parse error anywhere to explain it.
+
+### Envelope
+
+One JSON object on stdout, written whole and at most 1 MiB: `schema_version` 1, the `gate` asked for, the `target` it speaks for (`os/arch`), `metrics` (`name`, `type`, `value`, and `unit` where declared — an `int` stays an integer), `groups` naming where each number came from with the `members` that did not pass in the tool's own words ([test records](#test-records)), and `incomplete_reason` only when the run measured less than a full one. Completeness is that reason's absence. A complete envelope carries every metric its gate declares, each at most once.
+
+**`tree` is this project's own field**: the git tree id the measurement speaks for, stamped only when the identity before and after the run agreed, and absent on a gate whose subject is the machine. The judging layer blesses from it ([build-tools.md](build-tools.md#the-blessing)); a reader that does not know it skips it.
+
+### The gates
+
+A name is a concept and an optional instance (`checked:go`), and every row is separately runnable — that is what narrowing means here. A concept gate reports its concept's metrics under the shared name and, beside it, under each toolchain's own (`go_check_findings`, `promise_check_findings`); a composition's shared name is the total over its parts.
 
 | Gate | Measures | Metrics |
 |---|---|---|
-| `formatted:go` | Go files `gofmt` would rewrite — without rewriting them | `unformatted_go_files` |
-| `formatted:promise` | `.pr` files `promise format` would rewrite | `unformatted_promise_files` |
-| `formatted` | both of the above | both |
-| `builds` | Go packages that fail to compile, per module — and whether the build itself completed | `unbuildable_go_packages`, `build_failures` |
-| `checked:go` | `go vet` diagnostics, generated code excluded | `vet_findings` |
-| `checked:promise` | `promise check` over every Promise unit this project owns | `promise_check_failures`, `promise_check_errors`, `promise_check_warnings`, `promise_check_units` |
+| `formatted:go` | Go files `gofmt` would rewrite — without rewriting them | `unformatted_files`, `go_unformatted_files` |
+| `formatted:promise` | `.pr` files `promise format` would rewrite | `unformatted_files`, `promise_unformatted_files` |
+| `formatted` | both of the above | all of the above |
+| `builds` | Go packages that fail to compile, per module — and whether the build itself completed | `unbuildable_packages`, `go_unbuildable_packages`, `build_failures` |
+| `checked:go` | `go vet` diagnostics, generated code excluded | `check_findings`, `go_check_findings` |
+| `checked:promise` | `promise check` over every Promise unit this project owns | `check_findings`, `promise_check_findings`, `promise_check_failures`, `promise_check_warnings`, `promise_check_units` |
 | `checked` | both of the above | all of the above |
-| `tested:go` | failing tests in every Go module's suite | `go_test_failures`, `go_test_packages_failed` |
-| `tested:promise` | failing tests in the host Promise suite | `host_test_failures`, `host_leak_count`, `host_test_count` |
-| `tested` | both host suites | both |
+| `tested:go` | failing tests in every Go module's suite | `failed_tests`, `failed_packages`, `test_count`, each also `go_` |
+| `tested:promise` | failing tests in the host Promise suite | `failed_tests`, `leaked_tests`, `test_count`, each also `promise_` |
+| `tested` | both host suites | all of the above |
 | `integration` | `formatted` + `builds` + `checked` + `tested`, measured at once — what a landing decision rests on | all of the above |
-| `fit` | the machine, before work is given to it | `worktree_free_bytes`, `build_cache_free_bytes`, `worktree_hides_unlinked_files` |
-| `tested:wasm` | the Promise suite against wasm32-wasi, under the pinned `wasmtime` | `wasm_test_failures`, `wasm_leak_count`, `wasm_test_count` |
-| `tested:wasm-web` | the Promise suite against wasm32-web, under the pinned Node | `wasm_web_test_failures`, `wasm_web_leak_count`, `wasm_web_test_count` |
+| `fit` | the machine, before work is given to it | `worktree_free_bytes`, `cache_free_bytes`, and on Unix `worktree_hides_unlinked_files` |
+| `tested:wasm` | the Promise suite against wasm32-wasi, under the pinned `wasmtime` | `failed_tests`, `leaked_tests`, `test_count`, each also `wasm_` |
+| `tested:wasm-web` | the Promise suite against wasm32-web, under the pinned Node | the same, each also `wasm_web_` |
 | `tested:stress` | tests that do not agree with themselves across repeated runs | `stress_flaky_count`, `stress_iterations` |
-| `covered` | how much of each language's source the suites reach | `go_coverage_pct`, `promise_coverage_pct` |
-| `size:wasm` | what the wasm32-wasi canaries compile to, per canary | `wasm_size_<canary>`, `wasm_size_total` |
-| `install:thin` | installing a published thin release, end to end | the install phases' own metrics |
+| `covered` | how much of each language's source the suites reach | `statement_coverage`, `go_statement_coverage`, `block_coverage`, `promise_block_coverage` (`percent`) |
+| `size:wasm` | what the wasm32-wasi canaries compile to, per canary | `wasm_size_<canary>`, `wasm_size_total` (`bytes`) |
+| `install:thin`, `install:full` | installing a published release of that variant, end to end | the install phases' own metrics |
 | `latest-invariant` | whether `releases/latest` resolves to an epoch-* release | `latest_is_epoch` |
 
-Every gate above except `fit` also reports `cas_network_bytes` and `cas_home_count` — see [Store metrics](#store-metrics).
+Every gate above except `fit`, `install:*` and `latest-invariant` also reports `cas_network_bytes` and `cas_home_count` — see [Store metrics](#store-metrics).
 
-**The last seven are not part of `integration`, and that is the point of naming them.** They are the measurements a landing decision must not wait on — the wasm suite alone runs longer than every host gate combined — and they are run on a schedule instead. Naming them is what lets an orchestrator ask for one: a measurement reachable only by knowing its subcommand can be asked for only by whoever wrote the schedule.
+**The last eight are not part of `integration`, and that is the point of naming them.** They are the measurements a landing decision must not wait on — the wasm suite alone runs longer than every host gate combined — and they are run on a schedule instead. Naming them is what lets an orchestrator ask for one.
 
-**Three of those names are outside flow's closed vocabulary** — `size:wasm`, `install:thin` and `latest-invariant`. Two of them carry an instance half even though the concept is ours, because each measures one of several things it could: the canaries are built for wasm32-wasi, and a later `size:native` or `size:wasm-web` is a sibling gate rather than a rename of this one. That is permitted rather than tolerated: a project has gates the flow knows nothing about, and the SDK skips a name it does not recognise rather than refusing the listing. They are listed because the tracker addresses them by name, and it is the listing's job to say what can be addressed.
+**Three of those names are outside the closed concept vocabulary** — `size:wasm`, `install:*` and `latest-invariant`. Two carry an instance half even though the concept is ours, because each measures one of several things it could: the canaries are built for wasm32-wasi, and a later `size:native` is a sibling gate rather than a rename of this one. A variant is always part of the name, never a gate's argument: a gate takes no argument but `--envelope`.
 
-**`latest-invariant` also answers to its older subcommand spelling** — a bare `bin/gate latest-invariant`, which is what a scheduled gate runs today. It is the one name with no instance half to tell the two spellings apart, so `bin/gate latest-invariant --envelope` takes the contract path while a bare invocation keeps the subcommand. `install:thin` needs no such seam: it does not collide with `bin/gate install --variant …` at all.
+### Terms and the verdict
 
-A metric's presence here is not its term: which of `integration`'s metrics are *enforced* on a target is that target's block in `baselines.json`, and a metric whose end state the tree has not reached yet is registered there and tracked until it does.
+- **Two files, read strictly.** A **cap** is an absolute a person edits, in [`tools/gates/thresholds.json`](../tools/gates/thresholds.json): `{"<metric>": {"direction": "at_most" | "at_least", "cap": <number>}}`. A **baseline** is the best a metric has been, in [`tools/gates/baselines.json`](../tools/gates/baselines.json) ([Baselines](#baselines)). Both are inclusive bounds. The judge refuses, naming the file and the entry, an unknown key, a missing field, an unknown direction, a baseline with both `value` and `targets`, a metric no gate declares, and one metric with two directions.
+- **Every cap and baseline a metric has is applied, and all must hold.** An integer metric is compared as an integer. A metric with no term is not judged. `thresholds` holds one object per judged metric with only the keys that applied — `{"direction", "cap"?, "baseline"?}` — so anyone holding the envelope can re-check the verdict.
+- **A refusal says what to do.** `detail` states the judgement (metric, value and term), the evidence (up to five members that neither passed nor were excluded, each in the tool's own words, and a count of the rest — or that the gate reported nothing about why), and the remedy each gate states once in its own definition, naming the command that re-measures it.
+- **An unjudgeable envelope gets no verdict at all.** One that is not JSON, carries no or another `schema_version`, names another gate, repeats a metric, reports a metric as another type or unit than its gate declares, claims to be complete while lacking a declared metric, or carries no metric any term speaks to: the judge exits 1 having written nothing. So does an invalid terms file. An unjudged measurement is not a pass.
+- **An incomplete run is never a pass.** A run that measured less than a full one is judged and never acceptable, and `detail` relays its reason whole: honest numbers that understate what was checked are indistinguishable from an improvement.
+- **The judge spawns nothing.** It reads stdin and the terms files, so anyone holding both reaches the same verdict. `bin/run <name>` without `--verdict` is the by-hand path: it spawns `bin/gate <name> --envelope` as a process — the same boundary a runner crosses — and judges what that printed. No decision rests on it.
 
 - **`integration` is a composition, and every part is addressable.** A step fixing Go vet findings runs `bin/run checked:go` (seconds) rather than paying for the whole suite each round. Passing the parts is not passing the whole, and only the whole may be cited: a fix for one area can break another, and a sequence of narrow passes describes no single state.
 - **A gate reports what its run cost the store, once.** The bytes a run pulls over the wire and the bytes it explodes out of the store are properties of the whole run, not of any part of it — a composition's parts all draw on the same store — so the numbers appear exactly once in the envelope. Reporting them per part would put the same bytes in it several times under one name and leave the judge with duplicates. The window belongs to the **process**, `bin/gate` itself, and not to the function that measures: measuring is something a caller may do at any time, and a window is a side effect no measurement should carry — one opened inside a function call resets the ledger of whatever run is already measuring. `fit` is the exception, as ever: it measures the machine, must answer on one that cannot build, and so neither warms a toolchain nor opens a window.
 - **`fit` is not part of `integration`.** A machine that cannot build is not a change that may not land. It reports free space on the worktree's filesystem (which also holds `.promise-home/`) and on the one under `go env GOCACHE`, always both, so the envelope's shape does not vary by host. On a Unix host it also reports `worktree_hides_unlinked_files`, capped at 0: whether the worktree's filesystem keeps a removed file's name while the file is still open. A filesystem served through libfuse's high-level API, such as ntfs-3g, renames such a file to `.fuse_hidden…` until its last close, and NFS to `.nfs…`, so a temp dir a test has just emptied cannot be removed — every suite that runs a binary out of a temp dir, and the `go` tool's own work dir, then fails in cleanup after the test itself passed. The suites assume a removed name is gone at once everywhere but Windows, whose cleanup waits the lag out, so the metric is not reported there. A checkout on such a filesystem is a machine that cannot be given work, not a change that may not land; moving the checkout to a native filesystem clears it.
-- **The gate never judges; the judge never measures, and reads two kinds of terms.** A **cap** is an absolute a person edits, in [`tools/gates/thresholds.json`](../tools/gates/thresholds.json) — today the `fit` floors. A **baseline** is derived, the best a metric has been, and ratchets in [`tools/gates/baselines.json`](../tools/gates/baselines.json) per platform: anything that ratchets lives there, judged `up`/`down`/`exact` in its three states (enforced, pending, informational). A metric carrying both must satisfy both, and a gate reads neither.
-- **Every metric `integration` reports carries an enforced term on every target the baselines file knows** — not merely on whichever host happens to be running. A term is per-target data, and a metric first seen on a new platform is registered *informational*, which is tracked and never judged; promoting it is a person's step, and it is owed for every target block rather than only the one in front of them. A metric enforced on one platform and informational on another means a landing decision there rests on a number nobody looks at, and the gap is invisible until someone sits down at that platform — it arrives as a red trunk for them instead of a failure for whoever opened it.
-- **An incomplete run is still judged; what it may not do is move a baseline.** Refusing it outright would make any gate that deliberately measures less than everything permanently unpassable, which reads at the call site as a broken gate. The verdict says a baseline may not move from it; `bin/run` never moves one in any case, and neither does anything else in this repository — advancing a baseline is the workspace's job.
-- **Every gate measures the tree as it is now, never a leftover build.** Before it measures, a gate brings the build up to date by calling `bin/build`'s own `RunBuild` **in-process** — the same parser generation, resource embedding and compile — and adds no freshness rule of its own: `bin/build` decides what "up to date" means, so an already-built tree costs about 0.1s. It happens once per gate process, so `integration`'s parts share one build. This is not an optimisation of `tested`: the compiler `go:embed`s about a dozen generated, untracked inputs that only `bin/build` produces, so a gate that measured without producing them first reported numbers about a tree nobody proposed (stale artifacts), or refused to measure at all (missing artifacts), or reported a `vet_findings` count made entirely of the resulting package-load errors — a number about a tree `vet` never got far enough to analyse. `fit` is the only exception: it measures the machine rather than the tree, and must be answerable on a machine that cannot build. A build that does not complete is itself a measurement — `builds` reports `build_failures`, and every part whose numbers would be about build artifacts reports none and says why.
+- **The gate never judges; the judge never measures.** A gate reads no term, so it cannot be made to pass by editing it; the terms are a separate artefact out of the subject's reach, read by `bin/run` alone ([Terms and the verdict](#terms-and-the-verdict)).
+- **Every metric `integration` reports carries a term on every target this project ships**, or a written reason in `integrationUnjudged` not to — not merely on whichever host happens to be running. A term is per-target data where it is a baseline with `targets`, so a check on the host alone is blind to the platform its author is not sitting on, and the gap arrives as a red trunk for the next person there instead of a failure for whoever opened it; `TestIntegration_EveryMetricIsJudgedOnEveryShippedTarget` walks every shipped target.
+- **Every gate measures the tree as it is now, never a leftover build.** Before it measures, a gate brings the build up to date by calling `bin/build`'s own `RunBuild` **in-process** — the same parser generation, resource embedding and compile — and adds no freshness rule of its own: `bin/build` decides what "up to date" means, so an already-built tree costs about 0.1s. It happens once per gate process, so `integration`'s parts share one build. This is not an optimisation of `tested`: the compiler `go:embed`s about a dozen generated, untracked inputs that only `bin/build` produces, so a gate that measured without producing them first reported numbers about a tree nobody proposed (stale artifacts), or refused to measure at all (missing artifacts), or reported a `go_check_findings` count made entirely of the resulting package-load errors — a number about a tree `vet` never got far enough to analyse. `fit` is the only exception: it measures the machine rather than the tree, and must be answerable on a machine that cannot build. A build that does not complete is itself a measurement — `builds` reports `build_failures`, and every part whose numbers would be about build artifacts reports none and says why.
 - **A gate never repairs its subject.** Every check is the check-only form — no `gofmt -w`, no `promise format`, no staging; that is the difference from `bin/verify`, which repairs on its way to an answer. Bringing the build up to date is not a repair, but it is not invisible either: when the grammar has moved since `compiler/internal/parser/` was generated, the build regenerates those tracked files, and a runner enforcing the non-modification rule reports that as `broke_contract`. That reaches only a change that edited the grammar without regenerating, and the regenerated sources are left in the worktree for that change's own commit to carry.
 - **A project tool and the gate that measures the same property are one implementation in two modes.** The tool repairs, the gate measures, and that is the *only* difference between them: neither re-spells the other's subject, module list, package selection, exclusions or analyzer set. `bin/check` and `checked:go` share `GoCheckFindings` — the gate's count is the size of the list the tool prints. `bin/format` and `formatted:go` share one walk; `bin/coverage` and `coverage` share one package selection; `bin/test` and `tested:go` share one `go test` argv. Two spellings drift, and a drifted pair gives the project two contradictory answers to one question with no way to tell which is right.
-- **`checked:promise` measures UNITS, not files.** A unit is what can be analysed on its own: a directory with a `promise.toml` — all of its `.pr` files, tests included — or a `.pr` file that belongs to no project. A file of a multi-file module is not one, and never was: `modules/std/vector.pr` checked alone reports `_FnIter` undefined because `_FnIter` is in `iter.pr`. A per-file count therefore measured how the files are arranged rather than whether the code is sound, which is why the gate did not exist until `promise check` could take a project. `promise_check_failures` counts units that did not check and `promise_check_errors` the diagnostics in them, because a unit already carrying findings would otherwise absorb another one silently; `promise_check_warnings` counts diagnostics the compiler builds through; `promise_check_units` is the scale of what was swept, and is not judged for the reason `host_test_count` is not.
+- **`checked:promise` measures UNITS, not files.** A unit is what can be analysed on its own: a directory with a `promise.toml` — all of its `.pr` files, tests included — or a `.pr` file that belongs to no project. A file of a multi-file module is not one, and never was: `modules/std/vector.pr` checked alone reports `_FnIter` undefined because `_FnIter` is in `iter.pr`. A per-file count therefore measured how the files are arranged rather than whether the code is sound, which is why the gate did not exist until `promise check` could take a project. `promise_check_failures` counts units that did not check and `promise_check_findings` the diagnostics in them, because a unit already carrying findings would otherwise absorb another one silently; `promise_check_warnings` counts diagnostics the compiler builds through; `promise_check_units` is the scale of what was swept, and is not judged for the reason a suite's `test_count` is not.
 - **The Promise checker's tool mode is `bin/promise check` itself.** The compiler IS the checker, so there is no `bin/` wrapper: a person fixing type errors runs the same command the gate runs — `bin/promise check tests/... modules/... examples/... tools/stub/...` — and the gate's only addition is counting the summary line that command already prints. Its subject is `promiseSuiteTargets()`, the same list `tested:promise` runs, so the two measure the same code and a target added for one is added for both.
 - **Every Go gate sweeps every Go module in the tree** — `compiler/`, `tools/build/`, and `flows/` when this clone has one. `./...` is module-scoped, so measuring one module would report honest numbers about part of the subject. A module that is present but cannot be resolved (`flows/` without `flow-sdk/` beside it) is named in `incomplete`, never silently skipped.
 - **Generated code is excluded from being checked and from coverage, and never from being built.** `compiler/internal/parser` is written by ANTLR from the grammar, so a finding there is not actionable by the author of a change — it has ~77 `unreachable code` sites by construction. It still has to compile, so `builds` includes it. The exclusion is applied to the diagnostics and not only to the package list, because `go vet` reports findings in a package's *dependencies*: leaving the parser out of the list left its findings in the count, and whether they surfaced at all varied with the host's Go release and build-cache state — a metric that moves with that describes the host rather than the tree.
 - **A gate reports the tree on the pinned toolchain.** With any `PROMISE_*` toolchain override in effect (`PROMISE_OPT`, `PROMISE_LLC`, `PROMISE_LLD`, `PROMISE_LD64LLD`, `PROMISE_WASM_LD`, `PROMISE_CLANG`, `PROMISE_USE_CLANG`), the measurement would describe the operator's machine instead, and cannot stand as evidence about a `(commit, platform, check)` triple — so `bin/gate` refuses before any measurement starts, printing the reason on stderr and no envelope at all (T2108). A by-hand run under an override is still available through `bin/test` / `bin/verify`, which announce the override and proceed.
-- **Stdout carries one JSON object and nothing else.** `bin/gate <name>` without `--envelope` prints nothing and exits non-zero, so a bare run can never be mistaken for a pass. An error path prints nothing at all: a reader gets one envelope or none.
+- **Stdout carries one JSON object and nothing else.** `bin/gate <name>` without `--envelope` measures nothing: it is a usage error (exit 2) naming `bin/run <name>` as the form for a person, so a bare run can never be mistaken for a pass. An error path prints nothing at all: a reader gets one envelope or none.
 - **`thresholds` is always present in a verdict**, even when empty: a verdict without the terms it was reached from cannot be re-checked by anyone who was not there.
-- **An incomplete run is never a pass.** A run that measured less than a full one says so in `incomplete`, and the judge refuses it even when every number is within its cap — honest numbers that understate what was checked are indistinguishable from an improvement.
-- `bin/run <name>` without `--verdict` is the by-hand path: it spawns `bin/gate <name> --envelope` as a process, prints each metric beside its cap, and exits non-zero when a cap is missed. No decision rests on it.
 
 - **A measurement says which tree it is about, and a passing `integration` verdict blesses it.** A gate stamps its envelope with the tree identity it saw, taken after the build and again when the measurement is done; if the two differ it carries none, so a tree edited mid-measurement blesses nothing. Recording is the **judging** layer's, never the gate's — a gate cannot know whether its numbers are acceptable — so `bin/run integration`, `bin/run integration --verdict` and `bin/verify` all reach one rule (`blessIfPassed`), and one passing measurement of a tree is sufficient for the commit guard whoever ran it. Only the whole may be cited here too: a green part blesses nothing. See [build-tools.md](build-tools.md#the-blessing).
 
 **`bin/verify` measures this gate.** Its test phase is `integration`, run through the same in-process entry point `bin/run integration` uses, and its verdict is the judge's verdict on that envelope — so "verify passed" and "integration passed" are one answer about one tree rather than two that can differ. Verify's additions are the ones a gate may not make: it repairs first (`gofmt -w`, `promise format`), and it records the blessing.
-
-**Not yet migrated.** The tracker gates above still use `GateOutput` and are not in `bin/gate --list`, because everything listed must be runnable through `bin/run`. `integration` is host-scoped by construction — one run reports exactly one target — so the WASM suites are not an omission from it but a different target's measurement, asked for by name (`bin/gate wasm-test`, `bin/gate wasm-web-test`) and judged against that target's own block. Nothing about them belongs in `incomplete`: a reason that could never be discharged would make every host run incomplete, and no baseline moves from an incomplete run.
 
 ## Exception Management
 

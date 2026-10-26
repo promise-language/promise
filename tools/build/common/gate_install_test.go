@@ -131,31 +131,6 @@ func TestReadInstallPhases(t *testing.T) {
 	}
 }
 
-// TestRunGateInstallRejectsBadVariant: the variant is validated before any
-// script runs, so a bad/absent variant errors immediately. Covers every arg
-// shape that must fail before any network/exec work: absent variant, an unknown
-// variant value, --system with no variant, a dangling --variant with no value,
-// and an unrecognized flag.
-func TestRunGateInstallRejectsBadVariant(t *testing.T) {
-	root := t.TempDir()
-	bad := [][]string{
-		nil,
-		{"--variant", "bogus"},
-		{"--system"},
-		{"--variant"},                           // dangling flag, no value
-		{"-variant"},                            // dash-form dangling, no value
-		{"--bogus"},                             // unknown flag
-		{"--variant", "thin", "--extra"},        // valid variant but trailing junk
-		{"--variant", "thin", "--channel"},      // dangling --channel, no value
-		{"--variant", "thin", "--channel", "x"}, // invalid channel value
-	}
-	for _, args := range bad {
-		if err := runGateInstall(root, args); err == nil {
-			t.Errorf("runGateInstall(%v) = nil, want error", args)
-		}
-	}
-}
-
 // TestEnvWith verifies the sandbox env-override semantics: an override REPLACES
 // any existing entry for the same key (dropping the original regardless of its
 // position) and brand-new keys are appended. This is the mechanism that isolates
@@ -523,19 +498,6 @@ func TestGateInstallSource(t *testing.T) {
 	}
 }
 
-func TestValidateGateChannel(t *testing.T) {
-	for _, ok := range []string{"next", "stable", "2026.0", "2026.12", "2027.1"} {
-		if err := validateGateChannel(ok); err != nil {
-			t.Errorf("validateGateChannel(%q) = %v, want nil", ok, err)
-		}
-	}
-	for _, bad := range []string{"", "latest", "2026", "v2026.1", "next-week", "2026.x"} {
-		if err := validateGateChannel(bad); err == nil {
-			t.Errorf("validateGateChannel(%q) = nil, want error", bad)
-		}
-	}
-}
-
 // TestValidateLatestTag pins the `latest` invariant (T1493): the tripwire must
 // accept only epoch-* tags and reject a deps-* blob release (or anything else)
 // that wrongly occupies the `latest` slot.
@@ -613,17 +575,4 @@ func TestAssertLatestIsEpochAt(t *testing.T) {
 			t.Error("closed server = nil, want transport error")
 		}
 	})
-}
-
-// TestRunGateLatestInvariantRejectsArgs pins the arg-validation branch of
-// `bin/gate latest-invariant` (T1493): it takes no positional args, and a stray
-// arg is rejected with a usage error before any network call is attempted.
-func TestRunGateLatestInvariantRejectsArgs(t *testing.T) {
-	err := runGateLatestInvariant([]string{"stray"})
-	if err == nil {
-		t.Fatal("expected usage error for a stray arg, got nil")
-	}
-	if !strings.Contains(err.Error(), "usage") {
-		t.Errorf("error %q does not contain 'usage'", err.Error())
-	}
 }

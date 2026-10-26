@@ -11,112 +11,6 @@ import (
 	"time"
 )
 
-func TestParseTestSummaryLine_Basic(t *testing.T) {
-	output := "3634 passed, 0 failed (354 files, 1.075s)"
-	s := ParseTestSummaryLine(output)
-	if s == nil {
-		t.Fatal("expected non-nil summary")
-	}
-	if s.Passed != 3634 {
-		t.Errorf("Passed = %d, want 3634", s.Passed)
-	}
-	if s.Failed != 0 {
-		t.Errorf("Failed = %d, want 0", s.Failed)
-	}
-	if s.Leaked != 0 {
-		t.Errorf("Leaked = %d, want 0", s.Leaked)
-	}
-	if s.TimedOut != 0 {
-		t.Errorf("TimedOut = %d, want 0", s.TimedOut)
-	}
-}
-
-func TestParseTestSummaryLine_WithLeaks(t *testing.T) {
-	output := "3634 passed, 0 failed, 2 leaked (354 files, 1.075s)"
-	s := ParseTestSummaryLine(output)
-	if s == nil {
-		t.Fatal("expected non-nil summary")
-	}
-	if s.Passed != 3634 {
-		t.Errorf("Passed = %d, want 3634", s.Passed)
-	}
-	if s.Leaked != 2 {
-		t.Errorf("Leaked = %d, want 2", s.Leaked)
-	}
-}
-
-func TestParseTestSummaryLine_WithSkippedAndLeaks(t *testing.T) {
-	output := "3381 passed, 0 failed, 253 skipped, 2 leaked (343 files, 36.205s) [wasm32-wasi]"
-	s := ParseTestSummaryLine(output)
-	if s == nil {
-		t.Fatal("expected non-nil summary")
-	}
-	if s.Passed != 3381 {
-		t.Errorf("Passed = %d, want 3381", s.Passed)
-	}
-	if s.Failed != 0 {
-		t.Errorf("Failed = %d, want 0", s.Failed)
-	}
-	if s.Leaked != 2 {
-		t.Errorf("Leaked = %d, want 2", s.Leaked)
-	}
-}
-
-func TestParseTestSummaryLine_WithTimedOut(t *testing.T) {
-	output := "100 passed, 1 failed, 1 leaked, 2 timed out (10 files, 5.000s)"
-	s := ParseTestSummaryLine(output)
-	if s == nil {
-		t.Fatal("expected non-nil summary")
-	}
-	if s.Passed != 100 {
-		t.Errorf("Passed = %d, want 100", s.Passed)
-	}
-	if s.Failed != 1 {
-		t.Errorf("Failed = %d, want 1", s.Failed)
-	}
-	if s.Leaked != 1 {
-		t.Errorf("Leaked = %d, want 1", s.Leaked)
-	}
-	if s.TimedOut != 2 {
-		t.Errorf("TimedOut = %d, want 2", s.TimedOut)
-	}
-}
-
-func TestParseTestSummaryLine_MultilineOutput(t *testing.T) {
-	output := `pass (0.001s) test_add
-pass (0.002s) test_sub
-FAIL (0.003s) test_broken
-  panic: assertion failed
-
-2 passed, 1 failed (0.423s)
-FAILED:
-  test_broken`
-	s := ParseTestSummaryLine(output)
-	if s == nil {
-		t.Fatal("expected non-nil summary")
-	}
-	if s.Passed != 2 {
-		t.Errorf("Passed = %d, want 2", s.Passed)
-	}
-	if s.Failed != 1 {
-		t.Errorf("Failed = %d, want 1", s.Failed)
-	}
-}
-
-func TestParseTestSummaryLine_NoMatch(t *testing.T) {
-	s := ParseTestSummaryLine("no summary here")
-	if s != nil {
-		t.Errorf("expected nil, got %+v", s)
-	}
-}
-
-func TestParseTestSummaryLine_Empty(t *testing.T) {
-	s := ParseTestSummaryLine("")
-	if s != nil {
-		t.Errorf("expected nil, got %+v", s)
-	}
-}
-
 func TestWriteReadGateValues(t *testing.T) {
 	root := initBareGitRepo(t)
 	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
@@ -403,72 +297,6 @@ func GateOutputOmitEmpty(t *testing.T) {
 	}
 }
 
-// The two forms of the same failing run: what verify captured before T1888 and
-// what it captures now that a piped `promise test` drops its passing lines. The
-// summary and the FAILED: block are byte-identical between them by design.
-const (
-	capturedFullForm = `pass (0.004s) e2e/basics.pr (3 tests)
-FAIL (0.005s) e2e/strings.pr (1/3 failed)
-  test_split
-    panic: assertion failed
-pass (0.001s) e2e/hello.pr
-LEAK (0.002s) e2e/leaky.pr (1 leaked)
-
-568 passed, 2 failed, 3 leaked, 1 timed out (117 files, 30.810s)
-FAILED:
-  e2e/strings.pr: test_split
-    panic: assertion failed
-`
-	capturedPlainForm = `FAIL (0.005s) e2e/strings.pr (1/3 failed)
-  test_split
-    panic: assertion failed
-LEAK (0.002s) e2e/leaky.pr (1 leaked)
-
-568 passed, 2 failed, 3 leaked, 1 timed out (117 files, 30.810s)
-FAILED:
-  e2e/strings.pr: test_split
-    panic: assertion failed
-`
-)
-
-// TestVerifyReparsers_AgreeAcrossRenderModes is the T1888 constraint on the
-// consumer: the tested:promise gate re-parses the captured Promise output for
-// its counts, and dropping the passing progress lines must not change them.
-//
-// Verify no longer re-states the suite's own FAILED: block — the suite streams
-// it, so a second copy assembled from a buffer was the same text twice — so the
-// counts are what is left to agree.
-func TestVerifyReparsers_AgreeAcrossRenderModes(t *testing.T) {
-	full := ParseTestSummaryLine(capturedFullForm)
-	plain := ParseTestSummaryLine(capturedPlainForm)
-	if full == nil || plain == nil {
-		t.Fatalf("summary not found: full=%v plain=%v", full, plain)
-	}
-	if *full != *plain {
-		t.Errorf("counts differ between render modes: full %+v, plain %+v", *full, *plain)
-	}
-	if full.Passed != 568 || full.Failed != 2 || full.Leaked != 3 || full.TimedOut != 1 {
-		t.Errorf("counts = %+v, want 568/2/3/1", *full)
-	}
-}
-
-// TestVerifyReparsers_RejectTransientArtifacts is the negative of the same
-// constraint: the in-place rewriting goes to stderr precisely so a carriage
-// return can never reach this text. If one ever did, the summary line would no
-// longer start at a line boundary and the counts would silently vanish.
-func TestVerifyReparsers_RejectTransientArtifacts(t *testing.T) {
-	polluted := strings.Replace(capturedPlainForm,
-		"\n568 passed", "\rpass (0.001s) e2e/hello.pr\r568 passed", 1)
-	if s := ParseTestSummaryLine(polluted); s != nil {
-		t.Errorf("a carriage-return-polluted stream parsed as %+v; the test guards that "+
-			"the transient line must never reach stdout", *s)
-	}
-	// The clean stream still parses, so the assertion above is not vacuous.
-	if s := ParseTestSummaryLine(capturedPlainForm); s == nil {
-		t.Error("the clean plain-form stream must still parse")
-	}
-}
-
 // TestWriteGateValues_StampIsAuthoritative pins that the writer computes the
 // tree identity itself rather than trusting the caller's struct. Every
 // producer in gate.go builds a GateValues literal; if a stale or hand-set
@@ -563,13 +391,13 @@ func TestVerifySummary_ReportsWhatWasMeasured(t *testing.T) {
 		Target:   "darwin-arm64",
 		Compiler: "2026.10-8d0a3d1 (identity 12e9f923)",
 		Parts: []PartResult{
-			{Gate: "formatted:go", Metrics: []Metric{Count("unformatted_go_files", 0)}, Elapsed: 400 * time.Millisecond},
-			{Gate: "checked:promise", Metrics: []Metric{Count("promise_check_errors", 2)}, Elapsed: 63 * time.Second},
+			{Gate: "formatted:go", Metrics: []Metric{Count("go_unformatted_files", 0)}, Elapsed: 400 * time.Millisecond},
+			{Gate: "checked:promise", Metrics: []Metric{Count("promise_check_findings", 2)}, Elapsed: 63 * time.Second},
 			{Gate: "tested:promise", Incomplete: "the build did not complete, so the Promise suite did not run"},
 		},
-		Terms: map[string]term{
-			"unformatted_go_files": {Kind: "baseline", Direction: "exact", Value: 0},
-			"promise_check_errors": {Kind: "cap", Direction: "at_most", Value: 0},
+		Terms: map[string]appliedTerm{
+			"go_unformatted_files":   {Direction: AtMost, Baseline: num("0")},
+			"promise_check_findings": {Direction: AtMost, Cap: num("0")},
 		},
 		Failed:  "integration",
 		Store:   "CAS: 0 B over the wire",
@@ -583,7 +411,7 @@ func TestVerifySummary_ReportsWhatWasMeasured(t *testing.T) {
   Compiler:        2026.10-8d0a3d1 (identity 12e9f923)
   formatted:go     passed (400ms)
   checked:promise  FAILED (1m3s)
-                     promise_check_errors is 2, cap at_most 0
+                     promise_check_findings is 2, cap at_most 0
   tested:promise   not measured
                      the build did not complete, so the Promise suite did not run
   CAS: 0 B over the wire

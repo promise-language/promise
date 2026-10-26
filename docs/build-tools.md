@@ -19,7 +19,7 @@ The only prerequisite is Go 1.26.1+ — the floor `tools/build` inherits from th
 | Binary | Purpose |
 |--------|---------|
 | `bin/build` | Build the compiler binary (`bin/promise`). Handles ANTLR parser generation, resource embedding, LLVM detection, and Go compilation. |
-| `bin/verify` | Pre-commit verification: build, repair, check, then the `integration` gate, measured in-process and judged. Supports `--clean`, `--push`, `--lock-timeout`. No variant flags. |
+| `bin/verify` | Pre-commit verification: build, repair, check, then the `integration` gate, measured in-process and judged, and the blessing recorded. Takes no flag of its own — only the built-ins every tool answers (`-help`, `-version`, `-json`, `-human`, `-narrate`, `-json-input`). |
 | `bin/test` | Run test suites. Modes: `go`, `promise`, `tools`, `all`; with no mode, the CI set (`go` + `promise`, no tools). Supports `--wasm`, `--wasm-web`, `--clean`. |
 | `bin/format` | Format Go code (`gofmt`) and Promise code (`promise format`). |
 | `bin/check` | Run `go vet` over every Go module, reporting the findings this project's authors can act on — diagnostics in the generated parser are excluded. The same implementation the `checked:go` gate measures; `go vet` has no general `-fix`, so this is the check-only form of the pair. |
@@ -27,7 +27,8 @@ The only prerequisite is Go 1.26.1+ — the floor `tools/build` inherits from th
 | `bin/stress` | Stress testing for flaky test detection. |
 | `bin/setup` | One-time dev setup (git hooks). |
 | `bin/prereqs` | Report build prerequisites. The host must supply Go and Java; LLVM, the musl CRT and the WASM test runtimes are pinned and reported rather than prescribed. `bin/prereqs -wasm` stages the pinned `wasmtime` and `node` now instead of leaving them to the run that needs them. |
-| `bin/run` | Run one contract gate and judge it against `tools/gates/thresholds.json`. `bin/run <gate>` measures and judges for a person; `bin/run <gate> --verdict` judges an envelope on stdin (what the SDK calls); `bin/run --list [--json]` prints the gates and every command `./make` builds — the workspace reads that list to refuse installing over a project tool and to decide which names it may remove, so it reports the whole build set rather than a subset. `bin/run <command> [args…]` dispatches `bin/<command>`, since the two kinds share one namespace. See [gate-system.md](gate-system.md#the-contract-gates-and-the-judge). |
+| `bin/gate` | Measure one contract gate: `bin/gate <gate> --envelope` writes its envelope, `bin/gate --list` names every gate with what it reports. Nothing else answers. |
+| `bin/run` | Judge one contract gate against `tools/gates/thresholds.json` and `tools/gates/baselines.json`. `bin/run <gate>` measures and judges; `bin/run <gate> --verdict` judges an envelope on stdin (what the SDK calls); `bin/run --list` prints the gates and every command `./make` builds — the workspace reads that list to refuse installing over a project tool and to decide which names it may remove, so it reports the whole build set rather than a subset. `bin/run <command> [args…]` dispatches `bin/<command>`, since the two kinds share one namespace. See [gate-system.md](gate-system.md#the-contract-gates-and-the-judge). |
 
 **Only `./make` and `workspace setup/update` write into `bin/`.** It holds tool binaries, the compiler, and the build's own up-to-date sidecars — nothing else, so that everything in it is something a build put there and the directory can be deleted and rebuilt without losing state. Anything a command needs to write inside the worktree goes under `.home/` instead, with `.home/tmp/` for scratch. Both are gitignored and therefore outside `WorktreeHash`: a run's own scratch must never change the tree identity that run is measuring.
 
@@ -146,7 +147,8 @@ global state, so a test that runs them for real spends the host's state to
 assert on a flag.
 
 - **Proving a flag parses is a pure-parse test** (`parseTestArgs`,
-  `parseVerifyArgs`, `parseCleanArgs`), never a pipeline run: `--push` pushes.
+  `ParseInvocation`, `parseCleanArgs`), never a pipeline run: a run takes the
+  host-scope exclusion and builds the compiler.
 - **`go clean -testcache` is host-global, so no tool runs it.** It stamps
   `$GOCACHE/testexpire.txt`, and cmd/go then treats every test result saved
   before that moment as expired — in every module, and in every clone sharing
@@ -339,20 +341,27 @@ Verify is a list of named steps, run in order, stopping at the first failure —
 which it names, so `structure: docs: dangling link` sends the reader to the sweep
 rather than to a phase they have to identify first:
 
-| Step | Does |
-|------|------|
-| `lock` | Serialize concurrent verify runs across the host (see below) |
-| `clear` | Delete `.workspace/verified-tree` — drop any previous blessing (see below) |
-| `clean` | `--clean` only: wipe `.promise-home/` so the run starts cold |
-| `cache` | Point `PROMISE_HOME` at the repo-local `.promise-home/`, and clear any inherited `PROMISE_CACHE` so the whole cache lives there |
-| `build` | The full build pipeline (see above) |
-| `format go` | `gofmt -w .` |
-| `format promise` | `promise format` on all `.pr` files |
-| `check go` | `bin/check`'s own implementation: `go vet` over every Go module's packages, with the generated `internal/parser` excluded from the package list *and* from the findings. Both exclusions are needed — `go vet` reports diagnostics in a package's dependencies, so naming the packages alone does not keep the generated ones out of the answer. |
-| `check structure` | `common.RunStructuralChecks`, the sweeps over tracked sources described below |
-| `integration` | Measure the `integration` gate and judge it — **this step is verify's verdict** |
-| `record` | Bless the tree the measurement passed on (see below) |
-| `push` | `--push` only: `git push` |
+| Stage | Step | Does |
+|-------|------|------|
+| `prepare` | `lock` | Serialize concurrent verify runs across the host (see below) |
+| `prepare` | `clear` | Delete `.workspace/verified-tree` — drop any previous blessing (see below) |
+| `prepare` | `cache` | Point `PROMISE_HOME` at the repo-local `.promise-home/`, and clear any inherited `PROMISE_CACHE` so the whole cache lives there |
+| `prepare` | `build` | The full build pipeline (see above) |
+| `repair` | `gofmt` | `gofmt -w .` |
+| `repair` | `promise format` | `promise format` on all `.pr` files |
+| `check` | `go vet` | `bin/check`'s own implementation: `go vet` over every Go module's packages, with the generated `internal/parser` excluded from the package list *and* from the findings. Both exclusions are needed — `go vet` reports diagnostics in a package's dependencies, so naming the packages alone does not keep the generated ones out of the answer. |
+| `check` | `structure` | `common.RunStructuralChecks`, the sweeps over tracked sources described below |
+| `measure` | `integration` | Measure the `integration` gate and judge it — **this step is verify's verdict** |
+| `record` | `verified tree` | Bless the tree the measurement passed on (see below) |
+
+**The summary always prints**, and it is verify's result on stdout: for a person,
+the `Verify Summary` block and the roll of stages, ending with the failed step's
+own words and then `✅ OK to Commit` or `❌ Verify FAILED: not safe to commit`; in
+JSON, `{"ok":bool,"stages":[{"name","steps":[{"name","status","elapsed_seconds","detail"?}]}],"tree"?}`,
+where `status` is `passed`, `failed` or `not-run` and `tree` is the id the run
+blessed. Exit 0 when every stage passed, 1 otherwise; a stale `bin/verify` refuses
+with exit 3 before it runs anything. Nothing else reaches stdout: the build, the
+formatters and the suites are narration, on stderr when someone is watching.
 
 **The build precedes the repairs**, and that ordering is load-bearing:
 `promise format` is the formatter the compiler carries, and `integration`
@@ -389,7 +398,7 @@ unverified (T2170). Two consequences follow, both deliberate:
 
 ### The structural sweeps
 
-The `check structure` step runs `common.RunStructuralChecks` — every check named in
+The `structure` step runs `common.RunStructuralChecks` — every check named in
 `structuralChecks` (`tools/build/common/structural.go`):
 
 | Name | What it rejects |
@@ -435,7 +444,7 @@ so the record's path is spelled at both ends. That is the contract, not
 duplicated logic: the two ends compute different things.
 
 **Whoever judged that measurement records it**, through one rule
-(`blessIfPassed`): `bin/verify`'s `record` step, `bin/run integration`, and
+(`blessIfPassed`): `bin/verify`'s `verified tree` step, `bin/run integration`, and
 `bin/run integration --verdict` — the entry point the flow asks for a verdict on
 an envelope it produced by running the gate itself. So one passing `integration`
 measurement of a tree is sufficient for the commit guard whoever ran it. It used
@@ -498,25 +507,17 @@ match.
 
 ### Flags
 
-Verify takes **no variant flags**. `--wasm`, `--wasm-web`, `--shared` and
-`--local` are unknown-flag errors, not silent no-ops: each used to change what a
-run measured or where, while the record it wrote said none of it, so
-`bin/verify` and `bin/verify --shared --wasm` blessed the same tree id for two
-different measurements. The WASM suites remain their own gates
-([gate-system.md](gate-system.md)), asked for by name. `--shared` is gone from
-every other tool as well: no worktree command addresses `~/.promise`
-([Test Sandboxing](#test-sandboxing)).
-
-What survives cannot change what is measured or what a blessing means:
-
-- `--clean` — wipe the repo-local `.promise-home/` first, so the run starts cold.
-  Colder caches, identical suites: `integration` spells its own commands, and a
-  verify flag may not redefine them.
-- `--push` — `git push`, after the blessing is recorded and never before.
-- `--lock-timeout=<dur>` — bound the wait for the host-scope exclusion, which
-  happens before any measurement. Absent, the wait is unbounded. A verify whose
-  checkout's arena already holds the exclusion never waits, so the bound never
-  fires under a flow runner.
+Verify takes **no flag of its own**. `--wasm`, `--wasm-web`, `--shared` and
+`--local` went first: each used to change what a run measured or where, while
+the record it wrote said none of it, so `bin/verify` and
+`bin/verify --shared --wasm` blessed the same tree id for two different
+measurements. The WASM suites remain their own gates
+([gate-system.md](gate-system.md)), asked for by name. `--clean`, `--push` and
+`--lock-timeout` followed with the tool contract: a cold start is `bin/clean`
+first, a push is `git push` after a green run, and the wait for the host-scope
+exclusion is unbounded — how long a turn on this machine takes is the queue's
+business, and a runner counts it as waiting rather than against the run. Every
+one of them is now a usage error (exit 2), not a silent no-op.
 
 ### Progress rendering
 
@@ -552,12 +553,16 @@ Two rules make this work end to end:
 
 **The suites stream to stderr, and verify's own summary to stdout.** A gate's
 stdout carries an envelope and nothing else, so every measurement puts its
-human output on stderr — and verify measures through the gate. What an agent
-reads is therefore `bin/verify > log 2>&1`: each suite's own `FAILED:` block as
-it happens, then the `Verify Summary`. Verify does not re-state those blocks
-under its summary; a second copy assembled from a buffer was the same text
-twice, and holding a twenty-minute suite's output until the end makes a working
-run and a wedged one look alike.
+human output on stderr as narration — and verify measures through the gate.
+Narration is written when someone is watching: stderr is a terminal, or
+`-narrate` was given. What an agent reads is therefore
+`bin/verify -human -narrate > log 2>&1`: each suite's own `FAILED:` block as it
+happens, then the summary. Verify does not re-state those blocks under its
+summary; a second copy assembled from a buffer was the same text twice, and
+holding a twenty-minute suite's output until the end makes a working run and a
+wedged one look alike. A runner, which reads stdout alone, gets the JSON result,
+whose failed step carries the judge's detail: the finding, the evidence and the
+remedy.
 
 Override with `promise test -progress auto|full|plain|tty`, or with the
 `PROMISE_PROGRESS` environment variable (same spellings), which forces a mode
@@ -575,8 +580,8 @@ by a lock of the project's own. `bin/clean` takes the same exclusion.
 - **Verify declares it.** Its row of `bin/run --list --json` is
   `{"name":"verify","serialize":"host"}`, so a flow runner takes the exclusion
   before it spawns `bin/verify` and records the queue as waiting, outside the
-  run's time allowance. Every other command declares nothing and is listed by
-  bare name.
+  run's time allowance. Every other command declares nothing, and its row names
+  it alone.
 - **Verify joins it, so the queue is the runner's alone.** The exclusion is held
   by an *arena* — the id in the machine's host identity record (the host home's
   `identity.json`, written by `workspace setup`: a host's `h-` id, or in a guest
@@ -634,13 +639,15 @@ two disagree.
 
 ## Staleness Check
 
-The meta-builder (`./make`) computes an FNV hash of all `.go` and `go.mod` files under `tools/` and injects it into each binary at compile time via `-X main.sourceHash=<hash>`. When a tool binary runs, it recomputes the hash and compares. If they differ, the binary prints:
+The meta-builder (`./make`) computes an FNV hash of all `.go` and `go.mod` files under `tools/` and injects it into each binary at compile time via `-X main.sourceHash=<hash>`. When a tool binary runs, it recomputes the hash and compares — before it reads its command line, so a stale binary answers nothing, `-help` and `-version` included, from a surface it no longer matches. `-version` reports the stamped hash, and `./make -version` the one it computes.
+
+`bin/gate`, `bin/run` and `bin/verify` **refuse**: they exit 3 and write `{"condition":"stale","recovery":"./make"}` as their result — or, in human mode, `gate: the tools source has changed since this binary was built — run ./make`. In the two protocol modes, `bin/gate <name> --envelope` and `bin/run <gate> --verdict`, stdout stays empty and the status and that line on stderr carry it. A binary not built by `./make` refuses as `unstamped`, and one whose stamped repository is gone as `repository-unreachable`. A refusal is not a failure: a runner that meets one runs `./make` and asks once more, where a failure would have been reported against the tree. The other tools print
 
 ```
 tools source has changed — rebuild before continuing: /abs/path/to/repo/make (or ./make from the repo root)
 ```
 
-and exits with code 1. This ensures you never accidentally use a stale tool after editing the build system.
+and exit with code 1. Either way you never accidentally use a stale tool after editing the build system.
 
 The `bin/tool-guard` PreToolUse hook — the workspace's, wired up in `.claude/settings.json` — applies the same check per tool call. While the tools are stale the guard blocks Bash but lets Edit/Write through — its gates are read from disk at runtime, so a stale binary still enforces them correctly (T0276) — and it lifts the stale block for any command chain that invokes the repository's own make script, including wrapped forms such as `./make && go test ./...`, `./make 2>&1 | tail`, and `cd <repo> && ./make`. Only the stale block is lifted: every sub-command in such a chain still goes through the ordinary per-command checks, so a destructive second half is refused exactly as it would be on its own.
 
@@ -648,7 +655,7 @@ The rule both messages follow: **the recovery command a staleness message names 
 
 **The compiler binary, in the tests that drive it.** `bin/promise` is a build artifact no `go test` produces, and the black-box CLI suites under `compiler/cmd/promise/tests/` assert on its behaviour. They resolve it through one locator — `clitest.Bin` — and that locator refuses a binary older than the tree, comparing its mtime against the same inputs `bin/build` calls a build out of date for. It **fails the test** rather than skipping it: a skipped end-to-end suite is how a stale run goes unnoticed, and a stale run does not announce itself as stale — it reports a *product* defect, with plausible compiler output attached, for a fix that is present in the source and simply absent from the artifact. That is how a green trunk was filed as a critical "trunk red" alarm (T2134/T2137). The message names the offending source file and both spellings of `bin/build`, per the rule above.
 
-The check is deliberately **no stricter than `bin/build`'s own up-to-date rule** (`isBinaryUpToDate`), so the command it names always clears it; a check that could refuse what `bin/build` calls current would wedge the caller between two tools. Its two differences from that rule are both in the lax direction: the buildinfo version comparison is dropped, and `_test.go` files are not sources, since `go build` never compiles them into the binary. `bin/build` in turn refuses to run when the tools source has moved, so the recovery chain ends at `./make`. `PROMISE_TEST_BIN` names a binary explicitly and bypasses the check outright — an installed or published compiler is not expected to match the worktree. Nothing about the gates changes: `bin/gate go-test`, `bin/test` and `bin/verify` all bring the build up to date before they test, so the check is satisfied there by construction.
+The check is deliberately **no stricter than `bin/build`'s own up-to-date rule** (`isBinaryUpToDate`), so the command it names always clears it; a check that could refuse what `bin/build` calls current would wedge the caller between two tools. Its two differences from that rule are both in the lax direction: the buildinfo version comparison is dropped, and `_test.go` files are not sources, since `go build` never compiles them into the binary. `bin/build` in turn refuses to run when the tools source has moved, so the recovery chain ends at `./make`. `PROMISE_TEST_BIN` names a binary explicitly and bypasses the check outright — an installed or published compiler is not expected to match the worktree. Nothing about the gates changes: `tested:go`, `bin/test` and `bin/verify` all bring the build up to date before they test, so the check is satisfied there by construction.
 
 ## Previous Build System
 

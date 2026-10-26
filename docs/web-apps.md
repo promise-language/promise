@@ -777,7 +777,7 @@ A request is an ordinary value:
 |---|---|
 | `url` | Resolved against the page, as `fetch` resolves it: `"/echo"` names the page's own origin. |
 | `method` | `"GET"` unless set. |
-| `headers` | `web.FetchHeader[]`, each a `name` and a `value`, appended to the request in order. A repeated name is combined as `Headers.append` combines it. |
+| `headers` | `web.FetchHeader[]`, each a `name` and a `value`, appended to the request in order as `Headers.append` appends them: a repeated name is combined, and a header a page may not set (`Cookie`, `Host`, …) is left out. |
 | `body` | `string?`: the text body, or none. |
 
 Every other option a `fetch` init can carry takes the platform's default.
@@ -854,26 +854,24 @@ imports carry in the same `promise_env` object.
 [wasm-bindings.md](wasm-bindings.md) §"Helper Symbols and Their ABI", in both directions:
 
 - **Into the host:** the method, the URL, header names and values, and the
-  body. A string is UTF-8 in linear memory for the length of the call. The host
+  body. Each is Promise's bytes, valid for the length of the call: the host
   decodes it during the import with the loader's UTF-8 decoder and keeps no view
-  of linear memory afterwards: the bytes are Promise's, and growing memory
-  detaches any view into it. The body goes out as that text, UTF-8-encoded by
-  the platform, and its content type is `text/plain;charset=UTF-8` unless a
-  header sets one. A header name or value the platform does not accept (one
-  outside the ByteString range HTTP allows, for instance) makes the request
-  rejected, not a host error.
+  of linear memory afterwards, since growing memory detaches any view into it.
+  The body goes out as that text, UTF-8-encoded by the platform, and its
+  content type is `text/plain;charset=UTF-8` unless a header sets one. A header
+  name or value the platform does not accept (one outside the ByteString range
+  HTTP allows, for instance) makes the request rejected, not a host error.
 - **Out of the host:** a result's text. For a response it is what
   `Response.text()` produced, which decodes the body as UTF-8 whatever charset
   the response declares and replaces a malformed sequence with U+FFFD. Either
   way the host encodes it with the loader's UTF-8 encoder, so what Promise
-  receives is always valid UTF-8. The host writes it into a buffer it allocates
-  through `cabi_realloc`, and the caller frees that buffer once it has copied
-  the bytes into its own string. That buffer is the only Promise memory
+  receives is always valid UTF-8. Its buffer is allocated and freed as that
+  convention specifies for a `string` result. It is the only Promise memory
   `web.fetch`'s host half allocates, and it never outlives the Promise-side
   call that received it.
 
 **No import throws into the guest.** A request the platform refuses
-synchronously (an unparsable URL, a forbidden header, a body on a `GET`) settles
+synchronously (an unparsable URL, an invalid header name, a body on a `GET`) settles
 as rejected exactly as an asynchronous rejection does. Its result is delivered
 after the import that issued the request has returned, like every other result:
 delivery never happens inside an import.
@@ -907,17 +905,18 @@ indistinguishable from a real failure of the request.
 ### Lifetime of a request
 
 > **A request holds exactly one live host registration, from `web.fetch` until
-> its result is received or its pending fetch is dropped, and the host refers
-> to the request only while that registration is held.**
+> its result is received, its pending fetch is dropped or the instance exits,
+> and the host refers to the request only while that registration is held.**
 
 - **Liveness.** The request's subscription is the pending host operation that
   [The liveness rule](#the-liveness-rule) counts. It is opened before the host is asked to issue
   anything, so it covers the whole request: connection, headers, body
   consumption and the delivery of the result. It is released exactly once, on
   whichever terminal path the request takes: by `wait` once the result is
-  received, or by the pending fetch's drop. A request that never settles keeps
-  its instance alive for as long as its pending fetch exists, which is the
-  liveness rule's answer for any registration that could still deliver.
+  received, by the pending fetch's drop, or by `web.terminate` (Termination,
+  below). A request that never settles keeps its instance alive for as long as
+  its pending fetch exists, which is the liveness rule's answer for any
+  registration that could still deliver.
 - **Receiver closure is the cancellation.** There is no separate cancel call.
   Dropping a pending fetch whose result has not been received abandons the
   request, in this order:
@@ -940,18 +939,20 @@ indistinguishable from a real failure of the request.
   table and enqueues nothing. Every rejection a request can produce, from
   `fetch`, from the body read or from the abort, is handled by the host half;
   none surfaces as an unhandled rejection.
-- **Termination.** When the instance exits, whether through `web.terminate`
-  ([Program lifetime and termination](#program-lifetime-and-termination)), a panic ([Failure inside a handler](#failure-inside-a-handler)) or any other exit, the
-  loader aborts and forgets every request still open, and a settlement after
-  that delivers nothing. The exit adds no release of its own: a registration
-  still held when the instance exits ends with the instance, so none is
-  released twice. An exit that unwinds out of the pump a delivery calls is
+- **Termination.** `web.terminate` closes every subscription
+  ([Program lifetime and termination](#program-lifetime-and-termination)), a request's among them, and closing a request's
+  subscription abandons it: the three steps above, taken once, after which its
+  pending fetch has nothing left to release. Any other exit, a panic
+  ([Failure inside a handler](#failure-inside-a-handler)) among them, releases nothing: a registration still held
+  ends with the instance, so none is released twice. On every exit the loader
+  then aborts and forgets every request still open, and a settlement after that
+  delivers nothing. An exit that unwinds out of the pump a delivery calls is
   caught the way every host entry catches it.
 
 ### Where the host half lives
 
 **The host half of `web.fetch`, the JS behind the imports above, is the
-compiler's, in this repository.** The compiler generates it into the loaders,
+compiler's, in this repository.** The compiler generates it into the loader,
 beside the reference table, string marshalling, pump scheduling and exit
 handling it is written against. Which loader carries it is part of the artifact
 contract that [wasm-bindings.md](wasm-bindings.md) §"Browser JS Glue" owns. The `web` module owns
@@ -963,10 +964,13 @@ There are three reasons, each sufficient on its own:
 - **The host half is written against the generated loader's internals:** its
   reference table, its string helpers, its pump scheduling and its handling of
   an exit. A host half in a second repository would be written against names no
-  contract publishes, and would drift from them silently.
-- **A mismatch would surface only in a browser.** The headless harness stubs
-  every import it does not know ([Testing a web application](#testing-a-web-application)), so a host half and a
-  Promise half that disagreed would still link and pass every headless test.
+  contract publishes, and would drift from them silently: the headless harness
+  stubs every import it does not know ([Testing a web application](#testing-a-web-application)), so a host half that no
+  longer matched its loader would still link and pass every headless test.
+- **The loader has nowhere to take it from.** A `use web;` page loads the
+  bindgen glue, whose `init` takes only the module's URL and which exports no
+  import object ([wasm-bindings.md](wasm-bindings.md) §"Usage"). JS the `web` module shipped could
+  reach the page only as an edit to that generated output.
 - **Termination belongs to the loader.** Aborting every open request on exit is
   part of the loader's exit path, which nothing outside the loader can hook.
 

@@ -1980,6 +1980,94 @@ func TestBindWebIdlDictionaryInheritanceCompilesClean(t *testing.T) {
 	}
 }
 
+// TestBindWebIdlTypedefsCompileClean is the end-to-end acceptance for #721: a
+// typedef names no type, so each use binds as its target written in its place
+// (docs/wasm-bindings.md, "WebIDL to Promise", typedefs) — a primitive, a
+// union, a typedef of a typedef and of a nullable type, used nullable, as a
+// dictionary field, a parameter and a return type. Before the fix every use
+// kept the typedef's name and bind's self-check failed with `undefined type:
+// Name`. The caller uses each member at its target's Promise type, which only
+// an inlined typedef gives it.
+func TestBindWebIdlTypedefsCompileClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "typedefs.idl")
+	idl := `typedef DOMString Name;
+typedef (DOMString or long) NameOrIndex;
+typedef Name Label;
+typedef DOMString? MaybeName;
+
+interface Event {};
+typedef Event EventAlias;
+
+dictionary Options {
+	required NameOrIndex which;
+	Label label;
+};
+
+[Exposed=Window]
+interface Picker {
+	attribute Name name;
+	attribute Name? nickname;
+	attribute MaybeName alias;
+	readonly attribute Label label;
+	undefined pick(NameOrIndex which, optional Name hint);
+	Name rename(Name to);
+	EventAlias last();
+	EventAlias? find(Name key);
+	sequence<Name> names();
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	if out, err := exec.Command(bin, "bind", "webidl", "-name", "typedefs", "-o", outDir, idlPath).CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	userPath := filepath.Join(outDir, "use_typedefs.pr")
+	user := `main() {
+    picker := Picker.borrow(1);
+    string name = picker.name;
+    picker.name = "renamed";
+    string? nickname = picker.nickname;
+    picker.nickname = none;
+    string? alias = picker.alias;
+    string label = picker.label;
+    picker.pick(JsValue.Str(value: "first"), "hint");
+    string renamed = picker.rename("to");
+    Event last = picker.last();
+    Event? found = picker.find("key");
+    string[] names = picker.names();
+    options := Options(which: JsValue.Number(value: 1.0), label: "short");
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	for _, want := range []string{
+		"@Picker.name(", "@Picker.nickname(", "@Picker.alias(", "@Picker.label(", "@Picker.pick(",
+		"@Picker.rename(", "@Picker.last(", "@Picker.find(", "@Picker.names(",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Errorf("generated IR is missing %q", want)
+		}
+	}
+}
+
 // TestBindWebIdlDictionaryUnboundParentFailsLoudly is the error path: a
 // flattened dictionary never names its parent, so an unbound one would compile
 // into a type silently missing the inherited members. bind refuses it before

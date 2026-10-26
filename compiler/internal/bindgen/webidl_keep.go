@@ -90,10 +90,12 @@ type KeepDrop struct {
 // the chain, or dropped down it — only where the ancestor holds an instance
 // member of it.
 //
-// A reference is a name the lowered type carries (convertWebIdlTypeRef), so a
-// name inside a union, Promise<T> or record<K, V> — each lowered to JsValue — is
-// not one. A name absent from the input is not a dropped definition: a
-// declaration naming it is left to fail to compile, as an unbound parent does.
+// A reference is a name the type carries lowered with no typedef inlined
+// (convertWebIdlTypeRef), so a name inside a union, Promise<T> or record<K, V> —
+// each lowered to JsValue — is not one, and a use of a typedef names the
+// typedef, which the closure drops when its target names a dropped definition.
+// A name absent from the input is not a dropped definition: a declaration
+// naming it is left to fail to compile, as an unbound parent does.
 func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 	ifaces := interfacesByName(file)
 
@@ -120,7 +122,7 @@ func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 			if t == nil {
 				continue
 			}
-			if eachName(convertWebIdlTypeRef(t), func(name string) bool {
+			if eachName(convertWebIdlTypeRef(t, nil), func(name string) bool {
 				hit = name
 				return dropped[name]
 			}) {

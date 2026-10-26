@@ -19,14 +19,16 @@ import (
 // the interfaces deriving from it, because a derived member's name depends on
 // what it inherits (docs/wasm-bindings.md, "Shadowed Members"); the resources
 // still come out in input order. Dictionaries become Records carrying their
-// inherited members as their own fields (flattened). Enums become IR Enums. The
-// file produces a single module named from the first interface, or "web" if no
-// interfaces are present.
+// inherited members as their own fields (flattened). Enums become IR Enums. A
+// typedef names no type: each use of one lowers as its target written in its
+// place (convertWebIdlTypeRef). The file produces a single module named from the
+// first interface, or "web" if no interfaces are present.
 //
 // It fails when a dictionary's inheritance cannot be flattened — an ancestor
-// that is not a dictionary in the file, or a cycle — or when an anonymous
-// getter, setter or deleter cannot be reached by property access
-// (anonymousSpecialError), reporting every such dictionary and operation.
+// that is not a dictionary in the file, or a cycle — when a typedef refers to
+// itself (typedefTargets), or when an anonymous getter, setter or deleter
+// cannot be reached by property access (anonymousSpecialError), reporting every
+// such dictionary, typedef and operation.
 //
 // Call webidl.Merge(file) before this function to apply partials, mixins, and
 // includes statements, and to record the members a derived interface
@@ -48,6 +50,9 @@ func WebIdlToIR(file *webidl.File) ([]*Module, error) {
 type webidlConverter struct {
 	file  *webidl.File
 	dicts map[string]*webidl.Dictionary // every dictionary in file, by name
+	// typedefs holds the target of every typedef a use lowers through, by name
+	// (typedefTargets).
+	typedefs map[string]*webidl.TypeRef
 	// ifaces resolves an interface's parent by name (interfacesByName).
 	ifaces map[string]*webidl.Interface
 	// converted memoizes each interface's conversion, so a parent is converted
@@ -101,13 +106,16 @@ func (c *webidlConverter) convert() ([]*Module, error) {
 		ImportModule: "promise_env",
 	}
 
+	// Every lowering below inlines typedefs, so their table comes first.
+	var errs []error
+	c.typedefs, errs = typedefTargets(c.file)
+
 	// Convert enums
 	for _, e := range c.file.Enums {
 		m.Types = append(m.Types, c.convertEnum(e))
 	}
 
 	// Convert dictionaries as records
-	var errs []error
 	for _, d := range c.file.Dictionaries {
 		t, err := c.convertDictionary(d)
 		if err != nil {
@@ -215,7 +223,7 @@ func (c *webidlConverter) convertDictionary(d *webidl.Dictionary) (Type, error) 
 		for _, m := range chain[i].Members {
 			f := Field{
 				Name: idlToSnake(m.Name),
-				Type: convertWebIdlTypeRef(m.Type),
+				Type: convertWebIdlTypeRef(m.Type, c.typedefs),
 			}
 			if !m.Required {
 				// Optional dictionary members map to Option type
@@ -229,13 +237,71 @@ func (c *webidlConverter) convertDictionary(d *webidl.Dictionary) (Type, error) 
 }
 
 func (c *webidlConverter) convertTypedef(td *webidl.Typedef) Type {
-	ref := convertWebIdlTypeRef(td.Type)
+	ref := convertWebIdlTypeRef(td.Type, c.typedefs)
 	return Type{
 		Name:   td.Name,
 		Kind:   TypeAlias,
 		Target: &ref,
 		Doc:    td.Doc,
 	}
+}
+
+// typedefTargets returns the target of every typedef in file, by name: the
+// table convertWebIdlTypeRef inlines typedefs through. A typedef refers to the
+// typedefs its target names where the lowering follows a name — never inside a
+// union, Promise<T> or record<K, V>, each lowered to JsValue. One that refers to
+// itself, directly or through other typedefs, cannot be inlined, and WebIDL
+// forbids it: each typedef on such a cycle is reported and left out of the
+// table, so its uses lower as its name and every lowering ends.
+func typedefTargets(file *webidl.File) (map[string]*webidl.TypeRef, []error) {
+	targets := make(map[string]*webidl.TypeRef, len(file.Typedefs))
+	for _, td := range file.Typedefs {
+		targets[td.Name] = td.Type
+	}
+	// refers returns the typedefs the target of the typedef name refers to.
+	refers := func(name string) []string {
+		var names []string
+		eachName(convertWebIdlTypeRef(targets[name], nil), func(n string) bool {
+			if _, ok := targets[n]; ok {
+				names = append(names, n)
+			}
+			return false
+		})
+		return names
+	}
+	// reaches reports whether the typedef from is the typedef to, or refers to
+	// it through any number of typedefs.
+	reaches := func(from, to string) bool {
+		seen := make(map[string]bool)
+		for pending := []string{from}; len(pending) > 0; {
+			name := pending[len(pending)-1]
+			pending = pending[:len(pending)-1]
+			if name == to {
+				return true
+			}
+			if !seen[name] {
+				seen[name] = true
+				pending = append(pending, refers(name)...)
+			}
+		}
+		return false
+	}
+
+	var errs []error
+	var cyclic []string
+	for _, td := range file.Typedefs {
+		for _, next := range refers(td.Name) {
+			if reaches(next, td.Name) {
+				errs = append(errs, &webidl.ParseError{Pos: td.Pos, Msg: fmt.Sprintf("typedef %s: cycle through %s", td.Name, next)})
+				cyclic = append(cyclic, td.Name)
+				break
+			}
+		}
+	}
+	for _, name := range cyclic {
+		delete(targets, name)
+	}
+	return targets, errs
 }
 
 // convertInterface converts one interface, given the instance members it
@@ -270,7 +336,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 				Accessor:     AccessorGetter,
 				OwnerType:    iface.Name,
 				ImportName:   idlName + ".get",
-				Results:      []TypeRef{convertWebIdlTypeRef(m.Type)},
+				Results:      []TypeRef{convertWebIdlTypeRef(m.Type, c.typedefs)},
 				Doc:          doc,
 				ViaPrototype: viaPrototype,
 			}
@@ -290,7 +356,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 					Accessor:     AccessorSetter,
 					OwnerType:    iface.Name,
 					ImportName:   idlName + ".set",
-					Params:       []Param{{Name: "value", Type: convertWebIdlTypeRef(m.Type)}},
+					Params:       []Param{{Name: "value", Type: convertWebIdlTypeRef(m.Type, c.typedefs)}},
 					Doc:          doc,
 					ViaPrototype: viaPrototype,
 				}
@@ -329,7 +395,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 				Kind:       FuncStatic,
 				OwnerType:  iface.Name,
 				ImportName: idlName,
-				Results:    []TypeRef{convertWebIdlTypeRef(m.Type)},
+				Results:    []TypeRef{convertWebIdlTypeRef(m.Type, c.typedefs)},
 				Doc:        webidlDoc(m.Doc, "constant", idlName),
 			}
 			numberOverload(&f, names.declaredOnce(f))
@@ -562,7 +628,7 @@ func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operatio
 	for _, p := range op.Params {
 		param := Param{
 			Name: idlToSnake(p.Name),
-			Type: convertWebIdlTypeRef(p.Type),
+			Type: convertWebIdlTypeRef(p.Type, c.typedefs),
 		}
 		if p.Optional {
 			elem := param.Type
@@ -572,7 +638,7 @@ func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operatio
 	}
 
 	if op.Return != nil && op.Return.Builtin != "void" && op.Return.Builtin != "undefined" {
-		f.Results = []TypeRef{convertWebIdlTypeRef(op.Return)}
+		f.Results = []TypeRef{convertWebIdlTypeRef(op.Return, c.typedefs)}
 	}
 
 	return f
@@ -615,7 +681,7 @@ func (c *webidlConverter) convertConstructor(ifaceName string, ctor *webidl.Cons
 	for _, p := range ctor.Params {
 		param := Param{
 			Name: idlToSnake(p.Name),
-			Type: convertWebIdlTypeRef(p.Type),
+			Type: convertWebIdlTypeRef(p.Type, c.typedefs),
 		}
 		if p.Optional {
 			elem := param.Type
@@ -627,7 +693,13 @@ func (c *webidlConverter) convertConstructor(ifaceName string, ctor *webidl.Cons
 }
 
 // convertWebIdlTypeRef converts a WebIDL type reference to the binding IR TypeRef.
-func convertWebIdlTypeRef(ref *webidl.TypeRef) TypeRef {
+// A name typedefs holds is a typedef's, which names no type: it lowers as its
+// target written in its place, through any number of typedefs
+// (docs/wasm-bindings.md, "WebIDL to Promise", typedefs). A use written nullable
+// over a target that is nullable already stays nullable once, as WebIDL forbids
+// a nullable of a nullable type. A nil typedefs lowers every name as written
+// (ApplyKeepList).
+func convertWebIdlTypeRef(ref *webidl.TypeRef, typedefs map[string]*webidl.TypeRef) TypeRef {
 	if ref == nil {
 		return TypeRef{Kind: BuiltinKind, Builtin: "void"}
 	}
@@ -638,15 +710,22 @@ func convertWebIdlTypeRef(ref *webidl.TypeRef) TypeRef {
 	case webidl.BuiltinType:
 		result = convertWebIdlBuiltin(ref.Builtin)
 	case webidl.NamedType:
-		result = TypeRef{Kind: NamedKind, Name: ref.Name}
+		if target, ok := typedefs[ref.Name]; ok {
+			result = convertWebIdlTypeRef(target, typedefs)
+			if result.Kind == OptionKind {
+				return result
+			}
+		} else {
+			result = TypeRef{Kind: NamedKind, Name: ref.Name}
+		}
 	case webidl.SequenceType:
-		elem := convertWebIdlTypeRef(ref.Elem)
+		elem := convertWebIdlTypeRef(ref.Elem, typedefs)
 		result = TypeRef{Kind: ListKind, Elem: &elem}
 	case webidl.FrozenArrayType:
-		elem := convertWebIdlTypeRef(ref.Elem)
+		elem := convertWebIdlTypeRef(ref.Elem, typedefs)
 		result = TypeRef{Kind: ListKind, Elem: &elem}
 	case webidl.ObservableArrayType:
-		elem := convertWebIdlTypeRef(ref.Elem)
+		elem := convertWebIdlTypeRef(ref.Elem, typedefs)
 		result = TypeRef{Kind: ListKind, Elem: &elem}
 	case webidl.PromiseType:
 		// Promise<T> → Named "JsValue" for now (tasks are separate)

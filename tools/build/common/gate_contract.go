@@ -251,7 +251,7 @@ var contractGates = map[string]contractGateDef{
 	// all. Deliberately NOT part of integration — a machine that cannot build
 	// is not a change that may not land.
 	"fit": {
-		summary:         "free space where this project's work writes",
+		summary:         "free space where this project's work writes, and whether its filesystem lets a removed file's name go",
 		measure:         measureFit,
 		measuresMachine: true,
 	},

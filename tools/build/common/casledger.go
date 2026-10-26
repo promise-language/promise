@@ -45,7 +45,7 @@ const casLedgerName = ".promise-cas.jsonl"
 // worktree's scratch dir, NOT bin/ — only ./make and `workspace setup/update`
 // write there (T2211). Keep in lockstep with casmetrics.LedgerRelPath.
 func casLedgerPath(root string) string {
-	return filepath.Join(root, ".home", "tmp", casLedgerName)
+	return filepath.Join(scratchDir(root), casLedgerName)
 }
 
 // removeLegacyCASLedger deletes the ledger an older compiler left in bin/, where

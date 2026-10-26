@@ -434,6 +434,11 @@ func TestFit_FloorsAreCaps(t *testing.T) {
 			t.Errorf("%s = %+v, want a positive at_least floor", name, th)
 		}
 	}
+	// A filesystem that keeps a removed name is unfit outright: there is no
+	// amount of it a suite tolerates.
+	if th, ok := caps["worktree_hides_unlinked_files"]; !ok || th.Direction != AtMost || th.Cap != 0 {
+		t.Errorf("worktree_hides_unlinked_files = %+v, want at_most 0", th)
+	}
 }
 
 // integrationMetricsUnjudged names metrics integration's parts report that

@@ -33,3 +33,11 @@ func SetupLocalCache(root string) error {
 // tempDirVars are the variables a process reads its temp directory from, on
 // any platform.
 var tempDirVars = []string{"TMPDIR", "TMP", "TEMP"}
+
+// scratchDir is the worktree's scratch directory. Anything a command writes
+// inside the worktree goes under .home/, with .home/tmp/ for scratch
+// (docs/build-tools.md, Tool inventory): gitignored, so outside WorktreeHash,
+// and a run's own scratch never changes the tree identity it is measuring.
+func scratchDir(root string) string {
+	return filepath.Join(root, ".home", "tmp")
+}

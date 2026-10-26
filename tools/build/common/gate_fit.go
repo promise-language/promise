@@ -3,9 +3,10 @@ package common
 // The `fit` gate: is this machine fit to be given work at all?
 //
 // It is the one gate whose subject is not the code, and the project provides it
-// because only the project knows what its work requires. It reports free space
-// and stops — how much is enough is held in thresholds.json and applied by the
-// judge (judge.go).
+// because only the project knows what its work requires. It reports free space,
+// and on Unix whether the worktree's filesystem lets a removed file's name go
+// (gate_fit_unlink_unix.go), and stops — what is acceptable is held in
+// thresholds.json and applied by the judge (judge.go).
 
 import (
 	"fmt"
@@ -17,13 +18,21 @@ import (
 // writes to: the worktree (the change, and .promise-home/ with its build and
 // test caches) and the Go build cache. Both are reported every run even when
 // they are one device — an envelope whose shape varied by host is one no
-// threshold can be written against.
+// threshold can be written against. Beside the worktree's free space it reports
+// what unlinkMetrics measures of that filesystem — before the build cache, so a
+// run left incomplete by an unknown cache location still carries everything it
+// knows about the worktree.
 func measureFit(root string) ([]Metric, string, error) {
 	free, err := freeBytesNear(root)
 	if err != nil {
 		return nil, "", fmt.Errorf("free space at %s: %w", root, err)
 	}
 	metrics := []Metric{Size("worktree_free_bytes", free, "bytes")}
+	unlink, err := unlinkMetrics(root)
+	if err != nil {
+		return nil, "", fmt.Errorf("unlink semantics at %s: %w", root, err)
+	}
+	metrics = append(metrics, unlink...)
 
 	cache, why := goBuildCache(root)
 	if why != "" {

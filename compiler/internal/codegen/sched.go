@@ -2741,7 +2741,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 
 	if mainIsFailable {
 		// Call the helper function and check the result
-		result := c.block.NewCall(mainBodyFn)
+		result := c.emitDirectCall(mainBodyFn)
 		tag := c.block.NewExtractValue(result, 0) // i1: false=ok, true=error
 		errBlk := coroFn.NewBlock("main.error")
 		okBlk := coroFn.NewBlock("main.ok")

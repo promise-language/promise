@@ -421,73 +421,84 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 			continue
 		}
 
-		c.fn = fn
-		c.block = fn.NewBlock(".entry")
-		c.entryBlock = c.block
-		c.locals = make(map[string]*ir.InstAlloca)
-		c.localNameCount = make(map[string]int)
-		c.dropFlags = make(map[string]*ir.InstAlloca)
-		c.castSubjectMatch = nil
-		c.dropBindings = make(map[string]scopeBinding)
-		c.stmtTemps = nil                         // T0073
-		c.stmtTempMap = make(map[value.Value]int) // T0073
-		c.envTemps = nil                          // T0100
-		c.envTempMap = make(map[value.Value]int)  // T0100
-		c.tempTrackingEnabled = true              // T0084: enable in methods too
-		c.mutRefPtrs = nil
-		c.mutRefTypes = nil
-		c.scopeBindings = nil
-		c.canError = sig.CanError()
-		c.currentRetType = sig.Result()
-		c.setBorrowedValueParams(sig) // T0945
-		c.blockCounter = 0
-		c.enumCtorTemps = nil // B0267
-
-		// Bind parameters to local allocas
-		for i, p := range fn.Params {
-			sp := sig.Params()[i]
-			if _, isMutRef := sp.Type().(*types.MutRef); isMutRef {
-				// MutRef param: the LLVM param is a pointer to the caller's storage (B0149)
-				innerType := c.resolveType(sp.Type())
-				if c.mutRefPtrs == nil {
-					c.mutRefPtrs = make(map[string]value.Value)
-					c.mutRefTypes = make(map[string]irtypes.Type)
-				}
-				c.mutRefPtrs[sp.Name()] = p
-				c.mutRefTypes[sp.Name()] = innerType
-			} else {
-				alloca := c.entryBlock.NewAlloca(p.Typ)
-				c.entryBlock.NewStore(p, alloca)
-				c.locals[sp.Name()] = alloca
-
-				// T0087: Register drop binding for ~ (move) parameters.
-				if sp.Ref() == types.RefMut {
-					c.maybeRegisterDrop(sp.Name(), alloca, sp.Type())
-					c.maybeRegisterStructuralParamFree(sp.Name(), alloca, sp.Type()) // T0861
-				}
-
-				// B0191: Register drop binding for variadic parameters.
-				// Variadic params receive an owned Vector[T] that must be freed at scope exit.
-				if sp.IsVariadic() {
-					c.maybeRegisterDrop(sp.Name(), alloca, sp.Type())
-				}
-
-				// T1233: plain tuple-by-value params borrow — the caller owns and
-				// drops the tuple (see defineFunc). Supersedes T0406's callee-drop.
-
-				// T1194: borrow-by-default heap param reassigned to a fresh owned
-				// value inside the body (no-op unless reassigned).
-				c.maybeRegisterBorrowParamReassignDrop(sp.Name(), alloca, sp.Type(), sp.Ref(), fd.Body)
-			}
+		c.defineModuleFuncBody(fd, fn, sig, nil)
+		if variant := c.coroVariantToDefine(fn); variant != nil {
+			c.defineModuleFuncBody(fd, fn, sig, variant)
 		}
+	}
+}
 
-		c.genBlock(fd.Body)
+// defineModuleFuncBody generates module function fd's body into fn, or into
+// fn's coroutine variant when variant is non-nil (#68).
+func (c *Compiler) defineModuleFuncBody(fd *ast.FuncDecl, fn *ir.Func, sig *types.Signature, variant *ir.Func) {
+	vb := c.beginSourceBody(fn, variant)
+	c.locals = make(map[string]*ir.InstAlloca)
+	c.localNameCount = make(map[string]int)
+	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil
+	c.dropBindings = make(map[string]scopeBinding)
+	c.stmtTemps = nil                         // T0073
+	c.stmtTempMap = make(map[value.Value]int) // T0073
+	c.envTemps = nil                          // T0100
+	c.envTempMap = make(map[value.Value]int)  // T0100
+	c.tempTrackingEnabled = true              // T0084: enable in methods too
+	c.mutRefPtrs = nil
+	c.mutRefTypes = nil
+	c.scopeBindings = nil
+	c.canError = sig.CanError()
+	c.currentRetType = sig.Result()
+	c.setBorrowedValueParams(sig) // T0945
+	c.blockCounter = 0
+	c.enumCtorTemps = nil // B0267
 
-		// Emit scope cleanup for drop bindings (variadic, move params)
-		if c.block != nil && c.block.Term == nil {
-			if len(c.scopeBindings) > 0 {
-				c.emitScopeCleanup(0, false)
+	// Bind parameters to local allocas (a variant's trailing result slot is not one)
+	for i, p := range c.fn.Params[:len(fn.Params)] {
+		sp := sig.Params()[i]
+		if _, isMutRef := sp.Type().(*types.MutRef); isMutRef {
+			// MutRef param: the LLVM param is a pointer to the caller's storage (B0149)
+			innerType := c.resolveType(sp.Type())
+			if c.mutRefPtrs == nil {
+				c.mutRefPtrs = make(map[string]value.Value)
+				c.mutRefTypes = make(map[string]irtypes.Type)
 			}
+			c.mutRefPtrs[sp.Name()] = p
+			c.mutRefTypes[sp.Name()] = innerType
+		} else {
+			alloca := c.entryBlock.NewAlloca(p.Typ)
+			c.entryBlock.NewStore(p, alloca)
+			c.locals[sp.Name()] = alloca
+
+			// T0087: Register drop binding for ~ (move) parameters.
+			if sp.Ref() == types.RefMut {
+				c.maybeRegisterDrop(sp.Name(), alloca, sp.Type())
+				c.maybeRegisterStructuralParamFree(sp.Name(), alloca, sp.Type()) // T0861
+			}
+
+			// B0191: Register drop binding for variadic parameters.
+			// Variadic params receive an owned Vector[T] that must be freed at scope exit.
+			if sp.IsVariadic() {
+				c.maybeRegisterDrop(sp.Name(), alloca, sp.Type())
+			}
+
+			// T1233: plain tuple-by-value params borrow — the caller owns and
+			// drops the tuple (see defineFunc). Supersedes T0406's callee-drop.
+
+			// T1194: borrow-by-default heap param reassigned to a fresh owned
+			// value inside the body (no-op unless reassigned).
+			c.maybeRegisterBorrowParamReassignDrop(sp.Name(), alloca, sp.Type(), sp.Ref(), fd.Body)
+		}
+	}
+
+	c.enterCoroVariantBody(vb)
+	c.genBlock(fd.Body)
+
+	// Emit scope cleanup for drop bindings (variadic, move params)
+	if c.block != nil && c.block.Term == nil {
+		if len(c.scopeBindings) > 0 {
+			c.emitScopeCleanup(0, false)
+		}
+		// A variant's fall-through return is endCoroVariantBody's.
+		if vb == nil {
 			if sig.CanError() {
 				c.block.NewRet(c.zeroValue(fn.Sig.RetType))
 			} else if fn.Sig.RetType == irtypes.Void {
@@ -497,6 +508,7 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 			}
 		}
 	}
+	c.endCoroVariantBody(vb)
 }
 
 // declareModuleTypeMethods declares method stubs for module types with module-prefixed names.
@@ -630,129 +642,142 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 				continue
 			}
 
-			c.fn = fn
-			c.block = fn.NewBlock(".entry")
-			c.entryBlock = c.block
-			c.locals = make(map[string]*ir.InstAlloca)
-			c.localNameCount = make(map[string]int)
-			c.dropFlags = make(map[string]*ir.InstAlloca)
-			c.castSubjectMatch = nil
-			c.dropBindings = make(map[string]scopeBinding)
-			c.stmtTemps = nil                         // T0073
-			c.stmtTempMap = make(map[value.Value]int) // T0073
-			c.envTemps = nil                          // T0100
-			c.envTempMap = make(map[value.Value]int)  // T0100
-			// B0172: Enable temp tracking for module type methods.
-			c.tempTrackingEnabled = true
-			c.scopeBindings = nil
-			c.canError = m.Sig().CanError()
-			c.currentRetType = m.Sig().Result()
-			c.blockCounter = 0
-			c.enumCtorTemps = nil // B0267
-
-			// Bind 'this' and parameters
-			c.mutRefPtrs = nil
-			c.mutRefTypes = nil
-			paramIdx := 0
-			if m.Sig().Recv() != nil {
-				receiverType := irtypes.Type(irtypes.I8Ptr)
-				if isPrimitiveScalar(named) {
-					receiverType = llvmNamedType(named)
-				}
-				alloca := c.entryBlock.NewAlloca(receiverType)
-				c.entryBlock.NewStore(fn.Params[0], alloca)
-				c.locals["this"] = alloca
-				paramIdx = 1
-			}
-			for i, p := range m.Sig().Params() {
-				if _, isMutRef := p.Type().(*types.MutRef); isMutRef {
-					// MutRef param: the LLVM param is a pointer to the caller's storage (B0149)
-					innerType := c.resolveType(p.Type())
-					if c.mutRefPtrs == nil {
-						c.mutRefPtrs = make(map[string]value.Value)
-						c.mutRefTypes = make(map[string]irtypes.Type)
-					}
-					c.mutRefPtrs[p.Name()] = fn.Params[paramIdx+i]
-					c.mutRefTypes[p.Name()] = innerType
-				} else {
-					alloca := c.entryBlock.NewAlloca(fn.Params[paramIdx+i].Typ)
-					c.entryBlock.NewStore(fn.Params[paramIdx+i], alloca)
-					c.locals[p.Name()] = alloca
-
-					// T0087: Register drop binding for ~ (move) parameters.
-					if p.Ref() == types.RefMut {
-						c.maybeRegisterDrop(p.Name(), alloca, p.Type())
-						c.maybeRegisterStructuralParamFree(p.Name(), alloca, p.Type()) // T0861
-					}
-
-					// B0191: Register drop binding for variadic parameters.
-					// Variadic params receive an owned Vector[T] that must be freed at scope exit.
-					if p.IsVariadic() {
-						c.maybeRegisterDrop(p.Name(), alloca, p.Type())
-					}
-
-					// T0322: Register drop bindings for plain heap params on `new`
-					// constructor methods. genConstructorCallMono unconditionally
-					// clears the caller's drop flag for every arg except the
-					// strdup-borrow exception (string param on a type with drop /
-					// synth-drop), so the callee must drop them at scope exit if
-					// they aren't moved into a field. Restrict to Named-type
-					// receivers since genConstructorCallMono is the only caller
-					// that performs the unconditional clear; enum methods named
-					// `new` would not see this transfer.
-					if md.Name == "new" && p.Ref() != types.RefMut && !p.IsVariadic() {
-						var recvNamed *types.Named
-						if recv := m.Sig().Recv(); recv != nil {
-							recvNamed = extractNamed(recv.Type())
-						}
-						if recvNamed != nil {
-							skipDrop := extractNamed(p.Type()) == types.TypString && (recvNamed.HasDrop() || recvNamed.NeedsSynthDrop())
-							if !skipDrop {
-								c.maybeRegisterDrop(p.Name(), alloca, p.Type())
-								// T0861: a by-value structural-view param of a `new`
-								// constructor is owned (the call site clears the source
-								// drop flag), so it needs an RTTI-dispatched free.
-								c.maybeRegisterStructuralParamFree(p.Name(), alloca, p.Type())
-							}
-						}
-					}
-
-					// T1233: plain tuple-by-value params borrow — the caller owns
-					// and drops the tuple (see defineFunc). Supersedes T0406's
-					// callee-drop. (`new` constructor params keep their T0322/T0135
-					// clear-and-drop semantics above.)
-
-					// T1194: borrow-by-default heap param reassigned to a fresh
-					// owned value inside the body (no-op unless reassigned).
-					c.maybeRegisterBorrowParamReassignDrop(p.Name(), alloca, p.Type(), p.Ref(), md.Body)
-				}
-			}
-
-			c.genBlock(md.Body)
-
-			// T0553: For drop() methods, auto-append field drops (mirrors defineMethodFunc).
-			// Without this, module-defined types with user-written drop bodies leak their
-			// droppable fields.
-			if md.Name == "drop" && c.block != nil && c.block.Term == nil {
-				c.emitFieldDrops(named)
-			}
-
-			if c.block != nil && c.block.Term == nil {
-				// Emit scope cleanup for drop bindings (variadic, move params)
-				if len(c.scopeBindings) > 0 {
-					c.emitScopeCleanup(0, false)
-				}
-				if m.Sig().CanError() {
-					c.block.NewRet(c.zeroValue(fn.Sig.RetType))
-				} else if fn.Sig.RetType == irtypes.Void {
-					c.block.NewRet(nil)
-				} else {
-					c.block.NewRet(c.zeroValue(fn.Sig.RetType))
-				}
+			c.defineModuleMethodBody(md, m, fn, named, nil)
+			if variant := c.coroVariantToDefine(fn); variant != nil {
+				c.defineModuleMethodBody(md, m, fn, named, variant)
 			}
 			c.currentNamed = nil
 		}
 	}
+}
+
+// defineModuleMethodBody generates module method md's body into fn, or into
+// fn's coroutine variant when variant is non-nil (#68).
+func (c *Compiler) defineModuleMethodBody(md *ast.MethodDecl, m *types.Method, fn *ir.Func, named *types.Named, variant *ir.Func) {
+	vb := c.beginSourceBody(fn, variant)
+	params := c.fn.Params
+	c.locals = make(map[string]*ir.InstAlloca)
+	c.localNameCount = make(map[string]int)
+	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil
+	c.dropBindings = make(map[string]scopeBinding)
+	c.stmtTemps = nil                         // T0073
+	c.stmtTempMap = make(map[value.Value]int) // T0073
+	c.envTemps = nil                          // T0100
+	c.envTempMap = make(map[value.Value]int)  // T0100
+	// B0172: Enable temp tracking for module type methods.
+	c.tempTrackingEnabled = true
+	c.scopeBindings = nil
+	c.canError = m.Sig().CanError()
+	c.currentRetType = m.Sig().Result()
+	c.blockCounter = 0
+	c.enumCtorTemps = nil // B0267
+
+	// Bind 'this' and parameters
+	c.mutRefPtrs = nil
+	c.mutRefTypes = nil
+	paramIdx := 0
+	if m.Sig().Recv() != nil {
+		receiverType := irtypes.Type(irtypes.I8Ptr)
+		if isPrimitiveScalar(named) {
+			receiverType = llvmNamedType(named)
+		}
+		alloca := c.entryBlock.NewAlloca(receiverType)
+		c.entryBlock.NewStore(params[0], alloca)
+		c.locals["this"] = alloca
+		paramIdx = 1
+	}
+	for i, p := range m.Sig().Params() {
+		if _, isMutRef := p.Type().(*types.MutRef); isMutRef {
+			// MutRef param: the LLVM param is a pointer to the caller's storage (B0149)
+			innerType := c.resolveType(p.Type())
+			if c.mutRefPtrs == nil {
+				c.mutRefPtrs = make(map[string]value.Value)
+				c.mutRefTypes = make(map[string]irtypes.Type)
+			}
+			c.mutRefPtrs[p.Name()] = params[paramIdx+i]
+			c.mutRefTypes[p.Name()] = innerType
+		} else {
+			alloca := c.entryBlock.NewAlloca(params[paramIdx+i].Typ)
+			c.entryBlock.NewStore(params[paramIdx+i], alloca)
+			c.locals[p.Name()] = alloca
+
+			// T0087: Register drop binding for ~ (move) parameters.
+			if p.Ref() == types.RefMut {
+				c.maybeRegisterDrop(p.Name(), alloca, p.Type())
+				c.maybeRegisterStructuralParamFree(p.Name(), alloca, p.Type()) // T0861
+			}
+
+			// B0191: Register drop binding for variadic parameters.
+			// Variadic params receive an owned Vector[T] that must be freed at scope exit.
+			if p.IsVariadic() {
+				c.maybeRegisterDrop(p.Name(), alloca, p.Type())
+			}
+
+			// T0322: Register drop bindings for plain heap params on `new`
+			// constructor methods. genConstructorCallMono unconditionally
+			// clears the caller's drop flag for every arg except the
+			// strdup-borrow exception (string param on a type with drop /
+			// synth-drop), so the callee must drop them at scope exit if
+			// they aren't moved into a field. Restrict to Named-type
+			// receivers since genConstructorCallMono is the only caller
+			// that performs the unconditional clear; enum methods named
+			// `new` would not see this transfer.
+			if md.Name == "new" && p.Ref() != types.RefMut && !p.IsVariadic() {
+				var recvNamed *types.Named
+				if recv := m.Sig().Recv(); recv != nil {
+					recvNamed = extractNamed(recv.Type())
+				}
+				if recvNamed != nil {
+					skipDrop := extractNamed(p.Type()) == types.TypString && (recvNamed.HasDrop() || recvNamed.NeedsSynthDrop())
+					if !skipDrop {
+						c.maybeRegisterDrop(p.Name(), alloca, p.Type())
+						// T0861: a by-value structural-view param of a `new`
+						// constructor is owned (the call site clears the source
+						// drop flag), so it needs an RTTI-dispatched free.
+						c.maybeRegisterStructuralParamFree(p.Name(), alloca, p.Type())
+					}
+				}
+			}
+
+			// T1233: plain tuple-by-value params borrow — the caller owns
+			// and drops the tuple (see defineFunc). Supersedes T0406's
+			// callee-drop. (`new` constructor params keep their T0322/T0135
+			// clear-and-drop semantics above.)
+
+			// T1194: borrow-by-default heap param reassigned to a fresh
+			// owned value inside the body (no-op unless reassigned).
+			c.maybeRegisterBorrowParamReassignDrop(p.Name(), alloca, p.Type(), p.Ref(), md.Body)
+		}
+	}
+
+	c.enterCoroVariantBody(vb)
+	c.genBlock(md.Body)
+
+	// T0553: For drop() methods, auto-append field drops (mirrors defineMethodFunc).
+	// Without this, module-defined types with user-written drop bodies leak their
+	// droppable fields.
+	if md.Name == "drop" && c.block != nil && c.block.Term == nil {
+		c.emitFieldDrops(named)
+	}
+
+	if c.block != nil && c.block.Term == nil {
+		// Emit scope cleanup for drop bindings (variadic, move params)
+		if len(c.scopeBindings) > 0 {
+			c.emitScopeCleanup(0, false)
+		}
+		// A variant's fall-through return is endCoroVariantBody's.
+		if vb == nil {
+			if m.Sig().CanError() {
+				c.block.NewRet(c.zeroValue(fn.Sig.RetType))
+			} else if fn.Sig.RetType == irtypes.Void {
+				c.block.NewRet(nil)
+			} else {
+				c.block.NewRet(c.zeroValue(fn.Sig.RetType))
+			}
+		}
+	}
+	c.endCoroVariantBody(vb)
 }
 
 // forwardDeclareModuleMethod searches module infos for the type's owning module

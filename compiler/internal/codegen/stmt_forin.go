@@ -510,7 +510,7 @@ func (c *Compiler) emitIterNext(receiverVal value.Value, receiverType types.Type
 
 	// Extract instance pointer as receiver
 	instance := c.extractInstancePtr(receiverVal)
-	return c.block.NewCall(fn, append([]value.Value{instance}, defaultArgs...)...)
+	return c.emitDirectCall(fn, append([]value.Value{instance}, defaultArgs...)...)
 }
 
 // genForInRange handles for-in over a Range[T] value type (e.g., 0..10, 'a'..'z').

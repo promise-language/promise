@@ -201,6 +201,8 @@ var clearedBySaveState = []string{
 	"inGenerator", "generatorCanError", "generatorYieldSlot", "generatorErrorSlot",
 	"generatorCoroId", "generatorCleanup", "generatorSuspend", "generatorFinalSuspend",
 	"inFailableGoBlock", "failableGoBlockAggType", "failableGoBlockFinalSuspend",
+	// #68: a coroutine variant's result slot is a parameter of that variant
+	"coroResultSlot",
 	// T1588: per-name bindings consulted by genIdentExpr ahead of `locals`
 	"mutRefPtrs", "mutRefTypes", "matchBorrowedIdents", "borrowOptionalLocals",
 	// T0945

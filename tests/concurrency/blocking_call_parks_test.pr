@@ -1,0 +1,167 @@
+// promise-language/promise#68: a goroutine that blocks inside a called function
+// parks, as it does when it blocks in its own body. On WASM that takes the
+// callee's coroutine variant: before it, the callee ran a nested scheduler loop
+// on the goroutine's own stack.
+//
+// Every test stacks two goroutines that are each blocked inside a helper, so
+// the upper one waits on a value only the lower one can produce. A nested loop
+// in the upper one finds nothing runnable — the lower goroutine is not runnable,
+// it is underneath on the same stack — and reports a false deadlock. Each test
+// also covers one way the callee's result reaches its caller.
+//
+// exclude: wasi — wasm32-wasi still runs the nested loop (#718).
+recv_from(Channel[int] ch) int? {
+  return <-ch;
+}
+
+recv_str(Channel[string] ch) string? {
+  return <-ch;
+}
+
+forward(Channel[int] src, Channel[int] dst) {
+  v := recv_from(src);
+  if v is present {
+    dst.send(v + 1);
+  }
+}
+
+// Plain helpers, and the `go f(args)` call form.
+blocked_helpers_interleave() `test(exclude: wasi) {
+  a := channel[int](1);
+  b := channel[int](1);
+  t1 := go forward(a, b);
+  t2 := go {
+    v := recv_from(b);
+    v
+  };
+  t3 := go {
+    a.send(41);
+  };
+  got := <-t2;
+  <-t1;
+  <-t3;
+  assert(got is present && got! == 42, "t2 got the forwarded value");
+}
+
+recv_checked!(Channel[int] ch) int {
+  v := (<-ch) ?: 0;
+  if v < 0 {
+    raise error("negative:{v}");
+  }
+  return v;
+}
+
+// Returns a failable call's result, so its error propagates through two
+// variants before it reaches a handler.
+recv_checked_twice!(Channel[int] ch) int {
+  return recv_checked(ch);
+}
+
+relay_checked(Channel[int] src, Channel[string] dst) {
+  v := recv_checked_twice(src)? e {
+    dst.send(move e.message);
+    return;
+  };
+  dst.send("ok:{v}");
+}
+
+// A raise after the park reaches the handler two calls up, and a heap string
+// comes back through the result slot (the leak check sees a double free or leak).
+blocked_failable_helper_raises() `test(exclude: wasi) {
+  a := channel[int](1);
+  b := channel[string](1);
+  t1 := go relay_checked(a, b);
+  t2 := go {
+    s := recv_str(b);
+    s
+  };
+  t3 := go {
+    a.send(-5);
+  };
+  got := <-t2;
+  <-t1;
+  <-t3;
+  assert(got is present && got! == "negative:-5", "the raise reached the handler");
+}
+
+blocked_failable_helper_succeeds() `test(exclude: wasi) {
+  a := channel[int](1);
+  b := channel[string](1);
+  t1 := go relay_checked(a, b);
+  t2 := go {
+    s := recv_str(b);
+    s
+  };
+  t3 := go {
+    a.send(7);
+  };
+  got := <-t2;
+  <-t1;
+  <-t3;
+  assert(got is present && got! == "ok:7", "the value came back through the slot");
+}
+
+select_recv(Channel[int] x, Channel[int] y) int {
+  int r = 0;
+  select {
+    v := <-x:
+      r = v!;
+    v := <-y:
+      r = v! * 100;
+  }
+  return r;
+}
+
+forward_select(Channel[int] x, Channel[int] y, Channel[int] dst) {
+  dst.send(select_recv(x, y) + 1);
+}
+
+// A select with no ready case parks inside the helper.
+blocked_select_in_helper() `test(exclude: wasi) {
+  x := channel[int](1);
+  y := channel[int](1);
+  b := channel[int](1);
+  t1 := go forward_select(x, y, b);
+  t2 := go {
+    v := recv_from(b);
+    v
+  };
+  t3 := go {
+    y.send(3);
+  };
+  got := <-t2;
+  <-t1;
+  <-t3;
+  assert(got is present && got! == 301, "the select took the ready case");
+}
+
+// The task handle is dropped un-awaited at the end of its statement, so the
+// helper joins the goroutine there.
+join_then_forward(Channel[int] src, Channel[int] dst) {
+  box := channel[int](1);
+  _ := go {
+    v := recv_from(src);
+    box.send((v ?: 0) * 2);
+  };
+  v := recv_from(box);
+  if v is present {
+    dst.send(v);
+  }
+}
+
+blocked_task_join_in_helper() `test(exclude: wasi) {
+  a := channel[int](1);
+  b := channel[int](1);
+  t1 := go join_then_forward(a, b);
+  t2 := go {
+    v := recv_from(b);
+    v
+  };
+  t3 := go {
+    a.send(21);
+  };
+  got := <-t2;
+  <-t1;
+  <-t3;
+  assert(got is present && got! == 42, "the joined goroutine's value was forwarded");
+}

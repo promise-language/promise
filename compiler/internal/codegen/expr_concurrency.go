@@ -853,6 +853,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 	savedEnvTempMap := c.envTempMap                   // T1105
 	savedBorrowedValueParams := c.borrowedValueParams // T0945
 	savedInFailableGoBlock := c.inFailableGoBlock     // T1384: a nested `go x()` inside a `go! {}` body must not inherit the outer sink
+	savedCoroResultSlot := c.coroResultSlot           // #68: nor a coroutine variant's result slot
 	savedBlockTempFloors := c.resetBlockTempFloors()  // T1329: fresh function → floors from 0
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -868,6 +869,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
 	c.inFailableGoBlock = false               // T1384: the call form handles failability via the failable aggregate it stores, not the sink
+	c.coroResultSlot = nil                    // #68
 	c.stmtTemps = nil                         // T0594: fresh temp state for coroutine body
 	c.stmtTempMap = make(map[value.Value]int) // T0594
 	c.enumCtorTemps = nil                     // B0267
@@ -1126,6 +1128,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr, failable bool) 
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.inCoroutine = savedInCoroutine
 	c.inFailableGoBlock = savedInFailableGoBlock // T1384
+	c.coroResultSlot = savedCoroResultSlot       // #68
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
 	c.panicExitBlock = savedPanicExitBlock
@@ -1864,7 +1867,8 @@ func (c *Compiler) snapshotThisForGoBlock() (value.Value, irtypes.Type, *goThisS
 // or the raw success value for a plain `go {}` one. The single store lowering
 // shared by every producer of a goroutine result: the trailing-expression value,
 // the language-design.md#explicit-concurrency explicit-return value (T1385), the escaping-error path, and the
-// bare-return zero (T1392). T1384. Must be called on a live (non-terminated) block.
+// bare-return zero (T1392). T1384. A coroutine variant (#68) stores into its
+// caller's result slot instead. Must be called on a live (non-terminated) block.
 func (c *Compiler) storeGoResultAgg(agg value.Value) {
 	// The buffer is `pal_alloc(typeSize(bufTy))`, and the store below types its
 	// pointer from `agg` — so a value whose LLVM type is WIDER than the buffer
@@ -1876,6 +1880,12 @@ func (c *Compiler) storeGoResultAgg(agg value.Value) {
 	if bufTy := c.goResultBufferType(); bufTy != nil && !agg.Type().Equal(bufTy) {
 		panic(fmt.Sprintf("codegen: goroutine result store type %s does not match the result buffer type %s",
 			agg.Type(), bufTy))
+	}
+	// #68: a coroutine variant's result buffer is the slot its caller passed in,
+	// typed by the variant's signature and never null.
+	if c.coroResultSlot != nil {
+		c.block.NewStore(agg, c.coroResultSlot)
+		return
 	}
 	gTy := goroutineStructType()
 	currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
@@ -2126,6 +2136,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	savedFailableGoBlockAggType := c.failableGoBlockAggType           // T1384
 	savedFailableGoBlockFinalSuspend := c.failableGoBlockFinalSuspend // T1384
 	savedGoBlockValueResultLLVM := c.goBlockValueResultLLVM           // T1392
+	savedCoroResultSlot := c.coroResultSlot                           // #68
 	c.goExprFireAndForget = false                                     // reset for inner statements (B0109)
 	c.discardedExpr = nil                                             // T1029: inner ExprStmts set their own
 	c.discardAliasArgPtrs = nil                                       // T1029
@@ -2167,6 +2178,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.inCoroutine = true
 	c.inFailableGoBlock = false    // T1384: (re)activated below only for the `go! {}` body
 	c.goBlockValueResultLLVM = nil // T1392: (re)activated below only for a value-producing non-failable body
+	c.coroResultSlot = nil         // #68: the body's result goes through G.result_ptr, not an enclosing variant's slot
 	c.enumCtorTemps = nil          // B0267
 	c.borrowedValueParams = nil    // T0945: coroutine body has no user value params
 	if useGoBlockValuePath {
@@ -2514,6 +2526,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.failableGoBlockAggType = savedFailableGoBlockAggType           // T1384
 	c.failableGoBlockFinalSuspend = savedFailableGoBlockFinalSuspend // T1384
 	c.goBlockValueResultLLVM = savedGoBlockValueResultLLVM           // T1392
+	c.coroResultSlot = savedCoroResultSlot                           // #68
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
 	c.panicExitBlock = savedPanicExitBlock

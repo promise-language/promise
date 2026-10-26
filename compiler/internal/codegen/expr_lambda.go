@@ -160,6 +160,17 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.mutRefPtrs = nil                                  // T1661: lambda has its own ~ params
 	c.mutRefTypes = nil                                 // T1661
 
+	// #68: a lambda is its own function — a `raise` in its body returns from the
+	// lambda, never into an enclosing `go! {}` body's or coroutine variant's sink.
+	savedInFailableGoBlock := c.inFailableGoBlock
+	savedFailableGoBlockAggType := c.failableGoBlockAggType
+	savedFailableGoBlockFinalSuspend := c.failableGoBlockFinalSuspend
+	savedCoroResultSlot := c.coroResultSlot
+	c.inFailableGoBlock = false
+	c.failableGoBlockAggType = nil
+	c.failableGoBlockFinalSuspend = nil
+	c.coroResultSlot = nil
+
 	// Generate lambda body with fresh scope state
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -364,6 +375,11 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.discardAliasArgPtrs = savedDiscardAliasArgPtrs   // T1029
 	c.mutRefPtrs = savedMutRefPtrs                     // T1661
 	c.mutRefTypes = savedMutRefTypes                   // T1661
+
+	c.inFailableGoBlock = savedInFailableGoBlock // #68
+	c.failableGoBlockAggType = savedFailableGoBlockAggType
+	c.failableGoBlockFinalSuspend = savedFailableGoBlockFinalSuspend
+	c.coroResultSlot = savedCoroResultSlot
 
 	// T0100: Track env temp for non-variable lambdas. If this lambda is
 	// assigned to a variable, maybeRegisterEnvFree handles cleanup and the

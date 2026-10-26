@@ -160,9 +160,18 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 	}
 }
 
-// defineFunc generates the body of a single function.
+// defineFunc generates the body of a single function, then — when it can block
+// on wasm32-web — the body of its coroutine variant (#68).
 func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
-	c.fn = fn
+	c.defineFuncBody(fd, fn, nil)
+	if variant := c.coroVariantToDefine(fn); variant != nil {
+		c.defineFuncBody(fd, fn, variant)
+	}
+}
+
+// defineFuncBody generates fd's body into fn, or into fn's coroutine variant
+// when variant is non-nil.
+func (c *Compiler) defineFuncBody(fd *ast.FuncDecl, fn, variant *ir.Func) {
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
@@ -190,9 +199,9 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.borrowOptionalLocals = nil // T1085: clear cross-function stale entries
 	c.currentOpValueParams = nil // T0897: free functions are never operators
 
-	entry := fn.NewBlock(".entry")
-	c.block = entry
-	c.entryBlock = entry
+	vb := c.beginSourceBody(fn, variant)
+	entry := c.entryBlock
+	params := c.fn.Params
 
 	// Allocate parameters and store incoming values
 	obj := c.lookupFunc(fd.Name)
@@ -220,12 +229,12 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 				c.mutRefPtrs = make(map[string]value.Value)
 				c.mutRefTypes = make(map[string]irtypes.Type)
 			}
-			c.mutRefPtrs[p.Name()] = fn.Params[i]
+			c.mutRefPtrs[p.Name()] = params[i]
 			c.mutRefTypes[p.Name()] = innerType
 		} else {
 			alloca := entry.NewAlloca(c.resolveType(p.Type()))
 			alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
-			entry.NewStore(fn.Params[i], alloca)
+			entry.NewStore(params[i], alloca)
 			c.locals[p.Name()] = alloca
 
 			// T0087: Register drop binding for ~ (move) parameters.
@@ -283,6 +292,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 		c.emitCoverageIncrement(idx)
 	}
 
+	c.enterCoroVariantBody(vb)
 	c.genBlock(fd.Body)
 
 	// Ensure the function ends with a terminator
@@ -291,19 +301,23 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 		if len(c.scopeBindings) > 0 {
 			c.emitScopeCleanup(0, false)
 		}
-		if c.canError {
-			resultType := c.currentResultType()
-			if isVoidResult(resultType) {
-				c.block.NewRet(c.wrapOk(nil, resultType))
+		// A variant's fall-through return is endCoroVariantBody's.
+		if vb == nil {
+			if c.canError {
+				resultType := c.currentResultType()
+				if isVoidResult(resultType) {
+					c.block.NewRet(c.wrapOk(nil, resultType))
+				} else {
+					c.block.NewRet(c.wrapOk(c.zeroValue(resultType.Fields[1]), resultType))
+				}
+			} else if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
+				c.block.NewRet(nil)
 			} else {
-				c.block.NewRet(c.wrapOk(c.zeroValue(resultType.Fields[1]), resultType))
+				c.block.NewRet(c.zeroValue(fn.Sig.RetType))
 			}
-		} else if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
-			c.block.NewRet(nil)
-		} else {
-			c.block.NewRet(c.zeroValue(fn.Sig.RetType))
 		}
 	}
+	c.endCoroVariantBody(vb)
 }
 
 // lookupFunc finds a function object in sema info by name.

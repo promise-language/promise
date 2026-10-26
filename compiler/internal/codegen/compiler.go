@@ -634,6 +634,21 @@ type Compiler struct {
 	// failable analog uses failableGoBlockAggType instead.
 	goBlockValueResultLLVM irtypes.Type
 
+	// promise-language/promise#68: coroutine variants of functions that can block
+	// (coro_variant.go). coroVariants is the set of plain function names that get a
+	// `$coro` variant — non-nil only in the final wasm32-web pass, and the only gate
+	// for emitting variants and awaits. coroVariantCapable records every function a
+	// source-body emitter defined, which the analysis pass intersects the blocking
+	// functions with. coroVariantFns maps a plain function name to its declared
+	// variant.
+	coroVariants       map[string]bool
+	coroVariantCapable map[string]bool
+	coroVariantFns     map[string]*ir.Func
+	// The caller-allocated result slot of the coroutine variant being compiled:
+	// storeGoResultAgg stores there instead of through G.result_ptr. nil outside a
+	// variant body.
+	coroResultSlot value.Value
+
 	// noinline wrappers around coro.resume/done/destroy — used by generator consumers
 	// to hide the pattern from LLVM's coro-elide pass (which incorrectly stack-allocates
 	// generator frames when it sees ramp+resume+done+destroy in the same function).
@@ -957,11 +972,41 @@ func wasmDataLayout(llvmMajor int) string {
 	return "e-m:e-p:32:32-i64:64-n32:64-S128"
 }
 
+// compile runs codegen. On wasm32-web it may run twice (promise-language/promise#68):
+// an analysis pass finds the functions that can block (suspendingFuncs), and when
+// there are any, a final pass compiles them a second time as coroutine variants
+// and has coroutine bodies await them, so a goroutine that blocks through a call
+// parks instead of running a nested scheduler loop the reactor cannot return
+// through. The analysis pass ignores CachedInstances so it sees every body: a
+// function's ability to block depends only on its own body and its callees, so
+// every compile of a cached instance unit makes the same variants. Its result is
+// final when nothing can block — the backend still reuses cached instance
+// objects by key when their bodies were generated (compileAndLinkSeparate).
 func compile(file *ast.File, info *sema.Info, target string, opts *CompileOptions) *CompileResult {
-	module := ir.NewModule()
 	if target == "" {
 		target = HostTargetTriple()
 	}
+	if !isWasmWebTriple(target) {
+		return compileOnce(file, info, target, opts, nil)
+	}
+	analysisOpts := CompileOptions{}
+	if opts != nil {
+		analysisOpts = *opts
+	}
+	analysisOpts.CachedInstances = nil
+	analysis := compileOnce(file, info, target, &analysisOpts, nil)
+	ac := analysis.compiler
+	variants := suspendingFuncs(ac.module, ac.funcs["promise_sched_coop_step"], ac.coroVariantCapable)
+	if len(variants) == 0 {
+		return analysis
+	}
+	return compileOnce(file, info, target, opts, variants)
+}
+
+// compileOnce is one codegen pass. coroVariants is the set of functions that
+// get a coroutine variant (nil outside the final wasm32-web pass).
+func compileOnce(file *ast.File, info *sema.Info, target string, opts *CompileOptions, coroVariants map[string]bool) *CompileResult {
+	module := ir.NewModule()
 	module.TargetTriple = target
 	if strings.Contains(target, "wasm32") {
 		layout := ""
@@ -984,7 +1029,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		rootInfo:  info,
 		target:    target,
 		isWasm:    strings.Contains(target, "wasm"),
-		isWasmWeb: strings.Contains(target, "wasm") && strings.Contains(target, "web"),
+		isWasmWeb: isWasmWebTriple(target),
 		isWindows: strings.Contains(target, "windows"),
 		isMacOS:   strings.Contains(target, "apple"),
 		funcs:     make(map[string]*ir.Func),
@@ -1024,6 +1069,9 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		spiralInstances:      make(map[string]bool),
 		cstrGlobals:          make(map[string]*ir.Global),
 		fileNameGlobals:      make(map[string]*ir.Global),
+		coroVariants:         coroVariants,
+		coroVariantCapable:   make(map[string]bool),
+		coroVariantFns:       make(map[string]*ir.Func),
 	}
 
 	// Apply options
@@ -2497,6 +2545,7 @@ type compilerState struct {
 	inFailableGoBlock           bool // T1384
 	failableGoBlockAggType      *irtypes.StructType
 	failableGoBlockFinalSuspend *ir.Block
+	coroResultSlot              value.Value // #68
 }
 
 func (c *Compiler) saveState() compilerState {
@@ -2561,6 +2610,7 @@ func (c *Compiler) saveState() compilerState {
 		inFailableGoBlock:           c.inFailableGoBlock,
 		failableGoBlockAggType:      c.failableGoBlockAggType,
 		failableGoBlockFinalSuspend: c.failableGoBlockFinalSuspend,
+		coroResultSlot:              c.coroResultSlot,
 	}
 	// T1029: a nested function/coroutine body is not the discarded statement; do not
 	// inherit the outer's discarded-expr marker. restoreState brings it back.
@@ -2588,6 +2638,7 @@ func (c *Compiler) saveState() compilerState {
 	c.inFailableGoBlock = false
 	c.failableGoBlockAggType = nil
 	c.failableGoBlockFinalSuspend = nil
+	c.coroResultSlot = nil
 	// T1588: nor the outer's per-name bindings. genIdentExpr consults mutRefPtrs
 	// BEFORE locals, so a leftover entry silently shadows a same-named local of the
 	// nested body and loads through ANOTHER function's parameter pointer. defineFunc
@@ -2677,6 +2728,7 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.inFailableGoBlock = s.inFailableGoBlock
 	c.failableGoBlockAggType = s.failableGoBlockAggType
 	c.failableGoBlockFinalSuspend = s.failableGoBlockFinalSuspend
+	c.coroResultSlot = s.coroResultSlot
 }
 
 // resetBlockTempFloors zeroes the block-value temp floors for a nested function

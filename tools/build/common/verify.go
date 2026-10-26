@@ -111,6 +111,13 @@ type verifyRun struct {
 // were two answers about one tree that could differ — and only the first wrote
 // the record the commit guard reads (T2170).
 func RunVerify(root string, args []string, stdout io.Writer) error {
+	return runVerify(root, args, stdout, (*verifyRun).steps)
+}
+
+// runVerify is RunVerify with the pipeline as a parameter, so a test can hold
+// the result — its shape, its stream and its status — to the contract without
+// taking a lock, building a compiler or running a suite.
+func runVerify(root string, args []string, stdout io.Writer, steps func(*verifyRun) []verifyStep) error {
 	inv, err := ParseInvocation(verifySpec, args)
 	if err != nil {
 		return err
@@ -119,7 +126,7 @@ func RunVerify(root string, args []string, stdout io.Writer) error {
 	case inv.Help:
 		return WriteHelp(stdout, verifySpec, inv.Mode)
 	case inv.Version:
-		return WriteVersion(stdout, inv.Mode, versionText())
+		return WriteVersion(stdout, inv.Mode, versionText(root))
 	}
 	SetObserved(ObservedFor(inv))
 
@@ -133,7 +140,7 @@ func RunVerify(root string, args []string, stdout io.Writer) error {
 
 	r := &verifyRun{root: root, start: time.Now()}
 	defer r.release()
-	results := runVerifySteps(r.steps())
+	results := runVerifySteps(steps(r))
 	res := verifyResult{OK: true, Stages: results, Tree: r.blessed}
 	for _, stage := range results {
 		for _, s := range stage.Steps {
@@ -159,9 +166,11 @@ func RunVerify(root string, args []string, stdout io.Writer) error {
 
 // steps is the pipeline, in order. Two orderings are load-bearing:
 //
-//   - CLEAR IS SECOND, right after the lock. A run that dies — a red step, a
-//     Ctrl+C, a crash — must leave nothing blessed, or the commit guard would
-//     honour a record describing content this run had already begun changing.
+//   - CLEAR IS FIRST, before the lock. A run that dies — a red step, a lock it
+//     could not take or a queue it was stopped in, a Ctrl+C, a crash — must leave
+//     nothing blessed, or the commit guard would honour a record describing
+//     content this run had already begun changing. The record names a tree, so
+//     clearing it outside the exclusion costs another run at most a re-record.
 //   - BUILD PRECEDES THE REPAIRS. `promise format` is the formatter the compiler
 //     carries, and `integration` MEASURES whether anything is still unformatted.
 //     Repairing with a stale binary and being judged by the fresh one would fail
@@ -173,8 +182,8 @@ func RunVerify(root string, args []string, stdout io.Writer) error {
 // after a full suite.
 func (r *verifyRun) steps() []verifyStep {
 	return []verifyStep{
-		{"prepare", "lock", r.stepLock},
 		{"prepare", "clear", r.stepClear},
+		{"prepare", "lock", r.stepLock},
 		{"prepare", "cache", r.stepCache},
 		{"prepare", "build", r.stepBuild},
 		{"repair", "gofmt", r.stepFormatGo},
@@ -199,10 +208,15 @@ func runVerifySteps(steps []verifyStep) []stageResult {
 		res := stepResult{Name: s.name, Status: stepNotRun, ElapsedSeconds: "0"}
 		if !stopped {
 			start := time.Now()
-			err := s.run()
-			if err == nil && Interrupted() {
+			// An interrupt stops the run before its next step, never after one:
+			// a step that completed — the record written — is reported as what it
+			// did, so the result cannot say "failed" beside a written record.
+			var err error
+			if Interrupted() {
 				Progress().Clear()
 				err = errInterrupted
+			} else {
+				err = s.run()
 			}
 			res.ElapsedSeconds = json.Number(strconv.FormatFloat(time.Since(start).Seconds(), 'f', 3, 64))
 			res.Status = stepPassed
@@ -281,12 +295,42 @@ func stepLabel(status string) string {
 
 // stepLock serializes concurrent verify runs across the host (acquireHostScope).
 func (r *verifyRun) stepLock() error {
-	unlock, err := acquireHostScope(r.root)
+	ctx, cancel := interruptible(context.Background())
+	defer cancel()
+	unlock, err := acquireHostScopeCtx(ctx, r.root)
 	if err != nil {
+		if Interrupted() {
+			return errInterrupted
+		}
 		return fmt.Errorf("acquire verify lock: %w", err)
 	}
 	r.unlock = unlock
 	return nil
+}
+
+// interruptible is ctx, ended by the first Ctrl+C. The handler only sets the
+// flag the pipeline reads between steps; a step that blocks — the queue for the
+// host scope has no bound — reads it here instead, so the run ends with its
+// summary rather than waiting for the second Ctrl+C, which exits without one.
+// The watcher stops when the returned context ends, whichever ends it.
+func interruptible(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				if Interrupted() {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return ctx, cancel
 }
 
 // release drops the host-scope exclusion however the run ended.

@@ -292,7 +292,9 @@ func TestParseGoTestJSON_FailuresCarryTheirOwnWords(t *testing.T) {
 		`{"Action":"run","Package":"github.com/promise-language/promise/compiler/internal/codegen","Test":"TestLower"}`,
 		`{"Action":"output","Package":"github.com/promise-language/promise/compiler/internal/codegen","Test":"TestLower","Output":"=== RUN   TestLower\n"}`,
 		`{"Action":"output","Package":"github.com/promise-language/promise/compiler/internal/codegen","Test":"TestLower/call","Output":"    lower_test.go:41: got i32, want i64\n"}`,
+		`{"Action":"output","Package":"github.com/promise-language/promise/compiler/internal/codegen","Test":"TestLower/call","Output":"    --- FAIL: TestLower/call (0.10s)\n"}`,
 		`{"Action":"fail","Package":"github.com/promise-language/promise/compiler/internal/codegen","Test":"TestLower/call","Elapsed":0.1}`,
+		`{"Action":"output","Package":"github.com/promise-language/promise/compiler/internal/codegen","Test":"TestLower","Output":"--- FAIL: TestLower (0.12s)\n"}`,
 		`{"Action":"fail","Package":"github.com/promise-language/promise/compiler/internal/codegen","Test":"TestLower","Elapsed":0.12}`,
 		`{"Action":"fail","Package":"github.com/promise-language/promise/compiler/internal/codegen","Elapsed":0.2}`,
 		`{"ImportPath":"example.com/broken [example.com/broken.test]","Action":"build-output","Output":"broken.go:3:1: syntax error\n"}`,
@@ -305,8 +307,40 @@ func TestParseGoTestJSON_FailuresCarryTheirOwnWords(t *testing.T) {
 	}
 	got := mustJSON(t, run.groups)
 	want := mustJSON(t, []Group{
-		{Name: "compiler/internal/codegen", Members: []Member{{Name: "TestLower", Outcome: OutcomeFail, Detail: "lower_test.go:41: got i32, want i64", Elapsed: 0.12}}},
+		{Name: "compiler/internal/codegen", Members: []Member{{Name: "TestLower", Outcome: OutcomeFail, Detail: "lower_test.go:41: got i32, want i64\n--- FAIL: TestLower/call (0.10s)", Elapsed: 0.12}}},
 		{Name: "example.com/broken", Members: []Member{{Name: "(package)", Outcome: OutcomeFail, Detail: "broken.go:3:1: syntax error"}}},
+	})
+	if got != want {
+		t.Errorf("groups =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// A test that never reports a result — it hung past -timeout, or called
+// os.Exit — gets no fail event of its own, only its package does. It failed
+// all the same, and is counted and named with what it printed; one that hung
+// is a timeout. A test that finished is not blamed.
+func TestParseGoTestJSON_ATestThatNeverReportedFailed(t *testing.T) {
+	const pkg = "example.com/fix/tmo"
+	run := parseGoTestJSON(goEvents(
+		`{"Action":"run","Package":"`+pkg+`","Test":"TestFine"}`,
+		`{"Action":"pass","Package":"`+pkg+`","Test":"TestFine"}`,
+		`{"Action":"run","Package":"`+pkg+`","Test":"TestHang"}`,
+		`{"Action":"output","Package":"`+pkg+`","Test":"TestHang","Output":"=== RUN   TestHang\n"}`,
+		`{"Action":"output","Package":"`+pkg+`","Test":"TestHang","Output":"panic: test timed out after 3s\n\trunning tests:\n\t\tTestHang (3s)\n"}`,
+		`{"Action":"output","Package":"`+pkg+`","Output":"FAIL\texample.com/fix/tmo\t3.007s\n"}`,
+		`{"Action":"fail","Package":"`+pkg+`","Elapsed":3.007}`,
+		`{"Action":"run","Package":"example.com/fix/exit","Test":"TestExit"}`,
+		`{"Action":"output","Package":"example.com/fix/exit","Test":"TestExit","Output":"exit_test.go:9: leaving\n"}`,
+		`{"Action":"fail","Package":"example.com/fix/exit","Elapsed":0.01}`,
+	))
+	if run.failedTests != 2 || run.passedTests != 1 || run.failedPackages != 2 {
+		t.Fatalf("run = %+v, want two failing tests, one passing, two failing packages", run)
+	}
+	got := mustJSON(t, run.groups)
+	want := mustJSON(t, []Group{
+		{Name: pkg, Members: []Member{{Name: "TestHang", Outcome: OutcomeTimeout,
+			Detail: "panic: test timed out after 3s\nrunning tests:\nTestHang (3s)\nFAIL\texample.com/fix/tmo\t3.007s"}}},
+		{Name: "example.com/fix/exit", Members: []Member{{Name: "TestExit", Outcome: OutcomeFail, Detail: "exit_test.go:9: leaving"}}},
 	})
 	if got != want {
 		t.Errorf("groups =\n%s\nwant\n%s", got, want)

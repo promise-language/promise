@@ -69,8 +69,8 @@ Ctrl+C reaches the tool alone — so the tool forwards it, which makes the inter
 path the same whether the signal came from a terminal or from anywhere else.
 
 **A tool does not outlive its launcher.** Each long-running tool arms a watchdog
-(`common/orphan.go`) that exits with code 3 once the process that launched it is
-gone. Without it, killing a harness step leaves the tool running a full suite that
+(`common/orphan.go`) that exits with code 1 — could not complete; 3 is a refusal,
+which a rebuild would answer — once the process that launched it is gone. Without it, killing a harness step leaves the tool running a full suite that
 nobody is reading — and for verify, holding the host-global lock while it does, so
 orphans accumulate and every later run starves waiting for it. A tool launched
 already-detached (ppid 1) is not armed: there is no launcher whose death could mean
@@ -343,8 +343,8 @@ rather than to a phase they have to identify first:
 
 | Stage | Step | Does |
 |-------|------|------|
+| `prepare` | `clear` | Delete `.workspace/verified-tree` — drop any previous blessing, before anything else, so a run that cannot take the lock leaves none behind (see below) |
 | `prepare` | `lock` | Serialize concurrent verify runs across the host (see below) |
-| `prepare` | `clear` | Delete `.workspace/verified-tree` — drop any previous blessing (see below) |
 | `prepare` | `cache` | Point `PROMISE_HOME` at the repo-local `.promise-home/`, and clear any inherited `PROMISE_CACHE` so the whole cache lives there |
 | `prepare` | `build` | The full build pipeline (see above) |
 | `repair` | `gofmt` | `gofmt -w .` |
@@ -471,10 +471,12 @@ is always the formatted tree and unformatted content cannot be blessed at all.
 
 Three details are load-bearing:
 
-- **The `clear` step runs before anything else**, immediately after the
-  host-scope exclusion is taken. A run that dies mid-way — a red step, a Ctrl+C,
-  a crash — must leave nothing blessed, or the gate would honour a record
-  describing content the dead run had already begun changing.
+- **The `clear` step runs before anything else**, before the host-scope
+  exclusion is even taken. A run that dies mid-way — a red step, a lock it could
+  not take or a queue it was stopped in, a Ctrl+C, a crash — must leave nothing
+  blessed, or the gate would honour a record describing content the dead run had
+  already begun changing. The first Ctrl+C ends a run queued for the exclusion
+  too, with its summary.
 - **The tree is computed over a temp index seeded from a copy of the real index**,
   so it is exactly what `git add -A` would stage, and the real index is untouched.
   Ignore rules apply only to untracked paths, so any other seed gets the

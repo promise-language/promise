@@ -101,6 +101,12 @@ func judge(root string, env Envelope, terms Terms) Verdict {
 		failing = append(failing, m.Name)
 		judgements = append(judgements, fmt.Sprintf("%s is %s, %s%s", m.Name, m.String(), strings.Join(failed, " and "), whereFrom(env.Groups, m.Name)))
 	}
+	evidence, rest := refusalEvidence(env.Groups)
+	// The note belongs to the numbers: an incomplete run's reason is the gate's
+	// own account of why, and the note after it would deny that it gave one.
+	if len(evidence) == 0 && len(judgements) > 0 {
+		judgements[len(judgements)-1] += ", and the gate reported nothing about why"
+	}
 	if env.Incomplete != "" {
 		judgements = append(judgements, "this run measured less than a full one, so it cannot be acceptable: "+env.Incomplete)
 	}
@@ -110,13 +116,8 @@ func judge(root string, env Envelope, terms Terms) Verdict {
 	}
 	v.Acceptable = false
 	var b strings.Builder
-	evidence, rest := refusalEvidence(env.Groups)
-	for i, j := range judgements {
-		b.WriteString(j)
-		if i == len(judgements)-1 && len(evidence) == 0 {
-			b.WriteString(", and the gate reported nothing about why")
-		}
-		b.WriteString(".\n")
+	for _, j := range judgements {
+		b.WriteString(j + ".\n")
 	}
 	for _, e := range evidence {
 		b.WriteString(e + "\n")

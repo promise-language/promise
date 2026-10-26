@@ -27,6 +27,7 @@ package common
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -154,7 +155,9 @@ func measureBuildsWith(root string, capture captureFunc) (measurement, error) {
 			return measurement{}, fmt.Errorf("go build in %s: %w: %s", dir, err, firstRealLine(stderr))
 		}
 		n += len(failures)
-		groups = append(groups, Group{Name: relToRoot(root, dir), Members: failures})
+		if len(failures) > 0 {
+			groups = append(groups, Group{Name: relToRoot(root, dir), Members: failures})
+		}
 	}
 	return measurement{
 		metrics:    append(sharedCount("go", "unbuildable_packages", n), Count("build_failures", 0)),
@@ -320,6 +323,10 @@ func checkSweepGroups(output string) []Group {
 			// The unit's diagnostics end at the next result line or the summary.
 			flush()
 			g = nil
+		case name != "" && strings.HasPrefix(line, " "):
+			// The diagnostic's source excerpt is indented, and its first line may
+			// be nothing but the indentation of an empty source line.
+			lines = append(lines, line)
 		case strings.TrimSpace(line) == "":
 			flush()
 		case checkDiagnosticRe.MatchString(line):
@@ -427,14 +434,19 @@ type goTestRun struct {
 // parseGoTestJSON reads a `go test -json` stream. A test is counted at the top
 // level only — a subtest's outcome is its parent's — and what a subtest printed
 // is its parent's detail, so a failure carries the subtest that failed it. A
-// package that failed with no failing test of its own (it did not build, or its
-// binary died outside any test) is a member too, under "(package)", carrying
-// what go printed for it. A line that is not an event is not one of this
-// stream's, and is skipped.
+// test that started in a package that failed and never reported a result — it
+// hung past -timeout, called os.Exit, or the runtime died under it — failed
+// too, and is a member with what it printed: go reports no result for it, only
+// the package's. A package that failed with no failing test of its own (it did
+// not build, or its binary died outside any test) is a member too, under
+// "(package)", carrying what go printed for it. A line that is not an event is
+// not one of this stream's, and is skipped.
 func parseGoTestJSON(stdout string) goTestRun {
 	type pkgState struct {
 		output, build strings.Builder
 		tests         map[string]*strings.Builder
+		started       []string        // top-level tests in the order they ran
+		ended         map[string]bool // top-level tests that reported a result
 		failed        bool
 		failedBuild   string
 		members       []Member
@@ -445,7 +457,7 @@ func parseGoTestJSON(stdout string) goTestRun {
 	pkg := func(name string) *pkgState {
 		p, ok := pkgs[name]
 		if !ok {
-			p = &pkgState{tests: map[string]*strings.Builder{}}
+			p = &pkgState{tests: map[string]*strings.Builder{}, ended: map[string]bool{}}
 			pkgs[name] = p
 			order = append(order, name)
 		}
@@ -482,9 +494,15 @@ func parseGoTestJSON(stdout string) goTestRun {
 			// The package's own pass or skip: no test result.
 		case e.Test != top:
 			// A subtest's own result: its parent reports the outcome.
+		case e.Action == "run":
+			p.started = append(p.started, top)
+		case e.Action == "skip":
+			p.ended[top] = true
 		case e.Action == "pass":
+			p.ended[top] = true
 			run.passedTests++
 		case e.Action == "fail":
+			p.ended[top] = true
 			run.failedTests++
 			detail := ""
 			if b := p.tests[top]; b != nil {
@@ -501,6 +519,21 @@ func parseGoTestJSON(stdout string) goTestRun {
 			continue
 		}
 		members := p.members
+		for _, top := range p.started {
+			if !p.failed || p.ended[top] {
+				continue
+			}
+			run.failedTests++
+			said := ""
+			if b := p.tests[top]; b != nil {
+				said = b.String()
+			}
+			outcome := OutcomeFail
+			if strings.Contains(said+p.output.String(), "panic: test timed out") {
+				outcome = OutcomeTimeout
+			}
+			members = append(members, newMember(top, outcome, goTestFailureText(said+p.output.String())))
+		}
 		if p.failed && len(members) == 0 {
 			detail := p.output.String()
 			if p.failedBuild != "" {
@@ -516,13 +549,17 @@ func parseGoTestJSON(stdout string) goTestRun {
 }
 
 // goTestFailureText is what a failing test printed, without go's own framing
-// lines: the "=== RUN" and "--- FAIL:" lines say which test, and the group and
-// member already do.
+// lines: the "=== RUN" and "--- PASS:" lines, and the test's own "--- FAIL:",
+// say which test, and the group and member already do. A failing subtest's
+// "--- FAIL: TestTable/b" is kept: nothing else names which case failed.
 func goTestFailureText(output string) string {
 	var keep []string
 	for _, line := range strings.Split(output, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "=== ") || strings.HasPrefix(trimmed, "--- ") || trimmed == "" {
+		failed, isFail := strings.CutPrefix(trimmed, "--- FAIL: ")
+		failed, _, _ = strings.Cut(failed, " ")
+		subtestFailed := isFail && strings.Contains(failed, "/")
+		if strings.HasPrefix(trimmed, "=== ") || (strings.HasPrefix(trimmed, "--- ") && !subtestFailed) || trimmed == "" {
 			continue
 		}
 		keep = append(keep, trimmed)
@@ -626,32 +663,63 @@ func suiteMeasurement(root, toolchain, what, jsonl string, runErr error) (measur
 		return measurement{}, fmt.Errorf("reading %s's records: %w", what, err)
 	}
 	failed, leaked, passed := 0, 0, 0
-	var groups []Group
 	for _, file := range out.Files {
-		g := Group{Name: file.File}
 		for _, r := range file.Tests {
 			switch {
 			case r.Status == OutcomePass:
 				passed++
-				continue
 			case r.Status == OutcomeLeak:
 				leaked++
 			case slices.Contains(suiteFailedStatuses, r.Status):
 				failed++
 			}
-			m := newMember(r.Test, r.Status, r.Context)
-			m.Elapsed = r.Elapsed
-			g.Members = append(g.Members, m)
 		}
-		groups = append(groups, g)
 	}
+	groups := recordGroups(out.Files)
 	if len(out.Files) == 0 {
 		if runErr != nil {
 			return measurement{}, fmt.Errorf("%s reported no test records (%v), so nothing was measured", what, runErr)
 		}
 		return measurement{}, fmt.Errorf("%s reported no test records, so nothing was measured", what)
 	}
-	return measurement{metrics: suiteMetrics(toolchain, failed, leaked, passed), groups: groups}, nil
+	m := measurement{metrics: suiteMetrics(toolchain, failed, leaked, passed), groups: groups}
+	// A runner stopped by a signal — the machine killed it for its memory, say
+	// — reported only the tests it reached: counts that read like a smaller,
+	// clean suite. A runner that exits non-zero on its own has said why in its
+	// records.
+	if stoppedBySignal(runErr) {
+		m.incomplete = fmt.Sprintf("%s was stopped (%v) before it finished, so these counts cover only the tests it reported", what, runErr)
+	}
+	return m, nil
+}
+
+// stoppedBySignal reports whether err is a child that did not exit but was
+// ended by a signal, so that what it reported is however far it had got.
+func stoppedBySignal(err error) bool {
+	var exit *exec.ExitError
+	return errors.As(err, &exit) && !exit.Exited()
+}
+
+// recordGroups is a suite's evidence: a group per test file, a member per
+// record that did not pass, in the runner's own words. A file every test of
+// which passed has nothing to say about why, and adds no group.
+func recordGroups(files []TestFileGroup) []Group {
+	var groups []Group
+	for _, file := range files {
+		g := Group{Name: file.File}
+		for _, r := range file.Tests {
+			if r.Status == OutcomePass {
+				continue
+			}
+			m := newMember(r.Test, r.Status, r.Context)
+			m.Elapsed = r.Elapsed
+			g.Members = append(g.Members, m)
+		}
+		if len(g.Members) > 0 {
+			groups = append(groups, g)
+		}
+	}
+	return groups
 }
 
 // suiteMetrics is what one Promise suite reports, under the names every suite

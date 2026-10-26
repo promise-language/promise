@@ -486,3 +486,85 @@ func TestSumMetrics_ACompositionSumsSharedNames(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckAgainstDeclaration_HoldsALeafToItsRow: what a leaf reports must be
+// what its --list row declares — no undeclared metric, no other kind of number,
+// no name twice — and every member must be one §3 admits: named, with an
+// outcome from the vocabulary and no negative time. A complete run missing a
+// declared metric is made incomplete rather than passing for nothing wrong.
+func TestCheckAgainstDeclaration_HoldsALeafToItsRow(t *testing.T) {
+	declared := sharedCount("go", "unformatted_files", 0)
+	member := func(m Member) []Group { return []Group{{Name: "gofmt", Members: []Member{m}}} }
+	for _, tc := range []struct {
+		name string
+		in   measurement
+		want string
+	}{
+		{"an undeclared metric", measurement{metrics: append(declared, Count("stray", 1))}, `"stray", which this gate does not declare`},
+		{"another kind of number", measurement{metrics: []Metric{Size("unformatted_files", 1, unitBytes), declared[1]}}, "which this gate declares as int"},
+		{"a name twice", measurement{metrics: append(declared, declared[0])}, "twice"},
+		{"a member with no name", measurement{metrics: declared, groups: member(Member{Outcome: OutcomeFail})}, "no name"},
+		{"an outcome outside the vocabulary", measurement{metrics: declared, groups: member(Member{Name: "a.go", Outcome: "broken"})}, `outcome "broken"`},
+		{"a negative elapsed", measurement{metrics: declared, groups: member(Member{Name: "a.go", Outcome: OutcomeFail, Elapsed: -1})}, "negative elapsed"},
+	} {
+		if _, err := checkAgainstDeclaration("", "formatted:go", tc.in); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want it to say %q", tc.name, err, tc.want)
+		}
+	}
+	m, err := checkAgainstDeclaration("", "formatted:go", measurement{metrics: declared[:1]})
+	if err != nil || !strings.Contains(m.incomplete, "go_unformatted_files") {
+		t.Errorf("a missing declared metric: err = %v, incomplete = %q; want it named as incomplete", err, m.incomplete)
+	}
+	if m, err := checkAgainstDeclaration("", "formatted:go", measurement{metrics: declared, groups: member(newMember("a.go", OutcomeFail, ""))}); err != nil || m.incomplete != "" {
+		t.Errorf("a complete, well-formed run: err = %v, incomplete = %q", err, m.incomplete)
+	}
+}
+
+// TestEncodeEnvelope_EndsWithinTheBound: an envelope that fits is written as
+// measured; one that does not gives up evidence a step at a time — the tail of
+// each detail before the details, the details before the members — so a run
+// with many failures keeps each one's head, and even one with thousands ends
+// within the bound with its metrics whole.
+func TestEncodeEnvelope_EndsWithinTheBound(t *testing.T) {
+	envelope := func(members, detailBytes int) Envelope {
+		head := "lower_test.go:41: got i32, want i64\n"
+		g := Group{Name: "compiler/internal/codegen"}
+		for i := range members {
+			g.Members = append(g.Members, Member{Name: fmt.Sprintf("TestLower%d", i), Outcome: OutcomeFail,
+				Detail: head + strings.Repeat("x", detailBytes)})
+		}
+		return Envelope{SchemaVersion: 1, Gate: "tested:go", Target: HostTarget(),
+			Metrics: sharedCount("go", "failed_tests", members), Groups: []Group{g}}
+	}
+	decode := func(out []byte) Envelope {
+		t.Helper()
+		var env Envelope
+		if err := json.Unmarshal(out, &env); err != nil {
+			t.Fatalf("not an envelope: %v", err)
+		}
+		return env
+	}
+
+	small := envelope(3, 100)
+	out, err := encodeEnvelope(small)
+	if err != nil || mustJSON(t, decode(out).Groups) != mustJSON(t, small.Groups) {
+		t.Errorf("an envelope within the bound was changed: err = %v", err)
+	}
+
+	// 400 details of 4 KB do not fit; 400 of 1 KB do, so each keeps its head.
+	out, err = encodeEnvelope(envelope(400, 4000))
+	if err != nil || len(out) > maxEnvelopeBytes {
+		t.Fatalf("400 members: %d bytes, err = %v", len(out), err)
+	}
+	if got := decode(out).Groups[0].Members; len(got) != 400 || !strings.HasPrefix(got[399].Detail, "lower_test.go:41:") {
+		t.Errorf("400 members: kept %d, last detail %.40q; want all, each with its head", len(got), got[len(got)-1].Detail)
+	}
+
+	out, err = encodeEnvelope(envelope(40000, 100))
+	if err != nil || len(out) > maxEnvelopeBytes {
+		t.Fatalf("40000 members: %d bytes, err = %v", len(out), err)
+	}
+	if got := decode(out); metricInts(got.Metrics)["failed_tests"] != 40000 {
+		t.Errorf("the metrics were touched: %v", metricInts(got.Metrics))
+	}
+}

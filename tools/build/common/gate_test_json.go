@@ -180,17 +180,23 @@ const (
 // is applied at every site that builds a TestRecord's Context, so no gate
 // caller can emit a context line large enough to deadlock the runner drain.
 func clampContext(ctx string) string {
+	return clampText(ctx, maxContextLines, maxContextBytes)
+}
+
+// clampText is clampContext to a bound of the caller's: the envelope's own
+// bound narrows a member's detail further when a run has many (encodeEnvelope).
+func clampText(ctx string, maxLines, maxBytes int) string {
 	if ctx == "" {
 		return ctx
 	}
 	truncated := false
-	if lines := strings.Split(ctx, "\n"); len(lines) > maxContextLines {
-		ctx = strings.Join(lines[:maxContextLines], "\n")
+	if lines := strings.Split(ctx, "\n"); len(lines) > maxLines {
+		ctx = strings.Join(lines[:maxLines], "\n")
 		truncated = true
 	}
-	if len(ctx) > maxContextBytes {
+	if len(ctx) > maxBytes {
 		// Trim to a valid UTF-8 boundary so the marker reads cleanly.
-		ctx = strings.ToValidUTF8(ctx[:maxContextBytes], "")
+		ctx = strings.ToValidUTF8(ctx[:maxBytes], "")
 		truncated = true
 	}
 	if truncated {

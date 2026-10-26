@@ -257,6 +257,14 @@ func TestJudge_NoEvidenceSaysSo(t *testing.T) {
 	if v := judge(t.TempDir(), env, terms); !strings.Contains(v.Detail, "build_failures is 1, cap at_most 0, and the gate reported nothing about why.") {
 		t.Errorf("detail = %q", v.Detail)
 	}
+	// An incomplete run's reason is the gate's account of why: the note stays
+	// with the numbers, and the reason is relayed whole after them.
+	env.Incomplete = "the build did not complete"
+	v := judge(t.TempDir(), env, terms)
+	if !strings.Contains(v.Detail, "build_failures is 1, cap at_most 0, and the gate reported nothing about why.\n") ||
+		!strings.Contains(v.Detail, ": the build did not complete.\n") {
+		t.Errorf("detail = %q", v.Detail)
+	}
 }
 
 // A composition's remedy is that of the leaves declaring what failed, and no

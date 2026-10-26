@@ -60,7 +60,7 @@ func RunRun(root string, args []string, stdin io.Reader, stdout io.Writer) error
 	case inv.Help:
 		return WriteHelp(stdout, spec, inv.Mode)
 	case inv.Version:
-		return WriteVersion(stdout, inv.Mode, versionText())
+		return WriteVersion(stdout, inv.Mode, versionText(root))
 	}
 	SetObserved(ObservedFor(inv))
 
@@ -68,7 +68,7 @@ func RunRun(root string, args []string, stdin io.Reader, stdout io.Writer) error
 		if inv.Flags["list"] {
 			return writeRunList(root, stdout, inv.Mode)
 		}
-		return BareInvocation(spec, versionText())
+		return BareInvocation(spec, versionText(root))
 	}
 	// A command is dispatched before a gate is looked for, because the two
 	// share one namespace and a name cannot be both (CommandGateCollisions).
@@ -87,12 +87,16 @@ func RunRun(root string, args []string, stdin io.Reader, stdout io.Writer) error
 }
 
 // versionText is what -version reports: the tools source hash this binary was
-// stamped with, which is the hash its staleness check compares.
-func versionText() string {
-	if h := ToolHash(); h != "" {
-		return h
+// stamped with, which is the hash its staleness check compares. A binary that
+// got this far passed that check (RefuseUnlessFit), so the stamp IS the tree's
+// hash, and it is read from the tree rather than carried in a variable — the
+// same answer ./make -version gives.
+func versionText(root string) string {
+	h, err := ToolsSourceHash(root)
+	if err != nil {
+		return "unknown"
 	}
-	return "unknown"
+	return h
 }
 
 // runOneGate is the by-hand path: execute bin/gate as a process — the same
@@ -115,9 +119,7 @@ func runOneGate(root, name string, mode OutputMode, stdout io.Writer) error {
 	if errors.As(runErr, &exit) && exit.ExitCode() == ExitRefused {
 		// The gate declined to act and said why on stderr; that refusal is
 		// this run's, unchanged.
-		_, relative := MakeCommands(root)
-		return refuse(stdout, mode, &Refusal{Condition: RefusalStale, Recovery: relative,
-			Detail: "bin/gate refused to measure " + name})
+		return refuse(stdout, mode, gateRefusal(root, cmd.Path, name))
 	}
 	if len(bytes.TrimSpace(out)) == 0 {
 		if runErr != nil {
@@ -149,6 +151,27 @@ func runOneGate(root, name string, mode OutputMode, stdout io.Writer) error {
 		return &reportedExit{code: 1}
 	}
 	return nil
+}
+
+// gateRefusal is the refusal a gate gave when asked for an envelope. In that
+// protocol mode it says why on stderr only, so the object is asked for again
+// where the gate writes it as its result — `-version -json`, which a gate unfit
+// to act refuses before reading anything else — and relayed as the gate wrote
+// it: an unstamped gate is not reported as a stale one. A gate that has become
+// fit in between, or answers with something else, is reported as stale.
+func gateRefusal(root, gate, name string) *Refusal {
+	cmd := exec.Command(gate, "-version", "-json")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	var exit *exec.ExitError
+	var r Refusal
+	refused := errors.As(err, &exit) && exit.ExitCode() == ExitRefused
+	if !refused || json.Unmarshal(out, &r) != nil || r.Condition == "" || r.Recovery == "" {
+		_, relative := MakeCommands(root)
+		r = Refusal{Condition: RefusalStale, Recovery: relative}
+	}
+	r.Detail = "bin/gate refused to measure " + name + " (" + r.Condition + ")"
+	return &r
 }
 
 // reportedExit is an outcome already written on stdout: the process ends with

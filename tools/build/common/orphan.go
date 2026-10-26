@@ -6,11 +6,11 @@ import (
 	"time"
 )
 
-// orphanExitCode is what a tool exits with when its launcher died under it.
-// Distinct from 1 (the work ran and failed) and from 75 (the verify lock timed
-// out), because nothing was verified either way and the run must not be read as
-// a verdict on the tree.
-const orphanExitCode = 3
+// orphanExitCode is what a tool exits with when its launcher died under it: 1,
+// could not complete — the tools have four exit statuses and no other. Not 3:
+// that is a refusal, which a caller answers by running ./make and asking again,
+// and an orphan has nothing a rebuild would change.
+const orphanExitCode = 1
 
 // orphanPollInterval is how often WatchForOrphan re-checks. The check is a
 // getppid(2) — cheap enough that this could be far more frequent; 2s is chosen

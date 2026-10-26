@@ -47,7 +47,7 @@ func RunGate(root string, args []string) error {
 	case inv.Help:
 		return WriteHelp(os.Stdout, gateSpec, inv.Mode)
 	case inv.Version:
-		return WriteVersion(os.Stdout, inv.Mode, versionText())
+		return WriteVersion(os.Stdout, inv.Mode, versionText(root))
 	}
 	SetObserved(ObservedFor(inv))
 
@@ -58,7 +58,7 @@ func RunGate(root string, args []string) error {
 		if inv.Flags["list"] {
 			return writeGateList(os.Stdout, root, inv.Mode)
 		}
-		return BareInvocation(gateSpec, versionText())
+		return BareInvocation(gateSpec, versionText(root))
 	}
 	name := inv.Command
 	if !IsContractGate(name) {

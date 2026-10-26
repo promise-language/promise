@@ -59,14 +59,6 @@ type Refusal struct {
 
 func (r *Refusal) Error() string { return r.Detail + " — run " + r.Recovery }
 
-// toolHash is the stamped source hash of the running tool, recorded by
-// RefuseUnlessFit so -version can answer with the hash the check compares.
-var toolHash string
-
-// ToolHash is the running tool's stamped source hash, or "" before
-// RefuseUnlessFit has accepted it.
-func ToolHash() string { return toolHash }
-
 // RefuseUnlessFit is the first thing bin/gate, bin/run and bin/verify do: before
 // the command line is read — -help and -version included — the binary must have
 // been built by ./make from the tree it stands in. One that was not refuses
@@ -77,7 +69,6 @@ func ToolHash() string { return toolHash }
 func RefuseUnlessFit(tool, compiledHash string, args []string, protocol ...string) {
 	refusal := fitness(compiledHash)
 	if refusal == nil {
-		toolHash = compiledHash
 		return
 	}
 	os.Exit(writeRefusal(os.Stdout, os.Stderr, tool, refusal, args, protocol))

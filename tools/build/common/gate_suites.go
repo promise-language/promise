@@ -248,6 +248,9 @@ func measureCoveredWith(root string, goCover, promiseCover func(root string) (st
 		}
 	case !promiseProduced:
 		m.incomplete = "the Promise profile was not produced, so only Go coverage is reported"
+	case stoppedBySignal(promiseErr):
+		// Coverage of the tests it reached, read as the suite's.
+		m.incomplete = fmt.Sprintf("the Promise suite was stopped (%v) before it finished, so its coverage is of the tests it reached", promiseErr)
 	}
 	return m, nil
 }
@@ -425,18 +428,11 @@ func measureInstallVariant(root, variant string) (measurement, error) {
 		}
 		phases.Members = append(phases.Members, newMember(p, OutcomeNotRun, ""))
 	}
-	groups := []Group{phases}
-	for _, file := range out.Files {
-		g := Group{Name: file.File}
-		for _, r := range file.Tests {
-			if r.Status != OutcomePass {
-				m := newMember(r.Test, r.Status, r.Context)
-				m.Elapsed = r.Elapsed
-				g.Members = append(g.Members, m)
-			}
-		}
-		groups = append(groups, g)
+	var groups []Group
+	if len(phases.Members) > 0 {
+		groups = append(groups, phases)
 	}
+	groups = append(groups, recordGroups(out.Files)...)
 	return measurement{metrics: metrics, groups: groups}, nil
 }
 

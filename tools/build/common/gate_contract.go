@@ -764,9 +764,14 @@ func checkAgainstDeclaration(root, name string, m measurement) (measurement, err
 	}
 	for _, g := range m.groups {
 		for _, member := range g.Members {
-			if !validOutcome(member.Outcome) {
+			switch {
+			case member.Name == "":
+				return measurement{}, fmt.Errorf("reported a member of %s with no name", g.Name)
+			case !validOutcome(member.Outcome):
 				return measurement{}, fmt.Errorf("reported %s in %s with outcome %q, which is not one of %s",
 					member.Name, g.Name, member.Outcome, strings.Join(memberOutcomes, ", "))
+			case member.Elapsed < 0:
+				return measurement{}, fmt.Errorf("reported %s in %s with a negative elapsed time", member.Name, g.Name)
 			}
 		}
 	}
@@ -871,43 +876,59 @@ func runContractGate(root, name string, stdout io.Writer) error {
 	return err
 }
 
-// maxEnvelopeBytes bounds what one envelope may weigh, and maxMembersPerGroup
-// is how many members a group keeps when it must be cut. A runner reads a
-// gate's stdout whole, and evidence is the one part that grows without limit: a
-// tree where everything fails names every test, with its output.
-const (
-	maxEnvelopeBytes   = 1 << 20
-	maxMembersPerGroup = 50
-)
+// maxEnvelopeBytes bounds what one envelope may weigh. A runner reads a gate's
+// stdout whole, and evidence is the one part that grows without limit: a tree
+// where everything fails names every test, with its output.
+const maxEnvelopeBytes = 1 << 20
 
-// encodeEnvelope marshals env within maxEnvelopeBytes, giving up evidence in
-// the order it matters least: every member's detail first, then the members
-// past the first maxMembersPerGroup of each group. The metrics — what is
-// judged — and the groups' own metrics are never touched.
+// evidenceCut is one step down encodeEnvelope's ladder: each member's detail
+// held to detailLines lines and detailBytes bytes (0 drops it), and each group
+// to its first members (-1 keeps them all).
+type evidenceCut struct{ detailLines, detailBytes, members int }
+
+// evidenceLadder gives up evidence in the order it matters least: the tail of
+// each detail first — its head is the assertion or the panic — then the
+// details, then the members past the first of each group. The last step keeps
+// no member at all, so the ladder always ends within the bound: the metrics
+// that are judged are a few dozen numbers.
+func evidenceLadder() []evidenceCut {
+	return []evidenceCut{{10, 1024, -1}, {3, 256, -1}, {0, 0, -1}, {0, 0, 50}, {0, 0, 5}, {0, 0, 0}}
+}
+
+// encodeEnvelope marshals env within maxEnvelopeBytes, going down
+// evidenceLadder until it fits. The metrics — what is judged — and the groups'
+// own metrics are never touched.
 func encodeEnvelope(env Envelope) ([]byte, error) {
 	out, err := json.Marshal(env)
-	for _, cut := range []bool{false, true} {
+	full := env.Groups
+	for _, cut := range evidenceLadder() {
 		if err != nil || len(out) <= maxEnvelopeBytes {
 			break
 		}
-		env.Groups = trimEvidence(env.Groups, cut)
+		env.Groups = trimEvidence(full, cut)
 		out, err = json.Marshal(env)
+	}
+	if err == nil && len(out) > maxEnvelopeBytes {
+		return nil, fmt.Errorf("the envelope is %d bytes with no evidence left, past the %d a runner reads", len(out), maxEnvelopeBytes)
 	}
 	return out, err
 }
 
-// trimEvidence is groups without any member's detail, and with each group's
-// members cut to maxMembersPerGroup when cut is set. A copy: the measurement
-// the caller holds keeps everything.
-func trimEvidence(groups []Group, cut bool) []Group {
+// trimEvidence is groups cut as cut says. A copy: the measurement the caller
+// holds keeps everything.
+func trimEvidence(groups []Group, cut evidenceCut) []Group {
 	out := make([]Group, len(groups))
 	for i, g := range groups {
 		members := slices.Clone(g.Members)
-		for j := range members {
-			members[j].Detail = ""
+		if cut.members >= 0 && len(members) > cut.members {
+			members = members[:cut.members]
 		}
-		if cut && len(members) > maxMembersPerGroup {
-			members = members[:maxMembersPerGroup]
+		for j := range members {
+			if cut.detailBytes == 0 {
+				members[j].Detail = ""
+			} else {
+				members[j].Detail = clampText(members[j].Detail, cut.detailLines, cut.detailBytes)
+			}
 		}
 		g.Members = members
 		out[i] = g

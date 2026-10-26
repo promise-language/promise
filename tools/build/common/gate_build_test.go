@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -566,6 +568,26 @@ func TestTestedPromise_MapsTheSummaryToItsMetrics(t *testing.T) {
 	}
 }
 
+// A runner stopped by a signal partway reported only the tests it reached, all
+// of them passing: that is a smaller suite, not a clean one, so the run is
+// incomplete. A file with nothing to report adds no group.
+func TestTestedPromise_ARunnerStoppedPartwayIsIncomplete(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a process killed by a signal")
+	}
+	stubGateBuild(t, &fakeBuild{})
+	root := t.TempDir()
+	records := fmt.Sprintf(`{"file":%q,"test":"test_a","status":"pass","elapsed":0.001}`+"\n", filepath.Join(root, "tests", "a.pr"))
+	killed := exec.Command("sh", "-c", "kill -9 $$").Run()
+	meas, err := measureTestedPromiseWith(root, func(string, string) (string, error) { return records, killed })
+	if err != nil {
+		t.Fatalf("a partial stream is a measurement: %v", err)
+	}
+	if !strings.Contains(meas.incomplete, "was stopped") || len(meas.groups) != 0 {
+		t.Errorf("incomplete = %q, groups = %+v; want the stop named and no empty group", meas.incomplete, meas.groups)
+	}
+}
+
 // A suite that printed no summary measured nothing, and zero failures is not
 // what that means: an envelope of zeroes from a suite that never ran is a pass
 // nobody earned.
@@ -615,6 +637,35 @@ func TestCheckedPromise_MapsTheSummaryToItsMetrics(t *testing.T) {
 		if m.Int != want[m.Name] {
 			t.Errorf("%s = %d, want %d", m.Name, m.Int, want[m.Name])
 		}
+	}
+}
+
+// Each diagnostic is one member, named for its position and carrying its
+// source excerpt in the checker's own words — including an excerpt whose first
+// line is only the indentation of an empty source line, which is not the end of
+// the diagnostic.
+func TestCheckedPromise_EachDiagnosticIsOneMember(t *testing.T) {
+	const output = "FAIL tests/bad (2 errors)\n" +
+		"bad.pr:3:4: mismatched input 'main' expecting {'=>', LBRACE, ';', '`', '!'}\n" +
+		"    \n" +
+		"  > fun main() {\n" +
+		"        ^\n" +
+		"bad.pr:5:2: no viable alternative at input 'y'\n" +
+		"  >   y\n" +
+		"      ^\n" +
+		"\n" +
+		"0 checked, 0 warned, 1 failed (1 units, 2 errors, 0 warnings, 0.100s)\n"
+	groups := checkSweepGroups(output)
+	if len(groups) != 1 || groups[0].Name != "tests/bad" || len(groups[0].Members) != 2 {
+		t.Fatalf("groups = %+v, want tests/bad with one member per diagnostic", groups)
+	}
+	first := groups[0].Members[0]
+	if first.Name != "bad.pr:3:4" || first.Outcome != OutcomeFail ||
+		!strings.HasPrefix(first.Detail, "mismatched input 'main'") || !strings.Contains(first.Detail, "> fun main() {") {
+		t.Errorf("first member = %+v, want bad.pr:3:4 failing with its excerpt", first)
+	}
+	if second := groups[0].Members[1]; second.Name != "bad.pr:5:2" || !strings.Contains(second.Detail, ">   y") {
+		t.Errorf("second member = %+v", second)
 	}
 }
 

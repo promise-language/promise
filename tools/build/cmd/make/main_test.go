@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -13,19 +12,22 @@ import (
 	"github.com/promise-language/promise/tools/build/common"
 )
 
+// under is the seams the test running now has set up (stubSeams), which
+// runMake hands to run.
+var under seams
+
 // stubSeams replaces every seam for one test: hooks wiring does nothing, and a
 // build is recorded and writes a placeholder binary. It
 // returns the names built and the ldflags each was given, in order.
 func stubSeams(t *testing.T) (built *[]string, ldflags *[]string) {
 	t.Helper()
-	savedSetup, savedBuild := setupHooks, buildTool
 	t.Cleanup(func() {
-		setupHooks, buildTool = savedSetup, savedBuild
+		under = seams{}
 		common.SetObserved(true)
 	})
-	setupHooks = func(string) error { return nil }
+	under.setupHooks = func(string) error { return nil }
 	var names, flags []string
-	buildTool = func(root, name, out, lf string) error {
+	under.buildTool = func(root, name, out, lf string) error {
 		names = append(names, name)
 		flags = append(flags, lf)
 		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
@@ -39,23 +41,18 @@ func stubSeams(t *testing.T) (built *[]string, ldflags *[]string) {
 // forbidBuild makes any build attempt fail the test.
 func forbidBuild(t *testing.T) {
 	t.Helper()
-	buildTool = func(root, name, out, lf string) error {
+	under.buildTool = func(root, name, out, lf string) error {
 		t.Errorf("unexpected build of %s", name)
 		return nil
 	}
 }
 
-// fakeRoot lays out the minimum run needs: a git checkout whose .gitignore
-// holds the given lines, and tools/build/cmd with the given tools plus make.
+// fakeRoot lays out the minimum run needs: a .gitignore holding the given
+// lines, and tools/build/cmd with the given tools plus make. It is not a git
+// checkout: building the tools needs nothing but Go.
 func fakeRoot(t *testing.T, ignore []string, tools ...string) string {
 	t.Helper()
-	// Only the checkout's own .gitignore may decide what is ignored.
-	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	root := t.TempDir()
-	if out, err := exec.Command("git", "init", "-q", root).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
 	writeFile(t, filepath.Join(root, ".gitignore"), strings.Join(ignore, "\n")+"\n")
 	for _, name := range append([]string{"make"}, tools...) {
 		writeFile(t, filepath.Join(root, "tools", "build", "cmd", name, "main.go"), "package main\n\nfunc main() {}\n")
@@ -91,7 +88,7 @@ func markUpToDate(t *testing.T, root string, tools ...string) {
 func runMake(t *testing.T, root string, argv ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	var out, errb bytes.Buffer
-	err = run(root, argv, &out, &errb)
+	err = run(root, argv, &out, &errb, under)
 	return out.String(), errb.String(), err
 }
 
@@ -328,8 +325,8 @@ func TestNarrationGoesToStderr(t *testing.T) {
 
 func TestBuildFailure(t *testing.T) {
 	stubSeams(t)
-	succeed := buildTool
-	buildTool = func(root, name, out, lf string) error {
+	succeed := under.buildTool
+	under.buildTool = func(root, name, out, lf string) error {
 		if name == "beta" {
 			return os.ErrPermission
 		}
@@ -371,6 +368,22 @@ func TestRefusesCheckoutNotIgnoring(t *testing.T) {
 	}
 }
 
+// TestReadsTheCheckoutsOwnGitignore: any spelling that ignores the top-level
+// directory will do, and nothing but the committed .gitignore counts — a line
+// in this clone's .git/info/exclude ignores nothing for the next clone.
+func TestReadsTheCheckoutsOwnGitignore(t *testing.T) {
+	stubSeams(t)
+	root := fakeRoot(t, []string{"# tools", "bin/", "  /.workspace  ", ".home"}, "alpha")
+	if _, _, err := runMake(t, root, "-json"); err != nil {
+		t.Errorf("err = %v, want every spelling accepted", err)
+	}
+	root = fakeRoot(t, []string{"/bin/", "/.workspace/"}, "alpha")
+	writeFile(t, filepath.Join(root, ".git", "info", "exclude"), "/.home/\n")
+	if _, _, err := runMake(t, root, "-json"); err == nil || !strings.Contains(err.Error(), ".home/ is not ignored") {
+		t.Errorf("err = %v, want .home/ refused although .git/info/exclude lists it", err)
+	}
+}
+
 func TestRefusesWorkspaceToolCollision(t *testing.T) {
 	stubSeams(t)
 	forbidBuild(t)
@@ -406,5 +419,22 @@ func TestRefusesUnparseableWorkspaceProject(t *testing.T) {
 	_, _, err := runMake(t, root, "-json")
 	if common.ExitCode(err) != 1 || !strings.Contains(err.Error(), ".workspace/project.json") {
 		t.Errorf("err = %v, want a refusal naming .workspace/project.json", err)
+	}
+}
+
+// TestWiresHooksOnEveryRun: ./make is the bootstrap, so the hooks are wired
+// whether it builds or finds bin/ current — a clone whose tools were built
+// before the hooks existed gets them on its next ./make.
+func TestWiresHooksOnEveryRun(t *testing.T) {
+	stubSeams(t)
+	wired := 0
+	under.setupHooks = func(string) error { wired++; return nil }
+	root := fakeRoot(t, allIgnored, "alpha")
+	if _, _, err := runMake(t, root, "-json"); err != nil || wired != 1 {
+		t.Fatalf("a building run: err = %v, wired %d times, want once", err, wired)
+	}
+	forbidBuild(t)
+	if _, _, err := runMake(t, root, "-json"); err != nil || wired != 2 {
+		t.Errorf("an up-to-date run: err = %v, wired %d times in all, want twice", err, wired)
 	}
 }

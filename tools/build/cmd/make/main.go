@@ -15,7 +15,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -34,19 +33,19 @@ var spec = common.ToolSpec{
 	},
 }
 
-// The seams tests replace: each reaches outside the checkout's files (git's
-// config, the Go toolchain).
-var (
-	setupHooks = wireHooks
-	buildTool  = goBuild
-)
+// seams are what a run reaches outside the checkout's files through — git's
+// config and the Go toolchain — so a test can stand in for each.
+type seams struct {
+	setupHooks func(root string) error
+	buildTool  func(root, name, out, ldflags string) error
+}
 
 func main() {
 	root, err := bootstrapRoot()
 	if err != nil {
 		os.Exit(common.Fail("make", err))
 	}
-	os.Exit(common.Fail("make", run(root, os.Args[1:], os.Stdout, os.Stderr)))
+	os.Exit(common.Fail("make", run(root, os.Args[1:], os.Stdout, os.Stderr, seams{wireHooks, goBuild})))
 }
 
 // result is the JSON answer on stdout. Removed is always empty — ./make
@@ -61,7 +60,7 @@ type result struct {
 // result, on stdout; progress is narration, written to stderr only when someone
 // is watching. The error it returns is what main hands to common.Fail: a
 // *common.UsageError (exit 2) or a refusal or failure (exit 1).
-func run(root string, argv []string, stdout, stderr io.Writer) error {
+func run(root string, argv []string, stdout, stderr io.Writer, via seams) error {
 	start := time.Now()
 
 	inv, err := common.ParseInvocation(spec, argv)
@@ -97,7 +96,7 @@ func run(root string, argv []string, stdout, stderr io.Writer) error {
 	// Configure git hooks before any short-circuit. ./make is the bootstrap
 	// entry point — running it once on a fresh clone enables hooks. Idempotent
 	// and fast (a single `git config` call), so it's safe to do unconditionally.
-	if err := setupHooks(root); err != nil {
+	if err := via.setupHooks(root); err != nil {
 		fmt.Fprintf(stderr, "warning: git hooks setup failed: %v\n", err)
 	}
 	if err := checkIgnored(root); err != nil {
@@ -126,11 +125,14 @@ func run(root string, argv []string, stdout, stderr io.Writer) error {
 	if upToDate {
 		fmt.Fprintf(summary, "Tools up to date (%d tools, hash: %s..)\n", len(tools), hash[:12])
 	} else {
-		if built, err = buildTools(root, binDir, tools, hash, narr, stderr); err != nil {
+		if built, err = buildTools(root, binDir, tools, hash, narr, stderr, via.buildTool); err != nil {
 			return err
 		}
-		// Write hash sidecar for up-to-date check
-		os.WriteFile(hashFile, []byte(hash+"\n"), 0o644)
+		// Write hash sidecar for up-to-date check. The tools are built either
+		// way; without it the next run rebuilds them, so say why.
+		if err := os.WriteFile(hashFile, []byte(hash+"\n"), 0o644); err != nil {
+			fmt.Fprintf(stderr, "warning: the next ./make will rebuild every tool: %v\n", err)
+		}
 		// Invalidate gate values — tools changed, prior verify results are stale
 		common.InvalidateGateValues(root)
 		fmt.Fprintf(summary, "%d tools built\n", len(built))
@@ -153,32 +155,36 @@ func wireHooks(root string) error {
 	return common.RunSetup(root)
 }
 
-// mustBeIgnored is what ./make and the tools it builds write into the checkout,
-// each with the .gitignore line that keeps it out of every commit.
-var mustBeIgnored = []struct{ path, line string }{
-	{"bin/", "/bin/"},
-	{".workspace/", "/.workspace/"},
-	{".home/", "/.home/"},
-}
+// mustBeIgnored is each top-level directory ./make and the tools it builds write
+// into the checkout, which the checkout's .gitignore keeps out of every commit.
+var mustBeIgnored = []string{"bin", ".workspace", ".home"}
 
-// checkIgnored refuses a checkout whose git would pick up what ./make and the
-// tools write: building into it would leave binaries and per-clone state one
-// `git add -A` away from a commit.
+// checkIgnored refuses a checkout whose .gitignore would let git pick up what
+// ./make and the tools write: building into it would leave binaries and
+// per-clone state one `git add -A` away from a commit.
+//
+// It reads the committed .gitignore itself rather than asking git. git also
+// honours this clone's .git/info/exclude and the user's own ignore file, so a
+// checkout whose .gitignore lacks a line would pass on the machine that has one
+// and commit the directory from every other clone; and building the tools needs
+// nothing but Go.
 func checkIgnored(root string) error {
+	data, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("will not build: cannot read .gitignore to see what this checkout ignores: %w", err)
+	}
+	lines := strings.Split(string(data), "\n")
+	for i := range lines {
+		lines[i] = strings.TrimSpace(lines[i])
+	}
 	var missing []string
-	for _, m := range mustBeIgnored {
-		out, err := exec.Command("git", "-C", root, "check-ignore", "-q", "--", m.path).CombinedOutput()
-		var exit *exec.ExitError
-		switch {
-		case err == nil: // exit 0: ignored
-		case errors.As(err, &exit) && exit.ExitCode() == 1:
-			missing = append(missing, fmt.Sprintf("%s is not ignored: add the line %s to .gitignore", m.path, m.line))
-		default:
-			msg := strings.TrimSpace(string(out))
-			if msg == "" {
-				msg = err.Error()
-			}
-			return fmt.Errorf("cannot tell whether this checkout ignores %s: git check-ignore: %s", m.path, msg)
+	for _, dir := range mustBeIgnored {
+		// Each spelling ignores the top-level directory.
+		ignored := slices.ContainsFunc([]string{"/" + dir + "/", "/" + dir, dir + "/", dir}, func(s string) bool {
+			return slices.Contains(lines, s)
+		})
+		if !ignored {
+			missing = append(missing, fmt.Sprintf("%s/ is not ignored: add the line /%s/ to .gitignore", dir, dir))
 		}
 	}
 	if len(missing) > 0 {
@@ -221,7 +227,7 @@ func checkWorkspaceTools(root string, tools []string) error {
 		Tools []string `json:"tools"`
 	}
 	if err := json.Unmarshal(data, &project); err != nil {
-		return fmt.Errorf("will not build: %s cannot be parsed, so which tools a setup installed is unknown: %v", workspaceProject, err)
+		return fmt.Errorf("will not build: %s cannot be parsed, so which tools a setup installed is unknown: %w", workspaceProject, err)
 	}
 	var clash []string
 	for _, name := range tools {
@@ -282,7 +288,7 @@ func bootstrapRoot() (string, error) {
 // buildTools compiles every discovered build tool into bin/ and returns the
 // names it built. Progress goes to narr, each failure to stderr; the error names
 // the failed count if any tool fails to build.
-func buildTools(root, binDir string, tools []string, hash string, narr, stderr io.Writer) ([]string, error) {
+func buildTools(root, binDir string, tools []string, hash string, narr, stderr io.Writer, buildTool func(root, name, out, ldflags string) error) ([]string, error) {
 	fmt.Fprintf(narr, "Building %d tools (hash: %s..)\n", len(tools), hash[:12])
 
 	// Every tool is built for exactly one repository and carries which one, so

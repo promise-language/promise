@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +9,79 @@ import (
 	"strings"
 	"testing"
 )
+
+// TestFitness_EachUnfitBinaryRefusesWithItsCondition: a binary stamped from the
+// tree in front of it may act; one go build made, one stamped from another tools
+// tree, and one whose stamped repository is gone each refuse, naming why, with
+// ./make as the recovery.
+func TestFitness_EachUnfitBinaryRefusesWithItsCondition(t *testing.T) {
+	repo, err := RootForTests()
+	if err != nil {
+		t.Fatalf("RootForTests: %v", err)
+	}
+	hash, err := ToolsSourceHash(repo)
+	if err != nil {
+		t.Fatalf("ToolsSourceHash: %v", err)
+	}
+	withBakedRoot(t, repo)
+	if r := fitness(hash); r != nil {
+		t.Fatalf("fitness(current hash) = %+v, want nil", r)
+	}
+	_, relative := MakeCommands(repo)
+	for _, tc := range []struct {
+		name, hash, root, want string
+	}{
+		{"built by go build", "dev", repo, RefusalUnstamped},
+		{"carrying no stamp", "", repo, RefusalUnstamped},
+		{"stamped from another tree", "not-the-hash-of-any-real-tools-tree", repo, RefusalStale},
+		{"its repository gone", hash, filepath.Join(t.TempDir(), "gone"), RefusalRepositoryUnreachable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withBakedRoot(t, tc.root)
+			r := fitness(tc.hash)
+			if r == nil || r.Condition != tc.want || r.Recovery != relative {
+				t.Errorf("fitness(%q) = %+v, want condition %q, recovery %q", tc.hash, r, tc.want, relative)
+			}
+		})
+	}
+}
+
+// TestWriteRefusal_WhereTheRefusalGoes: the refusal is the result, so it goes
+// where the mode in force puts one — the {condition, recovery} object, and
+// nothing else, in JSON; one line for a person — except in a protocol mode
+// spelled on the command line, where stdout belongs to an envelope or a verdict
+// and stays empty while stderr carries the line. Every path exits 3.
+func TestWriteRefusal_WhereTheRefusalGoes(t *testing.T) {
+	r := &Refusal{Condition: RefusalStale, Recovery: "./make", Detail: "the tools source has changed since this binary was built"}
+	const object = `{"condition":"stale","recovery":"./make"}` + "\n"
+	const line = "gate: the tools source has changed since this binary was built — run ./make\n"
+	for _, tc := range []struct {
+		name                 string
+		args                 []string
+		terminal             bool
+		wantStdout, wantErrs string
+	}{
+		{"piped, nothing forced", []string{"--list"}, false, object, ""},
+		{"at a terminal", []string{"--list"}, true, line, ""},
+		{"-json at a terminal", []string{"--list", "-json"}, true, object, ""},
+		{"--human piped", []string{"--list", "--human"}, false, line, ""},
+		{"-help", []string{"-help"}, false, object, ""},
+		{"--envelope", []string{"fit", "--envelope"}, false, "", line},
+		{"-envelope at a terminal", []string{"fit", "-envelope"}, true, "", line},
+		{"envelope after --", []string{"fit", "--", "--envelope"}, false, object, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cliTerminals(t, tc.terminal, false)
+			var stdout, stderr bytes.Buffer
+			if code := writeRefusal(&stdout, &stderr, "gate", r, tc.args, []string{"envelope"}); code != ExitRefused {
+				t.Errorf("exit = %d, want %d", code, ExitRefused)
+			}
+			if stdout.String() != tc.wantStdout || stderr.String() != tc.wantErrs {
+				t.Errorf("stdout %q, stderr %q; want stdout %q, stderr %q", stdout.String(), stderr.String(), tc.wantStdout, tc.wantErrs)
+			}
+		})
+	}
+}
 
 // TestMakeCommands pins what the two spellings mean, because the staleness
 // messages promise it in words: the first resolves from any working directory,

@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -191,6 +193,47 @@ func TestIntegration_ExcludesTheScheduledGates(t *testing.T) {
 		}
 		if !IsContractGate(name) {
 			t.Errorf("%q is not a gate, so nothing can ask for it by name", name)
+		}
+	}
+}
+
+// TestCovered_ReportsEachLanguageAndSaysWhatItLacks: each language's figure is
+// reported under the shared and the per-toolchain name, in percent. A profile
+// that was not produced is a member saying why and makes the run incomplete,
+// and so does a Promise suite stopped partway: coverage of the tests it reached
+// is not the suite's.
+func TestCovered_ReportsEachLanguageAndSaysWhatItLacks(t *testing.T) {
+	stubGateBuild(t, &fakeBuild{})
+	const goProfile = "total:\t\t\t\t(statements)\t71.4%\n"
+	const promiseProfile = `{"kind":"coverage","file":"/r/a.pr","covered":3,"total":4}` + "\n"
+	cover := func(out string, err error) func(string) (string, error) {
+		return func(string) (string, error) { return out, err }
+	}
+	m, err := measureCoveredWith(t.TempDir(), cover(goProfile, nil), cover(promiseProfile, nil))
+	if err != nil || m.incomplete != "" {
+		t.Fatalf("both produced: err = %v, incomplete = %q", err, m.incomplete)
+	}
+	want := map[string]float64{"statement_coverage": 71.4, "go_statement_coverage": 71.4, "block_coverage": 75, "promise_block_coverage": 75}
+	if len(m.metrics) != len(want) {
+		t.Fatalf("metrics = %+v, want %v", m.metrics, want)
+	}
+	for _, metric := range m.metrics {
+		if metric.Float != want[metric.Name] || metric.Unit != unitPercent {
+			t.Errorf("%s = %v %s, want %v percent", metric.Name, metric.Float, metric.Unit, want[metric.Name])
+		}
+	}
+
+	m, err = measureCoveredWith(t.TempDir(), cover("", errors.New("go test: exit status 2")), cover(promiseProfile, nil))
+	if err != nil || !strings.Contains(m.incomplete, "Go profile was not produced") ||
+		len(m.groups) == 0 || len(m.groups[0].Members) != 1 || !strings.Contains(m.groups[0].Members[0].Detail, "exit status 2") {
+		t.Errorf("no Go profile: err = %v, incomplete = %q, groups = %+v", err, m.incomplete, m.groups)
+	}
+
+	if runtime.GOOS != "windows" {
+		killed := exec.Command("sh", "-c", "kill -9 $$").Run()
+		m, err = measureCoveredWith(t.TempDir(), cover(goProfile, nil), cover(promiseProfile, killed))
+		if err != nil || !strings.Contains(m.incomplete, "was stopped") {
+			t.Errorf("a Promise suite stopped partway: err = %v, incomplete = %q", err, m.incomplete)
 		}
 	}
 }

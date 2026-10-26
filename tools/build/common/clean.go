@@ -30,10 +30,10 @@ func CleanTarget(root string) string {
 // instead (goTestFlags).
 //
 // Clean takes the host-scope exclusion (acquireHostScope) before removing
-// anything, so it never clears a home a verify is measuring in. Callers that
-// already hold it (e.g. RunVerify with --clean) must use cleanLocked instead: a
-// second acquisition re-enters only when the checkout has an arena record, and
-// in a checkout with none it queues behind its own holder forever.
+// anything, so it never clears a home a verify is measuring in. A caller that
+// already holds it must use cleanLocked instead: a second acquisition re-enters
+// only when the checkout has an arena record, and in a checkout with none it
+// queues behind its own holder forever.
 func Clean(root string, opts CleanOptions) error {
 	unlock, err := acquireHostScope(root)
 	if err != nil {

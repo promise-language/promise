@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -125,7 +127,7 @@ func TestAcquireHostScope_NamesThisCheckoutsArena(t *testing.T) {
 	}
 }
 
-// TestAcquireHostScope_UnboundedAcquiresAfterRelease confirms lockTimeout=0
+// TestAcquireHostScope_UnboundedAcquiresAfterRelease confirms an unbounded wait
 // waits (does not time out) and succeeds once the holder releases. The waiter
 // has no arena record — a contributor clone — and still queues like any party.
 func TestAcquireHostScope_UnboundedAcquiresAfterRelease(t *testing.T) {
@@ -262,8 +264,7 @@ func TestAcquireHostScope_AHandRunVerifyHoldsOffARunner(t *testing.T) {
 // TestAcquireHostScope_CheckoutsWithNoArenaRecordExcludeEachOther: a checkout no
 // flow provisioned (a contributor clone, a CI runner) has no arena to re-enter
 // on, so it is a party like any other — two of them exclude each other, and so
-// does a second acquisition from the same one, which is why `verify --clean`
-// calls cleanLocked rather than Clean.
+// does a second acquisition from the same one.
 func TestAcquireHostScope_CheckoutsWithNoArenaRecordExcludeEachOther(t *testing.T) {
 	cleanTestHome(t)
 	root := t.TempDir()
@@ -330,8 +331,7 @@ func TestAcquireHostScope_ABadArenaRecordIsRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "arena.json") {
 		t.Errorf("the refusal must name the record, got: %v", err)
 	}
-	// Not the timeout: bin/verify maps errQueued to "retry later", and a
-	// broken record is broken on every retry.
+	// Not a wait: a broken record is broken on every retry.
 	if errors.Is(err, errQueued) {
 		t.Errorf("err = %v; a malformed record is a refusal, not a wait that timed out", err)
 	}
@@ -394,8 +394,8 @@ func TestAcquireHostScope_ABadHostRecordIsRefused(t *testing.T) {
 }
 
 // stepLog is a pipeline of steps that record the order they ran in, so the
-// guarantees that matter — stop at the first failure, never push what was not
-// blessed — can be asserted without taking a host lock or building a compiler
+// guarantees that matter — stop at the first failure, never record what was
+// not measured — can be asserted without taking a host lock or building a compiler
 // (T2092). RunVerify's real pipeline is asserted separately, by name.
 type stepLog struct {
 	ran []string
@@ -419,12 +419,13 @@ func verifyStepNames() []string {
 }
 
 // TestVerifySteps_Order pins the sequence, which is where verify's guarantees
-// live: the blessing is cleared before anything can change the tree, the build
-// precedes the repairs (so `promise format` is the formatter `integration` then
-// measures), and the measurement precedes the record.
+// live: the blessing is cleared before anything else — a lock that cannot be
+// taken leaves none behind — the build precedes the repairs (so `promise
+// format` is the formatter `integration` then measures), and the measurement
+// precedes the record.
 func TestVerifySteps_Order(t *testing.T) {
 	want := []string{
-		"prepare/lock", "prepare/clear", "prepare/cache", "prepare/build",
+		"prepare/clear", "prepare/lock", "prepare/cache", "prepare/build",
 		"repair/gofmt", "repair/promise format",
 		"check/go vet", "check/structure",
 		"measure/integration", "record/verified tree",
@@ -465,8 +466,99 @@ func TestRunVerifySteps_StopsAtTheFirstFailureAndNamesIt(t *testing.T) {
 	}
 }
 
+// TestRunVerify_TheResultIsTheSummary: piped, stdout carries the summary as one
+// JSON object and nothing else — a step printing to os.Stdout reaches the
+// narration — and the status is 0 only when every step passed. For a person it
+// is the stage roll, ending with whether the tree may be committed.
+func TestRunVerify_TheResultIsTheSummary(t *testing.T) {
+	t.Cleanup(func() { SetObserved(true) })
+	printing := func(err error) func() error {
+		return func() error { fmt.Println("noise a step printed"); return err }
+	}
+	pipeline := func(failure error) func(*verifyRun) []verifyStep {
+		return func(*verifyRun) []verifyStep {
+			return []verifyStep{
+				{"repair", "gofmt", printing(nil)},
+				{"measure", "integration", printing(failure)},
+				{"record", "verified tree", printing(nil)},
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		failure  error
+		wantCode int
+		check    func(t *testing.T, stdout string)
+	}{
+		{"a green run, piped", []string{"-json"}, nil, 0, func(t *testing.T, stdout string) {
+			var res verifyResult
+			if strings.Count(stdout, "\n") != 1 || json.Unmarshal([]byte(stdout), &res) != nil || !res.OK || len(res.Stages) != 3 {
+				t.Errorf("stdout = %q, want one JSON summary with ok and three stages", stdout)
+			}
+		}},
+		{"a red run, piped", []string{"-json"}, errors.New("failed_tests is 1"), 1, func(t *testing.T, stdout string) {
+			var res verifyResult
+			if json.Unmarshal([]byte(stdout), &res) != nil || res.OK {
+				t.Fatalf("stdout = %q, want a JSON summary that is not ok", stdout)
+			}
+			if s := res.Stages[1].Steps[0]; s.Status != stepFailed || s.Detail != "failed_tests is 1" || res.Stages[2].Steps[0].Status != stepNotRun {
+				t.Errorf("stages = %+v, want integration failed with its words and the record not run", res.Stages)
+			}
+		}},
+		{"a red run, for a person", []string{"-human"}, errors.New("failed_tests is 1"), 1, func(t *testing.T, stdout string) {
+			if !strings.HasSuffix(strings.TrimSpace(stdout), "❌ Verify FAILED: not safe to commit") {
+				t.Errorf("stdout ends %q, want the FAILED line", stdout[max(0, len(stdout)-80):])
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The process's own stdout, as main hands it over: a step that
+			// prints to os.Stdout writes there unless the run redirects it.
+			var err error
+			out := captureStdout(t, func() { err = runVerify(t.TempDir(), tc.args, os.Stdout, pipeline(tc.failure)) })
+			if code := ExitCode(err); code != tc.wantCode {
+				t.Errorf("exit = %d (%v), want %d", code, err, tc.wantCode)
+			}
+			if strings.Contains(out, "noise a step printed") {
+				t.Errorf("a step's own output reached stdout: %q", out)
+			}
+			tc.check(t, out)
+		})
+	}
+}
+
+// TestStepLock_ACtrlCEndsTheQueue: the wait for the host scope has no bound, so
+// the first Ctrl+C has to end it — the step fails as interrupted and the run
+// goes on to print its summary — rather than the run sitting in the queue until
+// a second Ctrl+C exits with nothing said.
+func TestStepLock_ACtrlCEndsTheQueue(t *testing.T) {
+	cleanTestHome(t)
+	t.Cleanup(func() { interrupted.Store(0) })
+	root := t.TempDir()
+	unlock, err := acquireWithin(root, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	done := make(chan error, 1)
+	r := &verifyRun{root: root}
+	go func() { done <- r.stepLock() }()
+	interrupted.Store(1)
+	select {
+	case err := <-done:
+		if !errors.Is(err, errInterrupted) || r.unlock != nil {
+			t.Errorf("stepLock = %v (holding: %v), want errInterrupted and nothing held", err, r.unlock != nil)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a Ctrl+C did not end the wait for the host scope within 10s")
+	}
+}
+
 // TestRunVerifySteps_InterruptStopsBeforeTheNextStep covers Ctrl+C. The pipeline
-// stops between steps rather than mid-step, and reports the step it had reached.
+// stops between steps rather than mid-step: the step that was running when it
+// landed is reported as what it did — it may have written the record — and the
+// next one fails as interrupted without running.
 func TestRunVerifySteps_InterruptStopsBeforeTheNextStep(t *testing.T) {
 	t.Cleanup(func() { interrupted.Store(0) })
 	var l stepLog
@@ -479,8 +571,8 @@ func TestRunVerifySteps_InterruptStopsBeforeTheNextStep(t *testing.T) {
 		}},
 		l.step("integration", nil),
 	})
-	if failedStep(got) != "go vet" || got[0].Steps[1].Detail != errInterrupted.Error() {
-		t.Errorf("steps = %+v, want go vet failed as interrupted", got[0].Steps)
+	if got[0].Steps[1].Status != stepPassed || failedStep(got) != "integration" || got[0].Steps[2].Detail != errInterrupted.Error() {
+		t.Errorf("steps = %+v, want go vet passed and integration failed as interrupted", got[0].Steps)
 	}
 	if want := []string{"build", "go vet"}; !slices.Equal(l.ran, want) {
 		t.Errorf("ran %v, want %v", l.ran, want)
@@ -511,7 +603,7 @@ func TestStepRoll_EndsWithTheVerdictLine(t *testing.T) {
 
 // TestAcquireHostScope_NoCacheDirectoryRefuses covers a host with no user
 // cache directory: there is nowhere to hold the host-scope exclusion, and
-// acquireVerifyLock refuses rather than running unserialized. A silent free pass
+// acquireHostScope refuses rather than running unserialized. A silent free pass
 // would let two verifies interleave over the same machine with nothing to say
 // so, and a runner's measurement beside them would report the load as much as
 // the code (flow docs/gates-and-commands.md § Two scopes).
@@ -556,7 +648,7 @@ func TestHostScope_CreatesNothingUnderTheSharedHome(t *testing.T) {
 
 	unlock, err := acquireWithin(t.TempDir(), time.Second)
 	if err != nil {
-		t.Fatalf("acquireVerifyLock: %v", err)
+		t.Fatalf("acquireHostScope: %v", err)
 	}
 	if !Exists(lockPath) {
 		t.Errorf("the exclusion was not taken at %s", lockPath)
@@ -569,6 +661,6 @@ func TestHostScope_CreatesNothingUnderTheSharedHome(t *testing.T) {
 	}
 
 	if Exists(shared) {
-		t.Errorf("taking the verify lock created %s; nothing run from a worktree may write the shared home", shared)
+		t.Errorf("taking the host-scope exclusion created %s; nothing run from a worktree may write the shared home", shared)
 	}
 }

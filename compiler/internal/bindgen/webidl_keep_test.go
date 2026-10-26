@@ -59,12 +59,15 @@ func keepShape(m *Module) (resources map[string][]string, parents map[string]str
 }
 
 func TestParseKeepList(t *testing.T) {
-	keep, err := ParseKeepList("keep.txt", "Element\n  Element.tagName  \n\nEvent.constructor\r\nNodeList.@@iterator\n")
+	keep, err := ParseKeepList("keep.txt", "Element\n  Element.tagName  \n\nEvent.constructor\r\nNodeList.@@iterator\nCSSPageDescriptors.margin-top\n")
 	if err != nil {
 		t.Fatalf("ParseKeepList: %v", err)
 	}
 	wantIfaces := map[string]bool{"Element": true}
-	wantMembers := map[string]bool{"Element.tagName": true, "Event.constructor": true, "NodeList.@@iterator": true}
+	wantMembers := map[string]bool{
+		"Element.tagName": true, "Event.constructor": true, "NodeList.@@iterator": true,
+		"CSSPageDescriptors.margin-top": true,
+	}
 	if !reflect.DeepEqual(keep.interfaces, wantIfaces) {
 		t.Errorf("interfaces = %v, want %v", keep.interfaces, wantIfaces)
 	}
@@ -543,6 +546,22 @@ func TestApplyKeepList(t *testing.T) {
 			list: "I\nI.foo_bar\n",
 			resources: map[string][]string{
 				"I": {"I.fooBar", "I.foo_bar.2"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// #719: an entry names a dashed member as the IDL spells it, and
+			// margin-top lowers to marginTop's Promise name, so the entry keeps
+			// both as one unit.
+			name: "a dashed member and its camel-cased spelling are one unit",
+			src: `interface I {
+				attribute DOMString marginTop;
+				attribute DOMString margin-top;
+				readonly attribute long other;
+			};`,
+			list: "I\nI.margin-top\n",
+			resources: map[string][]string{
+				"I": {"I.marginTop.get", "I.marginTop.set", "I.margin-top.get", "I.margin-top.set"},
 			},
 			types: map[string][]string{},
 		},

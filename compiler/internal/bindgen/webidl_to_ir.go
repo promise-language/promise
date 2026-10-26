@@ -716,15 +716,22 @@ func convertWebIdlBuiltin(builtin string) TypeRef {
 
 // Name conversion utilities: WebIDL camelCase → Promise snake_case
 
-// idlToSnake converts "getElementById" → "get_element_by_id"
+// idlToSnake converts "getElementById" → "get_element_by_id". A `-` separates
+// words as `_` does, "margin-top" → "margin_top", and a leading one (a CSS
+// vendor prefix) writes nothing: "-webkit-transform" → "webkit_transform", the
+// name "webkitTransform" generates. Written as `_`, it would make the member
+// private (docs/language-design.md, "Member Level Visibility").
 func idlToSnake(s string) string {
+	s = strings.TrimPrefix(s, "-")
 	if s == "" {
 		return s
 	}
 	var b strings.Builder
 	prev := rune(0)
 	for i, r := range s {
-		if r >= 'A' && r <= 'Z' {
+		if r == '-' {
+			b.WriteByte('_')
+		} else if r >= 'A' && r <= 'Z' {
 			// Insert underscore before uppercase if:
 			// 1. Not at start, AND
 			// 2. Previous char was lowercase, OR

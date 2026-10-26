@@ -743,6 +743,84 @@ func TestGenerateJSGlueAnonymousSpecialReachesHost(t *testing.T) {
 	}
 }
 
+// TestGenerateJSGlueHyphenatedMembersSyntaxValid parses the glue for members
+// named with a `-` (#719). Dot access to one, `obj.margin-top = value`, is not
+// an assignment target, so the whole module would be a SyntaxError.
+func TestGenerateJSGlueHyphenatedMembersSyntaxValid(t *testing.T) {
+	nodePath := requireNode(t)
+	nodeCheckGlue(t, nodePath, GenerateJSGlue(overloadIR(t, hyphenGlueFixture)))
+}
+
+// TestGenerateJSGlueHyphenatedMembersReachHost calls the imports of
+// hyphenGlueFixture against host objects whose members are named as the IDL
+// spells them (#719). node --check cannot catch a dot-access getter or call:
+// `obj.margin-top` parses as `obj.margin - top`. Target's `marginTop` and
+// `margin-top` are distinct host properties, and each import must reach its
+// own; Base's members, which Derived redeclares, must answer from Base on a
+// Derived, and check their receiver as a host's do.
+func TestGenerateJSGlueHyphenatedMembersReachHost(t *testing.T) {
+	nodePath := requireNode(t)
+	loader := smokeLoader{name: "glue", js: GenerateJSGlue(overloadIR(t, hyphenGlueFixture)), initArgs: []string{"frontend.wasm"}}
+	result := runSmokeDriver(t, nodePath, loader, 0, importCallDriver(`
+  function brand(self) {
+    if (!(self instanceof Base)) throw new TypeError("Illegal invocation");
+  }
+  class Target {
+    get marginTop() { return 1; }
+    set marginTop(v) { this.setCamel = v; }
+    get ["margin-top"]() { return 2; }
+    set ["margin-top"](v) { this.setDashed = v; }
+    ["do-it"](x) { return x * 10; }
+    static ["make-it"]() { return 7; }
+  }
+  class Base {
+    get ["page-orientation"]() { brand(this); return 3; }
+    set ["page-orientation"](v) { brand(this); this.setBase = v; }
+    ["run-it"](n) { brand(this); return n + 1; }
+  }
+  class Derived extends Base {
+    get ["page-orientation"]() { return "shadow"; }
+    ["run-it"](s) { return "shadow"; }
+  }
+  globalThis.Target = Target;
+  globalThis.Base = Base;
+  globalThis.Derived = Derived;
+
+  const env = imports.promise_env;
+  const target = new Target();
+  const derived = new Derived();
+  const t = mod._refStore(target);
+  const d = mod._refStore(derived);
+  const call = (f) => {
+    try {
+      return f();
+    } catch (e) {
+      return e.constructor.name;
+    }
+  };
+  const got = {
+    camel: call(() => env["Target.marginTop.get"](t)),
+    dashed: call(() => env["Target.margin-top.get"](t)),
+    doIt: call(() => env["Target.do-it"](t, 4)),
+    makeIt: call(() => env["Target.make-it"]()),
+    base: call(() => env["Base.page-orientation.get"](d)),
+    run: call(() => env["Base.run-it"](d, 5)),
+  };
+  call(() => env["Target.marginTop.set"](t, 8));
+  call(() => env["Target.margin-top.set"](t, 9));
+  call(() => env["Base.page-orientation.set"](d, 6));
+  got.setCamel = target.setCamel;
+  got.setDashed = target.setDashed;
+  got.setBase = derived.setBase;
+  process.stdout.write("RESULT:" + JSON.stringify(got) + "\n");
+`))
+
+	want := `RESULT:{"camel":1,"dashed":2,"doIt":40,"makeIt":7,"base":3,"run":6,"setCamel":8,"setDashed":9,"setBase":6}`
+	if result != want {
+		t.Errorf("imports reached %s, want %s", result, want)
+	}
+}
+
 // nodeCheckGlue fails the test unless `node --check` parses glue.
 func nodeCheckGlue(t *testing.T, nodePath, glue string) {
 	t.Helper()

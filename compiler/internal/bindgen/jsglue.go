@@ -419,10 +419,11 @@ func (g *jsGlueGenerator) emitFreeFuncImport(f Func) {
 // declares beside them: the object a constructor creates, and a nullable
 // interface result tested for null before it is stored. Each begins with a `$`,
 // and a name derived from a WebIDL argument never does: the WebIDL lexer's
-// identifiers are letters, digits and `_` (isIdentStart, isIdentContinue),
-// idlToSnake and sanitizeIdent add only `_`, and the one `$` such a name can
-// carry is the one jsParamName's escape puts at its end. So no argument can
-// take one of these names, whatever it is called (#689, #690).
+// identifiers are letters, digits, `_` and `-` (isIdentStart, isIdentContinue),
+// idlToSnake writes each `-` as `_` (or drops a leading one) and with
+// sanitizeIdent adds only `_`, and the one `$` such a name can carry is the one
+// jsParamName's escape puts at its end. So no argument can take one of these
+// names, whatever it is called (#689, #690).
 const (
 	jsReceiverParam      = "$handle"
 	jsReturnPointerParam = "$retptr"
@@ -493,7 +494,7 @@ func (g *jsGlueGenerator) emitConstructorBody(resourceName string, f Func, jsPar
 
 func (g *jsGlueGenerator) emitStaticBody(resourceName, importName string, f Func) {
 	args := g.buildJSCallArgs(f)
-	call := fmt.Sprintf("%s.%s(%s)", resourceName, importMember(importName), strings.Join(args, ", "))
+	call := fmt.Sprintf("%s%s(%s)", resourceName, jsProperty(importMember(importName)), strings.Join(args, ", "))
 	g.emitReturnConversion(f, call)
 }
 
@@ -516,7 +517,7 @@ func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func
 	// operation is the k-th of an overload set: "Type.methodName.k"
 	parts := strings.Split(importName, ".")
 	if len(parts) == 3 && parts[2] == "get" {
-		call := fmt.Sprintf("%s.%s", obj, member)
+		call := obj + jsProperty(member)
 		if f.ViaPrototype {
 			call = fmt.Sprintf("Reflect.get(%s.prototype, \"%s\", %s)", resourceName, member, obj)
 		}
@@ -528,7 +529,7 @@ func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func
 		if f.ViaPrototype {
 			g.writef("      Reflect.set(%s.prototype, \"%s\", %s, %s);\n", resourceName, member, value, obj)
 		} else {
-			g.writef("      %s.%s = %s;\n", obj, member, value)
+			g.writef("      %s%s = %s;\n", obj, jsProperty(member), value)
 		}
 		return
 	}
@@ -550,9 +551,9 @@ func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func
 		return
 	}
 
-	call := fmt.Sprintf("%s.%s(%s)", obj, member, strings.Join(args, ", "))
+	call := fmt.Sprintf("%s%s(%s)", obj, jsProperty(member), strings.Join(args, ", "))
 	if f.ViaPrototype {
-		call = fmt.Sprintf("Reflect.apply(%s.prototype.%s, %s, [%s])", resourceName, member, obj, strings.Join(args, ", "))
+		call = fmt.Sprintf("Reflect.apply(%s.prototype%s, %s, [%s])", resourceName, jsProperty(member), obj, strings.Join(args, ", "))
 	}
 	g.emitReturnConversion(f, call)
 }
@@ -584,6 +585,18 @@ func importMember(importName string) string {
 		return importName
 	}
 	return parts[1]
+}
+
+// jsProperty returns the property access that reaches member, an IDL
+// identifier, on the object expression it follows: `.member`, or
+// `["member"]` for a name with a `-` (`margin-top`), the one character an IDL
+// identifier may carry and a JS identifier may not. Dot access there would
+// still parse, as a subtraction, and read the wrong thing.
+func jsProperty(member string) string {
+	if strings.Contains(member, "-") {
+		return `["` + member + `"]`
+	}
+	return "." + member
 }
 
 func (g *jsGlueGenerator) buildJSCallArgs(f Func) []string {

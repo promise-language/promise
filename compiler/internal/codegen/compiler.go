@@ -977,11 +977,13 @@ func wasmDataLayout(llvmMajor int) string {
 // there are any, a final pass compiles them a second time as coroutine variants
 // and has coroutine bodies await them, so a goroutine that blocks through a call
 // parks instead of running a nested scheduler loop the reactor cannot return
-// through. The analysis pass ignores CachedInstances so it sees every body: a
-// function's ability to block depends only on its own body and its callees, so
-// every compile of a cached instance unit makes the same variants. Its result is
-// final when nothing can block — the backend still reuses cached instance
-// objects by key when their bodies were generated (compileAndLinkSeparate).
+// through. Its result is final when nothing can block.
+//
+// Neither pass skips CachedInstances. A function's ability to block depends on
+// its callees' bodies, most of them outside an instance's declaration, so which
+// variants an instance's unit defines and calls is only known once its body is
+// generated, and is part of that unit's cache key (InstanceCoroVariants); the
+// backend still reuses a cached instance object by that key.
 func compile(file *ast.File, info *sema.Info, target string, opts *CompileOptions) *CompileResult {
 	if target == "" {
 		target = HostTargetTriple()
@@ -989,18 +991,18 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	if !isWasmWebTriple(target) {
 		return compileOnce(file, info, target, opts, nil)
 	}
-	analysisOpts := CompileOptions{}
+	uncached := CompileOptions{}
 	if opts != nil {
-		analysisOpts = *opts
+		uncached = *opts
 	}
-	analysisOpts.CachedInstances = nil
-	analysis := compileOnce(file, info, target, &analysisOpts, nil)
+	uncached.CachedInstances = nil
+	analysis := compileOnce(file, info, target, &uncached, nil)
 	ac := analysis.compiler
 	variants := suspendingFuncs(ac.module, ac.funcs["promise_sched_coop_step"], ac.coroVariantCapable)
 	if len(variants) == 0 {
 		return analysis
 	}
-	return compileOnce(file, info, target, opts, variants)
+	return compileOnce(file, info, target, &uncached, variants)
 }
 
 // compileOnce is one codegen pass. coroVariants is the set of functions that

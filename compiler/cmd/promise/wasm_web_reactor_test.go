@@ -47,6 +47,20 @@ main() {
   };
 }
 `,
+	// The goroutine is the helper itself: `go f(args)`.
+	"go_call": webReactorExterns + `
+consume(Channel[i32] ch) {
+  v := recv_from(ch);
+  if v is present {
+    print_line("GOT {v}");
+  }
+}
+
+main() {
+  sub_id := _web_subscribe(16, 0);
+  go consume(_web_channel(sub_id));
+}
+`,
 	// for-in over a type whose next() receives: EventSubscription's shape.
 	"method": webReactorExterns + `
 type Sub {
@@ -70,6 +84,17 @@ main() {
 	// main itself parks in a helper while a subscription is live.
 	"main_awaits": webReactorExterns + `
 main() {
+  sub_id := _web_subscribe(16, 0);
+  ch := _web_channel(sub_id);
+  v := recv_from(ch);
+  if v is present {
+    print_line("MAIN GOT {v}");
+  }
+}
+`,
+	// A failable main's body is a function the main coroutine calls.
+	"failable_main_awaits": webReactorExterns + `
+main!() {
   sub_id := _web_subscribe(16, 0);
   ch := _web_channel(sub_id);
   v := recv_from(ch);
@@ -145,6 +170,34 @@ const [name, mode, ...vals] = process.argv.slice(2);
 })();
 `
 
+// webCoroCacheProgram's Box[int].get blocks only through helper, whose body is
+// HELPER_BODY. The module use makes the build compile Box[int] as its own,
+// cached instance object.
+const webCoroCacheProgram = `use math;
+
+type Box[T] {
+  T v;
+
+  get(Channel[int] ch) int {
+    return helper(ch);
+  }
+}
+
+helper(Channel[int] ch) int {
+  HELPER_BODY
+}
+
+main() {
+  ch := channel[int](1);
+  t := go {
+    b := Box[int](v: 1);
+    b.get(ch)
+  };
+  ch.send(41);
+  print_line("GOT {<-t} {math.sign(-3)}");
+}
+`
+
 type webReactorResult struct {
 	Logs       []string `json:"logs"`
 	Errs       []string `json:"errs"`
@@ -207,9 +260,13 @@ func TestWebReactorParksThroughCalls(t *testing.T) {
 			webReactorResult{Logs: []string{"GOT 777"}, Pumps: []int{0}, OK: true}, ""},
 		{"receive in a helper", []string{"helper", "enqueue", "777"},
 			webReactorResult{Logs: []string{"GOT 777"}, Pumps: []int{0}, OK: true}, ""},
+		{"go f(args) of a helper", []string{"go_call", "enqueue", "777"},
+			webReactorResult{Logs: []string{"GOT 777"}, Pumps: []int{0}, OK: true}, ""},
 		{"for-in over next()", []string{"method", "enqueue", "1", "2"},
 			webReactorResult{Logs: []string{"GOT 1", "GOT 2"}, Pumps: []int{0, 0}, OK: true}, ""},
 		{"main parked in a helper", []string{"main_awaits", "enqueue", "5"},
+			webReactorResult{Logs: []string{"MAIN GOT 5"}, Pumps: []int{0}, OK: true}, ""},
+		{"failable main parked in a helper", []string{"failable_main_awaits", "enqueue", "5"},
 			webReactorResult{Logs: []string{"MAIN GOT 5"}, Pumps: []int{0}, OK: true}, ""},
 		{"web.on", []string{"web_on", "click", "2"},
 			webReactorResult{Logs: []string{"click", "click"}, Listeners: 1, OK: true}, ""},
@@ -246,6 +303,57 @@ func TestWebReactorParksThroughCalls(t *testing.T) {
 		}
 		if c.wantErr != "" && !strings.Contains(strings.Join(got.Errs, "\n"), c.wantErr) {
 			t.Errorf("%s: stderr %q does not contain %q", c.name, got.Errs, c.wantErr)
+		}
+	}
+}
+
+// TestWebInstanceCacheTracksCoroVariants rebuilds one program into one build
+// cache while a function outside Box's declaration starts and stops blocking
+// (promise-language/promise#68). A cached instance object is reused by a key
+// over its declaration, but on wasm32-web it also carries the coroutine
+// variants its body reaches: Box[int].get has one only while helper blocks.
+// Without them in the key, the rebuild after helper started blocking reused the
+// variant-less Box[int] object, the link left Box[int].get$coro as an import no
+// host provides, and init() rejected.
+func TestWebInstanceCacheTracksCoroVariants(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping build+node integration test in short mode")
+	}
+	nodePath, err := resolveWasmRuntime("node")
+	if err != nil {
+		t.Skipf("the pinned node is not obtainable here: %v", err)
+	}
+	bin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+	env := []string{"PROMISE_CACHE=" + filepath.Join(dir, "cache")}
+	outDir := filepath.Join(dir, "out")
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(outDir, "driver.cjs")
+	if err := os.WriteFile(driver, []byte(webReactorDriver), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, step := range []struct{ name, helperBody, want string }{
+		{"returns", "return 1;", "GOT 1 -1"},
+		{"blocks", "return (<-ch) ?: 0;", "GOT 41 -1"},
+		{"returns_again", "return 1;", "GOT 1 -1"},
+	} {
+		srcFile := filepath.Join(dir, step.name, "main.pr")
+		if err := os.MkdirAll(filepath.Dir(srcFile), 0755); err != nil {
+			t.Fatal(err)
+		}
+		src := strings.Replace(webCoroCacheProgram, "HELPER_BODY", step.helperBody, 1)
+		if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
+			t.Fatal(err)
+		}
+		clitest.RunOK(t, bin, env, "build", "-target", "wasm32-web", "-o", filepath.Join(outDir, step.name+".wasm"), srcFile)
+		got := runNodeDriver[webReactorResult](t, nodePath, driver, step.name, "init")
+		if !got.OK || strings.Join(got.Logs, "\n") != step.want || len(got.Errs) != 0 {
+			t.Errorf("%s: init() ok=%v logs=%q stderr=%q, want ok logs=[%q] and no stderr",
+				step.name, got.OK, got.Logs, got.Errs, step.want)
 		}
 	}
 }

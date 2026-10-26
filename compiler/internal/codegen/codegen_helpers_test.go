@@ -161,6 +161,13 @@ func generateIR(t *testing.T, src string) string {
 // generateIRForTarget runs parse → sema → codegen with a specific target triple.
 func generateIRForTarget(t *testing.T, src, target string) string {
 	t.Helper()
+	return compileForTarget(t, src, target, nil).Module.String()
+}
+
+// compileForTarget is generateIRForTarget's compile, with options, returning the
+// whole result.
+func compileForTarget(t *testing.T, src, target string, opts *CompileOptions) *CompileResult {
+	t.Helper()
 	input := antlr.NewInputStream(src)
 	lexer := parser.NewPromiseLexer(input)
 	lexer.RemoveErrorListeners()
@@ -184,8 +191,7 @@ func generateIRForTarget(t *testing.T, src, target string) string {
 	}
 	info.ModuleInfos = map[string]*sema.ModuleInfo{"std": stdModInfo}
 	info.ModuleOrder = []string{"std"}
-	result := Compile(file, info, target)
-	return result.Module.String()
+	return CompileWithOptions(file, info, target, opts)
 }
 
 func getCodegenStdModInfo() (*sema.ModuleInfo, *types.Scope) {

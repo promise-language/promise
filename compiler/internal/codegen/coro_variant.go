@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -100,6 +101,57 @@ func suspendingFuncs(m *ir.Module, coopStep *ir.Func, capable map[string]bool) m
 			out = make(map[string]bool)
 		}
 		out[f.Name()] = true
+	}
+	return out
+}
+
+// InstanceCoroVariants returns, for each mono instance whose split unit defines
+// or calls a coroutine variant, the sorted names of those variants. They are
+// part of the instance's object cache key (compileAndLinkSeparate): which
+// variants exist depends on the bodies of the functions the instance reaches,
+// outside its declaration, so an object cached before one of them started or
+// stopped blocking defines or calls the wrong ones.
+func (r *CompileResult) InstanceCoroVariants() map[string][]string {
+	c := r.compiler
+	isVariant := make(map[*ir.Func]bool, len(c.coroVariantFns))
+	for _, v := range c.coroVariantFns {
+		isVariant[v] = true
+	}
+	sets := make(map[string]map[string]bool)
+	add := func(inst, name string) {
+		if sets[inst] == nil {
+			sets[inst] = make(map[string]bool)
+		}
+		sets[inst][name] = true
+	}
+	for _, fn := range c.module.Funcs {
+		inst, owned := c.instanceOwnedFuncs[fn.Name()]
+		if !owned || len(fn.Blocks) == 0 {
+			continue
+		}
+		if isVariant[fn] {
+			add(inst, fn.Name())
+		}
+		for _, b := range fn.Blocks {
+			for _, in := range b.Insts {
+				call, ok := in.(*ir.InstCall)
+				if !ok {
+					continue
+				}
+				if callee := directCallee(call.Callee); callee != nil && isVariant[callee] {
+					add(inst, callee.Name())
+				}
+			}
+		}
+	}
+	out := make(map[string][]string, len(sets))
+	for inst, set := range sets {
+		names := make([]string, 0, len(set))
+		for name := range set {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		out[inst] = names
 	}
 	return out
 }

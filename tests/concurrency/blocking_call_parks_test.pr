@@ -3,11 +3,11 @@
 // callee's coroutine variant: before it, the callee ran a nested scheduler loop
 // on the goroutine's own stack.
 //
-// Every test stacks two goroutines that are each blocked inside a helper, so
-// the upper one waits on a value only the lower one can produce. A nested loop
-// in the upper one finds nothing runnable — the lower goroutine is not runnable,
-// it is underneath on the same stack — and reports a false deadlock. Each test
-// also covers one way the callee's result reaches its caller.
+// The blocked_* tests stack two goroutines that are each blocked inside a
+// helper, so the upper one waits on a value only the lower one can produce. A
+// nested loop in the upper one finds nothing runnable — the lower goroutine is
+// not runnable, it is underneath on the same stack — and reports a false
+// deadlock. Each also covers one way the callee's result reaches its caller.
 //
 // exclude: wasi — wasm32-wasi still runs the nested loop (#718).
 recv_from(Channel[int] ch) int? {
@@ -41,6 +41,23 @@ blocked_helpers_interleave() `test(exclude: wasi) {
   <-t1;
   <-t3;
   assert(got is present && got! == 42, "t2 got the forwarded value");
+}
+
+// Both blocked goroutines run their helper as the goroutine itself (`go f(args)`).
+blocked_go_call_form() `test(exclude: wasi) {
+  a := channel[int](1);
+  b := channel[int](1);
+  c := channel[int](1);
+  t1 := go forward(a, b);
+  t2 := go forward(b, c);
+  t3 := go {
+    a.send(40);
+  };
+  got := recv_from(c);
+  <-t1;
+  <-t2;
+  <-t3;
+  assert(got is present && got! == 42, "the value was forwarded twice");
 }
 
 recv_checked!(Channel[int] ch) int {
@@ -164,4 +181,36 @@ blocked_task_join_in_helper() `test(exclude: wasi) {
   <-t1;
   <-t3;
   assert(got is present && got! == 42, "the joined goroutine's value was forwarded");
+}
+
+type FailingClose {
+  int id;
+
+  close!(~this) void {
+    raise error("close failed");
+  }
+}
+
+// A lambda in a failable helper's variant is its own function: a close error
+// in its body never reaches the variant's result slot.
+recv_then_apply!(Channel[int] ch) int {
+  v := (<-ch) ?: 0;
+  check := |int x| {
+    use r := FailingClose(id: x);
+    assert(r.id == x, "the lambda saw its argument");
+  };
+  check(v);
+  return v;
+}
+
+lambda_in_failable_helper() `test(exclude: wasi) {
+  ch := channel[int](1);
+  t := go! {
+    recv_then_apply(ch)
+  };
+  ch.send(3);
+  got := (<-t)? e {
+    -1
+  };
+  assert(got == 3, "the helper's own result came back");
 }

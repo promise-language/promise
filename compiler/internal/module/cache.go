@@ -336,9 +336,11 @@ func FormatCacheKeyInputs(name, cacheKey string, inputs []CacheKeyInput) string 
 //   - compilerHash: fingerprint of the compiler binary for invalidating stale entries
 //   - target: LLVM target triple
 //
-// Two instances with the same key are guaranteed to produce identical LLVM IR.
-// Changes to unrelated declarations in the same file do NOT change typeDeclHash
-// and therefore do NOT invalidate the cached .o file.
+// Two instances with the same key are guaranteed to produce identical LLVM IR,
+// once the key also carries the instance's coroutine variants
+// (InstanceCacheKeyWithCoroVariants). Changes to unrelated declarations in the
+// same file do NOT change typeDeclHash and therefore do NOT invalidate the cached
+// .o file.
 //
 // moduleContext is an optional sorted list of module IR prefixes present in the
 // build. B0244: Cross-module enum clone/drop forward-declarations produce different
@@ -360,6 +362,25 @@ func InstanceCacheKey(irPrefix, monoName, typeDeclHash string, argDeclHashes []s
 	fmt.Fprintf(h, "mode:%s\n", buildMode)
 	for _, mc := range moduleContext {
 		fmt.Fprintf(h, "modctx:%s\n", mc)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// InstanceCacheKeyWithCoroVariants folds into an InstanceCacheKey the coroutine
+// variants (`$coro` symbols, promise-language/promise#68) the instance's object
+// defines and calls, as codegen's InstanceCoroVariants reports them, sorted.
+// Whether they exist depends on the bodies of functions outside the instance's
+// declaration, which no other key component hashes. With none — every target
+// but wasm32-web, and every instance that reaches nothing that can block — the
+// key is returned unchanged.
+func InstanceCacheKeyWithCoroVariants(key string, coroVariants []string) string {
+	if len(coroVariants) == 0 {
+		return key
+	}
+	h := fnv.New128a()
+	fmt.Fprintf(h, "instance:%s\n", key)
+	for _, v := range coroVariants {
+		fmt.Fprintf(h, "coro:%s\n", v)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

@@ -3019,6 +3019,19 @@ func TestIdlEnumValueToPascal(t *testing.T) {
 		{"auto", "Auto"},
 		{"same-origin", "SameOrigin"},
 		{"no-cors", "NoCors"},
+		// #720: every character that is not an ASCII letter or digit separates
+		// words, and a name that would begin with a digit is prefixed with V.
+		{"2d", "V2d"},
+		{"text/html", "TextHtml"},
+		{"application/xhtml+xml", "ApplicationXhtmlXml"},
+		{"image/svg+xml", "ImageSvgXml"},
+		{"webgl2", "Webgl2"},
+		{"--2d", "V2d"},
+		{"über", "Ber"},
+		// Only the name's first character can call for the prefix, not a
+		// word's; and a word keeps its letters as written.
+		{"x-2d", "X2d"},
+		{"flipY", "FlipY"},
 	}
 	for _, tt := range tests {
 		got := idlEnumValueToPascal(tt.in)
@@ -3052,6 +3065,11 @@ func TestIdlEnumValueToPascalEmpty(t *testing.T) {
 	got = idlEnumValueToPascal("--")
 	if got != "Empty" {
 		t.Errorf("idlEnumValueToPascal(\"--\") = %q, want \"Empty\"", got)
+	}
+	// No letter or digit, though no character is `-`, `_` or a space (#720)
+	got = idlEnumValueToPascal("+/")
+	if got != "Empty" {
+		t.Errorf("idlEnumValueToPascal(\"+/\") = %q, want \"Empty\"", got)
 	}
 }
 

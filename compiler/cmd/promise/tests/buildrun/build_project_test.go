@@ -2113,6 +2113,76 @@ func TestBindWebIdlDictionaryUnboundParentFailsLoudly(t *testing.T) {
 	}
 }
 
+// TestBindWebIdlEnumValuesCompileClean is the end-to-end acceptance for #720:
+// an enum value is any string, and the variant it generates is named by a rule
+// every string satisfies (docs/wasm-bindings.md, "WebIDL to Promise", enums).
+// The IDL is webref html.idl's two enums whose values are not identifiers,
+// verbatim. Before the fix bind's self-check failed with `extraneous input '2'
+// expecting IDENT` at the `2d` variant. The caller matches every variant with
+// no wildcard, so a variant misnamed, missing or extra fails to compile.
+func TestBindWebIdlEnumValuesCompileClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "html.idl")
+	idl := `enum OffscreenRenderingContextId { "2d", "bitmaprenderer", "webgl", "webgl2", "webgpu" };
+
+enum DOMParserSupportedType {
+  "text/html",
+  "text/xml",
+  "application/xml",
+  "application/xhtml+xml",
+  "image/svg+xml"
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	if out, err := exec.Command(bin, "bind", "webidl", "-name", "html", "-o", outDir, idlPath).CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	userPath := filepath.Join(outDir, "use_enums.pr")
+	user := `context_id(OffscreenRenderingContextId id) string {
+    return match id {
+        OffscreenRenderingContextId.V2d => "2d",
+        OffscreenRenderingContextId.Bitmaprenderer => "bitmaprenderer",
+        OffscreenRenderingContextId.Webgl => "webgl",
+        OffscreenRenderingContextId.Webgl2 => "webgl2",
+        OffscreenRenderingContextId.Webgpu => "webgpu",
+    };
+}
+
+parser_type(DOMParserSupportedType type_) string {
+    return match type_ {
+        DOMParserSupportedType.TextHtml => "text/html",
+        DOMParserSupportedType.TextXml => "text/xml",
+        DOMParserSupportedType.ApplicationXml => "application/xml",
+        DOMParserSupportedType.ApplicationXhtmlXml => "application/xhtml+xml",
+        DOMParserSupportedType.ImageSvgXml => "image/svg+xml",
+    };
+}
+
+main() {
+    print_line(context_id(OffscreenRenderingContextId.V2d));
+    print_line(parser_type(DOMParserSupportedType.ImageSvgXml));
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput(); err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+}
+
 // TestBindWebIdlUnmatchedPartialFailsLoudly is the error path of #680: a spec
 // that extends definitions it does not bind — a partial interface, a partial
 // dictionary, an includes naming a missing mixin — would compile into a module

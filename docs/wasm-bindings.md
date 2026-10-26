@@ -421,12 +421,26 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 | `interface I : P` | `type I is P { ... }` | Inherits `P`'s members; the handle and ownership fields are declared once, on the root of the chain; `P` carries `` `open `` (see below) |
 | `dictionary` | `type { ... }` | Value type |
 | `dictionary D : P` | `type D { ... }` | Carries `P`'s members, and its ancestors', as fields of its own; no `is` (see below) |
-| `enum` | `enum { ... }` | With string mapping for JS |
+| `enum` | `enum { ... }` | Variants named from the values (see below); with string mapping for JS |
 | `callback` | `(Args) Return` | Lambda type |
 | `typedef T N` | the type `T` binds as | Inlined at each use of `N`; no type is named `N` (see below) |
 | `ArrayBuffer` | `u8[]` | |
 | `any` | `JsValue` | Tagged enum (see below) |
 | `object` | `JsValue` | Same enum, `Object` variant |
+
+**Enums.** A WebIDL enum value is any string, so the name of the variant it generates follows one
+rule that every string satisfies. A word is a maximal run of ASCII letters and digits; every other
+character — `-`, `_`, a space, `/`, `+`, any non-ASCII character — separates words and is dropped.
+The variant is the words in order, each with its first letter upper-cased and the rest as written:
+`"read-write"` is `ReadWrite`, `"text/html"` is `TextHtml` and `"application/xhtml+xml"` is
+`ApplicationXhtmlXml`. A name that would begin with a digit is prefixed with `V`, so `"2d"` is
+`V2d`; the prefix is not `_`, which marks a member private
+([Member Level Visibility](language-design.md#member-level-visibility)). A value with no letter or
+digit, `""` among them, is `Empty`. The rule spells the Promise name only: the value's string is
+still what the variant stands for on the host. Two values of one enum that generate one variant —
+`"a-b"` and `"a_b"`, or `""` and `"empty"` — are a `bind` error naming the enum, its position, both
+values and the variant. Every value whose variant an earlier value of its enum already generates is
+reported, against that first value, before anything is written.
 
 **Typedefs.** A typedef names no Promise type. Each use of it binds as its target written in its
 place, through any number of typedefs: with `typedef DOMString Name;`, `attribute Name label;` is a

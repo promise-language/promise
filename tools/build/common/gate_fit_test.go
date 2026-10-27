@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // decodeOneObject mirrors the runner's parse (flow pkg/orchestrator/github):
@@ -86,5 +87,29 @@ func TestFitGate_MetricWireKeepsItsType(t *testing.T) {
 	var m Metric
 	if err := json.Unmarshal([]byte(`{"name":"x","type":"int","value":1.5}`), &m); err == nil {
 		t.Error("an int metric with a fractional value must be refused, not absorbed")
+	}
+}
+
+// TestFitGate_AnswersWhileTheHostScopeIsHeld: fit declares no exclusion and
+// takes none, because it must answer on a machine whose holder is wedged —
+// that is exactly the machine a runner asks it about.
+func TestFitGate_AnswersWhileTheHostScopeIsHeld(t *testing.T) {
+	cleanTestHome(t)
+	root := t.TempDir()
+	unlock, err := acquireWithin(root, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	done := make(chan error, 1)
+	var stdout bytes.Buffer
+	go func() { done <- runContractGate(t.TempDir(), "fit", &stdout) }()
+	select {
+	case err := <-done:
+		if err != nil || !strings.Contains(stdout.String(), `"gate":"fit"`) {
+			t.Errorf("fit under a held host scope: err = %v, stdout %q", err, stdout.String())
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("fit queued behind the host-scope holder")
 	}
 }

@@ -465,6 +465,17 @@ func TestLoadTerms_ReadsThePlatformFirstBaselines(t *testing.T) {
 			t.Errorf("%s: err = %v, want one naming %q", name, err, tc.want)
 		}
 	}
+	// The conversion is held to the caps too: a converted direction the cap
+	// file contradicts is two directions for one metric, and an unconvertible
+	// one is refused rather than skipped.
+	for name, tc := range map[string]struct{ thresholds, body, want string }{
+		"against the cap":   {`{"cas_home_count": {"direction": "at_least", "cap": 0}}`, `{"linux-amd64": {"cas_home_count": {"value": 1, "direction": "down"}}}`, "one metric has one direction"},
+		"unknown direction": {`{}`, `{"linux-amd64": {"cas_home_count": {"value": 1, "direction": "sideways"}}}`, `unknown direction "sideways"`},
+	} {
+		if _, err := LoadTerms(writeTermsFiles(t, tc.thresholds, tc.body)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want one naming %q", name, err, tc.want)
+		}
+	}
 }
 
 // Every retired name the platform-first file carries maps to a metric some

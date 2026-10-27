@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // `bin/gate --list` is how an orchestrator learns what this project measures,
@@ -566,5 +567,93 @@ func TestEncodeEnvelope_EndsWithinTheBound(t *testing.T) {
 	}
 	if got := decode(out); metricInts(got.Metrics)["failed_tests"] != 40000 {
 		t.Errorf("the metrics were touched: %v", metricInts(got.Metrics))
+	}
+}
+
+// TestMetricWire_NumbersStayTheirKind: an int is written as the integer it is,
+// past what a float64 holds exactly, and a decimal is written without an
+// exponent — Go's own float encoding switches to one below 1e-6, which a reader
+// holding the contract would refuse. Both read back as written.
+func TestMetricWire_NumbersStayTheirKind(t *testing.T) {
+	for _, tc := range []struct {
+		metric Metric
+		want   string
+	}{
+		{Size("cas_network_bytes", 9007199254740993, unitBytes), `"value":9007199254740993`},
+		{Percent("statement_coverage", 0.0000001), `"value":0.0000001`},
+		{Percent("statement_coverage", 71.4), `"value":71.4`},
+	} {
+		out, err := json.Marshal(tc.metric)
+		if err != nil || !strings.Contains(string(out), tc.want) {
+			t.Errorf("%+v is written %s (%v), want %s", tc.metric, out, err, tc.want)
+			continue
+		}
+		var back Metric
+		if err := json.Unmarshal(out, &back); err != nil || back != tc.metric {
+			t.Errorf("%s reads back as %+v (%v), want %+v", out, back, err, tc.metric)
+		}
+	}
+	var m Metric
+	if err := json.Unmarshal([]byte(`{"name":"x","type":"count","value":1}`), &m); err == nil {
+		t.Error("a metric of a type outside the closed set was read")
+	}
+}
+
+// TestRunContractGate_AHostGateQueuesBehindTheHolder: a gate that declares
+// serialize "host" holds the exclusion while it measures, so run by hand it
+// queues behind whoever holds it rather than measuring that load — and
+// measures once the holder lets go. The queue line on the narration is the
+// signal that it is waiting.
+func TestRunContractGate_AHostGateQueuesBehindTheHolder(t *testing.T) {
+	cleanTestHome(t)
+	stubGateBuild(t, buildFails())
+	t.Cleanup(func() { SetObserved(true) })
+	SetObserved(true)
+	unlock, err := acquireWithin(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = saved; w.Close() })
+	queued := make(chan struct{})
+	go func() {
+		buf, seen, said := make([]byte, 4096), "", false
+		for {
+			n, err := r.Read(buf)
+			seen += string(buf[:n])
+			if !said && strings.Contains(seen, "Waiting for the host-scope exclusion") {
+				close(queued)
+				said = true
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	done := make(chan error, 1)
+	var out bytes.Buffer
+	go func() { done <- runContractGate(t.TempDir(), "tested:promise", &out) }()
+	select {
+	case <-queued:
+	case err := <-done:
+		unlock()
+		t.Fatalf("tested:promise measured (%v) while another run held the host scope", err)
+	case <-time.After(30 * time.Second):
+		unlock()
+		t.Fatal("tested:promise neither queued nor measured within 30s")
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil || !strings.Contains(out.String(), `"gate":"tested:promise"`) {
+			t.Errorf("after the holder let go: err = %v, stdout %q", err, out.String())
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("tested:promise did not measure within 30s of the holder letting go")
 	}
 }

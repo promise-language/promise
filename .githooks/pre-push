@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -x "$root/bin/prepush-guard" ]; then
+    exec "$root/bin/prepush-guard"
+fi
+echo "pre-push: bin/prepush-guard not installed — run 'workspace setup' on this checkout, then push" >&2
+exit 1

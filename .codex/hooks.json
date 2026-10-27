@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "*", "hooks": [{"type": "command", "command": "/bin/sh -c 'root=$(git rev-parse --show-toplevel) && \"$root/bin/tool-guard\" -agent codex || exit 2'"}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "*", "hooks": [{"type": "command", "command": "/bin/sh -c 'root=$(git rev-parse --show-toplevel) && \"$root/bin/tool-guard\" -agent codex || true'"}]}
+    ]
+  }
+}

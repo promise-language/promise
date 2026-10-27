@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
-# Git pre-commit trampoline — execs the installed hook, or refuses the commit.
-# Wired up by 'git config core.hooksPath .githooks', which provisioning runs for you.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -x "$root/bin/precommit-guard" ]; then
     exec "$root/bin/precommit-guard"
 fi
-# Fail closed: the commit gate is mandatory. If bin/precommit-guard is not
-# installed, a commit could slip past every check — so block it and demand
-# provisioning. The guard is delivered by the workspace, not built here.
-echo "pre-commit: bin/precommit-guard not installed — run bin/workspace setup first, then commit" >&2
+echo "pre-commit: bin/precommit-guard not installed — run 'workspace setup' on this checkout, then commit" >&2
 exit 1

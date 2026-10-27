@@ -178,7 +178,7 @@ callback on bare `CreateThread` threads.
 
 ### Prerequisites
 
-- **Go 1.25+** — builds the compiler itself
+- **Go 1.26.1+** — builds the compiler itself
 - **LLVM 22+** — full clang+llvm release (needs `opt.exe`, `llc.exe`, `lld-link.exe`)
 - **Java 11+** — ANTLR4 parser generation (optional if the parser is already generated; the generated parser is committed)
 

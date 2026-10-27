@@ -45,3 +45,5 @@ tools/build/winlink/lib/
 /.workspace/
 /.home/
 /.mcp.json
+Thumbs.db
+desktop.ini

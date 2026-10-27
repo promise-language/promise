@@ -207,7 +207,7 @@ func GoCheckFindings(root string, capture captureFunc) (findings []GoDiagnostic,
 // the repair mode degenerates to the check-only run: it reports the findings and
 // exits non-zero. What it must not become is a second, subtly different
 // measurement — hence the shared GoCheckFindings above, whose count IS the
-// gate's vet_findings.
+// gate's check_findings.
 func RunCheck(root string) error {
 	findings, incomplete, err := GoCheckFindings(root, captureSplit)
 	if err != nil {

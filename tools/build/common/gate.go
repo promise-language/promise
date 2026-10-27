@@ -1,347 +1,107 @@
 package common
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
-	"time"
 )
 
-// RunGate dispatches bin/gate subcommands. Subcommands output structured JSON
-// gate values to stdout; progress messages go to stderr.
+// gateSpec is everything bin/gate accepts. The gates themselves are not in
+// it: the command class points at `gate --list`, which reads the one registry
+// (contractGates), so -help cannot come to name a gate the tool does not have.
+var gateSpec = ToolSpec{
+	Tool:        "gate",
+	Description: "measure one property of this tree",
+	Flags:       []FlagSpec{{Name: "list", Description: "name every gate this project answers"}},
+	Commands: []CommandSpec{{
+		Name:         "<gate>",
+		Description:  "a gate this project answers",
+		EnumeratedBy: "gate --list",
+		Flags: []FlagSpec{{
+			Name:        "envelope",
+			Description: "write the measurement as one envelope on stdout",
+			FixesOutput: true,
+		}},
+	}},
+}
+
+// RunGate is bin/gate: `bin/gate <gate> --envelope` measures one gate and
+// writes its envelope on stdout, and `bin/gate --list` names the gates. Every
+// malformed command line is one *UsageError (exit 2) that has written nothing
+// on stdout, so a runner reads one envelope, one listing, or nothing.
 func RunGate(root string, args []string) error {
 	// A gate run is unattended CI — it must never be able to reach a model.
-	// PROMISE_GATE propagates to every subprocess a gate subcommand spawns
-	// (RunBuild, promise test, go test, ...) since none of the subprocess
-	// helpers in exec.go set cmd.Env, so they all inherit os.Environ(). bin/guard
-	// checks this marker and denies every prompt-invoking tool while it's set.
+	// PROMISE_GATE propagates to every subprocess a gate spawns (RunBuild,
+	// promise test, go test, ...) since none of the subprocess helpers in
+	// exec.go set cmd.Env, so they all inherit os.Environ(). bin/guard checks
+	// this marker and denies every prompt-invoking tool while it's set. Set
+	// before anything else, so no path through this function runs without it.
 	os.Setenv("PROMISE_GATE", "1")
-	// --list answers "which gates does this project provide?". It is the only
-	// mode besides a measurement that writes to stdout, and it cannot be
-	// mistaken for an envelope: names one per line, or one JSON object under
-	// --json. An orchestrator must not hold a second copy of this list, and
-	// asking the entry point is the only way to learn it that cannot go stale.
-	if list, jsonOut, ok := parseListArgs(args); ok {
-		if !list {
-			return fmt.Errorf("use of unknown flag; run `bin/gate --list [--json]` to list the gates")
-		}
-		return writeGateList(os.Stdout, jsonOut)
+	inv, err := ParseInvocation(gateSpec, args)
+	if err != nil {
+		return err
 	}
-	if len(args) == 0 {
-		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-web-test  run only wasm32-web target tests (via Node) and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values\n  install     run the end-to-end install gate (--variant {thin|full} [--channel {next|stable|<epoch>}] [--system])\n  latest-invariant  assert `releases/latest` resolves to an epoch-* release (fails fast otherwise)\n  schema      print the test-output JSON schema (see docs/gate-system.md)\n  fit         measure whether this machine may be given work (judge it with bin/run fit)\n\nListing:\n  --list      print the gates this project provides, one name per line\n  --list --json  print the gate manifest as JSON")
+	switch {
+	case inv.Help:
+		return WriteHelp(os.Stdout, gateSpec, inv.Mode)
+	case inv.Version:
+		return WriteVersion(os.Stdout, inv.Mode, versionText(root))
+	}
+	SetObserved(ObservedFor(inv))
+
+	if inv.Command == "" {
+		// --list answers "which gates does this project provide?". An
+		// orchestrator must not hold a second copy of the list, and asking the
+		// entry point is the only way to learn it that cannot go stale.
+		if inv.Flags["list"] {
+			return writeGateList(os.Stdout, root, inv.Mode)
+		}
+		return BareInvocation(gateSpec, versionText(root))
+	}
+	name := inv.Command
+	if !IsContractGate(name) {
+		return unknownContractGate(name)
+	}
+	// Without --envelope nothing is measured: a bare run that printed numbers
+	// and exited 0 would be read as a pass by the first script that wrapped it.
+	// The judged, human form of the same measurement is bin/run's.
+	if !inv.Flags["envelope"] {
+		return &UsageError{Tool: "gate", Problems: []string{fmt.Sprintf(
+			"%s measures %s, and writes it only with --envelope; run `bin/run %s` for a result meant for a person",
+			name, ContractGateSummary(name), name)}}
 	}
 	// A gate measures the tree on the pinned toolchain. Under a hand-pointed one
 	// the measurement describes the operator's machine instead, and cannot stand
 	// as evidence about a (commit, platform, check) triple — so it is refused as
 	// a verdict source rather than allowed to masquerade as a pinned result
-	// (T2108). The error path prints nothing at all, so a reader gets one
-	// envelope or none. Building and testing by hand under an override is still
-	// fine: bin/build, bin/test and bin/verify announce it and proceed.
+	// (T2108). After the command line, so listing still answers under an
+	// override; before measuring, so the refusal prints nothing on stdout.
+	// Building and testing by hand under an override is still fine: bin/build,
+	// bin/test and bin/verify announce it and proceed.
 	if overrides := ToolchainOverrides(); len(overrides) > 0 {
 		return fmt.Errorf("refusing to measure under a toolchain override: %s\n"+
 			"  a gate reports what the tree does on the pinned toolchain; this run would report what this machine does\n"+
 			"  unset the variable(s) and re-run, or use bin/test / bin/verify for a by-hand run",
 			strings.Join(overrides, " "))
 	}
-	// Flow-contract gates take the whole argv (`fit --envelope`), because the
-	// runner appends --envelope after the name and nothing else may be accepted.
-	//
-	// One name is BOTH a contract gate and one of the older subcommands below —
-	// `latest-invariant` — because the measurement existed as a subcommand
-	// before it had a name an orchestrator could discover, and unlike every
-	// other such pair it has no instance half to tell the two spellings apart.
-	// For that one name the contract path is taken when the caller asked for an
-	// envelope, and the subcommand keeps its own argv otherwise: a bare
-	// `bin/gate latest-invariant` is what a scheduled gate runs today, and
-	// routing it to a contract gate that refuses a bare invocation would take
-	// that schedule red without measuring anything.
-	//
-	// This is a migration seam and not a precedent: it exists for exactly the
-	// names in legacySubcommands, and it closes when those schedules move to
-	// `bin/gate <name> --envelope` and the subcommand is deleted.
-	if IsContractGate(args[0]) && (hasEnvelopeFlag(args) || !legacySubcommands[args[0]]) {
-		return runContractGate(root, args, os.Stdout)
-	}
-	switch args[0] {
-	case "test":
-		return runGateTest(root, args[1:])
-	case "install":
-		return runGateInstall(root, args[1:])
-	case "latest-invariant":
-		return runGateLatestInvariant(args[1:])
-	case "wasm-test":
-		return runGateWasmTests(root, args[1:])
-	case "wasm-web-test":
-		return runGateWasmWebTests(root, args[1:])
-	case "wasm-size":
-		return runGateWasmSize(root, args[1:])
-	case "go-test":
-		return runGateGoTest(root, args[1:])
-	case "stress":
-		return runGateStress(root, args[1:])
-	case "coverage":
-		return runGateCoverage(root, args[1:])
-	default:
-		return fmt.Errorf("unknown gate %q\nGates: test, wasm-test, wasm-web-test, wasm-size, go-test, stress, coverage, install, latest-invariant, fit, integration", args[0])
-	}
+	return runContractGate(root, name, os.Stdout)
 }
 
-// runGateTest runs Promise tests and writes structured JSON gate values to stdout.
-// Test progress is written to stderr so stdout is clean JSON.
-func runGateTest(root string, args []string) error {
-	args = NormalizeArgs(args)
-
-	// bin/gate test is host-only. wasm tests are `bin/gate wasm-test` — a
-	// separate single-target gate. Reject any unknown argument (incl. -wasm).
-	for _, arg := range args {
-		switch arg {
-		case "-local":
-		default:
-			return fmt.Errorf("usage: bin/gate test (use `bin/gate wasm-test` for wasm)")
-		}
-	}
-
-	if err := SetupLocalCache(root); err != nil {
-		return fmt.Errorf("setup local cache: %w", err)
-	}
-
-	// Build compiler first. Redirect stdout→stderr so build progress lines
-	// don't contaminate the JSON we emit to stdout at the end.
-	savedStdout := os.Stdout
-	os.Stdout = os.Stderr
-	buildErr := RunBuild(root, nil)
-	os.Stdout = savedStdout
-	if buildErr != nil {
-		return fmt.Errorf("build: %w", buildErr)
-	}
-
-	// Everything this gate goes on to do is charged to the store (T2143); the
-	// build above is not, and neither is the warm-up openCASWindow performs.
-	store := openCASWindow(root)
-
-	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
-
-	// Run host tests with --json. The runner streams one JSON record per
-	// eligible test to stdout (captured here) and human progress to stderr.
-	// T0763: this stream is the single authoritative source of test identity —
-	// no human-output scraping.
-	fmt.Fprintf(os.Stderr, "Running promise tests (%s)...\n", hostTarget)
-	hostJSONL, hostErr := RunPromiseTestsJSON(root, "")
-
-	// Build the single-target host envelope (relativizes file paths against the
-	// repo root, groups by file, derives metrics from the records).
-	out, err := BuildGateOutput(root, hostTarget, "host", "promise-tests", hostJSONL)
-	if err != nil {
-		return fmt.Errorf("build gate output: %w", err)
-	}
-
-	// Write the gate-values.json sidecar for whatever ingests it (the workspace
-	// advances baselines from these; nothing in this repository does).
-	gv := &GateValues{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Platform:  hostTarget,
-		Values:    out.Metrics,
-	}
-	store.AddTo(gv.Values)
-
-	if err := WriteGateValues(root, gv); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
-	}
-
-	// Output the two-level GateOutput JSON to stdout (machine-readable).
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal gate output: %w", err)
-	}
-	fmt.Println(string(data))
-
-	if hostErr != nil {
-		return fmt.Errorf("promise tests (host) failed")
-	}
-	return nil
-}
-
-// runGateWasmTests runs only WASM target tests and writes structured JSON gate values to stdout.
-// Unlike "test --wasm", this does not run host-target tests.
-func runGateWasmTests(root string, args []string) error {
-	args = NormalizeArgs(args)
-
-	for _, arg := range args {
-		switch arg {
-		case "-local":
-		default:
-			return fmt.Errorf("usage: bin/gate wasm-test")
-		}
-	}
-
-	// The runtime executes the built module. Stage the pinned one before the
-	// build so a host that cannot obtain it fails loudly here, rather than
-	// reporting a measurement it did not make (T2169). Which copy runs is not
-	// this machine's business to decide: a gate's verdict has to describe the
-	// tree, and a suite run under whatever wasmtime happened to be installed
-	// describes the host as much as the tree.
-	if _, err := EnsureWasmtime(root); err != nil {
-		return fmt.Errorf("pinned wasmtime unavailable: %w\n"+
-			"  Stage it with `bin/prereqs -wasm`, or name an existing binary with PROMISE_WASMTIME\n"+
-			"  (note that a gate refuses to measure under an override)", err)
-	}
-
-	if err := SetupLocalCache(root); err != nil {
-		return fmt.Errorf("setup local cache: %w", err)
-	}
-
-	// Build compiler first. Redirect stdout→stderr so build progress lines
-	// don't contaminate the JSON we emit to stdout at the end.
-	savedStdout := os.Stdout
-	os.Stdout = os.Stderr
-	buildErr := RunBuild(root, nil)
-	os.Stdout = savedStdout
-	if buildErr != nil {
-		return fmt.Errorf("build: %w", buildErr)
-	}
-
-	// Everything this gate goes on to do is charged to the store (T2143); the
-	// build above is not, and neither is the warm-up openCASWindow performs.
-	store := openCASWindow(root)
-
-	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
-
-	// Run wasm tests with --json (single-target wasm gate). The runner streams
-	// one JSON record per eligible test to stdout; human progress to stderr.
-	fmt.Fprintf(os.Stderr, "Running promise tests (wasm32-wasi)...\n")
-	wasmJSONL, wasmErr := RunPromiseTestsJSON(root, "wasm32-wasi")
-
-	// Build the single-target wasm envelope.
-	out, err := BuildGateOutput(root, "wasm32-wasi", "wasm", "wasm-test", wasmJSONL)
-	if err != nil {
-		return fmt.Errorf("build gate output: %w", err)
-	}
-
-	// Write the gate-values.json sidecar for whatever ingests it (the workspace
-	// advances baselines from these; nothing in this repository does).
-	// Platform is the host (where the gate ran); the metrics carry the wasm_
-	// prefix and the envelope's target records the test target.
-	gv := &GateValues{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Platform:  hostTarget,
-		Values:    out.Metrics,
-	}
-	store.AddTo(gv.Values)
-
-	if err := WriteGateValues(root, gv); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
-	}
-
-	// Output the two-level GateOutput JSON to stdout (machine-readable).
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal gate output: %w", err)
-	}
-	fmt.Println(string(data))
-
-	if wasmErr != nil {
-		return fmt.Errorf("promise tests (wasm32-wasi) failed")
-	}
-	return nil
-}
-
-// runGateWasmWebTests runs only wasm32-web target tests (via Node) and writes
-// structured JSON gate values to stdout.
-func runGateWasmWebTests(root string, args []string) error {
-	args = NormalizeArgs(args)
-
-	for _, arg := range args {
-		switch arg {
-		case "-local":
-		default:
-			return fmt.Errorf("usage: bin/gate wasm-web-test")
-		}
-	}
-
-	// The pinned Node runs the wasm32-web harness — see runGateWasmTests above
-	// for why the gate stages a runtime rather than probing for one (T2169).
-	if _, err := EnsureNode(root); err != nil {
-		return fmt.Errorf("pinned node unavailable: %w\n"+
-			"  Stage it with `bin/prereqs -wasm`, or name an existing binary with PROMISE_NODE\n"+
-			"  (note that a gate refuses to measure under an override)", err)
-	}
-
-	if err := SetupLocalCache(root); err != nil {
-		return fmt.Errorf("setup local cache: %w", err)
-	}
-
-	// Build compiler first. Redirect stdout→stderr so build progress lines
-	// don't contaminate the JSON we emit to stdout at the end.
-	savedStdout := os.Stdout
-	os.Stdout = os.Stderr
-	buildErr := RunBuild(root, nil)
-	os.Stdout = savedStdout
-	if buildErr != nil {
-		return fmt.Errorf("build: %w", buildErr)
-	}
-
-	// Everything this gate goes on to do is charged to the store (T2143); the
-	// build above is not, and neither is the warm-up openCASWindow performs.
-	store := openCASWindow(root)
-
-	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
-
-	// Run wasm32-web tests with --json (single-target gate). The runner streams
-	// one JSON record per eligible test to stdout; human progress to stderr.
-	fmt.Fprintf(os.Stderr, "Running promise tests (wasm32-web)...\n")
-	wasmWebJSONL, wasmWebErr := RunPromiseTestsJSON(root, "wasm32-web")
-
-	// Build the single-target wasm32-web envelope.
-	out, err := BuildGateOutput(root, "wasm32-web", "wasm_web", "wasm-web-test", wasmWebJSONL)
-	if err != nil {
-		return fmt.Errorf("build gate output: %w", err)
-	}
-
-	// Write the gate-values.json sidecar for whatever ingests it (the workspace
-	// advances baselines from these; nothing in this repository does).
-	// Platform is the host (where the gate ran); the metrics carry the
-	// wasm_web_ prefix and the envelope's target records the test target.
-	gv := &GateValues{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Platform:  hostTarget,
-		Values:    out.Metrics,
-	}
-	store.AddTo(gv.Values)
-
-	if err := WriteGateValues(root, gv); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
-	}
-
-	// Output the two-level GateOutput JSON to stdout (machine-readable).
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal gate output: %w", err)
-	}
-	fmt.Println(string(data))
-
-	if wasmWebErr != nil {
-		return fmt.Errorf("promise tests (wasm32-web) failed")
-	}
-	return nil
-}
-
-// gateGoTestArgv is the go-test gate's `go test` command: goTestArgs()'s bounded
-// -p / -parallel / -timeout, plus the -v its output parsers read and the -count=1
-// it needs to measure the tree rather than replay a saved result.
+// gateGoTestArgv is the coverage gate's `go test` command: goTestArgs()'s bounded
+// -p / -parallel / -timeout, plus -v and the -count=1 it needs to measure the
+// tree rather than replay a saved result.
 //
 // It is goTestArgs() and not a second spelling because a tool and the gate that
 // measures the same property are one implementation in two modes
-// (docs/gate-system.md). This gate kept its own argv through T1817 and so went
-// on running unbounded -p/-parallel long after bin/test stopped: on a 12-core
-// host that is 82 concurrent compilers at load average 31, which is what turned
-// a cold toolchain materialization into three-minute test timeouts (T2133).
+// (docs/gate-system.md). The gate this was written for kept its own argv through
+// T1817 and so went on running unbounded -p/-parallel long after bin/test
+// stopped: on a 12-core host that is 82 concurrent compilers at load average 31,
+// which is what turned a cold toolchain materialization into three-minute test
+// timeouts (T2133).
 //
-// extra flags go ahead of the package pattern, so the coverage gate below is
+// extra flags go ahead of the package pattern, so the coverage command below is
 // this command plus instrumentation rather than a second copy of it.
 func gateGoTestArgv(extra ...string) []string {
 	return goTestArgs(append([]string{"-v", "-count=1"}, extra...)...)
@@ -350,244 +110,6 @@ func gateGoTestArgv(extra ...string) []string {
 // gateCoverageArgv is gateGoTestArgv plus the coverage instrumentation.
 func gateCoverageArgv(covPkgs []string, covFile string) []string {
 	return gateGoTestArgv("-coverpkg="+strings.Join(covPkgs, ","), "-coverprofile="+covFile)
-}
-
-// runGateGoTest runs Go unit tests and writes structured JSON gate values to stdout.
-func runGateGoTest(root string, args []string) error {
-	args = NormalizeArgs(args)
-
-	for _, arg := range args {
-		switch arg {
-		case "-local":
-		default:
-			return fmt.Errorf("usage: bin/gate go-test")
-		}
-	}
-
-	if err := SetupLocalCache(root); err != nil {
-		return fmt.Errorf("setup local cache: %w", err)
-	}
-
-	// Build compiler first (stdout→stderr).
-	savedStdout := os.Stdout
-	os.Stdout = os.Stderr
-	buildErr := RunBuild(root, nil)
-	os.Stdout = savedStdout
-	if buildErr != nil {
-		return fmt.Errorf("build: %w", buildErr)
-	}
-
-	// Everything this gate goes on to do is charged to the store (T2143); the
-	// build above is not, and neither is the warm-up openCASWindow performs.
-	store := openCASWindow(root)
-
-	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
-	compilerDir := filepath.Join(root, "compiler")
-
-	fmt.Fprintf(os.Stderr, "Running go tests...\n")
-	output, testErr := RunTeeStderr(compilerDir, "go", gateGoTestArgv()...)
-
-	passed, failed := ParseGoTestOutput(output)
-	goFiles := ParseGoTestGroups(output)
-
-	gv := &GateValues{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Platform:  hostTarget,
-		Values:    make(map[string]float64),
-	}
-	gv.Values["go_test_count"] = float64(passed)
-	gv.Values["go_test_failures"] = float64(failed)
-
-	store.AddTo(gv.Values)
-
-	if err := WriteGateValues(root, gv); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
-	}
-
-	// Output the two-level GateOutput JSON to stdout (machine-readable).
-	out := &GateOutput{Target: hostTarget, Metrics: gv.Values, Files: goFiles, Complete: "go-tests"}
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal gate output: %w", err)
-	}
-	fmt.Println(string(data))
-
-	if testErr != nil {
-		return fmt.Errorf("go tests failed")
-	}
-	return nil
-}
-
-// runGateStress runs stress tests and writes structured JSON gate values to stdout.
-func runGateStress(root string, args []string) error {
-	iterations := "100"
-	for _, arg := range args {
-		if _, err := strconv.Atoi(arg); err == nil {
-			iterations = arg
-		} else {
-			return fmt.Errorf("usage: bin/gate stress [iterations]")
-		}
-	}
-
-	if err := SetupLocalCache(root); err != nil {
-		return fmt.Errorf("setup local cache: %w", err)
-	}
-
-	// Build compiler first (stdout→stderr).
-	savedStdout := os.Stdout
-	os.Stdout = os.Stderr
-	buildErr := RunBuild(root, nil)
-	os.Stdout = savedStdout
-	if buildErr != nil {
-		return fmt.Errorf("build: %w", buildErr)
-	}
-
-	// Everything this gate goes on to do is charged to the store (T2143); the
-	// build above is not, and neither is the warm-up openCASWindow performs.
-	store := openCASWindow(root)
-
-	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
-	promiseBin := filepath.Join(root, "bin", BinaryName())
-
-	fmt.Fprintf(os.Stderr, "Running stress tests (%s iterations)...\n", iterations)
-	output, testErr := RunTeeStderr(root, promiseBin, "test", "-timeout", "15s", "-stress", iterations, "tests/...", "modules/...")
-
-	iters, flakyCount := ParseStressOutput(output)
-
-	gv := &GateValues{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Platform:  hostTarget,
-		Values:    make(map[string]float64),
-	}
-	gv.Values["stress_iterations"] = float64(iters)
-	gv.Values["stress_flaky_count"] = float64(flakyCount)
-
-	store.AddTo(gv.Values)
-
-	if err := WriteGateValues(root, gv); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
-	}
-
-	// Output the unified GateOutput envelope (metric-only; no files).
-	out := &GateOutput{Target: hostTarget, Metrics: gv.Values, Complete: "stress"}
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal gate output: %w", err)
-	}
-	fmt.Println(string(data))
-
-	if testErr != nil {
-		return fmt.Errorf("stress tests failed")
-	}
-	return nil
-}
-
-// runGateCoverage runs Go and Promise coverage analysis and writes structured JSON gate values.
-func runGateCoverage(root string, args []string) error {
-	args = NormalizeArgs(args)
-
-	for _, arg := range args {
-		switch arg {
-		case "-local":
-		default:
-			return fmt.Errorf("usage: bin/gate coverage")
-		}
-	}
-
-	if err := SetupLocalCache(root); err != nil {
-		return fmt.Errorf("setup local cache: %w", err)
-	}
-
-	// Build compiler first (stdout→stderr).
-	savedStdout := os.Stdout
-	os.Stdout = os.Stderr
-	buildErr := RunBuild(root, nil)
-	os.Stdout = savedStdout
-	if buildErr != nil {
-		return fmt.Errorf("build: %w", buildErr)
-	}
-
-	// Everything this gate goes on to do is charged to the store (T2143); the
-	// build above is not, and neither is the warm-up openCASWindow performs.
-	store := openCASWindow(root)
-
-	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
-	compilerDir := filepath.Join(root, "compiler")
-	promiseBin := filepath.Join(root, "bin", BinaryName())
-
-	// Go coverage. -coverpkg is what makes the number mean anything here: by
-	// default `go test` instruments only the package under test, so a suite
-	// living in a sibling package is credited to nothing. T1776 split codegen's
-	// and cmd/promise's suites into per-area packages for parallelism, and the
-	// measured total fell 71% -> 57.7% with no change in what the tests
-	// actually exercise (internal/codegen alone reads 54.6% self-measured
-	// against 86.7% with -coverpkg). Naming every package restores the
-	// attribution.
-	//
-	// This stays confined to the coverage gate. -coverpkg instruments every
-	// package into every test binary, which is exactly the cost that keeps
-	// coverage a periodic gate rather than part of the integration path — so
-	// bin/test, bin/verify and bin/gate go-test must keep running without it.
-	covPkgs, err := goCoveragePackages(compilerDir)
-	if err != nil {
-		return fmt.Errorf("list coverage packages: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "Running Go coverage over %d packages...\n", len(covPkgs))
-	covFile := filepath.Join(os.TempDir(), "promise_gate_cov.out")
-	defer os.Remove(covFile)
-
-	var goCovPct float64
-	goOutput, _ := RunTeeStderr(compilerDir, "go", gateCoverageArgv(covPkgs, covFile)...)
-	// Read the profile whatever the tests returned. A failing test still
-	// produces a complete profile, and reporting 0 for a run that measured fine
-	// is a false collapse indistinguishable from a real one — the failure is
-	// already reported as go_test_failures.
-	if Exists(covFile) {
-		coverOutput, coverErr := RunOutputIn(compilerDir, "go", "tool", "cover", "-func="+covFile)
-		if coverErr == nil {
-			goCovPct = ParseCoverageTotal(coverOutput)
-		}
-	}
-	goPassed, goFailed := ParseGoTestOutput(goOutput)
-
-	// Promise coverage, read from the runner's --json stream rather than
-	// scraped from human output: the same stream carries one record per test
-	// (so this gate can report what it actually measured over) and one coverage
-	// record per file. Target set is unchanged, so promise_coverage_pct stays
-	// comparable across this change.
-	fmt.Fprintf(os.Stderr, "Running Promise coverage...\n")
-	promiseJSONL, _ := RunCaptureStdout(root, promiseBin, "test", "-json", "-coverage",
-		"-timeout", "30", "tests/...", "modules/...")
-	promiseCovPct, promisePassed, promiseFailed := ParsePromiseCoverageJSONL(promiseJSONL)
-
-	gv := &GateValues{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Platform:  hostTarget,
-		Values:    make(map[string]float64),
-	}
-	gv.Values["go_coverage_pct"] = goCovPct
-	gv.Values["go_test_count"] = float64(goPassed)
-	gv.Values["go_test_failures"] = float64(goFailed)
-	gv.Values["promise_coverage_pct"] = promiseCovPct
-	gv.Values["promise_test_count"] = float64(promisePassed)
-	gv.Values["promise_test_failures"] = float64(promiseFailed)
-
-	store.AddTo(gv.Values)
-
-	if err := WriteGateValues(root, gv); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
-	}
-
-	// Output the unified GateOutput envelope (metric-only; no files).
-	out := &GateOutput{Target: hostTarget, Metrics: gv.Values, Complete: "coverage"}
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal gate output: %w", err)
-	}
-	fmt.Println(string(data))
-
-	return nil
 }
 
 // goCoveragePackages lists the compiler packages whose statements the coverage
@@ -611,24 +133,6 @@ func goCoveragePackages(compilerDir string) ([]string, error) {
 
 // --- Parser helpers ---
 
-var goTestPassRe = regexp.MustCompile(`^--- PASS:`)
-var goTestFailRe = regexp.MustCompile(`^--- FAIL:`)
-
-// ParseGoTestOutput counts passed and failed tests from `go test -v` output.
-func ParseGoTestOutput(output string) (passed, failed int) {
-	for _, line := range strings.Split(output, "\n") {
-		if goTestPassRe.MatchString(line) {
-			passed++
-		} else if goTestFailRe.MatchString(line) {
-			failed++
-		}
-	}
-	return
-}
-
-var goTestResultRe = regexp.MustCompile(`^--- (PASS|FAIL|SKIP): (\S+) \((\d+\.\d+)s\)`)
-var goTestPkgRe = regexp.MustCompile(`^(ok|FAIL)\s+(\S+)\s+`)
-
 // goModulePrefix is the repository's VCS-root import prefix. Go package paths
 // are import paths (e.g. github.com/promise-language/promise/compiler/internal/
 // codegen); stripping this yields the repo-relative directory (compiler/
@@ -643,81 +147,6 @@ func goPkgToRepoRel(pkg string) string {
 		return rel
 	}
 	return pkg
-}
-
-// ParseGoTestGroups parses `go test -v` output into per-package file groups
-// (repo-relative path) with one TestRecord per test function, so go-test emits
-// the same two-level shape as the Promise test gates. Status is normalized to
-// the gate vocabulary: pass | fail | excluded (Go SKIP). T0763.
-func ParseGoTestGroups(output string) []TestFileGroup {
-	lines := strings.Split(output, "\n")
-	var groups []TestFileGroup
-	var pending []TestRecord
-	var contextLines []string
-	collectingContext := false
-
-	flushContext := func() {
-		if collectingContext && len(pending) > 0 {
-			// Bound the context so a failing test that dumps the full IR
-			// (assertContains) can't produce a >1MB JSON line that deadlocks
-			// the gate runner's drain — see clampContext (T0777).
-			pending[len(pending)-1].Context = clampContext(strings.Join(contextLines, "\n"))
-		}
-		collectingContext = false
-		contextLines = nil
-	}
-
-	for _, line := range lines {
-		// Package summary line — close the group with its package path.
-		if m := goTestPkgRe.FindStringSubmatch(line); m != nil {
-			flushContext()
-			if len(pending) > 0 {
-				groups = append(groups, TestFileGroup{
-					File:  goPkgToRepoRel(m[2]),
-					Tests: append([]TestRecord(nil), pending...),
-				})
-				pending = pending[:0]
-			}
-			continue
-		}
-
-		// Test result line.
-		if m := goTestResultRe.FindStringSubmatch(line); m != nil {
-			flushContext()
-			status := "pass"
-			switch m[1] {
-			case "FAIL":
-				status = "fail"
-			case "SKIP":
-				status = "excluded"
-			}
-			elapsed, _ := strconv.ParseFloat(m[3], 64)
-			pending = append(pending, TestRecord{Test: m[2], Status: status, Elapsed: elapsed})
-			if m[1] == "FAIL" {
-				collectingContext = true
-				contextLines = nil
-			}
-			continue
-		}
-
-		// Collect indented context lines for failures.
-		if collectingContext {
-			if strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "    ") {
-				contextLines = append(contextLines, strings.TrimSpace(line))
-			} else {
-				flushContext()
-			}
-		}
-	}
-
-	// Flush any trailing tests with no package summary (truncated output): we
-	// can't identify the package, so report them under an empty file rather than
-	// dropping them silently.
-	flushContext()
-	if len(pending) > 0 {
-		groups = append(groups, TestFileGroup{Tests: append([]TestRecord(nil), pending...)})
-	}
-	return groups
 }
 
 var stressIterRe = regexp.MustCompile(`(\d+) iterations over`)
@@ -743,22 +172,4 @@ func ParseCoverageTotal(output string) float64 {
 		return pct
 	}
 	return 0
-}
-
-// legacySubcommands are the names that are both a contract gate and one of the
-// older subcommands. A name here answers to both spellings during the
-// migration; every other contract gate answers only to the contract one.
-var legacySubcommands = map[string]bool{
-	"latest-invariant": true,
-}
-
-// hasEnvelopeFlag reports whether the caller asked for a measurement. Both
-// spellings, because every other flag in this tool accepts both.
-func hasEnvelopeFlag(args []string) bool {
-	for _, a := range args[1:] {
-		if a == "--envelope" || a == "-envelope" {
-			return true
-		}
-	}
-	return false
 }

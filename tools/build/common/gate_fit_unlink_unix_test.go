@@ -166,7 +166,7 @@ func TestFitGate_UnusableScratchIsNoMeasurement(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout bytes.Buffer
-	err := runContractGate(root, []string{"fit", "--envelope"}, &stdout)
+	err := runContractGate(root, "fit", &stdout)
 	if err == nil || !strings.Contains(err.Error(), "unlink semantics") {
 		t.Errorf("fit --envelope = %v, want a failure naming the unlink probe", err)
 	}
@@ -201,7 +201,7 @@ func TestUnlinkMetrics_ReportsAKeptNameAsOne(t *testing.T) {
 // that must never read 1, since a false 1 reports every machine unfit.
 func TestFitGate_ReportsUnlinkSemantics(t *testing.T) {
 	var stdout bytes.Buffer
-	if err := runContractGate(t.TempDir(), []string{"fit", "--envelope"}, &stdout); err != nil {
+	if err := runContractGate(t.TempDir(), "fit", &stdout); err != nil {
 		t.Fatalf("fit --envelope: %v", err)
 	}
 	var env Envelope

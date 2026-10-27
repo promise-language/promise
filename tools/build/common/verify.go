@@ -2,10 +2,13 @@ package common
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,109 +18,60 @@ import (
 
 var errInterrupted = fmt.Errorf("interrupted by Ctrl+C")
 
-// ErrLockTimeout is returned by RunVerify when --lock-timeout elapses before the
-// host-scope exclusion could be taken. It is NOT a verification failure — it
-// means another party held the exclusion for the whole wait. Callers (the
-// tracker runner) detect it (via errors.Is, or the EX_TEMPFAIL exit code / the
-// VERIFY_LOCK_TIMEOUT stderr marker the verify binary prints) to retry for a
-// turn rather than treating the run as failed.
-var ErrLockTimeout = errors.New("verify lock acquisition timed out")
-
-// verifyOptions is bin/verify's command line, parsed.
+// verifySpec is everything bin/verify accepts: the parameters every invocation
+// does, and nothing of its own.
 //
-// EVERY FLAG HERE IS UNABLE TO CHANGE WHAT IS MEASURED (T2170). What verify
+// NOTHING ON THIS COMMAND LINE CAN CHANGE WHAT IS MEASURED (T2170). What verify
 // measures is `integration`, whole, and a flag that could narrow or widen it
-// would make "blessed" mean different things on different invocations — which
-// is the defect this file was rewritten for. --clean wipes caches before
-// anything runs; --push acts after the blessing is recorded; --lock-timeout
-// bounds a wait that happens before any measurement. The variant options
-// --wasm, --wasm-web, --shared and --local are gone: the WASM suites are other
-// targets' gates (docs/gate-system.md), and with one cache there is nothing to
-// choose between.
-type verifyOptions struct {
-	clean bool
-	push  bool
-	// lockTimeout bounds how long to wait for the host-scope exclusion. 0 (the
-	// default, flag absent) waits UNBOUNDED — bin/verify is run on a variety of
-	// machines where any hardcoded timeout would be wrong; bounding the wait is
-	// the caller's choice via --lock-timeout (the tracker runner sets it so a
-	// lost turn can be retried).
-	lockTimeout time.Duration
+// would make "blessed" mean different things on different invocations. The
+// variant options --wasm, --wasm-web, --shared and --local went first; --clean,
+// --push and --lock-timeout went with the tool contract (#624): a wiped cache is
+// `bin/clean`, a push is `git push`, and the wait for the host-scope exclusion
+// is unbounded because how long a turn on this machine takes is the queue's
+// business, which a runner counts as waiting rather than against the run.
+var verifySpec = ToolSpec{
+	Tool:        "verify",
+	Description: "repair what is mechanically repairable, then measure and judge integration and bless the tree it passed",
 }
 
-// verifyUsage is the one spelling of what this tool accepts.
-const verifyUsage = "usage: bin/verify [--clean] [--push] [--lock-timeout=<dur>]"
+// The three things a step can have been, as the summary and the JSON both name
+// them.
+const (
+	stepPassed = "passed"
+	stepFailed = "failed"
+	stepNotRun = "not-run"
+)
 
-// retiredVerifyFlags are the variant options T2170 removed, each with what to
-// run instead.
-//
-// The refusal NAMES THE REPLACEMENT, as every other refusal in this tree does —
-// the staleness check names ./make, and verifiedtree's refusal names the
-// .gitignore line. A bare usage line says the flag is gone and leaves the reader to
-// discover where the measurement went, and for the two WASM targets it went
-// somewhere that still exists and is still run on a schedule. Losing a flag and
-// losing a suite are different facts, and a caller is entitled to be told which
-// one happened.
-var retiredVerifyFlags = map[string]string{
-	"wasm":     "The wasm32-wasi suite is its own gate: `bin/gate wasm-test`, or `bin/test --wasm` by hand.",
-	"wasm-web": "The wasm32-web suite is its own gate: `bin/gate wasm-web-test`, or `bin/test --wasm-web` by hand.",
-	"shared":   "Verify measures against the repo-local .promise-home/ and nothing else; no command run from a worktree addresses ~/.promise.",
-	"local":    "The repo-local .promise-home/ is the only cache verify uses, so there is nothing left to select.",
-}
-
-// unknownVerifyFlag refuses one argument. A retired variant option is told apart
-// from a typo, because the two need different things said to them.
-//
-// The flag is named in its two-dash spelling rather than quoted back as typed:
-// both spellings are accepted everywhere in this tool, NormalizeArgs has already
-// collapsed them by the time this is reached, and echoing the normalized form
-// would correct the reader in a spelling they may not have used.
-func unknownVerifyFlag(arg string) error {
-	if why, retired := retiredVerifyFlags[strings.TrimPrefix(arg, "-")]; retired {
-		return fmt.Errorf("--%s is no longer a flag: verify measures `integration`, which is host-scoped. %s\n%s",
-			strings.TrimPrefix(arg, "-"), why, verifyUsage)
-	}
-	return errors.New(verifyUsage)
-}
-
-// parseVerifyArgs parses bin/verify's flags and does nothing else — no lock, no
-// filesystem, no subprocess. It is separate from RunVerify so that flag coverage
-// can be a pure unit test: proving a flag parsed used to mean running the whole
-// pipeline, and for `--shared --clean` that meant deleting the host's ~/.promise
-// (T2084).
-func parseVerifyArgs(args []string) (verifyOptions, error) {
-	args = NormalizeArgs(args)
-	var opts verifyOptions
-
-	// --lock-timeout takes a duration value (NormalizeArgs has already split
-	// --lock-timeout=10m into "-lock-timeout" "10m").
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-clean":
-			opts.clean = true
-		case "-push":
-			opts.push = true
-		case "-lock-timeout":
-			if i+1 >= len(args) {
-				return verifyOptions{}, fmt.Errorf("-lock-timeout requires a duration value (e.g. --lock-timeout=10m)")
-			}
-			i++
-			d, err := time.ParseDuration(args[i])
-			if err != nil || d < 0 {
-				return verifyOptions{}, fmt.Errorf("-lock-timeout: invalid duration %q (use Go duration syntax, e.g. 10m)", args[i])
-			}
-			opts.lockTimeout = d
-		default:
-			return verifyOptions{}, unknownVerifyFlag(args[i])
-		}
-	}
-	return opts, nil
-}
-
-// verifyStep is one step of the pipeline, named as its failure will name it.
+// verifyStep is one step of the pipeline, named as its failure will name it,
+// in the stage the summary groups it under.
 type verifyStep struct {
-	name string
-	run  func() error
+	stage string
+	name  string
+	run   func() error
+}
+
+// stepResult is one step, what became of it, how long it took, and — for the
+// one that failed — what it said.
+type stepResult struct {
+	Name           string      `json:"name"`
+	Status         string      `json:"status"`
+	ElapsedSeconds json.Number `json:"elapsed_seconds"`
+	Detail         string      `json:"detail,omitempty"`
+}
+
+// stageResult is one stage of the run and what became of its steps.
+type stageResult struct {
+	Name  string       `json:"name"`
+	Steps []stepResult `json:"steps"`
+}
+
+// verifyResult is what bin/verify answers in JSON: whether every stage passed,
+// each stage's steps, and the tree the run blessed — absent when it recorded
+// nothing.
+type verifyResult struct {
+	OK     bool          `json:"ok"`
+	Stages []stageResult `json:"stages"`
+	Tree   string        `json:"tree,omitempty"`
 }
 
 // verifyRun is one bin/verify run: what its steps share, and what its summary is
@@ -127,11 +81,9 @@ type verifyStep struct {
 // order and their stop-at-the-first-failure behaviour can be asserted. RunVerify
 // itself takes a host-global lock and rebuilds the compiler, so it cannot be
 // driven by a test directly — which is how the ordering guarantees that matter
-// most (nothing is blessed before the measurement passed, nothing is pushed
-// before it was blessed) went uncovered.
+// most (nothing is blessed before the measurement passed) went uncovered.
 type verifyRun struct {
 	root  string
-	opts  verifyOptions
 	start time.Time
 
 	unlock func()
@@ -140,15 +92,16 @@ type verifyRun struct {
 	// What the integration step measured and what the judge made of it. Only
 	// these cross a step boundary: the summary reads them however the run ended,
 	// and `record` blesses from them.
-	env        Envelope
-	parts      []PartResult
-	terms      map[string]term
-	acceptable bool
+	env     Envelope
+	parts   []PartResult
+	verdict Verdict
+	blessed string
 }
 
 // RunVerify is the pre-commit pipeline: lock, clear the blessing, build, repair,
 // check, measure `integration`, and — only if the judge passed it — record the
-// blessing the commit guard reads.
+// blessing the commit guard reads. It writes its summary, and only that, on
+// stdout: the stage roll for a person, or one JSON object.
 //
 // ITS TEST PHASE IS THE GATE, IN PROCESS. Not a spawned bin/gate and not a
 // second implementation: MeasureContractGateParts is the entry point
@@ -157,33 +110,67 @@ type verifyRun struct {
 // Promise suites of its own, so "bin/verify passed" and "integration passed"
 // were two answers about one tree that could differ — and only the first wrote
 // the record the commit guard reads (T2170).
-func RunVerify(root string, args []string) error {
-	opts, err := parseVerifyArgs(args)
-	if err != nil {
-		return err
-	}
-	r := &verifyRun{root: root, opts: opts, start: time.Now()}
-	defer r.release()
+func RunVerify(root string, args []string, stdout io.Writer) error {
+	return runVerify(root, args, stdout, (*verifyRun).steps)
+}
 
-	failed, err := runVerifySteps(r.steps())
-	// A run that never got the lock measured nothing, so it has no summary to
-	// print — and its caller retries rather than reading one.
-	if errors.Is(err, ErrLockTimeout) {
-		return err
-	}
-	Progress().Print(r.summary(failed).String())
+// runVerify is RunVerify with the pipeline as a parameter, so a test can hold
+// the result — its shape, its stream and its status — to the contract without
+// taking a lock, building a compiler or running a suite.
+func runVerify(root string, args []string, stdout io.Writer, steps func(*verifyRun) []verifyStep) error {
+	inv, err := ParseInvocation(verifySpec, args)
 	if err != nil {
 		return err
 	}
-	Progress().Println("✅ OK to commit")
+	switch {
+	case inv.Help:
+		return WriteHelp(stdout, verifySpec, inv.Mode)
+	case inv.Version:
+		return WriteVersion(stdout, inv.Mode, versionText(root))
+	}
+	SetObserved(ObservedFor(inv))
+
+	// Stdout carries the summary and nothing else, so for the whole run
+	// os.Stdout points at the narration: the build, the formatters, a blob
+	// fetch, Progress() — anything in this process that prints to os.Stdout —
+	// cannot put a line in front of it.
+	saved := os.Stdout
+	os.Stdout = Narration()
+	defer func() { os.Stdout = saved }()
+
+	r := &verifyRun{root: root, start: time.Now()}
+	defer r.release()
+	results := runVerifySteps(steps(r))
+	res := verifyResult{OK: true, Stages: results, Tree: r.blessed}
+	for _, stage := range results {
+		for _, s := range stage.Steps {
+			if s.Status != stepPassed {
+				res.OK = false
+			}
+		}
+	}
+	human := r.summary(failedStep(results)).String() + stepRoll(res)
+	if inv.Mode == ModeJSON {
+		fmt.Fprint(Narration(), human)
+		if err := encodeLine(stdout, res); err != nil {
+			return err
+		}
+	} else if _, err := io.WriteString(stdout, human); err != nil {
+		return err
+	}
+	if !res.OK {
+		return &reportedExit{code: 1}
+	}
 	return nil
 }
 
 // steps is the pipeline, in order. Two orderings are load-bearing:
 //
-//   - CLEAR IS SECOND, right after the lock. A run that dies — a red step, a
-//     Ctrl+C, a crash — must leave nothing blessed, or the commit guard would
-//     honour a record describing content this run had already begun changing.
+//   - CLEAR IS FIRST, before the lock. A run that dies — a red step, a lock it
+//     could not take or a queue it was stopped in, a Ctrl+C, a crash — must leave
+//     nothing blessed, or the commit guard would honour a record describing
+//     content this run had already begun changing. The record names a tree, so
+//     clearing it outside the exclusion costs another run at most a re-record.
 //   - BUILD PRECEDES THE REPAIRS. `promise format` is the formatter the compiler
 //     carries, and `integration` MEASURES whether anything is still unformatted.
 //     Repairing with a stale binary and being judged by the fresh one would fail
@@ -194,61 +181,156 @@ func RunVerify(root string, args []string) error {
 // come before the measurement, so a dangling link fails in seconds rather than
 // after a full suite.
 func (r *verifyRun) steps() []verifyStep {
-	steps := []verifyStep{
-		{"lock", r.stepLock},
-		{"clear", r.stepClear},
+	return []verifyStep{
+		{"prepare", "clear", r.stepClear},
+		{"prepare", "lock", r.stepLock},
+		{"prepare", "cache", r.stepCache},
+		{"prepare", "build", r.stepBuild},
+		{"repair", "gofmt", r.stepFormatGo},
+		{"repair", "promise format", r.stepFormatPromise},
+		{"check", "go vet", r.stepCheckGo},
+		{"check", "structure", r.stepCheckStructure},
+		{"measure", "integration", r.stepIntegration},
+		{"record", "verified tree", r.stepRecord},
 	}
-	if r.opts.clean {
-		steps = append(steps, verifyStep{"clean", r.stepClean})
-	}
-	steps = append(steps,
-		verifyStep{"cache", r.stepCache},
-		verifyStep{"build", r.stepBuild},
-		verifyStep{"format go", r.stepFormatGo},
-		verifyStep{"format promise", r.stepFormatPromise},
-		verifyStep{"check go", r.stepCheckGo},
-		verifyStep{"check structure", r.stepCheckStructure},
-		verifyStep{"integration", r.stepIntegration},
-		verifyStep{"record", r.stepRecord},
-	)
-	if r.opts.push {
-		steps = append(steps, verifyStep{"push", r.stepPush})
-	}
-	return steps
 }
 
-// runVerifySteps runs the steps in order and stops at the first failure, which
-// it names. The name is the whole point: "structure: docs: dangling link" sends
-// the reader to the sweep, where a bare "dangling link" sends them hunting for
-// which phase produced it.
+// runVerifySteps runs the steps in order and stops at the first failure: the
+// one that failed carries what it said, and every step after it is not-run.
+// Each stage appears once, in the order its first step does.
 //
 // Stopping is what makes the pipeline's guarantees hold by construction rather
-// than by each step re-checking: nothing is recorded after a failed measurement,
-// and nothing is pushed after a failed record.
-func runVerifySteps(steps []verifyStep) (failed string, err error) {
+// than by each step re-checking: nothing is recorded after a failed measurement.
+func runVerifySteps(steps []verifyStep) []stageResult {
+	var stages []stageResult
+	stopped := false
 	for _, s := range steps {
-		if err := s.run(); err != nil {
-			return s.name, fmt.Errorf("%s: %w", s.name, err)
+		res := stepResult{Name: s.name, Status: stepNotRun, ElapsedSeconds: "0"}
+		if !stopped {
+			start := time.Now()
+			// An interrupt stops the run before its next step, never after one:
+			// a step that completed — the record written — is reported as what it
+			// did, so the result cannot say "failed" beside a written record.
+			var err error
+			if Interrupted() {
+				Progress().Clear()
+				err = errInterrupted
+			} else {
+				err = s.run()
+			}
+			res.ElapsedSeconds = json.Number(strconv.FormatFloat(time.Since(start).Seconds(), 'f', 3, 64))
+			res.Status = stepPassed
+			if err != nil {
+				res.Status, res.Detail, stopped = stepFailed, err.Error(), true
+			}
 		}
-		if Interrupted() {
-			Progress().Clear()
-			return s.name, fmt.Errorf("%s: %w", s.name, errInterrupted)
+		if n := len(stages); n == 0 || stages[n-1].Name != s.stage {
+			stages = append(stages, stageResult{Name: s.stage})
 		}
+		stages[len(stages)-1].Steps = append(stages[len(stages)-1].Steps, res)
 	}
-	return "", nil
+	return stages
 }
 
-// stepLock serializes concurrent verify runs across the host (acquireVerifyLock).
+// failedStep names the step that stopped the run, "" when none did.
+func failedStep(stages []stageResult) string {
+	for _, stage := range stages {
+		for _, s := range stage.Steps {
+			if s.Status == stepFailed {
+				return s.Name
+			}
+		}
+	}
+	return ""
+}
+
+// stepRoll is the stage roll a person reads under the summary block, ending
+// with the failed step's own words — so the last lines of the output carry all
+// the evidence — and then the one line saying whether the tree may be committed.
+func stepRoll(res verifyResult) string {
+	var b strings.Builder
+	var failures []stepResult
+	for _, stage := range res.Stages {
+		fmt.Fprintf(&b, "  %s\n", stage.Name)
+		for _, s := range stage.Steps {
+			took := ""
+			if s.Status != stepNotRun {
+				secs, _ := strconv.ParseFloat(string(s.ElapsedSeconds), 64)
+				took = time.Duration(secs * float64(time.Second)).Round(time.Millisecond).String()
+			}
+			fmt.Fprintf(&b, "    %-7s  %-16s %s\n", stepLabel(s.Status), s.Name, took)
+			if s.Status == stepFailed {
+				failures = append(failures, s)
+			}
+		}
+	}
+	if res.Tree != "" {
+		fmt.Fprintf(&b, "  blessed tree %s\n", res.Tree)
+	}
+	for _, s := range failures {
+		fmt.Fprintf(&b, "\n%s failed:\n", s.Name)
+		for _, line := range strings.Split(strings.TrimRight(s.Detail, "\n"), "\n") {
+			fmt.Fprintf(&b, "  %s\n", line)
+		}
+	}
+	b.WriteString(verifySummaryThin + "\n")
+	if res.OK {
+		b.WriteString("✅ OK to Commit\n")
+	} else {
+		b.WriteString("❌ Verify FAILED: not safe to commit\n")
+	}
+	return b.String()
+}
+
+// stepLabel is how a status reads in the roll.
+func stepLabel(status string) string {
+	switch status {
+	case stepPassed:
+		return "ok"
+	case stepFailed:
+		return "FAIL"
+	}
+	return stepNotRun
+}
+
+// stepLock serializes concurrent verify runs across the host (acquireHostScope).
 func (r *verifyRun) stepLock() error {
-	unlock, err := acquireVerifyLock(r.root, r.opts.lockTimeout)
+	ctx, cancel := interruptible(context.Background())
+	defer cancel()
+	unlock, err := acquireHostScopeCtx(ctx, r.root)
 	if err != nil {
-		if errors.Is(err, ErrLockTimeout) {
-			return err
+		if Interrupted() {
+			return errInterrupted
 		}
 		return fmt.Errorf("acquire verify lock: %w", err)
 	}
 	r.unlock = unlock
 	return nil
+}
+
+// interruptible is ctx, ended by the first Ctrl+C. The handler only sets the
+// flag the pipeline reads between steps; a step that blocks — the queue for the
+// host scope has no bound — reads it here instead, so the run ends with its
+// summary rather than waiting for the second Ctrl+C, which exits without one.
+// The watcher stops when the returned context ends, whichever ends it.
+func interruptible(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				if Interrupted() {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return ctx, cancel
 }
 
 // release drops the host-scope exclusion however the run ended.
@@ -262,14 +344,6 @@ func (r *verifyRun) release() {
 // is verifiedtree's, like the writing end it undoes — an absent record is
 // success there, which is exactly the state this step exists to produce.
 func (r *verifyRun) stepClear() error { return verifiedtree.Clear(r.root) }
-
-// stepClean wipes the repo-local home so the run starts from a known state.
-// It cannot change what is measured — `integration` spells its own commands —
-// only how much of the work is already cached.
-func (r *verifyRun) stepClean() error {
-	Progress().Println("Cleaning...")
-	return cleanLocked(r.root, CleanOptions{})
-}
 
 // stepCache points this run at the repo-local .promise-home/.
 func (r *verifyRun) stepCache() error { return SetupLocalCache(r.root) }
@@ -350,15 +424,14 @@ func (r *verifyRun) stepIntegration() error {
 	env.Tree = tree
 	env.Incomplete = joinIncomplete(env.Incomplete, moved)
 
-	caps, baselines, err := projectTerms(r.root)
+	terms, err := LoadTerms(r.root)
 	if err != nil {
 		return err
 	}
 	r.env, r.parts = env, parts
-	acceptable, terms, detail := judge(env, caps, baselines)
-	r.acceptable, r.terms = acceptable, terms
-	if !acceptable {
-		return errors.New(detail)
+	r.verdict = judge(r.root, env, terms)
+	if !r.verdict.Acceptable {
+		return errors.New(r.verdict.Detail)
 	}
 	r.writeGateValues()
 	return nil
@@ -367,15 +440,12 @@ func (r *verifyRun) stepIntegration() error {
 // stepRecord blesses the tree the measurement passed on. The rule is
 // blessIfPassed's, shared with bin/run, so verify and the flow cannot come to
 // disagree about what a blessing means.
-func (r *verifyRun) stepRecord() error { return blessIfPassed(r.root, r.env, r.acceptable) }
-
-// stepPush is last, after the blessing is recorded. Recording first is
-// deliberate: a push that fails (non-fast-forward, a network blip) has not
-// unverified the content, and dropping the record would charge a full re-verify
-// to get it back.
-func (r *verifyRun) stepPush() error {
-	Progress().Println("Pushing to remote...")
-	return RunIn(r.root, "git", "push")
+func (r *verifyRun) stepRecord() error {
+	if err := blessIfPassed(r.root, r.env, r.verdict.Acceptable); err != nil {
+		return err
+	}
+	r.blessed = r.env.Tree
+	return nil
 }
 
 // writeGateValues writes the sidecar whatever advances a baseline reads.
@@ -417,25 +487,26 @@ func (r *verifyRun) summary(failed string) verifySummary {
 		Target:   target,
 		Compiler: compilerIdentity(r.root),
 		Parts:    r.parts,
-		Terms:    r.terms,
+		Terms:    r.verdict.Thresholds,
 		Failed:   failed,
 		Store:    r.store.Summary(),
 		Elapsed:  time.Since(r.start),
 	}
 }
 
-// acquireVerifyLock takes the host-scope exclusion, which serializes verify
-// (and clean) runs across every checkout on the machine. It is the
-// orchestrator's exclusion, not one of this project's own (flow
-// docs/gates-and-commands.md § Two scopes): bin/verify declares it on its
-// `bin/run --list --json` row, so a flow runner takes it before spawning verify
-// and reports the queue as waiting, outside the run's allowance. Taking the
-// same exclusion here is what keeps that queue the only one (#96):
+// acquireHostScope takes the host-scope exclusion, which serializes verify,
+// clean and every gate that declares serialize "host" across every checkout on
+// the machine. It is the orchestrator's exclusion, not one of this project's
+// own (flow docs/gates-and-commands.md § Two scopes): bin/verify declares it on
+// its `bin/run --list --json` row and each such gate on its `bin/gate --list`
+// row, so a flow runner takes it before spawning them and reports the queue as
+// waiting, outside the run's allowance. Taking the same exclusion here is what
+// keeps that queue the only one (#96):
 //
-//   - under a runner, this checkout's arena already holds it, so verify is
+//   - under a runner, this checkout's arena already holds it, so the run is
 //     let straight through and its release does nothing;
-//   - run by hand, verify queues on the same file as every runner and every
-//     other hand-run verify on the machine.
+//   - run by hand, it queues on the same file as every runner and every other
+//     hand-run verify or gate on the machine.
 //
 // The holder is the arena a runner names itself by, read from the same two
 // records: the host id in the host home's identity.json and the arena id in
@@ -448,31 +519,29 @@ func (r *verifyRun) summary(failed string) verifySummary {
 //
 // It refuses rather than degrading: a machine with nowhere to hold the
 // exclusion gets an error, never an unserialized run. The kernel releases it if
-// the process dies. lockTimeout <= 0 waits indefinitely (the default); a
-// positive lockTimeout bounds the wait and returns ErrLockTimeout when it
-// elapses. The returned release must be deferred.
-func acquireVerifyLock(root string, lockTimeout time.Duration) (func(), error) {
+// the process dies. The wait is unbounded: how long a turn on this machine
+// takes is the queue's business, and the runner counts it as waiting, not
+// against the run. The returned release must be deferred.
+func acquireHostScope(root string) (func(), error) {
+	return acquireHostScopeCtx(context.Background(), root)
+}
+
+// acquireHostScopeCtx is acquireHostScope bounded by ctx: a context that ends
+// while the run is queued ends the wait with its error. Production code has no
+// bound to give it; a test asking "would this queue?" does.
+func acquireHostScopeCtx(ctx context.Context, root string) (func(), error) {
 	home, _ := hostscope.HostHome()
 	holder, err := hostscope.ArenaAt(home, root)
 	if err != nil && !errors.Is(err, hostscope.ErrArenaUnknown) && !errors.Is(err, hostscope.ErrHostUnknown) {
 		return nil, err
 	}
-	ctx := context.Background()
-	if lockTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, lockTimeout)
-		defer cancel()
-	}
 	// Said once, when — and only when — this run is about to block behind
 	// another arena: a free exclusion and a re-entered one print nothing.
 	ctx = hostscope.OnQueue(ctx, func(hostscope.Scope) func() {
-		fmt.Println(hostScopeWaitMessage())
+		fmt.Fprintln(Narration(), hostScopeWaitMessage())
 		return nil
 	})
 	release, _, err := hostscope.Acquire(ctx, holder)
-	if errors.Is(err, context.DeadlineExceeded) {
-		return nil, ErrLockTimeout
-	}
 	if err != nil {
 		return nil, err
 	}

@@ -18,7 +18,7 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 **IMPORTANT: Never commit, push, or create PRs unless the user explicitly asks you to.** Wait for an explicit instruction like "commit", "push", or "create a PR" before performing any git write operations.
 
-**IMPORTANT: Always run `bin/verify` before committing changes.** It builds, repairs what is mechanically repairable (`gofmt -w`, `promise format`), checks, and then measures the `integration` gate — the same measurement `bin/run integration` takes — and its verdict is the judge's verdict on that envelope. A green run blesses the tree, which is what the commit guard reads. It takes no variant flags: `--wasm`, `--wasm-web` and `--shared` are gone, because a blessing may not mean different things on different invocations. The WASM suites are other targets' gates (`bin/gate wasm-test`, `bin/gate wasm-web-test`, or `bin/test --wasm`). Do not commit if verify fails.
+**IMPORTANT: Always run `bin/verify` before committing changes.** It builds, repairs what is mechanically repairable (`gofmt -w`, `promise format`), checks, and then measures the `integration` gate — the same measurement `bin/run integration` takes — and its verdict is the judge's verdict on that envelope. A green run blesses the tree, which is what the commit guard reads. It takes no flag of its own — `--wasm`, `--clean`, `--push` and the rest are gone, because a blessing may not mean different things on different invocations. Its summary is its result on stdout (JSON when piped); run `bin/verify -human -narrate` to read the suites as they run. The WASM suites are other targets' gates (`bin/run tested:wasm`, `bin/run tested:wasm-web`, or `bin/test --wasm`). Do not commit if verify fails.
 
 **No binary files in history.** Pre-commit rejects any staged file whose first 8 KB contain a NUL byte, and any file over 1 MB — a binary can't be reviewed, so it must not enter history silently (T1620). The only exception is a path explicitly declared binary in `.gitattributes` (`binary`, or `-text`); adding one is a visible, reviewed diff. Generate binary artifacts at build time from tracked sources where possible — the Windows `def/*.def` → `.lib` generation (T0772) is the worked example of generating rather than committing; the `//go:embed`'d WASM CRT objects (`compiler/cmd/promise/crt/wasm32/*.o`) are the worked example of a justified exception (rebuilding them needs a WASM clang, which conflicts with the zero-dependency mandate).
 
@@ -40,8 +40,7 @@ bin/test --wasm            # include wasm32-wasi target (wasmtime)
 bin/test --wasm-web        # include wasm32-web target (Node.js harness)
 bin/test --clean           # wipe .promise-home/ first; Go tests run uncached
 bin/verify                 # build + repair + check + the integration gate (pre-commit)
-bin/verify --clean         # same, from a wiped .promise-home/
-bin/verify --push          # same, then git push if the run blessed the tree
+bin/verify -human -narrate # same, with the summary and the suites' progress for a person
 bin/clean                  # wipe .promise-home/ (pristine state)
 bin/format                 # format Go + Promise code
 bin/check                  # go vet (generated parser excluded)
@@ -49,7 +48,7 @@ bin/coverage               # Go + Promise test coverage
 bin/stress                 # stress test for flaky detection
 bin/prereqs                # check build prerequisites
 bin/setup                  # configure git hooks
-bin/gate --list            # the gates this project provides (one name per line)
+bin/gate --list            # the gates this project provides (names at a terminal; JSON rows with metrics otherwise)
 bin/gate <gate> --envelope # measure one gate; prints one JSON envelope, nothing else
 bin/run <gate>             # measure one gate and judge it against this project's terms
 bin/run <gate> --verdict   # judge an envelope on stdin (what the flow SDK asks)

@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -203,21 +204,31 @@ func TestCASLedgerDeduplicatesHomes(t *testing.T) {
 	}
 }
 
-// TestCASWindowValuesAlwaysPresent: the four are reported on every run, zeros
+// metricValues is metrics by name.
+func metricValues(metrics []Metric) map[string]float64 {
+	got := map[string]float64{}
+	for _, m := range metrics {
+		got[m.Name] = m.Number()
+	}
+	return got
+}
+
+// TestCASWindowMetricsAlwaysPresent: both are reported on every run, zeros
 // included — a counter that appears only when non-zero cannot be judged against
 // a baseline of zero.
-func TestCASWindowValuesAlwaysPresent(t *testing.T) {
+func TestCASWindowMetricsAlwaysPresent(t *testing.T) {
 	root := t.TempDir()
 	if err := resetCASLedger(root); err != nil {
 		t.Fatalf("resetCASLedger: %v", err)
 	}
-	vals, incomplete := casWindow{root: root, open: true}.Values()
+	metrics, incomplete := casWindow{root: root, open: true}.Metrics()
 	if incomplete != "" {
 		t.Errorf("incomplete = %q, want none", incomplete)
 	}
-	for _, name := range []string{"cas_network_bytes", "cas_materialized_bytes", "cas_materializations", "cas_home_count"} {
-		if _, ok := vals[name]; !ok {
-			t.Errorf("%s missing from a clean run's values: %v", name, vals)
+	vals := metricValues(metrics)
+	for _, spec := range storeMetricSpecs {
+		if _, ok := vals[spec.Name]; !ok {
+			t.Errorf("%s missing from a clean run's metrics: %v", spec.Name, vals)
 		}
 	}
 }
@@ -233,18 +244,20 @@ func TestCASWindowCountsHomes(t *testing.T) {
 {"event":"home","path":"/tmp/pkg-a-home"}
 {"event":"home","path":"/tmp/pkg-b-home"}
 `)
-	vals, _ := casWindow{root: root, open: true}.Values()
+	metrics, _ := casWindow{root: root, open: true}.Metrics()
+	vals := metricValues(metrics)
 	if vals["cas_home_count"] != 3 {
 		t.Fatalf("cas_home_count = %v, want 3", vals["cas_home_count"])
 	}
 	// The count only does its job if the term on it rejects the three. That term
-	// is `down` from 1 on every target (T2153), so this pins the number and the
-	// ratchet agreeing: three private homes fail it, one passes.
-	if checkRatchet("down", 1, vals["cas_home_count"]) {
-		t.Error("three private homes would pass a down-from-one baseline — the metric would not have caught T2133")
+	// is at most 1 on every target (T2153), so this pins the number and the
+	// term agreeing: three private homes fail it, one passes.
+	term := repoTerm(t, "cas_home_count", HostTarget())
+	if len(term.failures(Count("cas_home_count", int(vals["cas_home_count"])))) == 0 {
+		t.Error("three private homes pass this repository's term — the metric would not have caught T2133")
 	}
-	if !checkRatchet("down", 1, 1) {
-		t.Error("the one-home case would fail its own baseline")
+	if len(term.failures(Count("cas_home_count", 1))) != 0 {
+		t.Error("the one-home case would fail its own term")
 	}
 }
 
@@ -252,13 +265,6 @@ func TestCASWindowCountsHomes(t *testing.T) {
 // contributes no numbers and says why. Four zeros would read exactly like a
 // clean run, which is the failure mode this accounting exists to remove.
 func TestCASWindowUnopenedReportsNothing(t *testing.T) {
-	vals, incomplete := casWindow{root: t.TempDir(), why: "no ledger here"}.Values()
-	if vals != nil {
-		t.Errorf("an unopened window reported %v, want nothing", vals)
-	}
-	if incomplete == "" {
-		t.Error("an unopened window gave no reason")
-	}
 	metrics, incomplete := casWindow{root: t.TempDir(), why: "no ledger here"}.Metrics()
 	if len(metrics) != 0 || incomplete == "" {
 		t.Errorf("Metrics() = %v / %q, want none and a reason", metrics, incomplete)
@@ -266,9 +272,7 @@ func TestCASWindowUnopenedReportsNothing(t *testing.T) {
 }
 
 // TestCASWindowUnreadableLedgerReportsNothing: an opened window whose ledger
-// cannot be read measured nothing, so both folds — the tracker gates' Values
-// and the contract Metrics, which share one read — report no numbers and say
-// why. Zeros (an empty fold) would read as a clean run that reached no home at
+// cannot be read measured nothing, so it reports no numbers and says why. Zeros (an empty fold) would read as a clean run that reached no home at
 // all, and would pass the foreign-home check without having looked.
 func TestCASWindowUnreadableLedgerReportsNothing(t *testing.T) {
 	root := t.TempDir()
@@ -276,9 +280,6 @@ func TestCASWindowUnreadableLedgerReportsNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := casWindow{root: root, open: true}
-	if vals, why := w.Values(); vals != nil || !strings.Contains(why, "could not be read") {
-		t.Errorf("Values() = %v / %q, want nothing and the read failure", vals, why)
-	}
 	if metrics, why := w.Metrics(); len(metrics) != 0 || !strings.Contains(why, "could not be read") {
 		t.Errorf("Metrics() = %v / %q, want nothing and the read failure", metrics, why)
 	}
@@ -322,7 +323,7 @@ func TestCASWindowAddToEnvelopeIsWhatBothJudgedPathsUse(t *testing.T) {
 	writeLedger(t, root, `{"event":"network","bytes":64}
 `+homeEvent(t, filepath.Join(root, ".promise-home"))+
 		homeEvent(t, filepath.Join(root, ".promise-home", "tmp", "private-home")))
-	env := Envelope{Metrics: []Metric{Count("vet_findings", 0)}}
+	env := Envelope{Metrics: []Metric{Count("check_findings", 0)}}
 	casWindow{root: root, open: true}.AddToEnvelope(&env)
 
 	got := map[string]float64{}
@@ -340,11 +341,11 @@ func TestCASWindowAddToEnvelopeIsWhatBothJudgedPathsUse(t *testing.T) {
 	}
 	// Both readings fail their own term, which is the point of enforcing them:
 	// a byte off the wire and a second private home are each a defect.
-	if checkRatchet("exact", 0, got["cas_network_bytes"]) {
-		t.Error("64 bytes off the wire passes an exact-zero baseline")
+	if len(repoTerm(t, "cas_network_bytes", HostTarget()).failures(Size("cas_network_bytes", int64(got["cas_network_bytes"]), unitBytes))) == 0 {
+		t.Error("64 bytes off the wire passes this repository's term")
 	}
-	if checkRatchet("down", 1, got["cas_home_count"]) {
-		t.Error("two homes passes a down-from-one baseline")
+	if len(repoTerm(t, "cas_home_count", HostTarget()).failures(Count("cas_home_count", int(got["cas_home_count"])))) == 0 {
+		t.Error("two homes pass this repository's term")
 	}
 }
 
@@ -352,7 +353,7 @@ func TestCASWindowAddToEnvelopeIsWhatBothJudgedPathsUse(t *testing.T) {
 // numbers and carries its reason onto the envelope, so a run that could not
 // measure the store is judged as incomplete rather than as a clean zero.
 func TestCASWindowAddToEnvelopeSaysWhyWhenUnmeasured(t *testing.T) {
-	env := Envelope{Metrics: []Metric{Count("vet_findings", 0)}}
+	env := Envelope{Metrics: []Metric{Count("check_findings", 0)}}
 	casWindow{root: t.TempDir(), why: "no ledger here"}.AddToEnvelope(&env)
 
 	if len(env.Metrics) != 1 {
@@ -424,7 +425,7 @@ func TestCASWindowRefusesAForeignHomeByName(t *testing.T) {
 			}
 			writeLedger(t, root, ledger)
 
-			env := Envelope{Metrics: []Metric{Count("vet_findings", 0)}}
+			env := Envelope{Metrics: []Metric{Count("check_findings", 0)}}
 			casWindow{root: root, open: true}.AddToEnvelope(&env)
 
 			got := map[string]float64{}
@@ -461,12 +462,12 @@ func TestCASWindowAcceptsAHomeReachedThroughASymlink(t *testing.T) {
 	}
 }
 
-// TestContractStoreMetricPredicateMatchesMetrics: isContractStoreMetric spells
-// the two names a second time, because a metric name only exists to the drift
-// scanner by being written into a Count/Size call. This is the pin that keeps
-// the two spellings one set — a name added to Metrics and not to the predicate
-// would silently reach verify's gate values, which is the ratchet these are
-// deliberately kept out of.
+// TestContractStoreMetricPredicateMatchesMetrics: Metrics, the declaration the
+// listing carries (storeMetricSpecs) and isContractStoreMetric must be one set
+// — a name added to Metrics and not to the predicate would silently reach
+// verify's gate values, which is the ratchet these are deliberately kept out
+// of, and one missing from the declaration would make every tree gate report a
+// metric it does not declare.
 func TestContractStoreMetricPredicateMatchesMetrics(t *testing.T) {
 	root := t.TempDir()
 	writeLedger(t, root, `{"event":"home","path":"/w/.promise-home"}`+"\n")
@@ -478,6 +479,13 @@ func TestContractStoreMetricPredicateMatchesMetrics(t *testing.T) {
 		if !isContractStoreMetric(m.Name) {
 			t.Errorf("Metrics reports %q but isContractStoreMetric does not know it — it would reach verify's gate values", m.Name)
 		}
+	}
+	got := make([]MetricSpec, 0, len(metrics))
+	for _, m := range metrics {
+		got = append(got, specOf(m))
+	}
+	if !slices.Equal(got, storeMetricSpecs) {
+		t.Errorf("Metrics reports %v, the declaration says %v", got, storeMetricSpecs)
 	}
 	// And nothing else claims to be one: a gate's own metric wrongly matching
 	// would be dropped from the sidecar that advances its baseline.
@@ -527,35 +535,17 @@ func TestVerifyGateValuesDropTheStoreMetrics(t *testing.T) {
 	}
 }
 
-// TestBaselinesCarryEveryStoreMetricOnEveryTarget: a term is per-target data,
-// and a metric tracked on one platform and absent on another means a landing
-// decision there rests on a number nobody looks at (docs/gate-system.md). All
-// four are registered on all four targets: the two with an absolute end state
-// carry enforced terms (T2153), the two that differ by platform by construction
-// are tracked. What this test makes mechanical rather than remembered is the
-// "on every target" half — a metric registered on three blocks of four is
-// invisible on the fourth until somebody sits down there.
-func TestBaselinesCarryEveryStoreMetricOnEveryTarget(t *testing.T) {
-	root, err := RootForTests()
-	if err != nil {
-		t.Skipf("no checkout to read baselines from: %v", err)
-	}
-	data, err := os.ReadFile(filepath.Join(root, baselinesFile))
-	if err != nil {
-		t.Fatalf("read baselines: %v", err)
-	}
-	var baselines Baselines
-	if err := json.Unmarshal(data, &baselines); err != nil {
-		t.Fatalf("parse baselines: %v", err)
-	}
-	if len(baselines) == 0 {
-		t.Fatal("baselines file names no platform")
-	}
-	tracked := []string{"cas_network_bytes", "cas_home_count", "cas_materialized_bytes", "cas_materializations"}
-	for platform, block := range baselines {
-		for _, name := range tracked {
-			if _, ok := block[name]; !ok {
-				t.Errorf("%s: %s is not tracked — a store metric reported everywhere and registered on only some targets is a number nobody looks at where it is missing", platform, name)
+// TestTermsCarryEveryStoreMetricOnEveryTarget: the two store metrics every
+// tree gate reports carry a term on every platform this project ships. What
+// this makes mechanical rather than remembered is the "every platform" half — a
+// metric with a term on three targets of four is invisible on the fourth until
+// somebody sits down there.
+func TestTermsCarryEveryStoreMetricOnEveryTarget(t *testing.T) {
+	terms := repoTerms(t)
+	for _, spec := range storeMetricSpecs {
+		for _, target := range shippedTargets() {
+			if _, ok := termFor(spec.Name, target, terms); !ok {
+				t.Errorf("%s: %s carries no term — a store metric reported everywhere and judged on only some targets is a number nobody looks at where it is missing", target, spec.Name)
 			}
 		}
 	}
@@ -577,7 +567,7 @@ func TestRunContractGateAddsTheStoreCost(t *testing.T) {
 	root := t.TempDir()
 	stubGateBuild(t, &fakeBuild{})
 	var out bytes.Buffer
-	if err := runContractGate(root, []string{"formatted:go", "--envelope"}, &out); err != nil {
+	if err := runContractGate(root, "formatted:go", &out); err != nil {
 		t.Fatalf("runContractGate: %v", err)
 	}
 	var env Envelope
@@ -593,7 +583,7 @@ func TestRunContractGateAddsTheStoreCost(t *testing.T) {
 			t.Errorf("%s appears %d times in the envelope, want exactly 1: %+v", name, got[name], env.Metrics)
 		}
 	}
-	if got["unformatted_go_files"] != 1 {
+	if got["go_unformatted_files"] != 1 {
 		t.Errorf("the gate's own metric is missing: %+v", env.Metrics)
 	}
 }
@@ -604,7 +594,7 @@ func TestRunContractGateAddsNothingForFit(t *testing.T) {
 	root := t.TempDir()
 	stubGateBuild(t, &fakeBuild{})
 	var out bytes.Buffer
-	if err := runContractGate(root, []string{"fit", "--envelope"}, &out); err != nil {
+	if err := runContractGate(root, "fit", &out); err != nil {
 		t.Fatalf("runContractGate: %v", err)
 	}
 	var env Envelope
@@ -645,46 +635,6 @@ func TestMeasureContractGateTouchesNoLedger(t *testing.T) {
 	// happen is losing what was already there, which is a window being reset.
 	if !strings.HasPrefix(string(after), string(before)) {
 		t.Errorf("measuring reset the live ledger:\n before %q\n after  %q", before, after)
-	}
-}
-
-// TestCASWindowAddToMergesTheFourValues: the tracker gates report the store's
-// cost by merging it into the values they already built, so the merge must add
-// all four and disturb nothing the gate measured itself.
-func TestCASWindowAddToMergesTheFourValues(t *testing.T) {
-	root := t.TempDir()
-	writeLedger(t, root, `{"event":"network","bytes":12}
-{"event":"materialize","name":"crt-view","bytes":34,"count":2}
-{"event":"home","path":"/w/.promise-home"}
-`)
-	values := map[string]float64{"go_test_count": 7}
-	casWindow{root: root, open: true}.AddTo(values)
-
-	want := map[string]float64{
-		"go_test_count":          7,
-		"cas_network_bytes":      12,
-		"cas_materialized_bytes": 34,
-		"cas_materializations":   2,
-		"cas_home_count":         1,
-	}
-	for name, w := range want {
-		if values[name] != w {
-			t.Errorf("%s = %v, want %v", name, values[name], w)
-		}
-	}
-	if len(values) != len(want) {
-		t.Errorf("AddTo left %d values, want %d: %v", len(values), len(want), values)
-	}
-}
-
-// TestCASWindowAddToContributesNothingWhenUnopened: four zeros read exactly like
-// a clean run, so a window that could not be opened adds no keys at all — the
-// gate then reports the metrics it did measure and none it did not.
-func TestCASWindowAddToContributesNothingWhenUnopened(t *testing.T) {
-	values := map[string]float64{"go_test_count": 7}
-	casWindow{root: t.TempDir(), why: "no ledger here"}.AddTo(values)
-	if len(values) != 1 || values["go_test_count"] != 7 {
-		t.Errorf("an unopened window wrote into the gate's values: %v", values)
 	}
 }
 
@@ -763,9 +713,9 @@ func TestCASWindowRefusesARootThatCannotHoldALedger(t *testing.T) {
 	if w.open {
 		t.Fatal("a root whose .home is a file opened a window")
 	}
-	vals, incomplete := w.Values()
-	if vals != nil {
-		t.Errorf("an unopenable window reported %v", vals)
+	metrics, incomplete := w.Metrics()
+	if metrics != nil {
+		t.Errorf("an unopenable window reported %v", metrics)
 	}
 	if !strings.Contains(incomplete, "not measured") {
 		t.Errorf("the reason %q does not say the cost was not measured", incomplete)
@@ -785,16 +735,9 @@ func TestCASWindowReportsAnUnreadableLedger(t *testing.T) {
 	if _, err := readCASLedger(root); err == nil {
 		t.Fatal("reading a directory as a ledger succeeded")
 	}
-	vals, incomplete := casWindow{root: root, open: true}.Values()
-	if vals != nil {
-		t.Errorf("an unreadable ledger reported %v", vals)
-	}
-	if !strings.Contains(incomplete, "not measured") {
-		t.Errorf("the reason %q does not say the cost was not measured", incomplete)
-	}
 	metrics, incomplete := casWindow{root: root, open: true}.Metrics()
-	if len(metrics) != 0 || incomplete == "" {
-		t.Errorf("Metrics() = %v / %q, want none and a reason", metrics, incomplete)
+	if len(metrics) != 0 || !strings.Contains(incomplete, "not measured") {
+		t.Errorf("Metrics() = %v / %q, want none and a reason saying the cost was not measured", metrics, incomplete)
 	}
 }
 
@@ -807,7 +750,7 @@ func TestEnsureToolchainWarmSkipsAnUnbuiltTree(t *testing.T) {
 
 // TestCASWindowSummaryIsSilentOnAnUnreadableLedger: a ledger that cannot be READ
 // (as opposed to one that is absent, which folds to an honest zero) must produce
-// no summary line rather than a line of zeros. Values() answers the same case
+// no summary line rather than a line of zeros. Metrics() answers the same case
 // with a reason, because a gate has to distinguish "clean" from "not measured";
 // the human summary has no such obligation and says nothing.
 //
@@ -823,8 +766,8 @@ func TestCASWindowSummaryIsSilentOnAnUnreadableLedger(t *testing.T) {
 	}
 	// And the machine-readable side still reports it as unmeasured, so the two
 	// disagree only in verbosity.
-	if vals, incomplete := (casWindow{root: root, open: true}).Values(); vals != nil || incomplete == "" {
-		t.Errorf("Values() = %v / %q, want no numbers and a reason", vals, incomplete)
+	if metrics, incomplete := (casWindow{root: root, open: true}).Metrics(); metrics != nil || incomplete == "" {
+		t.Errorf("Metrics() = %v / %q, want no numbers and a reason", metrics, incomplete)
 	}
 }
 

@@ -205,7 +205,7 @@ func PrebuiltsCacheRoot() (string, error) {
 // (docs/build-tools.md §"Test Sandboxing"): promise/ under $XDG_CACHE_HOME when
 // it is set, else under the per-OS user cache directory. The download cache's
 // default root lives in it. (Verify's host-wide exclusion does not: it is the
-// orchestrator's, kept where the orchestrator keeps it — acquireVerifyLock.)
+// orchestrator's, kept where the orchestrator keeps it — acquireHostScope.)
 func hostCacheDir() (string, error) {
 	if v := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); v != "" {
 		return filepath.Join(v, "promise"), nil

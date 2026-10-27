@@ -320,7 +320,7 @@ Notes:
 
 ## End to end install gate
 
-The end-to-end install gate (`bin/gate install --variant {thin|full} [--channel {next|stable|<epoch>}]`, [gate-system.md](gate-system.md) §Class 3) validates the **real** user install path: it fetches the published install script from a GitHub release, runs it (download → verify checksum → decompress → `promise install`), sanity-checks the install, then runs the full test suite through the freshly **installed** distribution. The repo is public, so the gate installs straight from GitHub releases — `--channel` selects which: **next** (the moving `epoch-next` pre-release, default), **stable** (the latest published epoch), or an explicit **`Y.N`** epoch. This lets the same gate validate both the pre-release before a stable cut and the stable release after it. The gate never sets `PROMISE_BASE_URL` — GitHub is its only source (T0804 done; the `prebuilts.promise-lang.org` install bucket is gone). The installer **scripts** still honor `PROMISE_BASE_URL` as a manual **testing** override (point an install at a staged mirror), but it is unset for real users and unused by the gate.
+The end-to-end install gates (`install:thin` and `install:full`, run with `bin/run install:thin`; [gate-system.md](gate-system.md) §Class 3) validates the **real** user install path: it fetches the published install script from a GitHub release, runs it (download → verify checksum → decompress → `promise install`), sanity-checks the install, then runs the full test suite through the freshly **installed** distribution. The repo is public, so the gate installs straight from GitHub releases — the gates validate **next**, the moving `epoch-next` pre-release, so a stable cut is preceded by a measurement of exactly what it will promote. The gate never sets `PROMISE_BASE_URL` — GitHub is its only source (T0804 done; the `prebuilts.promise-lang.org` install bucket is gone). The installer **scripts** still honor `PROMISE_BASE_URL` as a manual **testing** override (point an install at a staged mirror), but it is unset for real users and unused by the gate.
 
 > **No longer on the install path.** The install gate now fetches from GitHub releases (above), so `bin/release publish-install` is **not** part of release validation anymore. It is retained as a manual **staging/testing** tool for an R2/dist bucket (handy for exercising the install flow against a private mirror). The former `scripts/early-access/*` installers, which served that bucket during the private-repo phase, have been removed.
 
@@ -343,7 +343,7 @@ bin/release publish-install --host windows-amd64 --out dist
 
 Flags: `--out` (staging dir, default `<root>/dist`), `--r2-bucket` (default `prebuilts`, `""` disables upload), `--no-upload` (build + stage but skip upload). Host-only for now (cross-build gated on T0524) — the maintainer runs it on each platform, like `publish-blobs`.
 
-**T0804 is done:** the repo is public and the gate fetches straight from GitHub releases via `--channel`. `publish-install` + the install scripts' `PROMISE_BASE_URL` override are no longer used by the gate, but are kept as a manual R2-staging/testing path (stage a bucket, then install from it with `PROMISE_BASE_URL=<mirror> install.sh`).
+**T0804 is done:** the repo is public and the gates fetch straight from GitHub releases. `publish-install` + the install scripts' `PROMISE_BASE_URL` override are no longer used by the gate, but are kept as a manual R2-staging/testing path (stage a bucket, then install from it with `PROMISE_BASE_URL=<mirror> install.sh`).
 
 ---
 

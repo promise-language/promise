@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // `bin/gate --list` is how an orchestrator learns what this project measures,
@@ -17,7 +17,7 @@ import (
 // must be among them or `claim`, `run-step` and `resolve` all refuse.
 func TestGateList_PrintsGateNames(t *testing.T) {
 	var out bytes.Buffer
-	if err := writeGateList(&out, false); err != nil {
+	if err := writeGateList(&out, t.TempDir(), ModeHuman); err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Fields(out.String())
@@ -42,17 +42,18 @@ func TestGateList_PrintsGateNames(t *testing.T) {
 // trusting the list discovers mid-item. Both read one registry; this is what
 // keeps a name from being added to only one of them.
 func TestGateList_EveryListedGateIsRunnable(t *testing.T) {
+	run := runSpec("../../..")
 	for _, name := range ContractGateNames() {
-		gate, verdict, err := parseRunArgs([]string{name, "--verdict"})
-		if err != nil || gate != name || !verdict {
-			t.Errorf("bin/gate lists %q but bin/run refuses it: %v", name, err)
+		inv, err := ParseInvocation(run, []string{name, "--verdict"})
+		if err != nil || inv.Command != name || !inv.Flags["verdict"] || run.PassThrough(name) {
+			t.Errorf("bin/gate lists %q but bin/run does not read it as a gate to judge: %+v, %v", name, inv, err)
 			continue
 		}
 		def := contractGates[name]
 		if def.measure == nil && len(def.parts) == 0 {
 			t.Errorf("%q is listed but neither measures nor composes, so asking for it measures nothing", name)
 		}
-		if _, _, err := parseContractGateArgs([]string{name, "--envelope"}); err != nil {
+		if inv, err := ParseInvocation(gateSpec, []string{name, "--envelope"}); err != nil || !inv.Flags["envelope"] {
 			t.Errorf("bin/gate lists %q but refuses to measure it: %v", name, err)
 		}
 	}
@@ -62,16 +63,16 @@ func TestGateList_EveryListedGateIsRunnable(t *testing.T) {
 // interpolating the result tells someone who typed `--json` to try `-json`,
 // correcting them in a spelling they did not use.
 func TestParse_RefusalQuotesTheTypedSpelling(t *testing.T) {
-	if _, _, err := parseContractGateArgs([]string{"fit", "--verbose"}); err == nil || !strings.Contains(err.Error(), `"--verbose"`) {
+	if _, err := ParseInvocation(gateSpec, []string{"fit", "--verbose"}); err == nil || !strings.Contains(err.Error(), "--verbose") {
 		t.Errorf("gate: got %v, want the typed --verbose", err)
 	}
-	if _, _, err := parseRunArgs([]string{"fit", "--bogus"}); err == nil || !strings.Contains(err.Error(), `"--bogus"`) {
+	if _, err := ParseInvocation(runSpec("../../.."), []string{"fit", "--bogus"}); err == nil || !strings.Contains(err.Error(), "--bogus") {
 		t.Errorf("run: got %v, want the typed --bogus", err)
 	}
 	// Both spellings still work, so the fix is about the message only.
 	for _, spelling := range [][]string{{"fit", "--envelope"}, {"fit", "-envelope"}} {
-		if _, envelope, err := parseContractGateArgs(spelling); err != nil || !envelope {
-			t.Errorf("parseContractGateArgs(%q) = %v, %v", spelling, envelope, err)
+		if inv, err := ParseInvocation(gateSpec, spelling); err != nil || !inv.Flags["envelope"] {
+			t.Errorf("ParseInvocation(%q) = %+v, %v", spelling, inv, err)
 		}
 	}
 }
@@ -83,13 +84,16 @@ func TestParse_RefusalQuotesTheTypedSpelling(t *testing.T) {
 // repository is discovered as a machine with no gates.
 func TestGateList_JSON(t *testing.T) {
 	var out bytes.Buffer
-	if err := writeGateList(&out, true); err != nil {
+	if err := writeGateList(&out, "../../..", ModeJSON); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
 		Gates []struct {
-			Name    string `json:"name"`
-			Summary string `json:"summary"`
+			Name      string            `json:"name"`
+			Summary   string            `json:"summary"`
+			Metrics   []MetricSpec      `json:"metrics"`
+			Requires  []json.RawMessage `json:"requires"`
+			Serialize string            `json:"serialize"`
 		} `json:"gates"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
@@ -104,24 +108,23 @@ func TestGateList_JSON(t *testing.T) {
 		if g.Summary == "" {
 			t.Errorf("gate %q lists no summary", g.Name)
 		}
+		// requires is present and empty, never absent: a row without it reads
+		// as a gate that has not said what it needs.
+		if g.Requires == nil || len(g.Requires) != 0 {
+			t.Errorf("gate %q requires = %v, want []", g.Name, g.Requires)
+		}
+		if !slices.Equal(g.Metrics, declaredMetrics("../../..", g.Name)) {
+			t.Errorf("gate %q lists metrics %v, want its declaration %v", g.Name, g.Metrics, declaredMetrics("../../..", g.Name))
+		}
+		if g.Serialize != gateSerialize(g.Name) {
+			t.Errorf("gate %q serialize = %q, want %q", g.Name, g.Serialize, gateSerialize(g.Name))
+		}
+	}
+	if gateSerialize(integrationGate) != serializeHost || gateSerialize("fit") != "" {
+		t.Errorf("integration must hold the host scope and fit must not")
 	}
 	if !slices.Equal(names, ContractGateNames()) {
 		t.Errorf("gates = %v, want %v", names, ContractGateNames())
-	}
-}
-
-func TestGateList_ArgsAreRecognised(t *testing.T) {
-	for _, args := range [][]string{{"--list"}, {"list"}, {"-list"}, {"--list", "--json"}, {"list", "--json"}} {
-		list, _, ok := parseListArgs(args)
-		if !ok || !list {
-			t.Errorf("parseListArgs(%q) = list %v, ok %v; want a listing request", args, list, ok)
-		}
-	}
-	// A gate invocation must fall through to the gates, not be read as a list.
-	for _, args := range [][]string{{"fit"}, {"fit", "--envelope"}, {"test"}, {}} {
-		if _, _, ok := parseListArgs(args); ok {
-			t.Errorf("parseListArgs(%q) claimed a listing request", args)
-		}
 	}
 }
 
@@ -129,7 +132,7 @@ func TestGateList_ArgsAreRecognised(t *testing.T) {
 // registry. It also reports the commands, which bin/gate knows nothing about.
 func TestRunList_GatesMatchGateListAndCommands(t *testing.T) {
 	var out bytes.Buffer
-	if err := writeRunList("../../..", &out, true); err != nil {
+	if err := writeRunList("../../..", &out, ModeJSON); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -177,10 +180,9 @@ func TestRunList_GatesMatchGateListAndCommands(t *testing.T) {
 	}
 }
 
-// listedNames reads the `commands` half of `bin/run --list --json` the way its
-// readers do — flow's DiscoverCommands and the workspace's build-set probe: an
-// element is either a bare name or a row naming one, and anything else is not
-// a listing.
+// listedNames reads the `commands` half of `bin/run --list --json` the way the
+// tool contract writes it: every element a row naming one command. A bare
+// string is no longer a row.
 type listedNames []string
 
 func (n *listedNames) UnmarshalJSON(data []byte) error {
@@ -189,20 +191,16 @@ func (n *listedNames) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for i, elem := range elems {
-		var name string
-		if err := json.Unmarshal(elem, &name); err != nil {
-			var row struct {
-				Name string `json:"name"`
-			}
-			if err := json.Unmarshal(elem, &row); err != nil {
-				return fmt.Errorf("commands[%d] is %s, neither a name nor a row naming one", i, elem)
-			}
-			name = row.Name
+		var row struct {
+			Name string `json:"name"`
 		}
-		if name == "" {
+		if err := json.Unmarshal(elem, &row); err != nil {
+			return fmt.Errorf("commands[%d] is %s, not a row naming a command", i, elem)
+		}
+		if row.Name == "" {
 			return fmt.Errorf("commands[%d] names nothing", i)
 		}
-		*n = append(*n, name)
+		*n = append(*n, row.Name)
 	}
 	return nil
 }
@@ -210,11 +208,11 @@ func (n *listedNames) UnmarshalJSON(data []byte) error {
 // verify declares the host-scope exclusion on its row of the JSON listing,
 // exactly as flow's DiscoverCommands reads it, so a runner takes the exclusion
 // before spawning verify and counts the queue as waiting, outside the run's
-// allowance (#96). Every other command declares nothing and stays a bare name.
+// allowance (#96). Every other command's row names it and declares nothing.
 // The text listing is for a person and carries names only.
 func TestRunList_VerifyDeclaresHostScope(t *testing.T) {
 	var out bytes.Buffer
-	if err := writeRunList("../../..", &out, true); err != nil {
+	if err := writeRunList("../../..", &out, ModeJSON); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -225,25 +223,25 @@ func TestRunList_VerifyDeclaresHostScope(t *testing.T) {
 	}
 	var sawVerify bool
 	for _, raw := range got.Commands {
-		var name string
-		if json.Unmarshal(raw, &name) == nil {
-			if name == "verify" {
-				t.Errorf("verify is listed as a bare name, declaring no exclusion")
-			}
+		var row commandRow
+		if err := json.Unmarshal(raw, &row); err != nil {
+			t.Errorf("command %s is not a row: %v", raw, err)
 			continue
 		}
-		if want := `{"name":"verify","serialize":"host"}`; string(raw) != want {
+		want := fmt.Sprintf(`{"name":%q}`, row.Name)
+		if row.Name == "verify" {
+			want, sawVerify = `{"name":"verify","serialize":"host"}`, true
+		}
+		if string(raw) != want {
 			t.Errorf("command row = %s, want %s — only verify declares an exclusion", raw, want)
-			continue
 		}
-		sawVerify = true
 	}
 	if !sawVerify {
 		t.Errorf("no verify row in %s", out.String())
 	}
 
 	out.Reset()
-	if err := writeRunList("../../..", &out, false); err != nil {
+	if err := writeRunList("../../..", &out, ModeHuman); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "\n  verify\n") || strings.Contains(out.String(), "serialize") {
@@ -318,433 +316,6 @@ func TestContractGates_PartGraphTerminates(t *testing.T) {
 	}
 	for _, name := range ContractGateNames() {
 		walk(name, nil)
-	}
-}
-
-// integrationMetrics names what integration's parts report. It is spelled out
-// rather than derived because deriving it means running the gates, which is
-// minutes of compiling and testing for a list that changes a few times a year.
-var integrationMetrics = []string{
-	"unformatted_go_files", "unformatted_promise_files",
-	"unbuildable_go_packages", "build_failures", "vet_findings",
-	"promise_check_failures", "promise_check_errors", "promise_check_warnings",
-	"go_test_failures", "go_test_packages_failed",
-	"host_test_failures", "host_leak_count",
-	// Not a gate's own metric: what the run cost the store, added once around
-	// the whole measurement. Enforced for the same reason as the rest — a
-	// landing decision rests on them (T2153).
-	"cas_network_bytes", "cas_home_count",
-}
-
-// Every metric integration's parts report must carry a term — a person-edited
-// cap or an enforced baseline — or integration passes on numbers nothing looks
-// at. Which of the two a metric gets is the project's call: absolutes are caps,
-// and anything that ratchets is a baseline.
-//
-// This checks every target the baselines file knows, not just the host's. A
-// term is per-target data, written where a gate has actually run, so a
-// host-scoped check is blind to the platform its author is not sitting on: the
-// gap then lands as a red trunk for the next person there rather than as a
-// failure for whoever opened it. That is exactly how T2087 reached main —
-// go_test_failures was seeded on two targets of four.
-func TestIntegration_PartMetricsAreJudged(t *testing.T) {
-	caps, err := loadThresholds("../../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	all, err := LoadBaselines("../../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	targets := make([]string, 0, len(all)+1)
-	for target := range all {
-		targets = append(targets, target)
-	}
-	slices.Sort(targets)
-	// A host with no block of its own is checked too, or the platform most in
-	// need of the seeding is the one target nothing asks about.
-	if !slices.Contains(targets, HostTarget()) {
-		targets = append(targets, HostTarget())
-	}
-	for _, target := range targets {
-		for _, name := range integrationMetrics {
-			if _, capped := caps[name]; capped {
-				continue
-			}
-			b, tracked := all[target][name]
-			if !tracked || b.Value == nil || b.Direction == "" || b.Type == "informational" {
-				t.Errorf("%s/%s has neither a cap nor an enforced baseline, so nothing judges it there — give it a value and a direction in %s",
-					target, name, baselinesFile)
-			}
-		}
-	}
-}
-
-// integrationCostMetrics are the integration metrics that are judged but do NOT
-// count something being wrong: they are what a run COST. A cost is a quality of
-// the machinery rather than of the change, so it ratchets instead of being
-// capped. Spelling the reason keeps the classification a decision — a new
-// integration metric lands in one list or the other, and neither inherits
-// silently.
-var integrationCostMetrics = map[string]string{
-	"cas_network_bytes": "bytes a run pulled over the wire into the store. It SHOULD be zero and is ratcheted `exact 0` today (T2150, T2153) — but an expensive run is not a defect in whichever change happened to measure it.",
-	"cas_home_count":    "how many private PROMISE_HOMEs a run materialized, ratcheted `down` from 1 (T2153). The floor is a fact about how the suites are sandboxed, not a count of anything wrong.",
-}
-
-// Every OTHER metric integrationMetrics demands a term for counts something
-// being WRONG — a failure, a leak, a diagnostic, an unformatted file — and the
-// only correct value for such a count is zero. So the term is an `at_most 0`
-// CAP, never a ratchet from a non-zero figure: a ratchet would be a standing
-// allowance ("this many are fine") and a number a later reader could edit to
-// buy forgiveness instead of fixing what moved it (T2192).
-//
-// A raise of a baseline is refused mechanically by the commit gate's
-// `ratcheted-baselines` check. Nothing guards thresholds.json the same way, so
-// this test is what makes weakening a cap as hard: it takes a visible edit here.
-func TestCorrectnessMetricsAreCappedAtZero(t *testing.T) {
-	caps, err := loadThresholds("../../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range integrationMetrics {
-		if _, cost := integrationCostMetrics[name]; cost {
-			continue
-		}
-		th, ok := caps[name]
-		if !ok {
-			t.Errorf("%s carries no cap in %s — a count of things being wrong is capped at zero, never baselined", name, ThresholdsFile)
-			continue
-		}
-		if th.Direction != AtMost || th.Cap != 0 {
-			t.Errorf("%s = %+v, want at_most 0", name, th)
-		}
-	}
-}
-
-// fit's floors are caps: they are absolutes a person edits, not numbers that
-// ratchet with history.
-func TestFit_FloorsAreCaps(t *testing.T) {
-	caps, err := loadThresholds("../../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"worktree_free_bytes", "build_cache_free_bytes"} {
-		th, ok := caps[name]
-		if !ok || th.Direction != AtLeast || th.Cap <= 0 {
-			t.Errorf("%s = %+v, want a positive at_least floor", name, th)
-		}
-	}
-	// A filesystem that keeps a removed name is unfit outright: there is no
-	// amount of it a suite tolerates.
-	if th, ok := caps["worktree_hides_unlinked_files"]; !ok || th.Direction != AtMost || th.Cap != 0 {
-		t.Errorf("worktree_hides_unlinked_files = %+v, want at_most 0", th)
-	}
-}
-
-// integrationMetricsUnjudged names metrics integration's parts report that
-// integrationMetrics deliberately leaves out, each with the reason. An
-// unexplained omission and an overlooked one look identical in a list of
-// strings, and the second is exactly how T2087 happened; spelling the reason
-// makes the next person's choice a decision rather than an inheritance.
-var integrationMetricsUnjudged = map[string]string{
-	"host_test_count":     "a suite's size is not a quality of the change. It ratchets `up` where a target carries a figure, but requiring that everywhere would fail a target for deleting a test — which is sometimes the right change.",
-	"promise_check_units": "how many units the checker was given is not a quality of the change either — merging two files into a module lowers it without checking any less. It ratchets `up` where a target carries a figure; what guards against a sweep that measured nothing is the gate's refusal of a run that printed no summary.",
-	// The scheduled gates' metrics. They are judged — every one of them carries
-	// a ratcheted baseline on the targets that measure it — but they are not
-	// INTEGRATION metrics, and integrationMetrics demands a term on every
-	// target this project ships. Requiring that here would fail linux-arm64 for
-	// not running a wasm suite, a stress run or coverage, which is a fact about
-	// what that platform is given to do and not a regression in any change.
-	"stress_flaky_count": "tested:stress, not integration: a flaky count needs many runs to mean anything, so it is measured on a schedule and ratcheted per target rather than demanded of every one.",
-	"stress_iterations":  "tested:stress reports how many chances a test had, because a flaky count without it says nothing. It is the size of the run, not a quality of the change.",
-	"wasm_size_total":    "the size:wasm gate, not integration: it is ratcheted per target where the WASM canaries are built, and linux-arm64 does not build them.",
-	// size:wasm reports one metric per canary under tests/size — today
-	// wasm_size_minimal, _strings, _collections, _concurrency and _full. They
-	// are built from the file names rather than spelled, so the scanner above
-	// cannot see them; they are ratcheted per target exactly as the total is.
-}
-
-// metricNameLiteral matches the name a gate gives a metric at the only place
-// one is ever spelled: the Count/Size constructors in gate source.
-var metricNameLiteral = regexp.MustCompile(`\b(?:Count|Size)\("([a-z0-9_]+)"`)
-
-// reportedMetricNames scans this package's non-test sources for every metric
-// name a gate can report. Reading the source rather than running the gates is
-// what makes this affordable — running them is minutes of compiling and testing
-// — and it is sound because a metric only exists by being constructed here.
-func reportedMetricNames(t *testing.T) []string {
-	t.Helper()
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	seen := map[string]bool{}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, m := range metricNameLiteral.FindAllSubmatch(src, -1) {
-			seen[string(m[1])] = true
-		}
-	}
-	if len(seen) == 0 {
-		t.Fatal("scanned the package and found no metric names at all — the constructors moved, and every check built on this scan has quietly stopped checking")
-	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	return names
-}
-
-// integrationMetrics is hand-maintained, and a hand-maintained list of what a
-// program reports drifts from what it reports. The drift is silent in both
-// directions and both directions matter: a metric added to a part gate and not
-// added here is never asked for a term on any target — T2087's defect one layer
-// up, and the one the all-targets sweep cannot see — while a name left here
-// after the metric was renamed away demands a baseline for a number nothing
-// will ever produce, which no green run can ever satisfy.
-//
-// So: every metric this program can report is accounted for, as an enforced
-// term, a cap, or a written reason not to judge it; and everything named here
-// is a metric this program can actually report.
-func TestIntegrationMetrics_AccountsForEveryMetricReported(t *testing.T) {
-	caps, err := loadThresholds("../../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	reported := reportedMetricNames(t)
-	for _, name := range reported {
-		switch {
-		case slices.Contains(integrationMetrics, name):
-		case caps[name].Direction != "":
-		case integrationMetricsUnjudged[name] != "":
-		default:
-			t.Errorf("a gate reports %q, but nothing accounts for it: add it to integrationMetrics (and give it a term on every target in %s), give it a cap, or say in integrationMetricsUnjudged why it is not judged",
-				name, baselinesFile)
-		}
-	}
-	for _, name := range integrationMetrics {
-		if !slices.Contains(reported, name) {
-			t.Errorf("integrationMetrics names %q, which no gate in this package reports — every target is being asked for a baseline on a number that will never arrive", name)
-		}
-	}
-	for name := range integrationMetricsUnjudged {
-		if !slices.Contains(reported, name) {
-			t.Errorf("integrationMetricsUnjudged excuses %q, which no gate reports — the excuse outlived the metric", name)
-		}
-	}
-}
-
-// foreignTarget is a platform no host can be, so a block keyed by it is never
-// the one a run reads. Spelled rather than derived: picking a real target that
-// "isn't this one" makes the test's meaning depend on where it runs.
-const foreignTarget = "nosuchos-nosucharch"
-
-// writeTerms builds a root carrying both manifests the judge reads. Either body
-// may be empty, meaning the file is simply absent — which is a state the judge
-// has an answer for, and therefore one worth testing.
-func writeTerms(t *testing.T, thresholds, baselines string) string {
-	t.Helper()
-	root := t.TempDir()
-	dir := filepath.Join(root, "tools", "gates")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for name, body := range map[string]string{
-		filepath.Base(ThresholdsFile): thresholds,
-		filepath.Base(baselinesFile):  baselines,
-	} {
-		if body == "" {
-			continue
-		}
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return root
-}
-
-// someCaps is a valid thresholds manifest naming a metric none of these tests
-// measures, so a baseline is the only thing that can judge anything here.
-const someCaps = `{"worktree_free_bytes": {"direction": "at_least", "cap": 1}}`
-
-// Baselines are PER TARGET, and which target a run reads is the whole of
-// T2087's first failure: go_test_failures carried an enforced baseline on two
-// of four targets, so the same gate judged it on two hosts and silently did not
-// on the others. projectTerms is where that choice is made, and every branch of
-// it below answers "nothing judges this metric here" — none of them loudly.
-func TestProjectTerms_AreScopedToTheHostTarget(t *testing.T) {
-	host := HostTarget()
-
-	t.Run("the host's own block is the one that judges", func(t *testing.T) {
-		root := writeTerms(t, someCaps, `{
-			"`+host+`":          {"mine":   {"value": 0, "direction": "exact"}},
-			"`+foreignTarget+`": {"theirs": {"value": 0, "direction": "exact"}}
-		}`)
-		caps, baselines, err := projectTerms(root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, ok := caps["worktree_free_bytes"]; !ok {
-			t.Error("the caps did not survive the lookup")
-		}
-		if _, ok := baselines["mine"]; !ok {
-			t.Error("the host's own baseline is missing, so a run here is judged by nothing it should be")
-		}
-		if _, ok := baselines["theirs"]; ok {
-			t.Error("another target's baseline reached this run — a figure measured on one machine cannot judge another")
-		}
-	})
-
-	t.Run("a host with no block of its own is judged by nothing", func(t *testing.T) {
-		root := writeTerms(t, someCaps, `{"`+foreignTarget+`": {"mine": {"value": 0, "direction": "exact"}}}`)
-		caps, baselines, err := projectTerms(root)
-		// Silence is the finding. This path is NOT an error and should not
-		// become one — a new platform must be able to run a gate before anyone
-		// has a figure for it — which is exactly why the gap is invisible from
-		// the inside, and why the check that catches it has to be a test over
-		// the whole file rather than over whatever HostTarget() says today.
-		if err != nil {
-			t.Fatalf("an unseeded host must still be able to run a gate: %v", err)
-		}
-		if len(baselines) != 0 {
-			t.Errorf("baselines = %v, want none: this host has no block", baselines)
-		}
-		if len(caps) == 0 {
-			t.Error("the caps stopped judging too — an unseeded host would then be judged by nothing at all")
-		}
-	})
-
-	t.Run("an unreadable baselines file leaves the caps judging", func(t *testing.T) {
-		for name, body := range map[string]string{
-			"absent":      "",
-			"not json":    `{`,
-			"wrong shape": `[]`,
-		} {
-			root := writeTerms(t, someCaps, body)
-			caps, baselines, err := projectTerms(root)
-			if err != nil {
-				t.Errorf("%s: %v — losing the baselines must not cost the caps", name, err)
-				continue
-			}
-			if len(caps) == 0 {
-				t.Errorf("%s: the caps went with the baselines", name)
-			}
-			if len(baselines) != 0 {
-				t.Errorf("%s: baselines = %v, want none", name, baselines)
-			}
-		}
-	})
-
-	t.Run("an absent thresholds manifest is fatal", func(t *testing.T) {
-		// The other direction, and it is not symmetric: a project with a judge
-		// must have caps, so their absence is a broken tree rather than an
-		// unseeded one. Judging on silently empty terms is the failure this
-		// whole item is about.
-		root := writeTerms(t, "", `{"`+host+`": {"mine": {"value": 0, "direction": "exact"}}}`)
-		if _, _, err := projectTerms(root); err == nil {
-			t.Error("a missing thresholds manifest must be refused, not absorbed into terms that judge nothing")
-		}
-	})
-}
-
-// The same gap, end to end, through the program that makes landing decisions:
-// an envelope reporting failures, with no term applied because the baseline for
-// that metric lives under a different target. This is precisely what
-// `bin/run tested:go` did on windows-amd64 at 5600e002 — and there it answered
-// "acceptable" over seven failing tests.
-//
-// It now answers no. A metric nobody set a rule for has not been cleared, and
-// the verdict says which: a gate reporting numbers it holds no terms for is
-// refused rather than waved through. TestIntegration_PartMetricsAreJudged
-// asserts the repository's data has no such hole; this asserts that a hole,
-// wherever one opens, costs a refusal and not a false pass.
-func TestJudgeStdin_ABaselineOnAnotherTargetIsNoTermHere(t *testing.T) {
-	const envelope = `{"schema_version":1,"gate":"tested:go","target":"nosuchos-nosucharch","metrics":[{"name":"go_test_failures","type":"int","value":7}]}`
-	const seeded = `{"value": 0, "direction": "exact"}`
-
-	for name, tc := range map[string]struct {
-		baselines      string
-		wantAcceptable bool
-		wantTerm       bool
-	}{
-		"seeded only on another target": {
-			baselines:      `{"` + foreignTarget + `": {"go_test_failures": ` + seeded + `}}`,
-			wantAcceptable: false, // seven failing tests and no term: not judged is not a pass
-			wantTerm:       false,
-		},
-		"seeded on this host": {
-			baselines:      `{"` + HostTarget() + `": {"go_test_failures": ` + seeded + `}}`,
-			wantAcceptable: false,
-			wantTerm:       true,
-		},
-		"tracked here but informational": {
-			// The third state, and it judges exactly as little as no entry at
-			// all — which is why the data test refuses it as a term, and why it
-			// reaches the same verdict as no entry at all: unjudged.
-			baselines:      `{"` + HostTarget() + `": {"go_test_failures": {"type": "informational"}}}`,
-			wantAcceptable: false,
-			wantTerm:       false,
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			root := writeTerms(t, someCaps, tc.baselines)
-			var out bytes.Buffer
-			if err := JudgeStdin(root, "tested:go", strings.NewReader(envelope), &out); err != nil {
-				t.Fatal(err)
-			}
-			var got verdictWire
-			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-				t.Fatalf("the verdict is not one JSON object: %v (%q)", err, out.String())
-			}
-			if got.Acceptable != tc.wantAcceptable {
-				t.Errorf("acceptable = %v, want %v (detail: %s)", got.Acceptable, tc.wantAcceptable, got.Detail)
-			}
-			if _, applied := got.Thresholds["go_test_failures"]; applied != tc.wantTerm {
-				t.Errorf("a term was applied = %v, want %v — the verdict must carry exactly what it was reached from", applied, tc.wantTerm)
-			}
-		})
-	}
-}
-
-// The sweep above walks every target the baselines FILE knows, which closes
-// the gap for a platform someone has already seeded and leaves one open for a
-// platform nobody has: a target with no block at all is not a target with a
-// hole in it, and the loop has nothing to iterate. That is the same defect one
-// step earlier — the first person on that platform meets a red trunk — and the
-// file cannot detect it about itself.
-//
-// requiredPlatforms is the answer, because it is already the list of platforms
-// this project ships and refuses to tag without (release_cut.go). Anchoring
-// here means adding a platform there makes its baselines a checked obligation
-// in the same change, rather than a discovery someone makes months later on the
-// machine. The reasoning is the one written over requiredPlatforms itself:
-// shipping something nothing gates on is how a platform silently rots.
-func TestBaselines_KnowEveryPlatformThisProjectShips(t *testing.T) {
-	all, err := LoadBaselines("../../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, platform := range requiredPlatforms {
-		if len(all[platform]) == 0 {
-			t.Errorf("%s is release-blocking, but %s has no block for it — the all-targets sweep has nothing to walk there, so every metric on that platform is unjudged and nothing says so until someone sits down at one",
-				platform, baselinesFile)
-		}
-	}
-	// And the other way: a block for a platform nobody ships is terms no run
-	// will ever read, and the sweep spends a real failure on maintaining them.
-	for platform := range all {
-		if !slices.Contains(requiredPlatforms, platform) {
-			t.Errorf("%s carries a block for %q, which this project does not ship — either it belongs in requiredPlatforms or the block is dead data the sweep now demands upkeep of",
-				baselinesFile, platform)
-		}
 	}
 }
 
@@ -840,7 +411,7 @@ func TestRunContractGate_StampsTheTreeItMeasured(t *testing.T) {
 	stubGateBuild(t, &fakeBuild{})
 
 	var out bytes.Buffer
-	if err := runContractGate(root, []string{"formatted:go", "--envelope"}, &out); err != nil {
+	if err := runContractGate(root, "formatted:go", &out); err != nil {
 		t.Fatalf("runContractGate: %v", err)
 	}
 	var env Envelope
@@ -861,7 +432,7 @@ func TestRunContractGate_StampsTheTreeItMeasured(t *testing.T) {
 // invite blessing a tree on the strength of a disk-space measurement.
 func TestRunContractGate_AMachineGateCarriesNoTree(t *testing.T) {
 	var out bytes.Buffer
-	if err := runContractGate(t.TempDir(), []string{"fit", "--envelope"}, &out); err != nil {
+	if err := runContractGate(t.TempDir(), "fit", &out); err != nil {
 		t.Fatalf("runContractGate: %v", err)
 	}
 	var env Envelope
@@ -885,5 +456,204 @@ func TestJoinIncomplete(t *testing.T) {
 		if got := joinIncomplete(tc.a, tc.b); got != tc.want {
 			t.Errorf("joinIncomplete(%q, %q) = %q, want %q", tc.a, tc.b, got, tc.want)
 		}
+	}
+}
+
+// TestSumMetrics_ACompositionSumsSharedNames: a name more than one part reports
+// is said once, as the sum — `tested` reports one failed_tests, not one per
+// toolchain — and a name only one part reports is carried as that part said it.
+// A proportion, or one name reported as two kinds of number, is refused rather
+// than added.
+func TestSumMetrics_ACompositionSumsSharedNames(t *testing.T) {
+	got, err := sumMetrics(
+		[]Metric{Count("failed_tests", 2), Count("go_failed_tests", 2)},
+		[]Metric{Count("failed_tests", 3), Count("promise_failed_tests", 3)})
+	if err != nil {
+		t.Fatalf("sumMetrics: %v", err)
+	}
+	want := map[string]int64{"failed_tests": 5, "go_failed_tests": 2, "promise_failed_tests": 3}
+	if g := metricInts(got); len(got) != len(want) || fmt.Sprint(g) != fmt.Sprint(want) {
+		t.Errorf("summed = %v (%d metrics), want %v", g, len(got), want)
+	}
+	for _, tc := range []struct {
+		name     string
+		into, in Metric
+	}{
+		{"a proportion", Percent("statement_coverage", 50), Percent("statement_coverage", 60)},
+		{"two kinds of number", Count("cas_network_bytes", 1), Size("cas_network_bytes", 1, unitBytes)},
+	} {
+		if _, err := sumMetrics([]Metric{tc.into}, []Metric{tc.in}); err == nil {
+			t.Errorf("%s reported by two parts was summed; want it refused", tc.name)
+		}
+	}
+}
+
+// TestCheckAgainstDeclaration_HoldsALeafToItsRow: what a leaf reports must be
+// what its --list row declares — no undeclared metric, no other kind of number,
+// no name twice — and every member must be one §3 admits: named, with an
+// outcome from the vocabulary and no negative time. A complete run missing a
+// declared metric is made incomplete rather than passing for nothing wrong.
+func TestCheckAgainstDeclaration_HoldsALeafToItsRow(t *testing.T) {
+	declared := sharedCount("go", "unformatted_files", 0)
+	member := func(m Member) []Group { return []Group{{Name: "gofmt", Members: []Member{m}}} }
+	for _, tc := range []struct {
+		name string
+		in   measurement
+		want string
+	}{
+		{"an undeclared metric", measurement{metrics: append(declared, Count("stray", 1))}, `"stray", which this gate does not declare`},
+		{"another kind of number", measurement{metrics: []Metric{Size("unformatted_files", 1, unitBytes), declared[1]}}, "which this gate declares as int"},
+		{"a name twice", measurement{metrics: append(declared, declared[0])}, "twice"},
+		{"a member with no name", measurement{metrics: declared, groups: member(Member{Outcome: OutcomeFail})}, "no name"},
+		{"an outcome outside the vocabulary", measurement{metrics: declared, groups: member(Member{Name: "a.go", Outcome: "broken"})}, `outcome "broken"`},
+		{"a negative elapsed", measurement{metrics: declared, groups: member(Member{Name: "a.go", Outcome: OutcomeFail, Elapsed: -1})}, "negative elapsed"},
+	} {
+		if _, err := checkAgainstDeclaration("", "formatted:go", tc.in); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want it to say %q", tc.name, err, tc.want)
+		}
+	}
+	m, err := checkAgainstDeclaration("", "formatted:go", measurement{metrics: declared[:1]})
+	if err != nil || !strings.Contains(m.incomplete, "go_unformatted_files") {
+		t.Errorf("a missing declared metric: err = %v, incomplete = %q; want it named as incomplete", err, m.incomplete)
+	}
+	if m, err := checkAgainstDeclaration("", "formatted:go", measurement{metrics: declared, groups: member(newMember("a.go", OutcomeFail, ""))}); err != nil || m.incomplete != "" {
+		t.Errorf("a complete, well-formed run: err = %v, incomplete = %q", err, m.incomplete)
+	}
+}
+
+// TestEncodeEnvelope_EndsWithinTheBound: an envelope that fits is written as
+// measured; one that does not gives up evidence a step at a time — the tail of
+// each detail before the details, the details before the members — so a run
+// with many failures keeps each one's head, and even one with thousands ends
+// within the bound with its metrics whole.
+func TestEncodeEnvelope_EndsWithinTheBound(t *testing.T) {
+	envelope := func(members, detailBytes int) Envelope {
+		head := "lower_test.go:41: got i32, want i64\n"
+		g := Group{Name: "compiler/internal/codegen"}
+		for i := range members {
+			g.Members = append(g.Members, Member{Name: fmt.Sprintf("TestLower%d", i), Outcome: OutcomeFail,
+				Detail: head + strings.Repeat("x", detailBytes)})
+		}
+		return Envelope{SchemaVersion: 1, Gate: "tested:go", Target: HostTarget(),
+			Metrics: sharedCount("go", "failed_tests", members), Groups: []Group{g}}
+	}
+	decode := func(out []byte) Envelope {
+		t.Helper()
+		var env Envelope
+		if err := json.Unmarshal(out, &env); err != nil {
+			t.Fatalf("not an envelope: %v", err)
+		}
+		return env
+	}
+
+	small := envelope(3, 100)
+	out, err := encodeEnvelope(small)
+	if err != nil || mustJSON(t, decode(out).Groups) != mustJSON(t, small.Groups) {
+		t.Errorf("an envelope within the bound was changed: err = %v", err)
+	}
+
+	// 400 details of 4 KB do not fit; 400 of 1 KB do, so each keeps its head.
+	out, err = encodeEnvelope(envelope(400, 4000))
+	if err != nil || len(out) > maxEnvelopeBytes {
+		t.Fatalf("400 members: %d bytes, err = %v", len(out), err)
+	}
+	if got := decode(out).Groups[0].Members; len(got) != 400 || !strings.HasPrefix(got[399].Detail, "lower_test.go:41:") {
+		t.Errorf("400 members: kept %d, last detail %.40q; want all, each with its head", len(got), got[len(got)-1].Detail)
+	}
+
+	out, err = encodeEnvelope(envelope(40000, 100))
+	if err != nil || len(out) > maxEnvelopeBytes {
+		t.Fatalf("40000 members: %d bytes, err = %v", len(out), err)
+	}
+	if got := decode(out); metricInts(got.Metrics)["failed_tests"] != 40000 {
+		t.Errorf("the metrics were touched: %v", metricInts(got.Metrics))
+	}
+}
+
+// TestMetricWire_NumbersStayTheirKind: an int is written as the integer it is,
+// past what a float64 holds exactly, and a decimal is written without an
+// exponent — Go's own float encoding switches to one below 1e-6, which a reader
+// holding the contract would refuse. Both read back as written.
+func TestMetricWire_NumbersStayTheirKind(t *testing.T) {
+	for _, tc := range []struct {
+		metric Metric
+		want   string
+	}{
+		{Size("cas_network_bytes", 9007199254740993, unitBytes), `"value":9007199254740993`},
+		{Percent("statement_coverage", 0.0000001), `"value":0.0000001`},
+		{Percent("statement_coverage", 71.4), `"value":71.4`},
+	} {
+		out, err := json.Marshal(tc.metric)
+		if err != nil || !strings.Contains(string(out), tc.want) {
+			t.Errorf("%+v is written %s (%v), want %s", tc.metric, out, err, tc.want)
+			continue
+		}
+		var back Metric
+		if err := json.Unmarshal(out, &back); err != nil || back != tc.metric {
+			t.Errorf("%s reads back as %+v (%v), want %+v", out, back, err, tc.metric)
+		}
+	}
+	var m Metric
+	if err := json.Unmarshal([]byte(`{"name":"x","type":"count","value":1}`), &m); err == nil {
+		t.Error("a metric of a type outside the closed set was read")
+	}
+}
+
+// TestRunContractGate_AHostGateQueuesBehindTheHolder: a gate that declares
+// serialize "host" holds the exclusion while it measures, so run by hand it
+// queues behind whoever holds it rather than measuring that load — and
+// measures once the holder lets go. The queue line on the narration is the
+// signal that it is waiting.
+func TestRunContractGate_AHostGateQueuesBehindTheHolder(t *testing.T) {
+	cleanTestHome(t)
+	stubGateBuild(t, buildFails())
+	t.Cleanup(func() { SetObserved(true) })
+	SetObserved(true)
+	unlock, err := acquireWithin(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = saved; w.Close() })
+	queued := make(chan struct{})
+	go func() {
+		buf, seen, said := make([]byte, 4096), "", false
+		for {
+			n, err := r.Read(buf)
+			seen += string(buf[:n])
+			if !said && strings.Contains(seen, "Waiting for the host-scope exclusion") {
+				close(queued)
+				said = true
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	done := make(chan error, 1)
+	var out bytes.Buffer
+	go func() { done <- runContractGate(t.TempDir(), "tested:promise", &out) }()
+	select {
+	case <-queued:
+	case err := <-done:
+		unlock()
+		t.Fatalf("tested:promise measured (%v) while another run held the host scope", err)
+	case <-time.After(30 * time.Second):
+		unlock()
+		t.Fatal("tested:promise neither queued nor measured within 30s")
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil || !strings.Contains(out.String(), `"gate":"tested:promise"`) {
+			t.Errorf("after the holder let go: err = %v, stdout %q", err, out.String())
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("tested:promise did not measure within 30s of the holder letting go")
 	}
 }

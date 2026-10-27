@@ -11,14 +11,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 )
 
-// gate_install.go implements `bin/gate install` — the end-to-end install gate
-// (T0803). It validates the REAL user install path: fetch the published install
-// script, run it (download binary → verify checksum → decompress → `promise
-// install`), sanity-check the install, then run the full test suite through the
-// freshly INSTALLED distribution (not bin/promise).
+// gate_install.go implements what the install:thin gate measures — the
+// end-to-end install (T0803). It validates the REAL user install path: fetch
+// the published install script, run it (download binary → verify checksum →
+// decompress → `promise install`), sanity-check the install, then run the full
+// test suite through the freshly INSTALLED distribution (not bin/promise).
 //
 // All gate logic lives here in cross-platform Go — there are deliberately NO
 // per-platform gate scripts (that mirrored-script duplication is exactly what
@@ -48,25 +47,12 @@ import (
 // single source of truth.
 const installGitHubRepo = "promise-language/promise"
 
-// defaultGateChannel is the release channel the install gate validates when
-// --channel is omitted: the moving `epoch-next` pre-release, which is what
-// `bin/release cut next` publishes for validation before a stable cut.
+// defaultGateChannel is the release channel the install gate validates: the
+// moving `epoch-next` pre-release, which is what `bin/release cut next`
+// publishes for validation before a stable cut.
 const defaultGateChannel = "next"
 
-// validateGateChannel accepts the three --channel forms: "next" (the moving
-// pre-release), "stable" (the latest published stable epoch), or an explicit
-// "Y.N" epoch (e.g. 2026.1).
-func validateGateChannel(channel string) error {
-	if channel == "next" || channel == "stable" {
-		return nil
-	}
-	if _, err := parseEpochStr(channel); err != nil {
-		return fmt.Errorf("--channel must be next, stable, or an epoch like 2026.1 (got %q)", channel)
-	}
-	return nil
-}
-
-// gateInstallSource maps a validated --channel to the GitHub release the gate
+// gateInstallSource maps a channel to the GitHub release the gate
 // installs from: the base URL the install script + assets are fetched from, and
 // the --epoch argument handed to the installer so it pulls the binary + checksums
 // from the SAME release.
@@ -88,7 +74,7 @@ func gateInstallSource(channel string) (scriptBaseURL, installerEpoch string) {
 
 // installPhasesFor lists the gate phases recorded in phases.json for a variant,
 // in execution order. Each maps to an `install_<variant>_<phase>_ok` ∈ {0,1}
-// metric in the envelope. The full variant adds an "offline" phase: a
+// metric in the envelope (installPhaseMetric). The full variant adds an "offline" phase: a
 // self-contained compile+run with the network blackholed, proving the host LLVM
 // toolchain blobs are pre-staged. The thin variant has no such guarantee (it
 // fetches blobs on first compile), so it omits the phase.
@@ -115,8 +101,7 @@ func validateLatestTag(tag string) error {
 
 // assertLatestIsEpoch is the cheap network-only tripwire for the `latest`
 // invariant: one GitHub API request (no asset download, no test suite), then
-// validateLatestTag. Wired as `bin/gate latest-invariant` (scheduled hourly)
-// and preflighted by the stable install gate so a regression fails fast with an
+// validateLatestTag. Measured as the latest-invariant gate, and preflighted by the stable install gate so a regression fails fast with an
 // actionable message instead of a mystery 404 on a blob URL (T1493).
 func assertLatestIsEpoch() error {
 	return assertLatestIsEpochAt("https://api.github.com/repos/" + installGitHubRepo + "/releases/latest")
@@ -150,105 +135,6 @@ func assertLatestIsEpochAt(api string) error {
 		return fmt.Errorf("parse %s: %w", api, err)
 	}
 	return validateLatestTag(rel.TagName)
-}
-
-// runGateLatestInvariant implements `bin/gate latest-invariant` — the cheap,
-// platform-independent tripwire that fails unless `releases/latest` resolves to
-// an epoch-* tag (T1493). It emits a one-line human message to stderr; the
-// exit status is the signal.
-func runGateLatestInvariant(args []string) error {
-	if len(args) != 0 {
-		return fmt.Errorf("usage: bin/gate latest-invariant")
-	}
-	if err := assertLatestIsEpoch(); err != nil {
-		fmt.Fprintf(os.Stderr, "latest-invariant: FAIL: %v\n", err)
-		return err
-	}
-	fmt.Fprintln(os.Stderr, "latest-invariant: ok (`latest` points at an epoch-* release)")
-	return nil
-}
-
-// runGateInstall runs the end-to-end install gate for one variant (thin|full)
-// and writes the structured JSON gate envelope to stdout. Phase progress goes to
-// stderr so stdout stays clean JSON.
-func runGateInstall(root string, args []string) error {
-	const usage = "usage: bin/gate install --variant {thin|full} [--channel {next|stable|<epoch>}] [--system]"
-	variant := ""
-	channel := defaultGateChannel
-	system := false
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "--variant" || arg == "-variant":
-			if i+1 >= len(args) {
-				return fmt.Errorf("%s", usage)
-			}
-			i++
-			variant = args[i]
-		case arg == "--variant=thin" || arg == "-variant=thin":
-			variant = "thin"
-		case arg == "--variant=full" || arg == "-variant=full":
-			variant = "full"
-		case arg == "--channel" || arg == "-channel":
-			if i+1 >= len(args) {
-				return fmt.Errorf("%s", usage)
-			}
-			i++
-			channel = args[i]
-		case strings.HasPrefix(arg, "--channel=") || strings.HasPrefix(arg, "-channel="):
-			channel = arg[strings.IndexByte(arg, '=')+1:]
-		case arg == "--system" || arg == "-system":
-			system = true
-		default:
-			return fmt.Errorf("%s", usage)
-		}
-	}
-	if variant != "thin" && variant != "full" {
-		return fmt.Errorf("bin/gate install: --variant must be thin or full")
-	}
-	if err := validateGateChannel(channel); err != nil {
-		return fmt.Errorf("bin/gate install: %w", err)
-	}
-
-	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
-
-	// Scratch dir for the phase artifacts (phases.json, tests.jsonl) and — in
-	// clean-slate mode — the sandbox HOME. Removed on exit.
-	work, err := os.MkdirTemp("", "gate-install-")
-	if err != nil {
-		return fmt.Errorf("mktemp: %w", err)
-	}
-	defer os.RemoveAll(work)
-
-	fmt.Fprintf(os.Stderr, "Running install gate (variant=%s, system=%v, channel=%s)...\n", variant, system, channel)
-	phaseErr := runInstallPhases(root, work, variant, channel, system)
-
-	// Aggregate the phase artifacts into the standard envelope.
-	out, err := buildInstallGateOutput(hostTarget, variant, work)
-	if err != nil {
-		return fmt.Errorf("aggregate gate output: %w", err)
-	}
-
-	// Sidecar so commit/periodic gate ingestion can read the metrics.
-	gv := &GateValues{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Platform:  hostTarget,
-		Values:    out.Metrics,
-	}
-	if err := WriteGateValues(root, gv); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
-	}
-
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal gate output: %w", err)
-	}
-	fmt.Println(string(data))
-
-	if phaseErr != nil {
-		return fmt.Errorf("install gate (%s) failed: %w", variant, phaseErr)
-	}
-	return nil
 }
 
 // runInstallPhases runs the four gate phases (fetch → install → sanity → test)
@@ -334,7 +220,7 @@ func runInstallPhases(root, work, variant, channel string, system bool) error {
 
 	// ── phase: fetch the published install script ────────────────────────────
 	// The script + assets are GitHub release assets (the repo is public;
-	// promise-lang.org is gone — GitHub is the only source). The --channel
+	// promise-lang.org is gone — GitHub is the only source). The channel
 	// selects which release: next / stable / an explicit epoch.
 	scriptBase, installerEpoch := gateInstallSource(channel)
 	scriptPath := filepath.Join(work, installScript)
@@ -602,7 +488,7 @@ func downloadFile(url, dest string) error {
 // install_<variant>_<phase>_ok ∈ {0,1}. Pure (filesystem-read only) so the
 // aggregation is unit-testable without running the gate.
 func buildInstallGateOutput(hostTarget, variant, work string) (*GateOutput, error) {
-	metricPrefix := "install_" + variant
+	metricPrefix := installMetricPrefix(variant)
 	// Resolve symlinks so srcDir is in the same path namespace the test runner
 	// reports (macOS /var→/private/var after chdir through a symlinked $TMPDIR).
 	// work still exists here; work/src (the worktree) may already be removed.
@@ -628,9 +514,28 @@ func buildInstallGateOutput(hostTarget, variant, work string) (*GateOutput, erro
 		if phases[p] == "pass" {
 			ok = 1
 		}
-		out.Metrics[metricPrefix+"_"+p+"_ok"] = ok
+		out.Metrics[installPhaseMetric(variant, p)] = ok
 	}
 	return out, nil
+}
+
+// installMetricPrefix is what every metric of one variant's install starts with.
+func installMetricPrefix(variant string) string { return "install_" + variant }
+
+// installPhaseMetric is the metric one phase's outcome is reported under.
+func installPhaseMetric(variant, phase string) string {
+	return installMetricPrefix(variant) + "_" + phase + "_ok"
+}
+
+// installMetricSpecs declares what buildInstallGateOutput reports for a
+// variant, from the same two sources it fills: the seeded per-status counts
+// and one outcome per phase. All are counts.
+func installMetricSpecs(variant string) []MetricSpec {
+	names := statusMetricNames(installMetricPrefix(variant))
+	for _, p := range installPhasesFor(variant) {
+		names = append(names, installPhaseMetric(variant, p))
+	}
+	return countSpecs(names...)
 }
 
 // readInstallPhases reads the phases.json ({"fetch":"pass|fail",...}). A missing

@@ -77,12 +77,12 @@ func TestRunVerifyRedRunLeavesNothingBlessed(t *testing.T) {
 	t.Setenv("PROMISE_HOME", filepath.Join(dir, ".promise-home"))
 	t.Setenv("TMPDIR", filepath.Join(dir, ".promise-home", "tmp"))
 
-	err := RunVerify(dir, []string{"--lock-timeout=30s"})
-	if err == nil {
+	res, err := runVerifyJSON(t, dir)
+	if err == nil || res.OK {
 		t.Fatal("verify over an empty root should fail")
 	}
-	if !strings.Contains(err.Error(), "no .g4 files") {
-		t.Errorf("verify should fail on the absent grammar, got: %v", err)
+	if failed := failedStepResult(res); !strings.Contains(failed.Detail, "no .g4 files") {
+		t.Errorf("verify should fail on the absent grammar, got: %+v", failed)
 	}
 	if Exists(AntlrJarPath(dir)) {
 		t.Errorf("verify fetched the ANTLR jar into %s — no build path may reach the network (T2116)", dir)
@@ -103,13 +103,42 @@ func TestRunVerifyRefusesWhenTheStaleBlessingCannotBeCleared(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, ".workspace/verified-tree/occupied", "x\n")
 
-	err := RunVerify(dir, []string{"--lock-timeout=30s"})
-	if err == nil {
+	res, err := runVerifyJSON(t, dir)
+	if err == nil || res.OK {
 		t.Fatal("verify must fail when the stale record cannot be cleared")
 	}
-	if !strings.HasPrefix(err.Error(), "clear: ") {
-		t.Errorf("verify must fail at the clear, not later, got: %v", err)
+	if failed := failedStepResult(res); failed.Name != "clear" {
+		t.Errorf("verify must fail at the clear, not later, got: %+v", failed)
 	}
+}
+
+// runVerifyJSON runs bin/verify in-process in JSON mode and reads the one
+// result it writes on stdout, whatever the run's outcome.
+func runVerifyJSON(t *testing.T, dir string) (verifyResult, error) {
+	t.Helper()
+	cliObserved(t, Observed()) // RunVerify records whether anyone watches
+	var out bytes.Buffer
+	runErr := RunVerify(dir, []string{"-json"}, &out)
+	var res verifyResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("verify's stdout is not its JSON result: %v\n%s", err, out.String())
+	}
+	if got := ExitCode(runErr); got != map[bool]int{true: 0, false: 1}[res.OK] {
+		t.Errorf("exit status %d does not agree with ok=%v", got, res.OK)
+	}
+	return res, runErr
+}
+
+// failedStepResult is the step that stopped the run, or the zero step.
+func failedStepResult(res verifyResult) stepResult {
+	for _, stage := range res.Stages {
+		for _, s := range stage.Steps {
+			if s.Status == stepFailed {
+				return s
+			}
+		}
+	}
+	return stepResult{}
 }
 
 func blessedEnvelope(tree string) Envelope {
@@ -236,7 +265,7 @@ func TestBlessing_IsTheSameFromVerifyAndFromTheJudge(t *testing.T) {
 	// who records the blessing. It may NOT be an empty manifest: a gate whose
 	// metrics carry no terms is refused, so judging nothing would fix the
 	// verdict at red and this test would pass for the wrong reason.
-	writeFile(t, dir, ThresholdsFile, `{"host_test_failures": {"direction": "at_most", "cap": 0}}`+"\n")
+	writeTermsInto(t, dir, `{"promise_failed_tests": {"direction": "at_most", "cap": 0}}`)
 	vtGit(t, dir, "add", "-A")
 	vtGit(t, dir, "commit", "-q", "-m", "base")
 	here, err := treeIdentity(dir)
@@ -244,7 +273,7 @@ func TestBlessing_IsTheSameFromVerifyAndFromTheJudge(t *testing.T) {
 		t.Fatalf("treeIdentity: %v", err)
 	}
 	env := blessedEnvelope(here)
-	env.Metrics = []Metric{Count("host_test_failures", 0)}
+	env.Metrics = completeIntegrationMetrics(t, dir, 0)
 
 	// Verify's path.
 	if err := blessIfPassed(dir, env, true); err != nil {
@@ -283,7 +312,7 @@ func TestJudgeStdin_ARedVerdictBlessesNothing(t *testing.T) {
 	dir := vtRepo(t)
 	writeFile(t, dir, "a.txt", "a\n")
 	// One cap the envelope's own metric cannot satisfy.
-	writeFile(t, dir, ThresholdsFile, `{"host_test_failures": {"direction": "at_most", "cap": 0}}`+"\n")
+	writeTermsInto(t, dir, `{"promise_failed_tests": {"direction": "at_most", "cap": 0}}`)
 	vtGit(t, dir, "add", "-A")
 	vtGit(t, dir, "commit", "-q", "-m", "base")
 	here, err := treeIdentity(dir)
@@ -291,7 +320,7 @@ func TestJudgeStdin_ARedVerdictBlessesNothing(t *testing.T) {
 		t.Fatalf("treeIdentity: %v", err)
 	}
 	env := blessedEnvelope(here)
-	env.Metrics = []Metric{Count("host_test_failures", 3)}
+	env.Metrics = completeIntegrationMetrics(t, dir, 3)
 	body, err := json.Marshal(env)
 	if err != nil {
 		t.Fatal(err)
@@ -400,7 +429,7 @@ func TestStepRecord_BlessesOnTheRunsOwnVerdict(t *testing.T) {
 		if err != nil {
 			t.Fatalf("treeIdentity: %v", err)
 		}
-		r := &verifyRun{root: dir, env: blessedEnvelope(measured), acceptable: acceptable}
+		r := &verifyRun{root: dir, env: blessedEnvelope(measured), verdict: Verdict{Acceptable: acceptable}}
 		if err := r.stepRecord(); err != nil {
 			return "", measured, err
 		}

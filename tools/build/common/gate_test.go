@@ -2,6 +2,7 @@ package common
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -9,248 +10,129 @@ import (
 	"testing"
 )
 
-// TestRunGate_NoArgs verifies the usage error when no subcommand is given.
-func TestRunGate_NoArgs(t *testing.T) {
-	err := RunGate("", nil)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+// runGate runs RunGate the way bin/gate's main does and returns what it wrote
+// on stdout. RunGate records whether anyone is watching and sets PROMISE_GATE
+// for the whole process; both are put back afterwards, so no other test runs
+// under a state this one left behind.
+func runGate(t *testing.T, root string, args ...string) (string, error) {
+	t.Helper()
+	t.Setenv("PROMISE_GATE", os.Getenv("PROMISE_GATE"))
+	cliObserved(t, true)
+	var err error
+	out := captureStdout(t, func() { err = RunGate(root, args) })
+	return out, err
+}
+
+// requireUsageError asserts err is a malformed invocation — exit 2 — that left
+// stdout empty, and returns its text.
+func requireUsageError(t *testing.T, args []string, out string, err error) string {
+	t.Helper()
+	var ue *UsageError
+	if !errors.As(err, &ue) {
+		t.Fatalf("RunGate(%q) = %v, want a usage error", args, err)
 	}
-	if !strings.Contains(err.Error(), "usage") {
-		t.Errorf("error %q does not contain 'usage'", err.Error())
+	if code := ExitCode(err); code != 2 {
+		t.Errorf("RunGate(%q) exits %d, want 2", args, code)
+	}
+	if out != "" {
+		t.Errorf("RunGate(%q) wrote %q on stdout; a usage error writes nothing there", args, out)
+	}
+	return err.Error()
+}
+
+// TestRunGate_NoArgs: a bare bin/gate asked nothing, and is answered with a
+// short page — what it expects, what it is, where the rest is — as a usage
+// error, so nothing reads it as a result.
+func TestRunGate_NoArgs(t *testing.T) {
+	for _, args := range [][]string{nil, {"-no-list"}} {
+		out, err := runGate(t, t.TempDir(), args...)
+		msg := requireUsageError(t, args, out, err)
+		want := []string{
+			"expecting a subcommand: <gate>, a gate this project answers — `gate --list` names them",
+			"promise unknown",
+			"measure one property of this tree",
+			"run `gate -help` for all of them",
+		}
+		if got := strings.Split(msg, "\n"); !slices.Equal(got, want) {
+			t.Errorf("RunGate(%q) said\n%s\nwant\n%s", args, msg, strings.Join(want, "\n"))
+		}
 	}
 }
 
 // TestRunGate_SetsPromiseGateEnv is the regression test for the T1877 runtime
 // half of gate-context enforcement: bin/guard's PROMISE_GATE check is only
 // effective if RunGate actually sets the marker, and it must do so
-// unconditionally — before the subcommand dispatch — so every subcommand
-// (including the no-args usage error and an unknown subcommand) inherits it.
-// bin/guard trusts this marker to deny prompt-invoking tools, so a call path
-// that skipped setting it would silently reopen the gap this task closes.
+// unconditionally — before the command line is even read — so every path
+// (including a bare invocation and an unknown gate) inherits it.
 func TestRunGate_SetsPromiseGateEnv(t *testing.T) {
 	t.Setenv("PROMISE_GATE", "")
-	os.Unsetenv("PROMISE_GATE")
-
-	// Even the earliest-return call paths (no args, unknown subcommand) must
-	// still set the marker, since RunGate sets it before looking at args[0].
-	RunGate("", nil)
-	if got := os.Getenv("PROMISE_GATE"); got != "1" {
-		t.Fatalf("after RunGate(nil): PROMISE_GATE = %q, want %q", got, "1")
-	}
-
-	os.Unsetenv("PROMISE_GATE")
-	RunGate("", []string{"bogus"})
-	if got := os.Getenv("PROMISE_GATE"); got != "1" {
-		t.Fatalf("after RunGate([\"bogus\"]): PROMISE_GATE = %q, want %q", got, "1")
-	}
-}
-
-// TestRunGate_UnknownSubcommand verifies the error for an unrecognized subcommand.
-func TestRunGate_UnknownSubcommand(t *testing.T) {
-	err := RunGate("", []string{"bogus"})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "unknown gate") {
-		t.Errorf("error %q does not contain 'unknown gate'", err.Error())
-	}
-}
-
-// TestRunGate_LatestInvariantIsAdvertised verifies the T1493 subcommand is wired
-// into the dispatcher: both the no-args usage text and the unknown-subcommand
-// hint must list `latest-invariant`, so an operator can discover the tripwire.
-func TestRunGate_LatestInvariantIsAdvertised(t *testing.T) {
-	usageErr := RunGate("", nil)
-	if usageErr == nil || !strings.Contains(usageErr.Error(), "latest-invariant") {
-		t.Errorf("no-args usage does not advertise latest-invariant: %v", usageErr)
-	}
-	unknownErr := RunGate("", []string{"bogus"})
-	if unknownErr == nil || !strings.Contains(unknownErr.Error(), "latest-invariant") {
-		t.Errorf("unknown-subcommand hint does not list latest-invariant: %v", unknownErr)
-	}
-}
-
-// TestRunGate_LatestInvariantRejectsArgs verifies the dispatcher routes
-// `latest-invariant` to its handler, which rejects stray positional args with a
-// usage error before any network call (T1493).
-func TestRunGate_LatestInvariantRejectsArgs(t *testing.T) {
-	err := RunGate("", []string{"latest-invariant", "extra"})
-	if err == nil {
-		t.Fatal("expected error for stray arg, got nil")
-	}
-	if !strings.Contains(err.Error(), "usage") {
-		t.Errorf("error %q does not contain 'usage'", err.Error())
-	}
-}
-
-// TestRunGate_TestBadFlag verifies that unrecognized flags are rejected early.
-func TestRunGate_TestBadFlag(t *testing.T) {
-	err := RunGate("", []string{"test", "--bogus"})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "usage") {
-		t.Errorf("error %q does not contain 'usage'", err.Error())
-	}
-}
-
-// TestRunGate_WasmTestsBadFlag verifies that unrecognized flags are rejected for wasm-test.
-func TestRunGate_WasmTestsBadFlag(t *testing.T) {
-	err := RunGate("", []string{"wasm-test", "--bogus"})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "usage") {
-		t.Errorf("error %q does not contain 'usage'", err.Error())
-	}
-}
-
-// TestRunGate_WasmWebTestIsAdvertised verifies the T1594 subcommand is wired
-// into the dispatcher: both the no-args usage text and the unknown-subcommand
-// hint must list `wasm-web-test`, so an operator (or gate scheduler) can
-// discover it instead of hitting "unknown subcommand" as in T1594.
-func TestRunGate_WasmWebTestIsAdvertised(t *testing.T) {
-	usageErr := RunGate("", nil)
-	if usageErr == nil || !strings.Contains(usageErr.Error(), "wasm-web-test") {
-		t.Errorf("no-args usage does not advertise wasm-web-test: %v", usageErr)
-	}
-	unknownErr := RunGate("", []string{"bogus"})
-	if unknownErr == nil || !strings.Contains(unknownErr.Error(), "wasm-web-test") {
-		t.Errorf("unknown-subcommand hint does not list wasm-web-test: %v", unknownErr)
-	}
-}
-
-// TestRunGate_WasmWebTestsBadFlag verifies that unrecognized flags are rejected for wasm-web-test.
-func TestRunGate_WasmWebTestsBadFlag(t *testing.T) {
-	err := RunGate("", []string{"wasm-web-test", "--bogus"})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "usage") {
-		t.Errorf("error %q does not contain 'usage'", err.Error())
-	}
-}
-
-// TestRunGate_OldWasmTestsNameRejected verifies that the old plural "wasm-tests" subcommand
-// is no longer recognized — renamed to "wasm-test" by T0245.
-func TestRunGate_OldWasmTestsNameRejected(t *testing.T) {
-	err := RunGate("", []string{"wasm-tests"})
-	if err == nil {
-		t.Fatal("expected error for removed subcommand wasm-tests, got nil")
-	}
-	if !strings.Contains(err.Error(), "unknown gate") {
-		t.Errorf("error %q does not contain 'unknown gate'", err.Error())
-	}
-}
-
-// TestRunGate_GoTestBadFlag verifies that unrecognized flags are rejected.
-func TestRunGate_GoTestBadFlag(t *testing.T) {
-	err := RunGate("", []string{"go-test", "--bogus"})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "usage") {
-		t.Errorf("error %q does not contain 'usage'", err.Error())
-	}
-}
-
-// TestRunGate_StressBadFlag verifies that non-numeric args are rejected.
-func TestRunGate_StressBadFlag(t *testing.T) {
-	err := RunGate("", []string{"stress", "--bogus"})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "usage") {
-		t.Errorf("error %q does not contain 'usage'", err.Error())
-	}
-}
-
-// TestRunGate_WasmSizeBadFlag verifies that unrecognized flags are rejected for wasm-size.
-func TestRunGate_WasmSizeBadFlag(t *testing.T) {
-	err := RunGate("", []string{"wasm-size", "--bogus"})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "usage") {
-		t.Errorf("error %q does not contain 'usage'", err.Error())
-	}
-}
-
-// TestRunGate_CoverageBadFlag verifies that unrecognized flags are rejected.
-func TestRunGate_CoverageBadFlag(t *testing.T) {
-	err := RunGate("", []string{"coverage", "--bogus"})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "usage") {
-		t.Errorf("error %q does not contain 'usage'", err.Error())
-	}
-}
-
-// TestRunGate_LegacySubcommandsRefuseShared (#102): -shared used to skip the
-// worktree home and run the suite, the build and the toolchain in the
-// machine-global ~/.promise. Every legacy subcommand that took it now refuses it
-// as a usage error, in either spelling, before pinning a home or building —
-// so the root gains no .promise-home and the refusal does not advertise the flag.
-func TestRunGate_LegacySubcommandsRefuseShared(t *testing.T) {
-	t.Setenv("PROMISE_GATE", os.Getenv("PROMISE_GATE")) // RunGate sets it
-	isolateLocalCacheEnv(t)
-	for _, sub := range []string{"test", "wasm-test", "wasm-web-test", "wasm-size", "go-test", "coverage"} {
-		for _, flag := range []string{"--shared", "-shared"} {
-			t.Run(sub+" "+flag, func(t *testing.T) {
-				root := t.TempDir()
-				err := RunGate(root, []string{sub, flag})
-				if err == nil || !strings.HasPrefix(err.Error(), "usage: bin/gate "+sub) {
-					t.Fatalf("RunGate(%s %s) = %v, want the usage error", sub, flag, err)
-				}
-				if strings.Contains(err.Error(), "shared") {
-					t.Errorf("the usage error still offers the flag: %v", err)
-				}
-				if Exists(filepath.Join(root, ".promise-home")) {
-					t.Errorf("a refused %s pinned a home before refusing", sub)
-				}
-			})
+	cliObserved(t, true)
+	for _, args := range [][]string{nil, {"bogus"}, {"-bogus"}} {
+		os.Unsetenv("PROMISE_GATE")
+		captureStdout(t, func() { RunGate("", args) })
+		if got := os.Getenv("PROMISE_GATE"); got != "1" {
+			t.Fatalf("after RunGate(%q): PROMISE_GATE = %q, want %q", args, got, "1")
 		}
 	}
 }
 
-// TestParseGoTestOutput verifies counting of PASS/FAIL lines.
-func TestParseGoTestOutput(t *testing.T) {
-	output := `=== RUN   TestFoo
---- PASS: TestFoo (0.00s)
-=== RUN   TestBar
---- PASS: TestBar (0.01s)
-=== RUN   TestBaz
---- FAIL: TestBaz (0.00s)
-FAIL	example.com/pkg	0.123s`
-	passed, failed := ParseGoTestOutput(output)
-	if passed != 2 {
-		t.Errorf("passed = %d, want 2", passed)
-	}
-	if failed != 1 {
-		t.Errorf("failed = %d, want 1", failed)
+// TestRunGate_UnknownSubcommand: a name this project does not measure is a
+// usage error that points at the listing.
+func TestRunGate_UnknownSubcommand(t *testing.T) {
+	out, err := runGate(t, "", "bogus")
+	msg := requireUsageError(t, []string{"bogus"}, out, err)
+	if want := "gate: no gate named \"bogus\" in this project; `gate --list` names them"; msg != want {
+		t.Errorf("error = %q, want %q", msg, want)
 	}
 }
 
-// TestParseGoTestOutput_AllPass verifies when all tests pass.
-func TestParseGoTestOutput_AllPass(t *testing.T) {
-	output := `--- PASS: TestA (0.00s)
---- PASS: TestB (0.00s)
-ok	example.com/pkg	0.05s`
-	passed, failed := ParseGoTestOutput(output)
-	if passed != 2 {
-		t.Errorf("passed = %d, want 2", passed)
-	}
-	if failed != 0 {
-		t.Errorf("failed = %d, want 0", failed)
+// TestRunGate_UsageErrorsWriteNothing: every malformed command line is ONE
+// usage error, exit 2, with nothing on stdout — a runner reads an envelope, a
+// listing, or nothing. The old subcommand names are not gates and are refused
+// like any other unknown name.
+func TestRunGate_UsageErrorsWriteNothing(t *testing.T) {
+	clearToolchainOverrides(t)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-bogus", "--list"}, "unknown flag -bogus"},
+		{[]string{"--list", "--list"}, "-list is given twice"},
+		{[]string{"-json", "-human", "--list"}, "-json and -human choose one output mode"},
+		{[]string{"fit"}, "gate: fit measures " + ContractGateSummary("fit") + ", and writes it only with --envelope; run `bin/run fit` for a result meant for a person"},
+		{[]string{"fit", "-no-envelope"}, "writes it only with --envelope"},
+		{[]string{"nosuch", "--envelope"}, "no gate named \"nosuch\" in this project; `gate --list` names them"},
+		{[]string{"test"}, "no gate named \"test\""},
+		{[]string{"fit", "--envelope", "-json"}, "--envelope writes one form only"},
+		{[]string{"fit", "fit", "--envelope"}, "unexpected argument \"fit\""},
+		{[]string{"--envelope"}, "unknown flag --envelope"},
+	} {
+		out, err := runGate(t, t.TempDir(), tc.args...)
+		if msg := requireUsageError(t, tc.args, out, err); !strings.Contains(msg, tc.want) {
+			t.Errorf("RunGate(%q) = %q, want it to say %q", tc.args, msg, tc.want)
+		}
 	}
 }
 
-// TestParseGoTestOutput_Empty verifies empty input returns zeros.
-func TestParseGoTestOutput_Empty(t *testing.T) {
-	passed, failed := ParseGoTestOutput("")
-	if passed != 0 || failed != 0 {
-		t.Errorf("passed=%d, failed=%d, want 0,0", passed, failed)
+// TestRunGate_ListFromJSONInput: the listing can be asked for in a -json-input
+// file exactly as on the command line, and -json makes it the JSON listing.
+func TestRunGate_ListFromJSONInput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invocation.json")
+	if err := os.WriteFile(path, []byte(`{"list": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runGate(t, t.TempDir(), "-json-input", path, "-json")
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	var got struct {
+		Gates []listedGate `json:"gates"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("the listing is not JSON: %v\n%s", err, out)
+	}
+	if len(got.Gates) != len(ContractGateNames()) {
+		t.Errorf("listed %d gates, want %d", len(got.Gates), len(ContractGateNames()))
 	}
 }
 
@@ -262,166 +144,6 @@ func flatTests(groups []TestFileGroup) []TestRecord {
 		out = append(out, g.Tests...)
 	}
 	return out
-}
-
-func TestParseGoTestGroups_MixedResults(t *testing.T) {
-	output := `=== RUN   TestFoo
---- PASS: TestFoo (0.001s)
-=== RUN   TestBar
---- FAIL: TestBar (0.003s)
-    bar_test.go:42: expected 1, got 2
-    bar_test.go:43: extra context
-FAIL
-FAIL	github.com/user/pkg/bar	0.010s
-=== RUN   TestBaz
---- PASS: TestBaz (0.002s)
-ok  	github.com/user/pkg/foo	0.005s`
-	groups := ParseGoTestGroups(output)
-	if len(groups) != 2 {
-		t.Fatalf("len(groups) = %d, want 2", len(groups))
-	}
-	// Group 0: bar package with TestFoo (pass) + TestBar (fail).
-	if groups[0].File != "github.com/user/pkg/bar" || len(groups[0].Tests) != 2 {
-		t.Fatalf("group 0: %+v", groups[0])
-	}
-	if groups[0].Tests[0].Test != "TestFoo" || groups[0].Tests[0].Status != "pass" || groups[0].Tests[0].Elapsed != 0.001 {
-		t.Errorf("group0 test0: %+v", groups[0].Tests[0])
-	}
-	if groups[0].Tests[1].Test != "TestBar" || groups[0].Tests[1].Status != "fail" {
-		t.Errorf("group0 test1: %+v", groups[0].Tests[1])
-	}
-	if !strings.Contains(groups[0].Tests[1].Context, "expected 1, got 2") ||
-		!strings.Contains(groups[0].Tests[1].Context, "extra context") {
-		t.Errorf("group0 test1 context = %q", groups[0].Tests[1].Context)
-	}
-	// Group 1: foo package with TestBaz (pass).
-	if groups[1].File != "github.com/user/pkg/foo" || groups[1].Tests[0].Test != "TestBaz" || groups[1].Tests[0].Status != "pass" {
-		t.Errorf("group 1: %+v", groups[1])
-	}
-}
-
-// TestParseGoTestGroups_RepoRelative verifies the repo module prefix is stripped
-// so go-test file identity is repo-relative, matching the Promise test gates.
-func TestParseGoTestGroups_RepoRelative(t *testing.T) {
-	output := `--- PASS: TestX (0.00s)
-ok  	github.com/promise-language/promise/compiler/internal/codegen	0.05s`
-	groups := ParseGoTestGroups(output)
-	if len(groups) != 1 || groups[0].File != "compiler/internal/codegen" {
-		t.Fatalf("repo-relative strip failed: %+v", groups)
-	}
-}
-
-// TestParseGoTestGroups_Skip maps Go SKIP to the gate's excluded status.
-func TestParseGoTestGroups_Skip(t *testing.T) {
-	output := `--- SKIP: TestSkipped (0.00s)
-    foo_test.go:3: not on this platform
-ok  	example.com/pkg	0.01s`
-	groups := ParseGoTestGroups(output)
-	if len(groups) != 1 || len(groups[0].Tests) != 1 || groups[0].Tests[0].Status != "excluded" {
-		t.Fatalf("SKIP not mapped to excluded: %+v", groups)
-	}
-}
-
-func TestParseGoTestGroups_AllPass(t *testing.T) {
-	output := `--- PASS: TestA (0.00s)
-ok  	example.com/pkg1	0.05s
---- PASS: TestB (0.01s)
-ok  	example.com/pkg2	0.06s`
-	groups := ParseGoTestGroups(output)
-	if len(groups) != 2 {
-		t.Fatalf("len(groups) = %d, want 2", len(groups))
-	}
-	if groups[0].File != "example.com/pkg1" || groups[1].File != "example.com/pkg2" {
-		t.Errorf("packages: %q, %q", groups[0].File, groups[1].File)
-	}
-	for _, e := range flatTests(groups) {
-		if e.Status != "pass" {
-			t.Errorf("test %q status = %q", e.Test, e.Status)
-		}
-	}
-}
-
-func TestParseGoTestGroups_Empty(t *testing.T) {
-	if groups := ParseGoTestGroups(""); len(groups) != 0 {
-		t.Errorf("len = %d, want 0", len(groups))
-	}
-}
-
-func TestParseGoTestGroups_Subtests(t *testing.T) {
-	output := `--- PASS: TestFoo (0.00s)
---- PASS: TestFoo/sub1 (0.00s)
---- PASS: TestFoo/sub2 (0.00s)
-ok  	example.com/pkg	0.01s`
-	tests := flatTests(ParseGoTestGroups(output))
-	if len(tests) != 3 {
-		t.Fatalf("len = %d, want 3", len(tests))
-	}
-	if tests[1].Test != "TestFoo/sub1" || tests[2].Test != "TestFoo/sub2" {
-		t.Errorf("subtest names: %q, %q", tests[1].Test, tests[2].Test)
-	}
-}
-
-func TestParseGoTestGroups_ContextTerminatedByPackage(t *testing.T) {
-	// Package summary directly follows context (no bare FAIL line).
-	output := `--- FAIL: TestY (0.01s)
-    y_test.go:5: boom
-FAIL	example.com/pkg	0.02s`
-	groups := ParseGoTestGroups(output)
-	if len(groups) != 1 || len(groups[0].Tests) != 1 {
-		t.Fatalf("groups = %+v", groups)
-	}
-	if !strings.Contains(groups[0].Tests[0].Context, "boom") {
-		t.Errorf("context = %q", groups[0].Tests[0].Context)
-	}
-	if groups[0].File != "example.com/pkg" {
-		t.Errorf("file = %q", groups[0].File)
-	}
-}
-
-func TestParseGoTestGroups_ContextTerminatedByNextTest(t *testing.T) {
-	// A new --- PASS/FAIL line arrives while collectingContext is still true.
-	output := `--- FAIL: TestA (0.01s)
-    a_test.go:1: err
---- PASS: TestB (0.02s)
-ok  	example.com/pkg	0.03s`
-	tests := flatTests(ParseGoTestGroups(output))
-	if len(tests) != 2 {
-		t.Fatalf("len = %d, want 2", len(tests))
-	}
-	if !strings.Contains(tests[0].Context, "err") {
-		t.Errorf("test 0 context = %q", tests[0].Context)
-	}
-	if tests[1].Context != "" {
-		t.Errorf("test 1 should have no context: %q", tests[1].Context)
-	}
-}
-
-func TestParseGoTestGroups_EOFWhileCollectingContext(t *testing.T) {
-	// EOF reached while still collecting context (no package summary at all).
-	output := `--- FAIL: TestZ (0.01s)
-    z_test.go:9: dangling context`
-	tests := flatTests(ParseGoTestGroups(output))
-	if len(tests) != 1 {
-		t.Fatalf("len = %d, want 1", len(tests))
-	}
-	if !strings.Contains(tests[0].Context, "dangling context") {
-		t.Errorf("context = %q", tests[0].Context)
-	}
-}
-
-func TestParseGoTestGroups_FailContext(t *testing.T) {
-	output := `--- FAIL: TestX (0.01s)
-    x_test.go:10: line1
-    x_test.go:11: line2
-FAIL
-FAIL	example.com/pkg	0.02s`
-	tests := flatTests(ParseGoTestGroups(output))
-	if len(tests) != 1 {
-		t.Fatalf("len = %d, want 1", len(tests))
-	}
-	if !strings.Contains(tests[0].Context, "line1") || !strings.Contains(tests[0].Context, "line2") {
-		t.Errorf("context = %q", tests[0].Context)
-	}
 }
 
 // runnerScannerCap mirrors the gate runner's per-line bufio.Scanner limit
@@ -445,44 +167,6 @@ func maxJSONLine(t *testing.T, v any) int {
 		}
 	}
 	return max
-}
-
-// TestParseGoTestGroups_ContextBounded is the T0777 regression guard: a failing
-// test that dumps a huge body (e.g. assertContains printing the full IR) must
-// NOT produce a context that JSON-encodes onto a line large enough to deadlock
-// the runner drain. The context is bounded and marked truncated; the resulting
-// GateOutput's longest line stays well under the runner's scanner cap.
-func TestParseGoTestGroups_ContextBounded(t *testing.T) {
-	var b strings.Builder
-	b.WriteString("--- FAIL: TestBigIR (0.50s)\n")
-	for i := 0; i < 40000; i++ { // ~2MB of indented "IR" if left unbounded
-		b.WriteString("    ")
-		b.WriteString(strings.Repeat("x", 48))
-		b.WriteString("\n")
-	}
-	b.WriteString("FAIL\n")
-	b.WriteString("FAIL\tgithub.com/promise-language/promise/compiler/internal/codegen\t0.50s\n")
-
-	groups := ParseGoTestGroups(b.String())
-	tests := flatTests(groups)
-	if len(tests) != 1 {
-		t.Fatalf("len = %d, want 1", len(tests))
-	}
-	ctx := tests[0].Context
-	if len(ctx) > maxContextBytes+len("\n… (truncated; full output in the gate log)") {
-		t.Errorf("context not bounded: %d bytes", len(ctx))
-	}
-	if !strings.Contains(ctx, "truncated") {
-		t.Errorf("expected truncation marker, got %q", ctx[:min(80, len(ctx))])
-	}
-	if !strings.HasPrefix(ctx, "x") {
-		t.Errorf("context should keep the head of the failure, got %q", ctx[:min(40, len(ctx))])
-	}
-
-	out := &GateOutput{Target: "darwin-arm64", Metrics: map[string]float64{}, Files: groups, Complete: "go-tests"}
-	if got := maxJSONLine(t, out); got >= runnerScannerCap {
-		t.Errorf("gate JSON has a %d-byte line (>= runner cap %d): would deadlock the runner drain", got, runnerScannerCap)
-	}
 }
 
 // TestClampContext covers the bounding helper directly.
@@ -649,18 +333,26 @@ func TestRunTeeStderr_ErrorWrapsCommandName(t *testing.T) {
 // pinned toolchain; run under a hand-pointed one it would report what this
 // machine does, which cannot stand as evidence about a (commit, platform, check)
 // triple. So it is refused outright rather than allowed to masquerade as a
-// pinned result — and refused before any subcommand dispatch, so no measurement
-// starts and no envelope is produced.
+// pinned result — and refused before anything is measured, so no envelope is
+// produced. It is not a usage error: the command line was fine, and the run
+// could not complete.
 func TestRunGate_RefusesUnderToolchainOverride(t *testing.T) {
 	for _, envVar := range []string{"PROMISE_OPT", "PROMISE_LD64LLD", "PROMISE_USE_CLANG"} {
 		t.Run(envVar, func(t *testing.T) {
 			clearToolchainOverrides(t)
 			t.Setenv(envVar, "/custom/tool")
 
-			// `test` is a real measurement gate: it must not begin.
-			err := RunGate("", []string{"test", "--envelope"})
+			// tested:go is a real measurement gate: it must not begin. The build
+			// is not stubbed, so reaching it would panic.
+			out, err := runGate(t, "", "tested:go", "--envelope")
 			if err == nil {
 				t.Fatal("expected refusal when a toolchain override is in effect")
+			}
+			if code := ExitCode(err); code != 1 {
+				t.Errorf("exit %d, want 1: the invocation was well formed", code)
+			}
+			if out != "" {
+				t.Errorf("a refused run wrote %q on stdout", out)
 			}
 			if !strings.Contains(err.Error(), "toolchain override") {
 				t.Errorf("error should name the override, got: %v", err)
@@ -678,15 +370,20 @@ func TestRunGate_RefusesUnderToolchainOverride(t *testing.T) {
 func TestRunGate_ListWorksUnderToolchainOverride(t *testing.T) {
 	clearToolchainOverrides(t)
 	t.Setenv("PROMISE_OPT", "/custom/opt")
-	if err := RunGate("", []string{"--list"}); err != nil {
+	out, err := runGate(t, "", "--list", "-human")
+	if err != nil {
 		t.Errorf("--list must still work under an override: %v", err)
+	}
+	if !slices.Equal(strings.Fields(out), ContractGateNames()) {
+		t.Errorf("--list printed %q under an override, want the gate names", out)
 	}
 }
 
-// TestGateGoTestArgv_IsTheSharedSpelling: the go-test gate runs the `go test`
+// TestGateGoTestArgv_IsTheSharedSpelling: the coverage gate runs the `go test`
 // bin/test and tested:go run, not a second spelling of it.
 //
-// It did not, for as long as T1817 had been bounding everything else: the gate
+// The go-test gate it was written for did not, for as long as T1817 had been
+// bounding everything else: the gate
 // kept the bare `go test -v -count=1 ./...` it was written with, so -p and
 // -parallel both defaulted to GOMAXPROCS and multiplied — 82 concurrent
 // compilers on a 12-core host — and the per-package limit stayed Go's 10m where

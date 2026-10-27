@@ -41,8 +41,11 @@ func unlinkMetricsWith(root string, removeDir func(string) error) ([]Metric, err
 	if hides {
 		n = 1
 	}
-	return []Metric{Count("worktree_hides_unlinked_files", n)}, nil
+	return []Metric{Count(unlinkMetricName, n)}, nil
 }
+
+// unlinkMetricSpecs declares what unlinkMetrics reports here.
+var unlinkMetricSpecs = countSpecs(unlinkMetricName)
 
 // hidesUnlinkedFiles is the probe. It creates a file in a fresh directory under
 // scratch, unlinks it while holding it open, and then removes the directory with

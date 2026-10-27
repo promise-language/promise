@@ -593,7 +593,8 @@ This runs:
   measured and judged exactly as `bin/run integration` measures and judges them
 
 The WASM suites are a different target's measurement, asked for by name:
-`bin/test --wasm`, or the `wasm-test` gate.
+`bin/test --wasm`, or `bin/run tested:wasm` (`bin/gate tested:wasm --envelope` for
+the bare envelope).
 
 **Do not commit if verify fails.**
 

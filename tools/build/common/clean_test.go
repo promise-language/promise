@@ -132,7 +132,7 @@ func TestCleanTarget(t *testing.T) {
 // are redirected, so the exclusion is this test's own.
 func TestClean_WaitsForTheHostScopeExclusion(t *testing.T) {
 	cleanTestHome(t)
-	unlock, err := acquireVerifyLock(arenaRoot(t, peerArenaID), 0)
+	unlock, err := acquireHostScope(arenaRoot(t, peerArenaID))
 	if err != nil {
 		t.Fatal(err)
 	}

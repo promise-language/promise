@@ -290,34 +290,27 @@ func promiseSuiteTargets() []string {
 	return []string{"tests/...", "modules/...", "examples/...", "tools/stub/..."}
 }
 
+// promiseSuiteArgs is `promise test` over the suite for target (empty = host),
+// with output choosing how the child renders: the one spelling of the suite's
+// command line every runner of it shares, so a person's run and a gate's
+// measurement cannot come to differ in targets or timeouts.
+func promiseSuiteArgs(target string, output ...string) []string {
+	args := append([]string{"test"}, promiseTestTimeoutArgs(target)...)
+	args = append(args, output...)
+	if target != "" {
+		args = append(args, "-target", target)
+	}
+	return append(args, promiseSuiteTargets()...)
+}
+
 // RunPromiseTests runs Promise tests for the given target (empty = host).
 // Returns captured stdout (even on failure) and any error.
 func RunPromiseTests(root, target string) (string, error) {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
-	args := append([]string{"test"}, promiseTestTimeoutArgs(target)...)
-	args = append(args, promiseTestProgressArgs()...)
-	if target != "" {
-		args = append(args, "-target", target)
-	}
-	args = append(args, promiseSuiteTargets()...)
 	// The child owns the transient line for the duration of the run; drop ours
 	// first so the two never fight over the same screen row.
 	Progress().Clear()
-	return RunTee(root, promiseBin, args...)
-}
-
-// RunPromiseTestsCapture is like RunPromiseTests but tees test output to stderr
-// instead of stdout, keeping stdout clean for structured output (e.g. JSON).
-func RunPromiseTestsCapture(root, target string) (string, error) {
-	promiseBin := filepath.Join(root, "bin", BinaryName())
-	args := append([]string{"test"}, promiseTestTimeoutArgs(target)...)
-	args = append(args, promiseTestProgressArgs()...)
-	if target != "" {
-		args = append(args, "-target", target)
-	}
-	args = append(args, promiseSuiteTargets()...)
-	Progress().Clear()
-	return RunTeeStderr(root, promiseBin, args...)
+	return RunTee(root, promiseBin, promiseSuiteArgs(target, promiseTestProgressArgs()...)...)
 }
 
 // RunPromiseTestsJSON runs the Promise test suite with --json, returning the
@@ -327,11 +320,5 @@ func RunPromiseTestsCapture(root, target string) (string, error) {
 // target is non-empty it cross-compiles for that target. T0763.
 func RunPromiseTestsJSON(root, target string) (string, error) {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
-	args := append([]string{"test"}, promiseTestTimeoutArgs(target)...)
-	args = append(args, "--json")
-	if target != "" {
-		args = append(args, "-target", target)
-	}
-	args = append(args, promiseSuiteTargets()...)
-	return RunCaptureStdout(root, promiseBin, args...)
+	return RunCaptureStdout(root, promiseBin, promiseSuiteArgs(target, "--json")...)
 }

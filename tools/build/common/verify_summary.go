@@ -5,58 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 )
 
-// TargetSummary holds test counts for a single target (e.g., host or wasm).
-type TargetSummary struct {
-	Passed    int     `json:"passed"`
-	Failed    int     `json:"failed"`
-	Leaked    int     `json:"leaked"`
-	TimedOut  int     `json:"timed_out"`
-	ElapsedMs float64 `json:"elapsed_ms"`
-}
-
-var testSummaryRe = regexp.MustCompile(
-	`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) timed out)?`,
-)
-
-// ParseTestSummaryLine extracts test counts from raw test output by finding
-// the summary line (e.g., "568 passed, 0 failed, 0 leaked (117 files, 30.810s)").
-// Returns nil if no summary line is found.
-func ParseTestSummaryLine(output string) *TargetSummary {
-	for _, line := range strings.Split(output, "\n") {
-		m := testSummaryRe.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		passed, _ := strconv.Atoi(m[1])
-		failed, _ := strconv.Atoi(m[2])
-		var leaked, timedOut int
-		if m[3] != "" {
-			// skipped — not tracked in baselines
-		}
-		if m[4] != "" {
-			leaked, _ = strconv.Atoi(m[4])
-		}
-		if m[5] != "" {
-			timedOut, _ = strconv.Atoi(m[5])
-		}
-		return &TargetSummary{
-			Passed:   passed,
-			Failed:   failed,
-			Leaked:   leaked,
-			TimedOut: timedOut,
-		}
-	}
-	return nil
-}
-
 // GateValues holds flat named metric values written by verify as a sidecar file.
-// Keys are metric names (e.g. "host_test_count"); values are float64.
+// Keys are metric names (e.g. "promise_test_count"); values are float64.
 // The commit gate reads this directly — no translation layer.
 type GateValues struct {
 	Timestamp string             `json:"timestamp"`
@@ -64,11 +18,6 @@ type GateValues struct {
 	Worktree  string             `json:"worktree"`
 	Values    map[string]float64 `json:"values"`
 }
-
-// The unified gate envelope is GateOutput (see gate_test_json.go): every
-// subcommand emits {target, metrics, files?, complete}. Metric-only gates
-// (stress, coverage, wasm-size) omit files; test-producing gates (test,
-// wasm-test, go-test) populate it. T0763.
 
 const gateValuesFile = "gate-values.json"
 
@@ -157,7 +106,7 @@ type verifySummary struct {
 	// Terms is what the judge applied, by metric name. A part is FAILED when one
 	// of its own metrics is outside its term, which is how a row can name the
 	// gate to re-run rather than leaving the reader to map metrics to gates.
-	Terms   map[string]term
+	Terms   map[string]appliedTerm
 	Failed  string
 	Store   string
 	Elapsed time.Duration
@@ -219,10 +168,10 @@ func (s verifySummary) String() string {
 func (s verifySummary) row(p PartResult) (status string, notes []string) {
 	var failed []string
 	for _, m := range p.Metrics {
-		t, judged := s.Terms[m.Name]
-		if judged && !metricWithinTerm(m, t) {
-			failed = append(failed, fmt.Sprintf("%s is %s, %s %s %s",
-				m.Name, m.String(), t.Kind, t.Direction, formatCap(t.Value)))
+		if t, judged := s.Terms[m.Name]; judged {
+			if bounds := t.failures(m); len(bounds) > 0 {
+				failed = append(failed, fmt.Sprintf("%s is %s, %s", m.Name, m.String(), strings.Join(bounds, " and ")))
+			}
 		}
 	}
 	switch {

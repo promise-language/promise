@@ -1,20 +1,18 @@
 {
-  "worktree_free_bytes":    {"direction": "at_least", "cap": 4294967296},
-  "build_cache_free_bytes": {"direction": "at_least", "cap": 2147483648},
+  "worktree_free_bytes":           {"direction": "at_least", "cap": 4294967296},
+  "cache_free_bytes":              {"direction": "at_least", "cap": 2147483648},
   "worktree_hides_unlinked_files": {"direction": "at_most", "cap": 0},
 
-  "latest_is_epoch":        {"direction": "at_least", "cap": 1},
+  "latest_is_epoch":               {"direction": "at_least", "cap": 1},
 
-  "build_failures":            {"direction": "at_most", "cap": 0},
-  "unbuildable_go_packages":   {"direction": "at_most", "cap": 0},
-  "vet_findings":              {"direction": "at_most", "cap": 0},
-  "unformatted_go_files":      {"direction": "at_most", "cap": 0},
-  "unformatted_promise_files": {"direction": "at_most", "cap": 0},
-  "promise_check_errors":      {"direction": "at_most", "cap": 0},
-  "promise_check_failures":    {"direction": "at_most", "cap": 0},
-  "promise_check_warnings":    {"direction": "at_most", "cap": 0},
-  "go_test_failures":          {"direction": "at_most", "cap": 0},
-  "go_test_packages_failed":   {"direction": "at_most", "cap": 0},
-  "host_test_failures":        {"direction": "at_most", "cap": 0},
-  "host_leak_count":           {"direction": "at_most", "cap": 0}
+  "build_failures":                {"direction": "at_most", "cap": 0},
+  "unbuildable_packages":          {"direction": "at_most", "cap": 0},
+  "check_findings":                {"direction": "at_most", "cap": 0},
+  "unformatted_files":             {"direction": "at_most", "cap": 0},
+  "promise_check_failures":        {"direction": "at_most", "cap": 0},
+  "promise_check_warnings":        {"direction": "at_most", "cap": 0},
+  "go_failed_tests":               {"direction": "at_most", "cap": 0},
+  "go_failed_packages":            {"direction": "at_most", "cap": 0},
+  "promise_failed_tests":          {"direction": "at_most", "cap": 0},
+  "promise_leaked_tests":          {"direction": "at_most", "cap": 0}
 }

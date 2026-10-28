@@ -311,8 +311,9 @@ func TestCoroVariantOnlyOnWasmWeb(t *testing.T) {
 	}
 }
 
-// A goroutine awaits blocking generic functions (explicit and inferred type
-// arguments), enum methods and generic type methods the same way.
+// A goroutine awaits blocking generic functions, enum methods, generic type
+// methods and generic methods of types and enums (explicit and inferred type
+// arguments) the same way.
 func TestCoroutineAwaitsGenericAndEnumCallees(t *testing.T) {
 	ir := generateIRForTarget(t, `
 recv_any[T](Channel[T] ch) T? {
@@ -326,6 +327,18 @@ enum Src {
     return match this {
       Chan(ch) => <-ch,
     };
+  }
+
+  take[U](Channel[U] ch) U? {
+    return <-ch;
+  }
+}
+
+type Box {
+  int id;
+
+  take[U](Channel[U] ch) U? {
+    return <-ch;
   }
 }
 
@@ -346,7 +359,12 @@ main() {
     c := s.next();
     h := Holder[int](ch: channel[int](1));
     d := h.take();
-    (a ?: 0) + (b ?: 0) + (c ?: 0) + (d ?: 0)
+    bx := Box(id: 1);
+    e := bx.take[int](ch);
+    f := bx.take(ch);
+    g := s.take[int](ch);
+    k := s.take(ch);
+    (a ?: 0) + (b ?: 0) + (c ?: 0) + (d ?: 0) + (e ?: 0) + (f ?: 0) + (g ?: 0) + (k ?: 0)
   };
   ch.send(1);
   ch.send(2);
@@ -361,6 +379,8 @@ main() {
 		`call i8* @"recv_any[int]$coro"(`:    2,
 		`call i8* @Src.next$coro(`:           1,
 		`call i8* @"Holder[int].take$coro"(`: 1,
+		`call i8* @"Box.take[int]$coro"(`:    2,
+		`call i8* @"Src.take[int]$coro"(`:    2,
 	} {
 		if n := strings.Count(ramp, call); n != want {
 			t.Errorf("goroutine ramp has %d of %q, want %d\n%s", n, call, want, ramp)
@@ -428,10 +448,18 @@ func TestCoroVariantNotEmittedWhenNothingBlocks(t *testing.T) {
 	assertNotContains(t, ir, "$coro")
 }
 
-// A goroutine awaits a blocking module function's variant, and the variant is
-// compiled in the module's split unit beside the plain function.
+// A goroutine awaits a blocking module function's variant, generic or not, and
+// the variant is compiled in the module's split unit beside the plain function.
 func TestCoroutineAwaitsModuleFunction(t *testing.T) {
-	alphaInfo, alphaScope := parseModuleSource(t, "alpha", "recv_one(Channel[int] ch) int? `public { return <-ch; }")
+	alphaInfo, alphaScope := parseModuleSource(t, "alpha", `
+recv_one(Channel[int] ch) int? `+"`public"+` {
+  return <-ch;
+}
+
+recv_any[T](Channel[T] ch) T? `+"`public"+` {
+  return <-ch;
+}
+`)
 	stdModInfo, stdScope := getCodegenStdModInfo()
 	src := `
 use alpha "./alpha";
@@ -439,9 +467,10 @@ use alpha "./alpha";
 main() {
   ch := channel[int](1);
   t := go {
-    alpha.recv_one(ch)
+    (alpha.recv_one(ch) ?: 0) + (alpha.recv_any[int](ch) ?: 0)
   };
   ch.send(1);
+  ch.send(2);
   <-t;
 }
 `
@@ -460,13 +489,203 @@ main() {
 
 	mainIR, moduleIRs := Compile(file, info, "wasm32-web").SplitModuleIRs()
 	ramp := extractDefine(mainIR, ".goroutine.0")
-	if !strings.Contains(ramp, "call i8* @__mod_alpha_recv_one$coro(") {
-		t.Errorf("the goroutine should await @__mod_alpha_recv_one$coro\n%s", ramp)
+	for _, call := range []string{"call i8* @__mod_alpha_recv_one$coro(", `call i8* @"recv_any[int]$coro"(`} {
+		if !strings.Contains(ramp, call) {
+			t.Errorf("the goroutine ramp has no %q\n%s", call, ramp)
+		}
 	}
 	if extractDefine(mainIR, "__mod_alpha_recv_one$coro") != "" {
 		t.Errorf("main IR defines the module function's variant")
 	}
 	if extractDefine(moduleIRs["alpha"], "__mod_alpha_recv_one$coro") == "" {
 		t.Errorf("module alpha's IR does not define the variant\n%s", moduleIRs["alpha"])
+	}
+}
+
+// parkKindsProgram has one helper per way a function can block, each called
+// from a goroutine.
+const parkKindsProgram = `
+recv_one(Channel[int] ch) int {
+  return (<-ch) ?: 0;
+}
+
+send_one(Channel[int] ch, int v) {
+  ch.send(v);
+}
+
+select_one(Channel[int] x, Channel[int] y) int {
+  int r = 0;
+  select {
+    v := <-x:
+      r = v!;
+    v := <-y:
+      r = v!;
+  }
+  return r;
+}
+
+await_one(task[int] move t) int {
+  return <-t;
+}
+
+join_one(Channel[int] ch) {
+  _ := go {
+    ch.send(1);
+  };
+}
+
+lock_one(Ref[Mutex[int]] m) int {
+  use guard := m.borrow.lock();
+  return guard.borrow;
+}
+
+main() {
+  ch := channel[int](4);
+  x := channel[int](1);
+  m := Ref[Mutex[int]](Mutex[int](0));
+  mc := m.clone();
+  t := go {
+    a := recv_one(ch);
+    send_one(ch, 1);
+    b := select_one(ch, x);
+    inner := go {
+      3
+    };
+    c := await_one(move inner);
+    join_one(ch);
+    d := lock_one(mc);
+    a + b + c + d
+  };
+  ch.send(1);
+  ch.send(2);
+  <-t;
+}
+`
+
+// Every way a function can block parks its variant: a channel receive and send,
+// select, awaiting a task, joining an un-awaited one, a contended Mutex lock. No
+// variant steps the scheduler, directly or through a plain function that does,
+// while each plain twin still does — so the helper really blocks.
+func TestCoroVariantsNeverPump(t *testing.T) {
+	r := compileForTarget(t, parkKindsProgram, "wasm32-web", nil)
+	c := r.compiler
+	every := make(map[string]bool, len(r.Module.Funcs))
+	for _, f := range r.Module.Funcs {
+		every[f.Name()] = true
+	}
+	pumps := suspendingFuncs(r.Module, c.funcs["promise_sched_coop_step"], every)
+	for _, helper := range []string{"recv_one", "send_one", "select_one", "await_one", "join_one", "lock_one"} {
+		plain := "__user." + helper
+		if !pumps[plain] {
+			t.Errorf("%s does not step the scheduler, so it does not exercise a park", plain)
+		}
+		variant := c.coroVariantFns[plain]
+		if variant == nil || len(variant.Blocks) == 0 {
+			t.Errorf("%s has no coroutine variant", plain)
+			continue
+		}
+		if pumps[variant.Name()] {
+			t.Errorf("%s steps the scheduler instead of parking", variant.Name())
+		}
+	}
+}
+
+// A failable constructor whose parent constructor blocks gets a variant, which
+// awaits the parent's variant through super() and routes the parent's error into
+// its own result slot: the variant's ramp has no `ret` of the result.
+func TestFailableSuperInCoroVariant(t *testing.T) {
+	ir := generateIRForTarget(t, `
+type Base {
+  int value;
+
+  new!(~this, Channel[int] move ch) {
+    v := (<-ch) ?: 0;
+    if v < 0 {
+      raise error("negative");
+    }
+    this.value = v;
+  }
+}
+
+type Child is Base {
+  new!(~this, Channel[int] move ch) {
+    super(ch: move ch);
+  }
+}
+
+main() {
+  ch := channel[int](1);
+  ch.send(1);
+  k := Child(ch: move ch)? e {
+    return;
+  };
+}
+`, "wasm32-web")
+	child := extractDefine(ir, "Child.new$coro")
+	if child == "" {
+		t.Fatalf("Child.new has no coroutine variant\n%s", ir)
+	}
+	if !strings.Contains(child, "call i8* @Base.new$coro(") {
+		t.Errorf("Child.new$coro should await Base.new$coro through super()\n%s", child)
+	}
+	if strings.Contains(child, "ret { i1, i8* }") {
+		t.Errorf("Child.new$coro returns the result instead of storing it\n%s", child)
+	}
+	if !strings.Contains(child, "{ i1, i8* }* %result.slot") {
+		t.Errorf("Child.new$coro should store its result through %%result.slot\n%s", child)
+	}
+}
+
+// Every way out of a variant with a result — return, raise, falling off the end,
+// the panic exit — stores into the caller's slot before it reaches the final
+// suspend, so the caller never loads a slot nothing wrote. A failable void
+// function's success is falling off its end.
+func TestCoroVariantEveryExitStoresResult(t *testing.T) {
+	r := compileForTarget(t, coroVariantProgram+`
+wait_open!(Channel[int] ch) {
+  v := (<-ch) ?: -1;
+  if v < 0 {
+    raise error("closed");
+  }
+}
+
+spawn_wait_open(Channel[int] ch) {
+  t := go {
+    ok := true;
+    wait_open(ch)? e {
+      ok = false;
+    };
+    ok
+  };
+  <-t;
+}
+`, "wasm32-web", nil)
+	for _, plain := range []string{"__user.recv_from", "__user.checked", "__user.wait_open"} {
+		variant := r.compiler.coroVariantFns[plain]
+		if variant == nil || len(variant.Blocks) == 0 {
+			t.Errorf("%s has no coroutine variant", plain)
+			continue
+		}
+		slot := variant.Params[len(variant.Params)-1]
+		exits := 0
+		for _, b := range variant.Blocks {
+			br, ok := b.Term.(*ir.TermBr)
+			if !ok || br.Target.Ident() != "%final.suspend" {
+				continue
+			}
+			exits++
+			stored := false
+			for _, in := range b.Insts {
+				if st, ok := in.(*ir.InstStore); ok && st.Dst == slot {
+					stored = true
+				}
+			}
+			if !stored {
+				t.Errorf("%s: block %s reaches the final suspend without storing the result\n%s", variant.Name(), b.Name(), variant.LLString())
+			}
+		}
+		if exits == 0 {
+			t.Errorf("%s: no block reaches the final suspend", variant.Name())
+		}
 	}
 }

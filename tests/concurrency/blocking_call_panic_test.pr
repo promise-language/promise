@@ -1,0 +1,25 @@
+// promise-language/promise#68: a panic in a helper after it parked reaches the
+// task's receiver exactly like a panic in the goroutine's own body. On
+// wasm32-web the helper runs as its coroutine variant, whose panic exit leaves
+// the panic for the awaiting goroutine to propagate.
+//
+// Excluded on windows for the same reason as panic_recovery_task.pr (panic
+// message routing through the Windows runtime).
+recv_then_fail(Channel[int] ch) int {
+  v := (<-ch) ?: 0;
+  assert(v < 0, "boom after park {v}");
+  return v;
+}
+
+main() `test(expected: "panic: boom after park 7", exclude: windows) {
+  ch := channel[int](1);
+  t := go {
+    recv_then_fail(ch)
+  };
+  s := go {
+    ch.send(7);
+  };
+  <-s;
+  <-t;
+  print_line("unreachable — the helper's panic should have propagated");
+}

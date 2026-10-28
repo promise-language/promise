@@ -183,6 +183,110 @@ blocked_task_join_in_helper() `test(exclude: wasi) {
   assert(got is present && got! == 42, "the joined goroutine's value was forwarded");
 }
 
+send_then_signal(Channel[int] full, Channel[int] signal) {
+  full.send(5);
+  signal.send(1);
+}
+
+// A send to a full channel parks inside the helper until a reader drains it.
+blocked_send_in_helper() `test(exclude: wasi) {
+  full := channel[int](1);
+  full.send(0);
+  b := channel[int](1);
+  c := channel[int](1);
+  t1 := go send_then_signal(full, b);
+  t2 := go forward(b, c);
+  t3 := go {
+    <-full
+  };
+  got := recv_from(c);
+  <-t1;
+  <-t2;
+  drained := <-t3;
+  assert(drained is present && drained! == 0, "the reader drained the first value");
+  assert((<-full)! == 5, "the parked send completed");
+  assert(got is present && got! == 2, "the signal was forwarded");
+}
+
+await_then_forward(task[int] move t, Channel[int] dst) {
+  v := <-t;
+  dst.send(v + 1);
+}
+
+// Awaiting a task that has not finished parks inside the helper.
+blocked_task_await_in_helper() `test(exclude: wasi) {
+  a := channel[int](1);
+  b := channel[int](1);
+  c := channel[int](1);
+  inner := go {
+    (<-a) ?: 0
+  };
+  t1 := go await_then_forward(move inner, b);
+  t2 := go forward(b, c);
+  t3 := go {
+    a.send(40);
+  };
+  got := recv_from(c);
+  <-t1;
+  <-t2;
+  <-t3;
+  assert(got is present && got! == 42, "the awaited value was forwarded twice");
+}
+
+read_locked(Ref[Mutex[int]] m) int {
+  use guard := m.borrow.lock();
+  return guard.borrow;
+}
+
+lock_then_forward(Ref[Mutex[int]] m, Channel[int] dst) {
+  dst.send(read_locked(m) + 1);
+}
+
+// A contended Mutex lock parks inside the helper until the holder unlocks.
+blocked_lock_in_helper() `test(exclude: wasi) {
+  m := Ref[Mutex[int]](Mutex[int](0));
+  holder_m := m.clone();
+  reader_m := m.clone();
+  release := channel[int](1);
+  b := channel[int](1);
+  c := channel[int](1);
+  holder := go {
+    use guard := holder_m.borrow.lock();
+    <-release;
+    guard.borrow = 40;
+  };
+  t1 := go lock_then_forward(reader_m, b);
+  t2 := go forward(b, c);
+  t3 := go {
+    release.send(1);
+  };
+  got := recv_from(c);
+  <-holder;
+  <-t1;
+  <-t2;
+  <-t3;
+  assert(got is present && got! == 42, "the value written under the lock was forwarded twice");
+}
+
+spawn_then_recv(Channel[int] ch) int {
+  inner := go {
+    2
+  };
+  v := (<-ch) ?: 0;
+  return v + <-inner;
+}
+
+// A goroutine spawned inside a helper's variant delivers its value to its own
+// task, never into the variant's result slot.
+goroutine_spawned_in_helper() `test(exclude: wasi) {
+  ch := channel[int](1);
+  t := go {
+    spawn_then_recv(ch)
+  };
+  ch.send(40);
+  assert(<-t == 42, "the helper combined its own result with the inner task's");
+}
+
 type FailingClose {
   int id;
 

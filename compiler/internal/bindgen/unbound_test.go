@@ -89,6 +89,25 @@ interface A { attribute M m; };`,
 			want: []string{"dict.webidl:2:15: A.m names M, which is not defined in the bound IDL files"},
 		},
 		{
+			// A mixin's member is generated on the interface including it, so it
+			// is reported there, at its own position — never on the mixin.
+			name: "an included mixin's member",
+			src: `interface mixin M {
+  Missing fromMixin();
+};
+interface A {};
+A includes M;`,
+			want: []string{"dict.webidl:2:3: A.fromMixin names Missing, which is not defined in the bound IDL files"},
+		},
+		{
+			// A dictionary carries its ancestors' members as fields, but declares
+			// only its own: an inherited member is reported once, on its declarer.
+			name: "an inherited dictionary field",
+			src: `dictionary P { Missing m; };
+dictionary D : P { long n; };`,
+			want: []string{"dict.webidl:1:16: P.m names Missing, which is not defined in the bound IDL files"},
+		},
+		{
 			name: "every declaration is reported",
 			src: `typedef sequence<Gone> G;
 dictionary D { Missing a; };

@@ -425,7 +425,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args, nil)
 	}
 
-	var result value.Value = c.block.NewCall(fn, argVals...)
+	var result value.Value = c.emitDirectCall(fn, argVals...)
 	c.clearVariadicStaticFlags(variadicPTs)
 
 	// B0345: If the return value aliases an argument, clear the argument's drop flag
@@ -531,7 +531,7 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args, nil)
 	}
 
-	var result value.Value = c.block.NewCall(fn, argVals...)
+	var result value.Value = c.emitDirectCall(fn, argVals...)
 	c.clearVariadicStaticFlags(variadicPTs)
 	result = c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals, e) // B0345
 	return result
@@ -663,7 +663,7 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args, callSubst)
 	}
 
-	var result value.Value = c.block.NewCall(fn, argVals...)
+	var result value.Value = c.emitDirectCall(fn, argVals...)
 	c.clearVariadicStaticFlags(variadicPTs)
 	result = c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst, e) // T0331/T0418
 	return result
@@ -714,7 +714,7 @@ func (c *Compiler) genInferredGenericCall(e *ast.CallExpr, inferred *sema.Inferr
 		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args, callSubst)
 	}
 
-	var result value.Value = c.block.NewCall(fn, argVals...)
+	var result value.Value = c.emitDirectCall(fn, argVals...)
 	c.clearVariadicStaticFlags(variadicPTs)
 	result = c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst, e) // T0331/T0418
 	return result
@@ -770,7 +770,7 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args, callSubst)
 	}
 
-	var result value.Value = c.block.NewCall(fn, argVals...)
+	var result value.Value = c.emitDirectCall(fn, argVals...)
 	c.clearVariadicStaticFlags(variadicPTs)
 	result = c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst, e) // T0331/T0418
 	return result
@@ -880,7 +880,7 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, combined)
 	args = append(args, argVals...)
 
-	var result value.Value = c.block.NewCall(fn, args...)
+	var result value.Value = c.emitDirectCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
 	result = c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, combined, e) // B0345/T0418
 	return result
@@ -995,7 +995,7 @@ func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, member *ast.MemberE
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, combined)
 	args = append(args, argVals...)
 
-	var result value.Value = c.block.NewCall(fn, args...)
+	var result value.Value = c.emitDirectCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
 	result = c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, combined, e) // B0345/T0418
 
@@ -1083,19 +1083,25 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params(), e.Args, superSubst)
 		}
 		args := append([]value.Value{thisPtr}, argVals...)
-		result := c.block.NewCall(fn, args...)
+		result := c.emitDirectCall(fn, args...)
 		if newMethod != nil && newMethod.Sig().CanError() {
 			tag := c.block.NewExtractValue(result, 0)
 			errBlock := c.newBlock("super.err")
 			okBlock := c.newBlock("super.ok")
 			c.block.NewCondBr(tag, errBlock, okBlock)
-			// Error path: propagate
+			// Error path: propagate. #68: routed like every other propagation site,
+			// so a constructor's coroutine variant stores the error into its result
+			// slot instead of a `ret` its ramp cannot have.
 			c.block = errBlock
 			resultType := fn.Sig.RetType.(*irtypes.StructType)
 			errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
-			outerResultType := c.fn.Sig.RetType.(*irtypes.StructType)
-			errResult := c.wrapError(errVal, outerResultType)
-			c.block.NewRet(errResult)
+			if c.inFailableGoBlock {
+				c.emitFailableGoBlockError(errVal)
+			} else if c.inGenerator && c.generatorCanError {
+				c.emitGeneratorError(errVal)
+			} else {
+				c.block.NewRet(c.wrapError(errVal, c.currentResultType()))
+			}
 			// Continue on ok path
 			c.block = okBlock
 		}

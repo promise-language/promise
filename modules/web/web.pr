@@ -98,13 +98,6 @@ type EventSubscription `public `target(web) `doc("A live subscription to browser
     return _web_subscription_dropped(this._sub_id);
   }
 
-  // KNOWN BROKEN as of promise-language/promise#68 when called from a
-  // goroutine other than main() itself: receiving from a channel through a
-  // method call (this one) currently makes the wasm32-web reactor's initial
-  // drain misreport a live subscription as a deadlock instead of idling.
-  // See web.on's doc comment below for the full repro. This means `for e in
-  // subscription` inside any `go { }` block is currently unsafe in real
-  // (non-test) wasm32-web usage, not just web.on.
   next() Event? `public `doc("Returns the next event, parking until one arrives or the subscription closes. Duck-typed for-in support — write `for e in subscription` rather than calling this directly.") {
     h := <-this._channel;
     if h is present {
@@ -167,19 +160,6 @@ events(Element target, string[] kinds) EventSubscription `public `target(web) `d
 // parameter would be rejected at compile time, because the caller's scope
 // would free the environment while the consuming goroutine is still
 // invoking it.
-//
-// KNOWN BROKEN as of promise-language/promise#68: `for e in subscription`
-// below desugars to a method call (`subscription.next()`), and a goroutine's
-// channel receive that happens through ANY function-call indirection — not
-// just this one — currently makes the wasm32-web reactor's initial drain
-// misreport a live, correctly-registered subscription as
-// "fatal: all goroutines are asleep - deadlock!" instead of idling per §4.3.
-// Confirmed via three isolated repros (bare top-level receive: works; same
-// receive one call-frame deeper, struct+method or plain function: both
-// broken) in both debug and --release builds. Invisible to `bin/promise
-// test` (batch tests never run the reactor drain — they always use
-// promise_sched_coop_run). Do not treat `bin/verify --wasm-web` passing as
-// evidence this works in a real browser/Node host.
 on(Element target, string move kind, (Event) -> void move handler) `public `target(web) `doc("Subscribes to one event kind on a DOM element and spawns a goroutine that calls handler once per event, until the subscription is closed or dropped. The handler is consumed (`(Event) -> void move handler`) because the spawned goroutine outlives this call.") {
   subscription := events(target, [kind]);
   go {

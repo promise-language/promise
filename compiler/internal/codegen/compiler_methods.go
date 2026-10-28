@@ -581,9 +581,18 @@ func (c *Compiler) lookupMethodForDecl(named *types.Named, md *ast.MethodDecl) *
 	return named.LookupMethod(md.Name)
 }
 
-// defineMethodFunc generates the body of a single method.
+// defineMethodFunc generates the body of a single method, then — when it can
+// block on wasm32-web — the body of its coroutine variant (#68).
 func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.Func, ownerNamed ...*types.Named) {
-	c.fn = fn
+	c.defineMethodBody(md, m, fn, nil, ownerNamed...)
+	if variant := c.coroVariantToDefine(fn); variant != nil {
+		c.defineMethodBody(md, m, fn, variant, ownerNamed...)
+	}
+}
+
+// defineMethodBody generates md's body into fn, or into fn's coroutine variant
+// when variant is non-nil.
+func (c *Compiler) defineMethodBody(md *ast.MethodDecl, m *types.Method, fn, variant *ir.Func, ownerNamed ...*types.Named) {
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
@@ -614,9 +623,9 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	}
 	defer func() { c.currentNamed = savedNamed }()
 
-	entry := fn.NewBlock(".entry")
-	c.block = entry
-	c.entryBlock = entry
+	vb := c.beginSourceBody(fn, variant)
+	entry := c.entryBlock
+	params := c.fn.Params
 
 	paramIdx := 0
 
@@ -627,10 +636,10 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 
 	// Allocate receiver as "this"
 	if m.Sig().Recv() != nil {
-		receiverType := fn.Params[paramIdx].Typ
+		receiverType := params[paramIdx].Typ
 		alloca := entry.NewAlloca(receiverType)
 		alloca.SetName(c.uniqueLocalName("this.addr"))
-		entry.NewStore(fn.Params[paramIdx], alloca)
+		entry.NewStore(params[paramIdx], alloca)
 		c.locals["this"] = alloca
 		paramIdx++
 	}
@@ -648,13 +657,13 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 				c.mutRefPtrs = make(map[string]value.Value)
 				c.mutRefTypes = make(map[string]irtypes.Type)
 			}
-			c.mutRefPtrs[p.Name()] = fn.Params[paramIdx]
+			c.mutRefPtrs[p.Name()] = params[paramIdx]
 			c.mutRefTypes[p.Name()] = innerType
 		} else {
 			lt := c.resolveType(p.Type())
 			alloca := entry.NewAlloca(lt)
 			alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
-			entry.NewStore(fn.Params[paramIdx], alloca)
+			entry.NewStore(params[paramIdx], alloca)
 			c.locals[p.Name()] = alloca
 
 			// T0087: Register drop binding for ~ (move) parameters.
@@ -739,6 +748,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 		c.emitCoverageIncrement(idx)
 	}
 
+	c.enterCoroVariantBody(vb)
 	c.genBlock(md.Body)
 
 	// For drop() methods: after the user body, automatically drop all fields that have drop()
@@ -757,17 +767,21 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 		if len(c.scopeBindings) > 0 {
 			c.emitScopeCleanup(0, false)
 		}
-		if c.canError {
-			resultType := c.currentResultType()
-			if isVoidResult(resultType) {
-				c.block.NewRet(c.wrapOk(nil, resultType))
+		// A variant's fall-through return is endCoroVariantBody's.
+		if vb == nil {
+			if c.canError {
+				resultType := c.currentResultType()
+				if isVoidResult(resultType) {
+					c.block.NewRet(c.wrapOk(nil, resultType))
+				} else {
+					c.block.NewRet(c.wrapOk(c.zeroValue(resultType.Fields[1]), resultType))
+				}
+			} else if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
+				c.block.NewRet(nil)
 			} else {
-				c.block.NewRet(c.wrapOk(c.zeroValue(resultType.Fields[1]), resultType))
+				c.block.NewRet(c.zeroValue(fn.Sig.RetType))
 			}
-		} else if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
-			c.block.NewRet(nil)
-		} else {
-			c.block.NewRet(c.zeroValue(fn.Sig.RetType))
 		}
 	}
+	c.endCoroVariantBody(vb)
 }

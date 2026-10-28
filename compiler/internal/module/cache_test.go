@@ -1105,6 +1105,29 @@ func TestInstanceCacheKeyDifferentArgDeclHash(t *testing.T) {
 	}
 }
 
+// promise-language/promise#68: an instance object's coroutine variants depend on
+// bodies outside its declaration, so the same declaration with a different set
+// of variants is a different object. With none the key is the declaration's.
+func TestInstanceCacheKeyWithCoroVariants(t *testing.T) {
+	base := InstanceCacheKey("", "Box[int]", "decl", nil, "cmp", "wasm32-unknown-web", "debug", nil)
+	if got := InstanceCacheKeyWithCoroVariants(base, nil); got != base {
+		t.Errorf("no coroutine variants changed the key: %q != %q", got, base)
+	}
+	get := InstanceCacheKeyWithCoroVariants(base, []string{"Box[int].get$coro"})
+	both := InstanceCacheKeyWithCoroVariants(base, []string{"Box[int].get$coro", "__user.helper$coro"})
+	keys := map[string]string{"none": base, "get": get, "get+helper": both}
+	seen := map[string]string{}
+	for name, k := range keys {
+		if prev, dup := seen[k]; dup {
+			t.Errorf("variant sets %q and %q share a key", prev, name)
+		}
+		seen[k] = name
+	}
+	if again := InstanceCacheKeyWithCoroVariants(base, []string{"Box[int].get$coro"}); again != get {
+		t.Errorf("the same variant set must give the same key: %q != %q", again, get)
+	}
+}
+
 // === Embed hash functions (T0032) ===
 
 func TestIsGlobPattern(t *testing.T) {

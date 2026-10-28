@@ -1,0 +1,320 @@
+// promise-language/promise#68: a goroutine that blocks inside a called function
+// parks, as it does when it blocks in its own body. On WASM that takes the
+// callee's coroutine variant: before it, the callee ran a nested scheduler loop
+// on the goroutine's own stack.
+//
+// The blocked_* tests stack two goroutines that are each blocked inside a
+// helper, so the upper one waits on a value only the lower one can produce. A
+// nested loop in the upper one finds nothing runnable — the lower goroutine is
+// not runnable, it is underneath on the same stack — and reports a false
+// deadlock. Each also covers one way the callee's result reaches its caller.
+//
+// exclude: wasi — wasm32-wasi still runs the nested loop (#718).
+recv_from(Channel[int] ch) int? {
+  return <-ch;
+}
+
+recv_str(Channel[string] ch) string? {
+  return <-ch;
+}
+
+forward(Channel[int] src, Channel[int] dst) {
+  v := recv_from(src);
+  if v is present {
+    dst.send(v + 1);
+  }
+}
+
+// Plain helpers, and the `go f(args)` call form.
+blocked_helpers_interleave() `test(exclude: wasi) {
+  a := channel[int](1);
+  b := channel[int](1);
+  t1 := go forward(a, b);
+  t2 := go {
+    v := recv_from(b);
+    v
+  };
+  t3 := go {
+    a.send(41);
+  };
+  got := <-t2;
+  <-t1;
+  <-t3;
+  assert(got is present && got! == 42, "t2 got the forwarded value");
+}
+
+// Both blocked goroutines run their helper as the goroutine itself (`go f(args)`).
+blocked_go_call_form() `test(exclude: wasi) {
+  a := channel[int](1);
+  b := channel[int](1);
+  c := channel[int](1);
+  t1 := go forward(a, b);
+  t2 := go forward(b, c);
+  t3 := go {
+    a.send(40);
+  };
+  got := recv_from(c);
+  <-t1;
+  <-t2;
+  <-t3;
+  assert(got is present && got! == 42, "the value was forwarded twice");
+}
+
+recv_checked!(Channel[int] ch) int {
+  v := (<-ch) ?: 0;
+  if v < 0 {
+    raise error("negative:{v}");
+  }
+  return v;
+}
+
+// Returns a failable call's result, so its error propagates through two
+// variants before it reaches a handler.
+recv_checked_twice!(Channel[int] ch) int {
+  return recv_checked(ch);
+}
+
+relay_checked(Channel[int] src, Channel[string] dst) {
+  v := recv_checked_twice(src)? e {
+    dst.send(move e.message);
+    return;
+  };
+  dst.send("ok:{v}");
+}
+
+// A raise after the park reaches the handler two calls up, and a heap string
+// comes back through the result slot (the leak check sees a double free or leak).
+blocked_failable_helper_raises() `test(exclude: wasi) {
+  a := channel[int](1);
+  b := channel[string](1);
+  t1 := go relay_checked(a, b);
+  t2 := go {
+    s := recv_str(b);
+    s
+  };
+  t3 := go {
+    a.send(-5);
+  };
+  got := <-t2;
+  <-t1;
+  <-t3;
+  assert(got is present && got! == "negative:-5", "the raise reached the handler");
+}
+
+blocked_failable_helper_succeeds() `test(exclude: wasi) {
+  a := channel[int](1);
+  b := channel[string](1);
+  t1 := go relay_checked(a, b);
+  t2 := go {
+    s := recv_str(b);
+    s
+  };
+  t3 := go {
+    a.send(7);
+  };
+  got := <-t2;
+  <-t1;
+  <-t3;
+  assert(got is present && got! == "ok:7", "the value came back through the slot");
+}
+
+select_recv(Channel[int] x, Channel[int] y) int {
+  int r = 0;
+  select {
+    v := <-x:
+      r = v!;
+    v := <-y:
+      r = v! * 100;
+  }
+  return r;
+}
+
+forward_select(Channel[int] x, Channel[int] y, Channel[int] dst) {
+  dst.send(select_recv(x, y) + 1);
+}
+
+// A select with no ready case parks inside the helper.
+blocked_select_in_helper() `test(exclude: wasi) {
+  x := channel[int](1);
+  y := channel[int](1);
+  b := channel[int](1);
+  t1 := go forward_select(x, y, b);
+  t2 := go {
+    v := recv_from(b);
+    v
+  };
+  t3 := go {
+    y.send(3);
+  };
+  got := <-t2;
+  <-t1;
+  <-t3;
+  assert(got is present && got! == 301, "the select took the ready case");
+}
+
+// The task handle is dropped un-awaited at the end of its statement, so the
+// helper joins the goroutine there.
+join_then_forward(Channel[int] src, Channel[int] dst) {
+  box := channel[int](1);
+  _ := go {
+    v := recv_from(src);
+    box.send((v ?: 0) * 2);
+  };
+  v := recv_from(box);
+  if v is present {
+    dst.send(v);
+  }
+}
+
+blocked_task_join_in_helper() `test(exclude: wasi) {
+  a := channel[int](1);
+  b := channel[int](1);
+  t1 := go join_then_forward(a, b);
+  t2 := go {
+    v := recv_from(b);
+    v
+  };
+  t3 := go {
+    a.send(21);
+  };
+  got := <-t2;
+  <-t1;
+  <-t3;
+  assert(got is present && got! == 42, "the joined goroutine's value was forwarded");
+}
+
+send_then_signal(Channel[int] full, Channel[int] signal) {
+  full.send(5);
+  signal.send(1);
+}
+
+// A send to a full channel parks inside the helper until a reader drains it.
+blocked_send_in_helper() `test(exclude: wasi) {
+  full := channel[int](1);
+  full.send(0);
+  b := channel[int](1);
+  c := channel[int](1);
+  t1 := go send_then_signal(full, b);
+  t2 := go forward(b, c);
+  t3 := go {
+    <-full
+  };
+  got := recv_from(c);
+  <-t1;
+  <-t2;
+  drained := <-t3;
+  assert(drained is present && drained! == 0, "the reader drained the first value");
+  assert((<-full)! == 5, "the parked send completed");
+  assert(got is present && got! == 2, "the signal was forwarded");
+}
+
+await_then_forward(task[int] move t, Channel[int] dst) {
+  v := <-t;
+  dst.send(v + 1);
+}
+
+// Awaiting a task that has not finished parks inside the helper.
+blocked_task_await_in_helper() `test(exclude: wasi) {
+  a := channel[int](1);
+  b := channel[int](1);
+  c := channel[int](1);
+  inner := go {
+    (<-a) ?: 0
+  };
+  t1 := go await_then_forward(move inner, b);
+  t2 := go forward(b, c);
+  t3 := go {
+    a.send(40);
+  };
+  got := recv_from(c);
+  <-t1;
+  <-t2;
+  <-t3;
+  assert(got is present && got! == 42, "the awaited value was forwarded twice");
+}
+
+read_locked(Ref[Mutex[int]] m) int {
+  use guard := m.borrow.lock();
+  return guard.borrow;
+}
+
+lock_then_forward(Ref[Mutex[int]] m, Channel[int] dst) {
+  dst.send(read_locked(m) + 1);
+}
+
+// A contended Mutex lock parks inside the helper until the holder unlocks.
+blocked_lock_in_helper() `test(exclude: wasi) {
+  m := Ref[Mutex[int]](Mutex[int](0));
+  holder_m := m.clone();
+  reader_m := m.clone();
+  release := channel[int](1);
+  b := channel[int](1);
+  c := channel[int](1);
+  holder := go {
+    use guard := holder_m.borrow.lock();
+    <-release;
+    guard.borrow = 40;
+  };
+  t1 := go lock_then_forward(reader_m, b);
+  t2 := go forward(b, c);
+  t3 := go {
+    release.send(1);
+  };
+  got := recv_from(c);
+  <-holder;
+  <-t1;
+  <-t2;
+  <-t3;
+  assert(got is present && got! == 42, "the value written under the lock was forwarded twice");
+}
+
+spawn_then_recv(Channel[int] ch) int {
+  inner := go {
+    2
+  };
+  v := (<-ch) ?: 0;
+  return v + <-inner;
+}
+
+// A goroutine spawned inside a helper's variant delivers its value to its own
+// task, never into the variant's result slot.
+goroutine_spawned_in_helper() `test(exclude: wasi) {
+  ch := channel[int](1);
+  t := go {
+    spawn_then_recv(ch)
+  };
+  ch.send(40);
+  assert(<-t == 42, "the helper combined its own result with the inner task's");
+}
+
+type FailingClose {
+  int id;
+
+  close!(~this) void {
+    raise error("close failed");
+  }
+}
+
+// A lambda in a failable helper's variant is its own function: a close error
+// in its body never reaches the variant's result slot.
+recv_then_apply!(Channel[int] ch) int {
+  v := (<-ch) ?: 0;
+  check := |int x| {
+    use r := FailingClose(id: x);
+    assert(r.id == x, "the lambda saw its argument");
+  };
+  check(v);
+  return v;
+}
+
+lambda_in_failable_helper() `test(exclude: wasi) {
+  ch := channel[int](1);
+  t := go! {
+    recv_then_apply(ch)
+  };
+  ch.send(3);
+  got := (<-t)? e {
+    -1
+  };
+  assert(got == 3, "the helper's own result came back");
+}

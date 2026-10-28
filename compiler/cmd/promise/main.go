@@ -3733,7 +3733,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	if result.CoverageEnabled() {
 		instMode += "+cov"
 	}
-	instMetas := buildInstCacheMetas(result.SemaInfo(), compilerHash, target, instMode)
+	instMetas := buildInstCacheMetas(result.SemaInfo(), compilerHash, target, instMode, result.InstanceCoroVariants())
 
 	type instObj struct {
 		name    string
@@ -3846,7 +3846,9 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 // buildInstCacheMetas builds a map from mono instance name (e.g., "Vector[int]")
 // to a CacheMeta containing the stable cache key and debug metadata. Instances
 // whose origin type has no hash (e.g., native/universe types) are omitted.
-func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target, buildMode string) map[string]*module.CacheMeta {
+// coroVariants is codegen's InstanceCoroVariants, folded into each instance's key
+// (#68); nil before codegen, which then skips no wasm32-web instance body.
+func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target, buildMode string, coroVariants map[string][]string) map[string]*module.CacheMeta {
 	if mainInfo == nil {
 		return nil
 	}
@@ -3891,6 +3893,7 @@ func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target, buildMode st
 		}
 		sort.Strings(argDeclHashes)
 		key := module.InstanceCacheKey(irPrefix, mName, typeDeclHash, argDeclHashes, compilerHash, target, buildMode, moduleContext)
+		key = module.InstanceCacheKeyWithCoroVariants(key, coroVariants[mName])
 		result[mName] = &module.CacheMeta{
 			Kind:          module.CacheKindInstance,
 			Name:          mName,
@@ -3942,7 +3945,7 @@ func lookupCachedInstances(info *sema.Info, target, buildMode string) map[string
 	if cacheDir == "" {
 		return nil
 	}
-	metas := buildInstCacheMetas(info, module.CompilerIdentity(), target, buildMode)
+	metas := buildInstCacheMetas(info, module.CompilerIdentity(), target, buildMode, nil)
 	if len(metas) == 0 {
 		return nil
 	}

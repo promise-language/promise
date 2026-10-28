@@ -143,7 +143,7 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), callArgs, ownerSubst)
 	args = append(args, argVals...)
 
-	var result value.Value = c.block.NewCall(fn, args...)
+	var result value.Value = c.emitDirectCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
 	result = c.emitReturnAliasCheckSubst(result, method.Sig(), callArgs, origArgVals, ownerSubst, e) // B0345/T0418
 	return result
@@ -488,7 +488,7 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), callArgs, enumSubst)
 	args = append(args, argVals...)
 
-	var result value.Value = c.block.NewCall(fn, args...)
+	var result value.Value = c.emitDirectCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
 	result = c.emitReturnAliasCheckSubst(result, method.Sig(), callArgs, origArgVals, enumSubst, e) // B0345/T0418
 

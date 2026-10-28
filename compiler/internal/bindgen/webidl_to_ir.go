@@ -318,11 +318,12 @@ func typedefTargets(file *webidl.File) (map[string]*webidl.TypeRef, []error) {
 	return targets, errs
 }
 
-// definedTypes returns every name a reference (firstRef) may carry that resolves
-// in the generated module: each interface (mixins excluded), dictionary, enum,
-// typedef and callback the merged file defines, and JsValue, which the lowering
-// itself produces. Any other name is defined in none of the bound IDL files
-// (docs/wasm-bindings.md, "Supported subset").
+// definedTypes returns every name a reference (firstRef) may carry that the
+// bound IDL files define: each interface (mixins excluded), dictionary, enum,
+// typedef and callback of the merged file, and JsValue, which the lowering
+// itself produces. Any other name is defined in none of them
+// (docs/wasm-bindings.md, "Supported subset"). A callback is defined, though
+// the generated module does not declare it yet (#595).
 func definedTypes(file *webidl.File) map[string]bool {
 	defined := map[string]bool{"JsValue": true}
 	for name := range interfacesByName(file) {

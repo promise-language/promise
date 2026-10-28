@@ -995,3 +995,40 @@ func TestApplyKeepList(t *testing.T) {
 		})
 	}
 }
+
+// #723: a keep list drops a dictionary whose parent no bound IDL file defines,
+// never one whose parent is defined as something other than a dictionary —
+// that name is not absent from the input, so it stays the bind error it is
+// without a list (docs/wasm-bindings.md, "Dictionary inheritance").
+func TestApplyKeepListKeepsADefinedNonDictionaryParent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  string
+		list string
+	}{
+		{name: "enum", src: `enum E { "a" };`, list: "A\nA.use\n"},
+		{name: "typedef", src: `typedef long E;`, list: "A\nA.use\n"},
+		{name: "kept interface", src: `interface E { attribute long n; };`, list: "A\nA.use\nE\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := parseMerged(t, tc.src+`
+			dictionary D : E { long x; };
+			interface A { undefined use(optional D d = {}); };`)
+			keep, err := ParseKeepList("keep.txt", tc.list)
+			if err != nil {
+				t.Fatalf("ParseKeepList: %v", err)
+			}
+			if drops := ApplyKeepList(file, keep); len(drops) > 0 {
+				t.Errorf("drops = %v, want none", drops)
+			}
+			modules, err := WebIdlToIR(file)
+			want := "dictionary D inherits from E, which is not a dictionary in the bound IDL files"
+			if err == nil {
+				t.Fatalf("WebIdlToIR succeeded with %d modules, want %q", len(modules), want)
+			}
+			if err.Error() != want {
+				t.Errorf("error = %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}

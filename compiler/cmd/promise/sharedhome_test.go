@@ -35,4 +35,12 @@ import (
 // there answers every one of them with the wrong home. An explicitly provided
 // home is the caller's declared intent, the same rule Bin applies to
 // PROMISE_TEST_BIN.
-func TestMain(m *testing.M) { os.Exit(clitest.SharedHomeKeepingAmbient(m)) }
+//
+// A child spawned as a fake linker runs no tests at all: the compiler hands it
+// a linker's argv, not test flags (fakeLinkerMain, #619).
+func TestMain(m *testing.M) {
+	if record := os.Getenv(fakeLinkerEnv); record != "" {
+		os.Exit(fakeLinkerMain(record))
+	}
+	os.Exit(clitest.SharedHomeKeepingAmbient(m))
+}

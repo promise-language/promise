@@ -6007,7 +6007,11 @@ func wasmLinkDiagnosticError(stderr string) error {
 		"trap at runtime instead of failing here", strings.Join(syms, ", "))
 }
 
-// linkWasmMulti links multiple .o files for WebAssembly.
+// linkWasmMulti links multiple .o files for WebAssembly. The arguments travel
+// through a response file (writeResponseFile): a Windows host caps wasm-ld's
+// command line exactly as it does lld-link's. --rsp-quoting stays on the real
+// command line, since wasm-ld reads it before expanding the file and otherwise
+// picks the quoting by host.
 func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) error {
 	lldPath, err := findLLVMTool("wasm-ld")
 	if err != nil {
@@ -6019,10 +6023,15 @@ func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) er
 	if err != nil {
 		return err
 	}
+	rsp, err := writeResponseFile(outputFile, linkArgs)
+	if err != nil {
+		return fmt.Errorf("error linking (wasm-ld): %w", err)
+	}
+	defer os.Remove(rsp)
 	var diag bytes.Buffer
 	if err := runResilient(func() *exec.Cmd {
 		diag.Reset() // runResilient re-invokes this per attempt
-		c := runLLVMCmd(lldPath, linkArgs...)
+		c := runLLVMCmd(lldPath, "--rsp-quoting=windows", "@"+rsp)
 		c.Stderr = io.MultiWriter(os.Stderr, &diag)
 		return c
 	}); err != nil {
@@ -6419,29 +6428,76 @@ func buildWindowsLinkArgs(target string, objFiles []string, outputFile string) (
 	return args, nil
 }
 
-// linkWindows runs lld-link for a single .obj file.
-func linkWindows(objFile, target, outputFile string) error {
-	lldPath, err := findLLVMTool("lld-link")
-	if err != nil {
-		return fmt.Errorf("error: %w", err)
+// windowsQuoteArg quotes s as one argument under the Windows command-line rules
+// (CommandLineToArgvW, which LLVM's TokenizeWindowsCommandLine follows):
+// backslashes are literal except in a run that ends at a double quote, where
+// the run is doubled and the quote escaped. syscall.EscapeArg implements the
+// same rules but builds only on Windows, and a response file is written on
+// every host that links (a Windows .exe cross-links from Linux/macOS; wasm links
+// everywhere). Unlike EscapeArg it also quotes CR and LF, which separate
+// arguments in a response file.
+func windowsQuoteArg(s string) string {
+	if s != "" && !strings.ContainsAny(s, " \t\r\n\"") {
+		return s
 	}
-	checkLLVMToolVersion(lldPath)
-
-	linkArgs, err := buildWindowsLinkArgs(target, []string{objFile}, outputFile)
-	if err != nil {
-		return err
+	var b strings.Builder
+	b.WriteByte('"')
+	slashes := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			slashes++
+		case '"':
+			// The run already written becomes 2n+1 backslashes: n to double
+			// it, one to escape the quote.
+			b.WriteString(strings.Repeat(`\`, slashes+1))
+			slashes = 0
+		default:
+			slashes = 0
+		}
+		b.WriteByte(s[i])
 	}
-	if err := runResilient(func() *exec.Cmd {
-		c := runLLVMCmd(lldPath, linkArgs...)
-		c.Stderr = os.Stderr
-		return c
-	}); err != nil {
-		return fmt.Errorf("error linking (lld-link): %w", err)
-	}
-	return nil
+	// A trailing run is doubled so it does not escape the closing quote.
+	b.WriteString(strings.Repeat(`\`, slashes))
+	b.WriteByte('"')
+	return b.String()
 }
 
-// linkWindowsMulti links multiple .obj files on Windows via lld-link.
+// writeResponseFile writes args to a linker response file beside outputFile,
+// one windowsQuoteArg-quoted argument per line, and returns its path; the
+// caller removes it. lld-link reads response files with Windows quoting on
+// every host, and wasm-ld is told to with --rsp-quoting=windows.
+//
+// The inline command line grows with every object times the length of its
+// path — per-module and per-instance objects under the temp dir — and Windows'
+// CreateProcess refuses one past 32,767 characters with
+// ERROR_FILENAME_EXCED_RANGE ("The filename or extension is too long"), which
+// is how tests/std/map_test.pr stopped linking on windows-amd64 (#619).
+func writeResponseFile(outputFile string, args []string) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(outputFile), filepath.Base(outputFile)+".*.rsp")
+	if err != nil {
+		return "", fmt.Errorf("creating response file: %w", err)
+	}
+	var b strings.Builder
+	for _, a := range args {
+		b.WriteString(windowsQuoteArg(a))
+		b.WriteByte('\n')
+	}
+	_, werr := f.WriteString(b.String())
+	if err := errors.Join(werr, f.Close()); err != nil {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("writing response file %s: %w", f.Name(), err)
+	}
+	return f.Name(), nil
+}
+
+// linkWindows runs lld-link for a single .obj file.
+func linkWindows(objFile, target, outputFile string) error {
+	return linkWindowsMulti([]string{objFile}, target, outputFile)
+}
+
+// linkWindowsMulti links multiple .obj files on Windows via lld-link. The
+// arguments travel through a response file (writeResponseFile).
 func linkWindowsMulti(objFiles []string, target, outputFile string) error {
 	lldPath, err := findLLVMTool("lld-link")
 	if err != nil {
@@ -6453,8 +6509,13 @@ func linkWindowsMulti(objFiles []string, target, outputFile string) error {
 	if err != nil {
 		return err
 	}
+	rsp, err := writeResponseFile(outputFile, linkArgs)
+	if err != nil {
+		return fmt.Errorf("error linking (lld-link): %w", err)
+	}
+	defer os.Remove(rsp)
 	if err := runResilient(func() *exec.Cmd {
-		c := runLLVMCmd(lldPath, linkArgs...)
+		c := runLLVMCmd(lldPath, "@"+rsp)
 		c.Stderr = os.Stderr
 		return c
 	}); err != nil {

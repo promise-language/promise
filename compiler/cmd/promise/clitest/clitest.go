@@ -520,8 +520,12 @@ func warmupBin() string {
 // progress_test.go asserts holds exactly one line.
 //
 // `promise exec` is the honest warm-up — it is the same path the tests drive, so
-// it materializes exactly what they need and nothing else. Best effort: a
-// warm-up that fails leaves the tests exactly where they were.
+// it materializes the host toolchain they need and nothing else. It never
+// stages the pinned wasmtime the wasm32-wasi tests run under, because a host
+// program never runs one: under a gate, ensureToolchainWarm (tools/build/common)
+// staged it before the window opened (#625), and under a bare `go test` the
+// first such test fetches it. Best effort: a warm-up that fails leaves the tests
+// exactly where they were.
 func warmToolchain(bin string) {
 	if bin == "" {
 		return

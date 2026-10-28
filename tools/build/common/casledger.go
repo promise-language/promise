@@ -291,12 +291,21 @@ func (w casWindow) AddToEnvelope(env *Envelope) {
 // was, and whatever it could not stage is measured as the cost it really is.
 //
 // `promise exec` is the honest warm-up — the same path the suites drive, so it
-// materializes what they need and nothing else. clitest.warmToolchain does the
-// same for the Go suites; the two are separate modules and cannot share it.
+// materializes the host toolchain they need and nothing else. It never stages
+// the pinned wasmtime the wasm32-wasi tests run under, because a host program
+// never runs one; EnsureWasmtime stages that in the host prebuilts cache, which
+// resolveWasmRuntime reads before the store, so the first such test does not
+// fetch it inside the window (#625). clitest.warmToolchain repeats only the
+// exec, for a bare `go test`: it runs inside the window, and the compiler is a
+// separate module that cannot reach the tools' staging.
 func ensureToolchainWarm(root string) {
 	bin := filepath.Join(root, "bin", BinaryName())
 	if !Exists(bin) {
 		return
+	}
+	if _, err := EnsureWasmtime(root); err != nil {
+		Progress().Printf("note: the pinned wasmtime could not be staged before measuring (%s); a wasm32-wasi test that fetches it is charged to %s\n",
+			firstRealLine(err.Error()), casNetworkBytesMetric)
 	}
 	// A directory of its own, so the warm-up is never interpreted against
 	// whatever project the gate happens to be run from.

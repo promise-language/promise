@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -202,28 +203,40 @@ func executableTarGz(t *testing.T, name, content string) []byte {
 	return buf.Bytes()
 }
 
+// pinnedWasmtimeRoot is a tree whose prebuilts.toml pins a wasmtime for this
+// host, served by a local server that counts the requests it answers, with the
+// prebuilts cache pointed at an empty directory of the test's own.
+//
+// The archive wraps the executable in a versioned directory, as every upstream
+// release archive does; resolveInnerRoot is what has to see through that. There
+// is no catalog entry, so ensureSlimBlobs falls through to the pinned upstream
+// archive — also the path a maintainer hits between pinning a new version and
+// publishing its blobs, so it must work rather than merely warn.
+func pinnedWasmtimeRoot(t *testing.T) (root string, srv *httptest.Server, requests *atomic.Int32) {
+	t.Helper()
+	target := CurrentBuildTarget()
+	exe := RuntimeExeName("wasmtime", target)
+	tarBytes := executableTarGz(t, "wasmtime-v9.9.9-host/"+exe, "#!/bin/true\n")
+	requests = &atomic.Int32{}
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write(tarBytes)
+	}))
+	t.Cleanup(srv.Close)
+	root = writeRuntimeRoot(t, runtimePrebuiltsTOML(target, "wasmtime", exe,
+		srv.URL+"/wasmtime.tar.gz", sha256Hex(tarBytes)))
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
+	return root, srv, requests
+}
+
 // Staging returns a path to the executable itself, not the directory holding
 // it, and the file has to be runnable. A runtime staged without the execute bit
 // fails at exec time — an EACCES naming a path, far from the staging step that
 // caused it — so the mode is asserted here where it is set.
 func TestEnsureWasmRuntime_ReturnsAnExecutablePath(t *testing.T) {
-	target := CurrentBuildTarget()
-	exe := RuntimeExeName("wasmtime", target)
-	// Wrapped in a versioned directory, as every upstream release archive is;
-	// resolveInnerRoot is what has to see through that.
-	tarBytes := executableTarGz(t, "wasmtime-v9.9.9-host/"+exe, "#!/bin/true\n")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write(tarBytes)
-	}))
-	t.Cleanup(srv.Close)
+	root, _, _ := pinnedWasmtimeRoot(t)
+	exe := RuntimeExeName("wasmtime", CurrentBuildTarget())
 
-	root := writeRuntimeRoot(t, runtimePrebuiltsTOML(target, "wasmtime", exe,
-		srv.URL+"/wasmtime.tar.gz", sha256Hex(tarBytes)))
-	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
-
-	// No catalog entry → ensureSlimBlobs falls through to the pinned upstream
-	// archive. That is also the path a maintainer hits between pinning a new
-	// version and publishing its blobs, so it must work rather than merely warn.
 	path, err := EnsureWasmRuntime(root, "wasmtime")
 	if err != nil {
 		t.Fatalf("staging the pinned wasmtime: %v", err)

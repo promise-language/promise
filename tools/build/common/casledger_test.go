@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -741,11 +742,118 @@ func TestCASWindowReportsAnUnreadableLedger(t *testing.T) {
 	}
 }
 
+// placeholderCompiler puts a file where the warm-up looks for the compiler that
+// is no program at all, so its exec fails on every platform without spawning
+// anything and a test sees only what the warm-up does besides.
+func placeholderCompiler(t *testing.T, root string) {
+	t.Helper()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, BinaryName()), []byte("not a compiler\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// recordingCompiler puts a script where the warm-up looks for the compiler that
+// leaves a mark beside itself when it is run, and returns whether it was. POSIX
+// only, like every shell-script stub in this package.
+func recordingCompiler(t *testing.T, root string) (ran func() bool) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script tool stubs are not executable on Windows")
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n: > \"$(dirname \"$0\")/ran\"\n"
+	if err := os.WriteFile(filepath.Join(bin, BinaryName()), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return func() bool { return Exists(filepath.Join(bin, "ran")) }
+}
+
 // TestEnsureToolchainWarmSkipsAnUnbuiltTree: the warm-up is best effort and must
 // not be a way for a gate to fail. With no compiler to run it does nothing at
-// all — no process, no error.
+// all — no process, no error, and no wasmtime fetched for a measurement that
+// cannot happen.
 func TestEnsureToolchainWarmSkipsAnUnbuiltTree(t *testing.T) {
-	ensureToolchainWarm(t.TempDir()) // no bin/promise: returns without spawning
+	root, _, requests := pinnedWasmtimeRoot(t) // no bin/promise
+	ensureToolchainWarm(root)
+	if n := requests.Load(); n != 0 {
+		t.Errorf("an unbuilt tree fetched the pinned wasmtime (%d request(s)), want nothing done at all", n)
+	}
+}
+
+// TestEnsureToolchainWarmStagesThePinnedWasmtime: the warm-up stages the
+// wasmtime the wasm32-wasi tests run under, so the first of them does not fetch
+// it inside the measured window (#625). Staged means the network is no longer
+// needed: with the server gone, asking again still answers.
+//
+// The compiler is a placeholder that cannot run, which also pins that staging
+// does not depend on the exec half of the warm-up succeeding.
+func TestEnsureToolchainWarmStagesThePinnedWasmtime(t *testing.T) {
+	root, srv, requests := pinnedWasmtimeRoot(t)
+	placeholderCompiler(t, root)
+
+	ensureToolchainWarm(root)
+	if requests.Load() == 0 {
+		t.Fatal("the warm-up never fetched the pinned wasmtime")
+	}
+	srv.Close()
+	if _, err := EnsureWasmtime(root); err != nil {
+		t.Errorf("the pinned wasmtime is not staged after the warm-up: %v", err)
+	}
+
+	// Staged where the COMPILER looks, which is what the fix rests on: the tests'
+	// compilers take wasmtime from this cache, ahead of the store, only from
+	// <cache>/wasmtime[-slim]/<version>/<host>/<exe> with tools.ok beside it
+	// (prebuiltRuntimePath, compiler/cmd/promise/llvm_cas.go). That reader is a
+	// separate module whose half of the layout
+	// TestPrebuiltRuntimePathAcceptsTheUpstreamCacheDir pins; this is the
+	// writer's half. The fixture has no slim blob, so it is the upstream dir.
+	target := CurrentBuildTarget()
+	staged := filepath.Join(os.Getenv("PROMISE_PREBUILTS_CACHE"), "wasmtime", "9.9.9", target)
+	for _, name := range []string{RuntimeExeName("wasmtime", target), toolsOKFile} {
+		if !Exists(filepath.Join(staged, name)) {
+			t.Errorf("the warm-up left no %s in %s, where the compiler looks for the staged wasmtime", name, staged)
+		}
+	}
+}
+
+// TestEnsureToolchainWarmNarratesAWasmtimeItCannotStage: staging is best effort
+// — a host with no pinned wasmtime still gets its warm-up and its measurement —
+// but the failure is said rather than swallowed, because it is what explains
+// the cas_network_bytes that follows. Said with its reason: here, that this
+// host has no pin, which names the host.
+func TestEnsureToolchainWarmNarratesAWasmtimeItCannotStage(t *testing.T) {
+	root := writeRuntimeRoot(t, bothRuntimesTOML("some-other-target", false))
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
+	placeholderCompiler(t, root)
+
+	out := captureStdout(t, func() { ensureToolchainWarm(root) })
+	for _, want := range []string{"wasmtime", casNetworkBytesMetric, CurrentBuildTarget()} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the warm-up's output does not name %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestEnsureToolchainWarmExecsWhenWasmtimeCannotBeStaged: the halves are
+// independent. A wasmtime the warm-up cannot stage — no pin for this host, or
+// no network on a first run — must not cost the gate the exec half too, or the
+// host toolchain it stages would be charged to every window instead.
+func TestEnsureToolchainWarmExecsWhenWasmtimeCannotBeStaged(t *testing.T) {
+	root := writeRuntimeRoot(t, bothRuntimesTOML("some-other-target", false))
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
+	ran := recordingCompiler(t, root)
+
+	captureStdout(t, func() { ensureToolchainWarm(root) }) // the note is the test above's
+	if !ran() {
+		t.Error("the warm-up did not run the compiler after failing to stage the pinned wasmtime")
+	}
 }
 
 // TestCASWindowSummaryIsSilentOnAnUnreadableLedger: a ledger that cannot be READ

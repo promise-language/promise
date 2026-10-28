@@ -355,7 +355,7 @@ Top-level constructs: `interface` (with inheritance), `interface mixin` / standa
 
 Member-level features:
 
-- **Extended attributes** (`[Exposed=Window]`, `[CEReactions]`, `[RuntimeEnabled=Foo]`, …) are accepted and skipped at every position they may appear: top level, before interface/dictionary members, and **inline before a type** (e.g. `(TrustedHTML or [LegacyNullToEmptyString] DOMString)`). They are parsed for structure and, with two exceptions, do not affect generated bindings: `[LegacyOverrideBuiltIns]`, on an interface or a partial interface, and `[LegacyUnforgeable]`, on an attribute or an operation, decide which JS member an import calls (§"WebIDL to Promise", interface inheritance).
+- **Extended attributes** (`[Exposed=Window]`, `[CEReactions]`, `[RuntimeEnabled=Foo]`, …) are accepted and skipped at every position they may appear: top level, before interface/dictionary members, and **inline before a type** (e.g. `(TrustedHTML or [LegacyNullToEmptyString] DOMString)`). They are parsed for structure and, with three exceptions, do not affect generated bindings: `[LegacyOverrideBuiltIns]`, on an interface or a partial interface, and `[LegacyUnforgeable]`, on an attribute or an operation, decide which JS member an import calls (§"WebIDL to Promise", interface inheritance); and `[LegacyWindowAlias]`, on an interface definition, makes each identifier it names — `[LegacyWindowAlias=X]`, or the list form `[LegacyWindowAlias=(X, Y)]` — name that interface wherever it is used as a type (§"WebIDL to Promise", names defined outside IDL).
 - **Dictionary members** support `required`, default values, and leading extended attributes. Non-`required` members map to `T?` (Promise optional).
 - **Default values** cover string/number/boolean/identifier literals, the empty sequence `[]`, and the **empty dictionary `{}`** (e.g. `optional SetHTMLOptions options = {}`). Default values are parsed but not yet materialized into the generated bindings.
 - **Operation members**: regular, `static`, `getter`/`setter`/`deleter`, `stringifier`, `legacycaller`, `constructor`, `iterable<…>`, and `async` operations. A named `legacycaller` binds as the regular operation of its name, in that name's overload set ([Overloaded Operations](#overloaded-operations)); an anonymous one — calling the object itself — binds no member. A named `getter`, `setter` or `deleter` likewise binds as the regular operation of its name, and its import calls that method. An anonymous one binds as a member named by its keyword, numbered in that name's overload set: `HTMLFormElement`'s indexed and named getters are `getter` and `getter_2`. Its import, `<Interface>.<keyword>`, reaches the host as WebIDL exposes it on a legacy platform object: as property access keyed by its first argument. A getter is `obj[key]`, a setter `obj[key] = value`, and a deleter `delete obj[key]`; an `unsigned long` index is passed as its unsigned value. The result is whatever that access yields. For a key the object does not support, that is `undefined`, which a nullable result receives as absent. Property access passes only a key, plus a value for a setter, and returns no setter result. So an anonymous getter or deleter that does not take exactly one argument, or a setter that does not take exactly two or that declares a result, is a `bind` error naming the operation and its position.
@@ -411,7 +411,7 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 | `long` / `unsigned long` | `i32` / `u32` | |
 | `long long` / `unsigned long long` | `i64` / `u64` | |
 | `float` / `double` | `f32` / `f64` | |
-| `DOMString` / `USVString` | `string` | |
+| `DOMString` / `USVString` / `CSSOMString` | `string` | CSSOM defines `CSSOMString` in prose as a `DOMString` or a `USVString`, at the implementation's choice (see below) |
 | `ByteString` | `u8[]` | |
 | `sequence<T>` | `T[]` | |
 | `Promise<T>` | `task[T]` | Maps to Promise concurrency |
@@ -419,6 +419,8 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 | `void` / `undefined` | (void) | |
 | `interface` | `type { int _js_ref; ... }` | Opaque JS handle |
 | `interface I : P` | `type I is P { ... }` | Inherits `P`'s members; the handle and ownership fields are declared once, on the root of the chain; `P` carries `` `open `` (see below) |
+| `WindowProxy` | `Window` | HTML defines it in prose as the proxy for a `Window` (see below) |
+| `X`, of `[LegacyWindowAlias=X] interface I` | `I` | The alias names the interface it annotates (see below) |
 | `dictionary` | `type { ... }` | Value type |
 | `dictionary D : P` | `type D { ... }` | Carries `P`'s members, and its ancestors', as fields of its own; no `is` (see below) |
 | `enum` | `enum { ... }` | Variants named from the values (see below); with string mapping for JS |
@@ -427,6 +429,18 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 | `ArrayBuffer` | `u8[]` | |
 | `any` | `JsValue` | Tagged enum (see below) |
 | `object` | `JsValue` | Same enum, `Object` variant |
+
+**Names defined outside IDL.** `CSSOMString`, `WindowProxy` and each identifier a
+`[LegacyWindowAlias]` names are used as types, but no IDL definition defines them: specification
+prose or an extended attribute does. Each lowers to what it names, so it is the same type as that:
+a derived member that spells an inherited one's type by the other name is exactly that member
+([Shadowed Members](#shadowed-members)), and a keep list that drops `Window` or `DOMMatrix` drops
+what names `WindowProxy` or `SVGMatrix`, reporting the definition it names
+([Generating a subset](#generating-a-subset)). An alias is known only from the bound IDL, from the
+interface definition carrying it. So `SVG.idl`'s `SVGMatrix`, bound without the `geometry.idl` that
+declares it on `DOMMatrix`, names a definition absent from the input (§"Generating a subset"),
+`SVGMatrix`; and a `WindowProxy` with no `Window` bound names one too, `Window` — never
+`WindowProxy`.
 
 **Enums.** A WebIDL enum value is any string, so the name of the variant it generates follows one
 rule that every string satisfies. A word is a maximal run of ASCII letters and digits; every other

@@ -167,9 +167,27 @@ func (p *Parser) tryParseExtAttrs() []*ExtAttr {
 }
 
 // parseExtAttrString parses the content between [ and ] into ExtAttr entries.
+// Attributes are separated by the commas outside parentheses, so an identifier
+// list — `Exposed=(Window,Worker)`, `LegacyWindowAlias=(SVGMatrix,WebKitCSSMatrix)`
+// — stays one attribute, its Value the whole parenthesized list.
 func parseExtAttrString(s string) []*ExtAttr {
 	var attrs []*ExtAttr
-	parts := strings.Split(s, ",")
+	var parts []string
+	depth, start := 0, 0
+	for i, r := range s {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, s[start:])
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -928,9 +946,10 @@ func (p *Parser) parseUnionType() *TypeRef {
 // includes statements to the definitions they extend, then records on each
 // interface the members an interface inheriting from it redeclares
 // (Interface.Redeclared) and those a named property may hide
-// (Interface.OverriddenBuiltIns). It returns an error for each partial whose
-// interface, mixin or dictionary is not in file, and for each side of an
-// includes statement that is not, after applying every one that matches:
+// (Interface.OverriddenBuiltIns), and on the file the identifiers each
+// [LegacyWindowAlias] names (File.WindowAliases). It returns an error for each
+// partial whose interface, mixin or dictionary is not in file, and for each side
+// of an includes statement that is not, after applying every one that matches:
 // nothing else would name the members they carry, so they would otherwise
 // vanish unreported.
 // An "interface mixin", which the parser stores as an Interface marked _mixin,
@@ -1017,7 +1036,40 @@ func Merge(file *File) []*ParseError {
 	// Last, so a member a partial or a mixin contributes counts on either side.
 	recordRedeclared(file, ifaceMap)
 	recordOverriddenBuiltIns(file, ifaceMap)
+	recordWindowAliases(file, ifaceMap)
 	return errs
+}
+
+// recordWindowAliases sets File.WindowAliases: each identifier a
+// [LegacyWindowAlias] on an interface definition names — one identifier, or a
+// parenthesized list of them — maps to that interface. An interface mixin is
+// not an interface, and WebIDL does not apply the attribute to a partial
+// interface, so neither is read. The first interface in input order to name an
+// identifier keeps it.
+func recordWindowAliases(file *File, byName map[string]*Interface) {
+	for _, iface := range file.Interfaces {
+		if byName[iface.Name] != iface {
+			continue
+		}
+		for _, ea := range iface.ExtAttrs {
+			if ea.Name != "LegacyWindowAlias" {
+				continue
+			}
+			list := strings.TrimSuffix(strings.TrimPrefix(ea.Value, "("), ")")
+			for _, alias := range strings.Split(list, ",") {
+				alias = strings.TrimSpace(alias)
+				if alias == "" {
+					continue
+				}
+				if file.WindowAliases == nil {
+					file.WindowAliases = make(map[string]string)
+				}
+				if _, taken := file.WindowAliases[alias]; !taken {
+					file.WindowAliases[alias] = iface.Name
+				}
+			}
+		}
+	}
 }
 
 // recordOverriddenBuiltIns sets Interface.OverriddenBuiltIns on every interface

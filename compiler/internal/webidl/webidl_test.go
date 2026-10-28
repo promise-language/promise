@@ -1,6 +1,7 @@
 package webidl
 
 import (
+	"fmt"
 	"maps"
 	"reflect"
 	"slices"
@@ -1421,6 +1422,31 @@ func TestParseExtAttrParenthesized(t *testing.T) {
 	}
 }
 
+// An identifier list is one extended attribute, its commas inside the
+// parentheses (#722) — written as webref writes it, over several lines.
+func TestParseExtAttrIdentifierList(t *testing.T) {
+	src := `[Exposed=(Window,Worker),
+ Serializable,
+ LegacyWindowAlias=(SVGMatrix,WebKitCSSMatrix)]
+interface DOMMatrix {};`
+	file, errs := Parse(src, "geometry.idl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	var got []ExtAttr
+	for _, ea := range file.Interfaces[0].ExtAttrs {
+		got = append(got, *ea)
+	}
+	want := []ExtAttr{
+		{Name: "Exposed", Value: "(Window,Worker)"},
+		{Name: "Serializable"},
+		{Name: "LegacyWindowAlias", Value: "(SVGMatrix,WebKitCSSMatrix)"},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("ExtAttrs = %+v, want %+v", got, want)
+	}
+}
+
 func TestParseCallbackInterface(t *testing.T) {
 	// "callback interface" is skipped and returns nil callback
 	src := `callback interface EventListener {
@@ -2192,14 +2218,73 @@ func TestMergeRecordsOverriddenBuiltIns(t *testing.T) {
 	}
 }
 
+// Merge maps each identifier a [LegacyWindowAlias] names to the interface it
+// annotates, from the whole input (#722).
+func TestMergeRecordsWindowAliases(t *testing.T) {
+	cases := []struct {
+		name string
+		srcs []string // parsed one by one, then appended, as `bind` does
+		want map[string]string
+	}{
+		{
+			name: "one identifier and a list, declared in another file than the one using them",
+			srcs: []string{
+				`[Exposed=Window, LegacyWindowAlias=SVGPoint] interface DOMPoint {};
+				[Exposed=Window, LegacyWindowAlias=( SVGMatrix,
+				  WebKitCSSMatrix )] interface DOMMatrix {};`,
+				`interface SVGGeometryElement { SVGPoint getPointAtLength(float distance); };`,
+			},
+			want: map[string]string{"SVGPoint": "DOMPoint", "SVGMatrix": "DOMMatrix", "WebKitCSSMatrix": "DOMMatrix"},
+		},
+		{
+			// WebIDL forbids two interfaces naming one alias; the first keeps it.
+			name: "the first interface to name an identifier keeps it",
+			srcs: []string{`[LegacyWindowAlias=X] interface A {}; [LegacyWindowAlias=X] interface B {};`},
+			want: map[string]string{"X": "A"},
+		},
+		{
+			// A mixin is not an interface, and a partial interface does not
+			// carry the attribute.
+			name: "neither a mixin nor a partial interface",
+			srcs: []string{`[LegacyWindowAlias=M] interface mixin Mix {};
+			interface P {};
+			[LegacyWindowAlias=Q] partial interface P {};`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			file := &File{}
+			for i, src := range tc.srcs {
+				parsed, errs := Parse(src, fmt.Sprintf("%d.webidl", i))
+				if len(errs) > 0 {
+					t.Fatalf("unexpected errors: %v", errs)
+				}
+				file.Append(parsed)
+			}
+			if errs := Merge(file); len(errs) > 0 {
+				t.Fatalf("merge errors: %v", errs)
+			}
+			if !maps.Equal(file.WindowAliases, tc.want) {
+				t.Errorf("WindowAliases = %v, want %v", file.WindowAliases, tc.want)
+			}
+		})
+	}
+}
+
 // TestFileAppendCopiesEveryField walks File's fields by reflection rather than
 // listing them, so a field added to File that Append does not copy fails here
 // (#656: bind's hand-kept list dropped PartialDicts).
 func TestFileAppendCopiesEveryField(t *testing.T) {
+	// Merge sets these from the merged definitions, after Append has combined
+	// them, so Append has nothing of theirs to combine.
+	mergeDerived := map[string]bool{"WindowAliases": true}
 	dst, src := &File{}, &File{}
 	dv, sv := reflect.ValueOf(dst).Elem(), reflect.ValueOf(src).Elem()
 	typ := dv.Type()
 	for i := 0; i < typ.NumField(); i++ {
+		if mergeDerived[typ.Field(i).Name] {
+			continue
+		}
 		ft := typ.Field(i).Type
 		if ft.Kind() != reflect.Slice || ft.Elem().Kind() != reflect.Pointer {
 			t.Fatalf("File.%s is %s, not a slice of pointers: decide how Append combines it", typ.Field(i).Name, ft)
@@ -2210,13 +2295,18 @@ func TestFileAppendCopiesEveryField(t *testing.T) {
 	}
 	want := make([][2]any, typ.NumField())
 	for i := range want {
-		want[i] = [2]any{dv.Field(i).Index(0).Interface(), sv.Field(i).Index(0).Interface()}
+		if !mergeDerived[typ.Field(i).Name] {
+			want[i] = [2]any{dv.Field(i).Index(0).Interface(), sv.Field(i).Index(0).Interface()}
+		}
 	}
 
 	dst.Append(src)
 
 	for i := 0; i < typ.NumField(); i++ {
 		name, got := typ.Field(i).Name, dv.Field(i)
+		if mergeDerived[name] {
+			continue
+		}
 		if got.Len() != 2 {
 			t.Errorf("File.%s: got %d entries after Append, want 2 (dst's then src's)", name, got.Len())
 			continue

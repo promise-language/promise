@@ -467,6 +467,19 @@ func TestApplyKeepList(t *testing.T) {
 			},
 		},
 		{
+			// Only a dictionary is dropped for an absent parent: an interface's is
+			// named in its `is` clause, so a kept one stays and fails to compile
+			// (docs/wasm-bindings.md, "WebIDL to Promise", interface inheritance).
+			name: "an interface inheriting from an absent name is kept",
+			src:  `interface C : Missing { undefined m(); };`,
+			list: "C\nC.m\n",
+			resources: map[string][]string{
+				"C": {"C.m"},
+			},
+			parents: map[string]string{"C": "Missing"},
+			types:   map[string][]string{},
+		},
+		{
 			name: "a typedef naming an absent name is dropped with its uses",
 			src: `typedef Missing M;
 			interface A { attribute M m; undefined other(); };`,

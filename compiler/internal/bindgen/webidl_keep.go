@@ -59,6 +59,9 @@ func ParseKeepList(path, src string) (*KeepList, error) {
 type KeepDrop struct {
 	What string
 	Ref  string
+	// Unbound reports that Ref is defined in none of the bound IDL files, rather
+	// than dropped by the list.
+	Unbound bool
 }
 
 // ApplyKeepList reduces a merged file (webidl.Merge has run, so a mixin's
@@ -90,16 +93,16 @@ type KeepDrop struct {
 // the chain, or dropped down it — only where the ancestor holds an instance
 // member of it.
 //
-// A reference is a name the type carries lowered with no typedef inlined
-// (convertWebIdlTypeRef), so a name inside a union, Promise<T> or record<K, V> —
-// each lowered to JsValue — is not one, and a use of a typedef names the
-// typedef, which the closure drops when its target names a dropped definition.
-// A name defined outside IDL references what it names: WindowProxy is Window,
-// and a [LegacyWindowAlias] identifier its interface. A name absent from the
-// input is not a dropped definition: a declaration naming it is left to fail to
-// compile, as an unbound parent does.
+// A reference is what firstRef walks: a name the type carries lowered with no
+// typedef inlined, so a name inside a union, Promise<T> or record<K, V> — each
+// lowered to JsValue — is not one, and a use of a typedef names the typedef,
+// which the closure drops when its target names a dropped definition. A name
+// defined outside IDL references what it names: WindowProxy is Window, and a
+// [LegacyWindowAlias] identifier its interface. A name no bound IDL file defines
+// (definedTypes) counts as a dropped definition, and its KeepDrop is Unbound.
 func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 	ifaces := interfacesByName(file)
+	defined := definedTypes(file)
 
 	kept := make(map[string]bool)
 	for _, iface := range file.Interfaces {
@@ -119,19 +122,7 @@ func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 	}
 	// droppedRef returns the first dropped definition the types name, or "".
 	droppedRef := func(types ...*webidl.TypeRef) string {
-		var hit string
-		for _, t := range types {
-			if t == nil {
-				continue
-			}
-			if eachName(convertWebIdlTypeRef(t, nil, file.WindowAliases), func(name string) bool {
-				hit = name
-				return dropped[name]
-			}) {
-				return hit
-			}
-		}
-		return ""
+		return firstRef(file.WindowAliases, func(name string) bool { return dropped[name] || !defined[name] }, types...)
 	}
 
 	var drops []KeepDrop
@@ -228,6 +219,9 @@ func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 	}
 	file.Interfaces = interfaces
 
+	for i := range drops {
+		drops[i].Unbound = !defined[drops[i].Ref]
+	}
 	return drops
 }
 
@@ -242,7 +236,7 @@ func unitsOf(iface *webidl.Interface, keep *KeepList) (own, inheritable map[memb
 	own = make(map[memberUnit]bool)
 	inheritable = make(map[memberUnit]bool)
 	for _, m := range iface.Members {
-		unit, label, listed, _ := keepUnit(m)
+		unit, label, listed, _, _ := keepUnit(m)
 		if !listed || keep.members[iface.Name+"."+label] {
 			own[unit] = true
 		}
@@ -299,7 +293,7 @@ func selectMembers(iface *webidl.Interface, selected func(unit memberUnit) bool,
 	s := &memberSelection{dangling: make(map[memberUnit]string)}
 	ordered := make(map[string]bool)
 	for _, m := range iface.Members {
-		unit, label, _, types := keepUnit(m)
+		unit, label, _, types, _ := keepUnit(m)
 		if !selected(unit) {
 			continue
 		}
@@ -375,17 +369,17 @@ type memberUnit struct {
 // by, if listed reports that a list must name it for it to be kept, and the
 // name a KeepDrop reports it by: an attribute's or operation's identifier, an
 // anonymous special operation's keyword, `constructor` for every constructor;
-// and the types it references.
-func keepUnit(m webidl.Member) (unit memberUnit, label string, listed bool, types []*webidl.TypeRef) {
+// the types it references; and its position, which unboundRefs reports it at.
+func keepUnit(m webidl.Member) (unit memberUnit, label string, listed bool, types []*webidl.TypeRef, pos webidl.Pos) {
 	switch m := m.(type) {
 	case *webidl.Attribute:
-		label, listed, types = m.Name, true, []*webidl.TypeRef{m.Type}
+		label, listed, types, pos = m.Name, true, []*webidl.TypeRef{m.Type}, m.Pos
 	case *webidl.Operation:
 		types = []*webidl.TypeRef{m.Return}
 		for _, p := range m.Params {
 			types = append(types, p.Type)
 		}
-		label, listed = m.Name, true
+		label, listed, pos = m.Name, true, m.Pos
 		if m.Name == "" {
 			label, listed = m.Special, false
 		}
@@ -393,18 +387,18 @@ func keepUnit(m webidl.Member) (unit memberUnit, label string, listed bool, type
 		for _, p := range m.Params {
 			types = append(types, p.Type)
 		}
-		label, listed = keepConstructor, true
+		label, listed, pos = keepConstructor, true, m.Pos
 	case *webidl.Const:
-		label, listed, types = m.Name, false, []*webidl.TypeRef{m.Type}
+		label, listed, types, pos = m.Name, false, []*webidl.TypeRef{m.Type}, m.Pos
 	case *webidl.Iterable:
-		label, listed, types = "iterable", false, []*webidl.TypeRef{m.KeyType, m.ValueType}
+		label, listed, types, pos = "iterable", false, []*webidl.TypeRef{m.KeyType, m.ValueType}, m.Pos
 	default:
 		// A member kind added to the parser must decide here whether a keep list
 		// names it; letting it through unexamined would bypass the filter.
 		panic(fmt.Sprintf("bindgen: keep list: unhandled WebIDL member %T", m))
 	}
 	if name, ok := memberName(m); ok {
-		return memberUnit{name: name, lowered: true}, label, listed, types
+		return memberUnit{name: name, lowered: true}, label, listed, types, pos
 	}
-	return memberUnit{name: label}, label, listed, types
+	return memberUnit{name: label}, label, listed, types, pos
 }

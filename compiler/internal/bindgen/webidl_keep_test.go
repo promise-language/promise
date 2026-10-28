@@ -386,16 +386,127 @@ func TestApplyKeepList(t *testing.T) {
 			},
 		},
 		{
-			// A definition absent from the input is not one the list dropped: the
-			// member is kept, and fails to compile with `undefined type` as an
-			// unbound parent does — the remedy is binding its spec, not hiding it.
-			name: "a name absent from the input is not a dropped definition",
+			// #723: a name no bound IDL file defines counts as a dropped
+			// definition, so a list never has to bind a spec only because what it
+			// keeps names that spec's definitions.
+			name: "a name absent from the input is dropped as a dropped definition is",
 			src:  `interface Element { Missing find(); };`,
 			list: "Element\nElement.find\n",
 			resources: map[string][]string{
-				"Element": {"Element.find"},
+				"Element": nil,
 			},
 			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "Element.find", Ref: "Missing", Unbound: true},
+			},
+		},
+		{
+			// #723's repro: the optional field is removed, the dictionary and
+			// the member taking it stay.
+			name: "an optional field naming an absent name is removed",
+			src: `dictionary D { Missing m; long n; };
+			[Exposed=Window] interface A { undefined use(optional D d = {}); };`,
+			list: "A\nA.use\n",
+			resources: map[string][]string{
+				"A": {"A.use"},
+			},
+			types: map[string][]string{"D": {"n"}},
+			drops: []KeepDrop{
+				{What: "D.m", Ref: "Missing", Unbound: true},
+			},
+		},
+		{
+			// The dictionary is dropped for the absent name; the member taking it
+			// is dropped for the dictionary, which the list's closure drops.
+			name: "a required field naming an absent name drops its dictionary",
+			src: `dictionary D { required Missing m; };
+			interface A { undefined use(D d); undefined other(); };`,
+			list: "A\nA.use\nA.other\n",
+			resources: map[string][]string{
+				"A": {"A.other"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "dictionary D", Ref: "Missing", Unbound: true},
+				{What: "A.use", Ref: "D"},
+			},
+		},
+		{
+			name: "a typedef naming an absent name is dropped with its uses",
+			src: `typedef Missing M;
+			interface A { attribute M m; undefined other(); };`,
+			list: "A\nA.m\nA.other\n",
+			resources: map[string][]string{
+				"A": {"A.other"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "typedef M", Ref: "Missing", Unbound: true},
+				{What: "A.m", Ref: "M"},
+			},
+		},
+		{
+			name: "a parameter and a return type naming absent names",
+			src: `interface A {
+				undefined take(Missing m);
+				Other give();
+				readonly attribute long ok;
+			};`,
+			list: "A\nA.take\nA.give\nA.ok\n",
+			resources: map[string][]string{
+				"A": {"A.ok.get"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "A.take", Ref: "Missing", Unbound: true},
+				{What: "A.give", Ref: "Other", Unbound: true},
+			},
+		},
+		{
+			// A name inside a union is not a reference: the union lowers to
+			// JsValue, which compiles whatever the union names.
+			name: "a union naming an absent name is kept",
+			src:  `interface A { attribute (Missing or DOMString) u; };`,
+			list: "A\nA.u\n",
+			resources: map[string][]string{
+				"A": {"A.u.get", "A.u.set"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// WindowProxy names Window, so with no Window bound the absent name
+			// is Window — never WindowProxy, which no definition defines.
+			name: "WindowProxy with no Window bound names Window",
+			src: `interface A {
+				readonly attribute WindowProxy? opener;
+				readonly attribute long ok;
+			};`,
+			list: "A\nA.opener\nA.ok\n",
+			resources: map[string][]string{
+				"A": {"A.ok.get"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "A.opener", Ref: "Window", Unbound: true},
+			},
+		},
+		{
+			// D keeps the unit m, so its ancestor P keeps P.m; P.m names an absent
+			// definition, so the unit is dropped down the chain as for a dropped
+			// one.
+			name: "an absent name drops a unit across the chain",
+			src: `interface P { Missing m(); };
+			interface D : P { undefined m(long a); };`,
+			list: "D\nD.m\n",
+			resources: map[string][]string{
+				"P": nil,
+				"D": nil,
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "P.m", Ref: "Missing", Unbound: true},
+				{What: "D.m", Ref: "Missing", Unbound: true},
+			},
 		},
 		{
 			// #612: D's m shadows P's, so it is numbered after it. Listing D.m

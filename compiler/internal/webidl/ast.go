@@ -14,10 +14,17 @@ type File struct {
 	PartialDicts []*PartialDictionary
 	Mixins       []*Mixin
 	Includes     []*IncludesStatement
+	// WindowAliases maps each identifier an interface's [LegacyWindowAlias]
+	// names to that interface's name: `SVGMatrix` to `DOMMatrix`. Merge sets it
+	// from the whole merged file; like Interface.Redeclared, nothing that later
+	// reduces the file clears it, so an alias still names its interface after a
+	// keep list drops that interface.
+	WindowAliases map[string]string
 }
 
 // Append adds every definition of src to f, after f's own, so Merge sees the
-// definitions of several parsed files as one file's.
+// definitions of several parsed files as one file's. WindowAliases is not a
+// definition: Merge sets it from the combined definitions afterwards.
 func (f *File) Append(src *File) {
 	f.Interfaces = append(f.Interfaces, src.Interfaces...)
 	f.Dictionaries = append(f.Dictionaries, src.Dictionaries...)

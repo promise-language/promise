@@ -2493,6 +2493,100 @@ func TestBindWebIdlKeepListInvocationErrors(t *testing.T) {
 	}
 }
 
+// TestBindWebIdlNamesOutsideIDLCompileClean is the end-to-end acceptance for
+// #722: CSSOMString, WindowProxy and the identifiers a [LegacyWindowAlias] names
+// — declared in one file as webref's geometry.idl declares them, used in
+// another — lower to what they name (docs/wasm-bindings.md, "Names defined
+// outside IDL") as an attribute type, a parameter, a nullable and a dictionary
+// field, and bind's self-check passes. Before the fix it failed with
+// `undefined type` for each of the three.
+func TestBindWebIdlNamesOutsideIDLCompileClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind self-check integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	geometryPath := filepath.Join(dir, "geometry.idl")
+	geometry := `[Exposed=(Window,Worker),
+ Serializable,
+ LegacyWindowAlias=SVGPoint]
+interface DOMPoint {
+  attribute unrestricted double x;
+};
+
+[Exposed=(Window,Worker),
+ Serializable,
+ LegacyWindowAlias=(SVGMatrix,WebKitCSSMatrix)]
+interface DOMMatrix {
+  readonly attribute unrestricted double a;
+};
+
+[Exposed=Window]
+interface Window {};
+`
+	if err := os.WriteFile(geometryPath, []byte(geometry), 0644); err != nil {
+		t.Fatal(err)
+	}
+	usePath := filepath.Join(dir, "use.idl")
+	use := `dictionary Opts {
+  CSSOMString text;
+  WindowProxy view;
+  required SVGMatrix transform;
+};
+
+[Exposed=Window]
+interface A {
+  attribute CSSOMString text;
+  readonly attribute WindowProxy? opener;
+  readonly attribute SVGMatrix m;
+  undefined use(CSSOMString s, CSSOMString? ns, WindowProxy w, SVGPoint p, WebKitCSSMatrix k);
+  SVGMatrix? getCTM();
+  SVGPoint? point();
+};
+`
+	if err := os.WriteFile(usePath, []byte(use), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	out, err := exec.Command(bin, "bind", "webidl", "-name", "probe", "-o", outDir, geometryPath, usePath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("bind webidl failed its self-check (want exit 0): %v\n%s", err, out)
+	}
+}
+
+// TestBindWebIdlWindowProxyWithoutWindow: WindowProxy names Window, so with no
+// Window bound the name left unresolved is Window — the definition to bind —
+// and WindowProxy appears nowhere in the report (#722).
+func TestBindWebIdlWindowProxyWithoutWindow(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind self-check integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "in.idl")
+	idl := "[Exposed=Window]\ninterface A {\n  readonly attribute WindowProxy? opener;\n};\n"
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bin, "bind", "webidl", "-name", "probe", "-o", filepath.Join(dir, "out"), idlPath).CombinedOutput()
+	if err == nil {
+		t.Fatalf("bind webidl succeeded with WindowProxy used and no Window bound (want it to fail)\n%s", out)
+	}
+	// The paths in the output carry this test's name, so match the reports.
+	if !strings.Contains(string(out), "undefined type: Window\n") {
+		t.Errorf("want the report to name Window, the definition WindowProxy names\noutput:\n%s", out)
+	}
+	if strings.Contains(string(out), "undefined type: WindowProxy") {
+		t.Errorf("the report names WindowProxy, which no definition defines; want only Window\noutput:\n%s", out)
+	}
+}
+
 // irFunctionBody returns the text of the first `define` whose signature contains
 // marker, up to the closing brace at column 0.
 func irFunctionBody(ir, marker string) (string, bool) {

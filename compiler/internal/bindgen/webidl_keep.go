@@ -94,8 +94,10 @@ type KeepDrop struct {
 // (convertWebIdlTypeRef), so a name inside a union, Promise<T> or record<K, V> —
 // each lowered to JsValue — is not one, and a use of a typedef names the
 // typedef, which the closure drops when its target names a dropped definition.
-// A name absent from the input is not a dropped definition: a declaration
-// naming it is left to fail to compile, as an unbound parent does.
+// A name defined outside IDL references what it names: WindowProxy is Window,
+// and a [LegacyWindowAlias] identifier its interface. A name absent from the
+// input is not a dropped definition: a declaration naming it is left to fail to
+// compile, as an unbound parent does.
 func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 	ifaces := interfacesByName(file)
 
@@ -122,7 +124,7 @@ func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 			if t == nil {
 				continue
 			}
-			if eachName(convertWebIdlTypeRef(t, nil), func(name string) bool {
+			if eachName(convertWebIdlTypeRef(t, nil, file.WindowAliases), func(name string) bool {
 				hit = name
 				return dropped[name]
 			}) {

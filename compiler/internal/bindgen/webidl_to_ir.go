@@ -235,7 +235,7 @@ func (c *webidlConverter) convertDictionary(d *webidl.Dictionary) (Type, error) 
 		for _, m := range chain[i].Members {
 			f := Field{
 				Name: idlToSnake(m.Name),
-				Type: convertWebIdlTypeRef(m.Type, c.typedefs),
+				Type: convertWebIdlTypeRef(m.Type, c.typedefs, c.file.WindowAliases),
 			}
 			if !m.Required {
 				// Optional dictionary members map to Option type
@@ -249,7 +249,7 @@ func (c *webidlConverter) convertDictionary(d *webidl.Dictionary) (Type, error) 
 }
 
 func (c *webidlConverter) convertTypedef(td *webidl.Typedef) Type {
-	ref := convertWebIdlTypeRef(td.Type, c.typedefs)
+	ref := convertWebIdlTypeRef(td.Type, c.typedefs, c.file.WindowAliases)
 	return Type{
 		Name:   td.Name,
 		Kind:   TypeAlias,
@@ -273,7 +273,7 @@ func typedefTargets(file *webidl.File) (map[string]*webidl.TypeRef, []error) {
 	// refers returns the typedefs the target of the typedef name refers to.
 	refers := func(name string) []string {
 		var names []string
-		eachName(convertWebIdlTypeRef(targets[name], nil), func(n string) bool {
+		eachName(convertWebIdlTypeRef(targets[name], nil, nil), func(n string) bool {
 			if _, ok := targets[n]; ok {
 				names = append(names, n)
 			}
@@ -348,7 +348,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 				Accessor:     AccessorGetter,
 				OwnerType:    iface.Name,
 				ImportName:   idlName + ".get",
-				Results:      []TypeRef{convertWebIdlTypeRef(m.Type, c.typedefs)},
+				Results:      []TypeRef{convertWebIdlTypeRef(m.Type, c.typedefs, c.file.WindowAliases)},
 				Doc:          doc,
 				ViaPrototype: viaPrototype,
 			}
@@ -368,7 +368,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 					Accessor:     AccessorSetter,
 					OwnerType:    iface.Name,
 					ImportName:   idlName + ".set",
-					Params:       []Param{{Name: "value", Type: convertWebIdlTypeRef(m.Type, c.typedefs)}},
+					Params:       []Param{{Name: "value", Type: convertWebIdlTypeRef(m.Type, c.typedefs, c.file.WindowAliases)}},
 					Doc:          doc,
 					ViaPrototype: viaPrototype,
 				}
@@ -407,7 +407,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 				Kind:       FuncStatic,
 				OwnerType:  iface.Name,
 				ImportName: idlName,
-				Results:    []TypeRef{convertWebIdlTypeRef(m.Type, c.typedefs)},
+				Results:    []TypeRef{convertWebIdlTypeRef(m.Type, c.typedefs, c.file.WindowAliases)},
 				Doc:        webidlDoc(m.Doc, "constant", idlName),
 			}
 			numberOverload(&f, names.declaredOnce(f))
@@ -640,7 +640,7 @@ func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operatio
 	for _, p := range op.Params {
 		param := Param{
 			Name: idlToSnake(p.Name),
-			Type: convertWebIdlTypeRef(p.Type, c.typedefs),
+			Type: convertWebIdlTypeRef(p.Type, c.typedefs, c.file.WindowAliases),
 		}
 		if p.Optional {
 			elem := param.Type
@@ -650,7 +650,7 @@ func (c *webidlConverter) convertOperation(ifaceName string, op *webidl.Operatio
 	}
 
 	if op.Return != nil && op.Return.Builtin != "void" && op.Return.Builtin != "undefined" {
-		f.Results = []TypeRef{convertWebIdlTypeRef(op.Return, c.typedefs)}
+		f.Results = []TypeRef{convertWebIdlTypeRef(op.Return, c.typedefs, c.file.WindowAliases)}
 	}
 
 	return f
@@ -693,7 +693,7 @@ func (c *webidlConverter) convertConstructor(ifaceName string, ctor *webidl.Cons
 	for _, p := range ctor.Params {
 		param := Param{
 			Name: idlToSnake(p.Name),
-			Type: convertWebIdlTypeRef(p.Type, c.typedefs),
+			Type: convertWebIdlTypeRef(p.Type, c.typedefs, c.file.WindowAliases),
 		}
 		if p.Optional {
 			elem := param.Type
@@ -710,8 +710,9 @@ func (c *webidlConverter) convertConstructor(ifaceName string, ctor *webidl.Cons
 // (docs/wasm-bindings.md, "WebIDL to Promise", typedefs). A use written nullable
 // over a target that is nullable already stays nullable once, as WebIDL forbids
 // a nullable of a nullable type. A nil typedefs lowers every name as written
-// (ApplyKeepList).
-func convertWebIdlTypeRef(ref *webidl.TypeRef, typedefs map[string]*webidl.TypeRef) TypeRef {
+// (ApplyKeepList). Any other name lowers through convertWebIdlName, aliases being
+// the merged file's File.WindowAliases.
+func convertWebIdlTypeRef(ref *webidl.TypeRef, typedefs map[string]*webidl.TypeRef, aliases map[string]string) TypeRef {
 	if ref == nil {
 		return TypeRef{Kind: BuiltinKind, Builtin: "void"}
 	}
@@ -723,21 +724,21 @@ func convertWebIdlTypeRef(ref *webidl.TypeRef, typedefs map[string]*webidl.TypeR
 		result = convertWebIdlBuiltin(ref.Builtin)
 	case webidl.NamedType:
 		if target, ok := typedefs[ref.Name]; ok {
-			result = convertWebIdlTypeRef(target, typedefs)
+			result = convertWebIdlTypeRef(target, typedefs, aliases)
 			if result.Kind == OptionKind {
 				return result
 			}
 		} else {
-			result = TypeRef{Kind: NamedKind, Name: ref.Name}
+			result = convertWebIdlName(ref.Name, aliases)
 		}
 	case webidl.SequenceType:
-		elem := convertWebIdlTypeRef(ref.Elem, typedefs)
+		elem := convertWebIdlTypeRef(ref.Elem, typedefs, aliases)
 		result = TypeRef{Kind: ListKind, Elem: &elem}
 	case webidl.FrozenArrayType:
-		elem := convertWebIdlTypeRef(ref.Elem, typedefs)
+		elem := convertWebIdlTypeRef(ref.Elem, typedefs, aliases)
 		result = TypeRef{Kind: ListKind, Elem: &elem}
 	case webidl.ObservableArrayType:
-		elem := convertWebIdlTypeRef(ref.Elem, typedefs)
+		elem := convertWebIdlTypeRef(ref.Elem, typedefs, aliases)
 		result = TypeRef{Kind: ListKind, Elem: &elem}
 	case webidl.PromiseType:
 		// Promise<T> → Named "JsValue" for now (tasks are separate)
@@ -759,6 +760,26 @@ func convertWebIdlTypeRef(ref *webidl.TypeRef, typedefs map[string]*webidl.TypeR
 	}
 
 	return result
+}
+
+// convertWebIdlName converts a name used as a type. A name that specification
+// prose or an extended attribute defines, rather than an IDL definition, lowers
+// to what it names (docs/wasm-bindings.md, "Names defined outside IDL"): CSSOM's
+// CSSOMString is a DOMString or a USVString at the implementation's choice,
+// HTML's WindowProxy is the proxy for a Window, and an identifier a
+// [LegacyWindowAlias] names (aliases) is the interface it annotates. Any other
+// name is its own.
+func convertWebIdlName(name string, aliases map[string]string) TypeRef {
+	switch name {
+	case "CSSOMString":
+		return convertWebIdlBuiltin("DOMString")
+	case "WindowProxy":
+		return TypeRef{Kind: NamedKind, Name: "Window"}
+	}
+	if iface, ok := aliases[name]; ok {
+		name = iface
+	}
+	return TypeRef{Kind: NamedKind, Name: name}
 }
 
 func convertWebIdlBuiltin(builtin string) TypeRef {

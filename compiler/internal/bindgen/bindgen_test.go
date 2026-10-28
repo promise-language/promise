@@ -4049,7 +4049,7 @@ func TestConvertWebIdlTypeRefComprehensive(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := convertWebIdlTypeRef(tt.ref, nil)
+			got := convertWebIdlTypeRef(tt.ref, nil, nil)
 			if got.Kind != tt.expect.Kind {
 				t.Errorf("kind = %d, want %d", got.Kind, tt.expect.Kind)
 			}

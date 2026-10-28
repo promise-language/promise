@@ -99,7 +99,8 @@ type KeepDrop struct {
 // which the closure drops when its target names a dropped definition. A name
 // defined outside IDL references what it names: WindowProxy is Window, and a
 // [LegacyWindowAlias] identifier its interface. A name no bound IDL file defines
-// (definedTypes) counts as a dropped definition, and its KeepDrop is Unbound.
+// (definedTypes), as a reference or as a dictionary's parent, counts as a
+// dropped definition, and its KeepDrop is Unbound.
 func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 	ifaces := interfacesByName(file)
 	defined := definedTypes(file)
@@ -143,7 +144,7 @@ func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 				continue
 			}
 			ref := ""
-			if d.Parent != "" && dropped[d.Parent] {
+			if d.Parent != "" && (dropped[d.Parent] || !defined[d.Parent]) {
 				ref = d.Parent
 			}
 			for _, m := range d.Members {

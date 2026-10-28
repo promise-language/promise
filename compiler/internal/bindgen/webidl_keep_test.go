@@ -432,6 +432,41 @@ func TestApplyKeepList(t *testing.T) {
 			},
 		},
 		{
+			// A dictionary carries its parent's members, so one whose parent no
+			// bound file defines is dropped as one whose parent the list drops
+			// (webref's DragEventInit : MouseEventInit).
+			name: "a dictionary inheriting from an absent name is dropped",
+			src: `dictionary D : Gone { long x; };
+			interface A { undefined use(optional D d = {}); undefined other(); };`,
+			list: "A\nA.use\nA.other\n",
+			resources: map[string][]string{
+				"A": {"A.other"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "dictionary D", Ref: "Gone", Unbound: true},
+				{What: "A.use", Ref: "D"},
+			},
+		},
+		{
+			// P is dropped for its absent parent; D, which inherits P's members,
+			// for P.
+			name: "an absent dictionary ancestor drops the chain below it",
+			src: `dictionary P : Gone { long a; };
+			dictionary D : P { long b; };
+			interface A { undefined use(D d); undefined other(); };`,
+			list: "A\nA.use\nA.other\n",
+			resources: map[string][]string{
+				"A": {"A.other"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "dictionary P", Ref: "Gone", Unbound: true},
+				{What: "dictionary D", Ref: "P"},
+				{What: "A.use", Ref: "D"},
+			},
+		},
+		{
 			name: "a typedef naming an absent name is dropped with its uses",
 			src: `typedef Missing M;
 			interface A { attribute M m; undefined other(); };`,

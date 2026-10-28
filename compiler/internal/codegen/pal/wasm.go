@@ -6,6 +6,8 @@ import (
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // WasmPAL implements PAL for WebAssembly using WASI (WebAssembly System Interface).
@@ -239,14 +241,14 @@ func emitWasmDebugAbortCall(module *ir.Module, blk *ir.Block, key, msg string, w
 			ir.NewParam("buf", irtypes.I8Ptr),
 			ir.NewParam("len", irtypes.I64))
 		envWrite.FuncAttrs = append(envWrite.FuncAttrs,
-			ir.AttrPair{Key: "wasm-import-module", Value: "promise_env"},
+			ir.AttrPair{Key: "wasm-import-module", Value: wasmweb.ImportModule},
 			ir.AttrPair{Key: "wasm-import-name", Value: "write"})
 
 		envExit := getOrDeclareFunc(module, "promise_env_exit", irtypes.Void,
 			ir.NewParam("code", irtypes.I32))
 		addFuncAttr(envExit, enum.FuncAttrNoReturn)
 		envExit.FuncAttrs = append(envExit.FuncAttrs,
-			ir.AttrPair{Key: "wasm-import-module", Value: "promise_env"},
+			ir.AttrPair{Key: "wasm-import-module", Value: wasmweb.ImportModule},
 			ir.AttrPair{Key: "wasm-import-name", Value: "exit"})
 
 		blk.NewCall(envWrite, stderrFd, msgPtr, constant.NewInt(irtypes.I64, int64(len(msg))))

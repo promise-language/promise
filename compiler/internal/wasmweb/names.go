@@ -15,14 +15,24 @@
 // See docs/web-apps.md §14.
 package wasmweb
 
+import (
+	"slices"
+	"strings"
+)
+
 // ImportModule is the WASM import module name the JS glue supplies. Every
 // promise_env.* import the runtime declares uses this as its module.
 const ImportModule = "promise_env"
 
-// Exports called by the host (JS → WASM). Both are registered with the linker
-// via --export= in buildWasmLinkArgs; adding a name here is not enough on its
-// own.
+// Exports called by the host (JS → WASM). A name added here must also be added
+// to Exports, which is what registers it with the linker.
 const (
+	// ExportInitialize is the reactor entry point codegen defines in place of
+	// _start: it initializes the runtime, runs main, and drains.
+	//
+	//	_initialize() -> void
+	ExportInitialize = "_initialize"
+
 	// ExportPump drains the scheduler within a budget and returns.
 	//
 	//	promise_web_pump() -> i32
@@ -42,6 +52,15 @@ const (
 	// EnqueueDropped.
 	ExportEnqueue = "promise_web_enqueue"
 )
+
+// Exports returns every host-called name above: buildWasmLinkArgs exports
+// exactly these. None is a symbol Promise code may bind — each is defined in
+// the raw shape the host calls, which no plain `extern lowers to — so sema
+// rejects an `extern naming one (IsExport).
+func Exports() []string { return []string{ExportInitialize, ExportPump, ExportEnqueue} }
+
+// IsExport reports whether sym is one of Exports.
+func IsExport(sym string) bool { return slices.Contains(Exports(), sym) }
 
 // Pump return codes (ExportPump).
 const (
@@ -91,6 +110,78 @@ const (
 	//	promise_web_subscription_dropped(sub_id: i32) -> i32
 	SubscriptionDroppedFunc = "promise_web_subscription_dropped"
 )
+
+// Param is one parameter of a registered signature. Type is the Promise source
+// spelling of the type ("i32", "Channel[i32]"); Name documents the parameter and
+// does not reach the ABI.
+type Param struct {
+	Type string
+	Name string
+}
+
+// Signature is the declaration a Promise `extern naming Sym must carry. Result
+// is "" for no result. WebOnly marks a symbol that exists only on wasm32-web.
+type Signature struct {
+	Sym     string
+	Params  []Param
+	Result  string
+	WebOnly bool
+}
+
+// String renders the signature as Promise declares it:
+// "(i32 capacity, i32 policy) i32", "(i32 sub_id)".
+func (s Signature) String() string {
+	var b strings.Builder
+	b.WriteByte('(')
+	for i, p := range s.Params {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(p.Type)
+		b.WriteByte(' ')
+		b.WriteString(p.Name)
+	}
+	b.WriteByte(')')
+	if s.Result != "" {
+		b.WriteByte(' ')
+		b.WriteString(s.Result)
+	}
+	return b.String()
+}
+
+// signatures is every symbol Promise code binds with `extern: the delivery
+// primitives above. Codegen defines each one, on wasm32-web only, in the shape
+// a plain `extern of exactly this signature calls, so a declaration with any
+// other signature would call it with the wrong shape. The exports are not
+// listed: no declaration binds one (Exports).
+var signatures = []Signature{
+	{Sym: SubscribeFunc, Params: []Param{{"i32", "capacity"}, {"i32", "policy"}}, Result: "i32", WebOnly: true},
+	{Sym: ChannelFunc, Params: []Param{{"i32", "sub_id"}}, Result: "Channel[i32]", WebOnly: true},
+	{Sym: UnsubscribeFunc, Params: []Param{{"i32", "sub_id"}}, WebOnly: true},
+	{Sym: SubscriptionDroppedFunc, Params: []Param{{"i32", "sub_id"}}, Result: "i32", WebOnly: true},
+}
+
+// Signatures returns every registered signature. The result is a copy;
+// mutating it does not change the registry.
+func Signatures() []Signature {
+	out := make([]Signature, len(signatures))
+	for i, s := range signatures {
+		s.Params = append([]Param(nil), s.Params...)
+		out[i] = s
+	}
+	return out
+}
+
+// Lookup returns the registered signature of sym.
+func Lookup(sym string) (Signature, bool) {
+	for _, s := range signatures {
+		if s.Sym == sym {
+			s.Params = append([]Param(nil), s.Params...)
+			return s, true
+		}
+	}
+	return Signature{}, false
+}
 
 // Queue overflow policies (§8.1), selected per subscription at subscribe
 // time.

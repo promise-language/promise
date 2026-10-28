@@ -16,6 +16,7 @@ import (
 	"github.com/promise-language/promise/compiler/internal/ast"
 	"github.com/promise-language/promise/compiler/internal/sema"
 	"github.com/promise-language/promise/compiler/internal/types"
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // formatDurationNs formats a nanosecond duration as a human-readable string
@@ -2254,7 +2255,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	if c.isWasm {
 		entryName := "_start"
 		if c.isWasmWeb {
-			entryName = "_initialize"
+			entryName = wasmweb.ExportInitialize
 		}
 		hasEntry := false
 		for _, f := range c.module.Funcs {

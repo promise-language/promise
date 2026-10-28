@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 func TestIsWasmWebTarget(t *testing.T) {
@@ -38,7 +40,7 @@ func TestEmbeddedWasmWebHarnessNonEmpty(t *testing.T) {
 	// Sanity-check that the harness references the imports the wasm32-web PAL
 	// produces. If the harness is rewritten without these names, tests will
 	// trap on instantiate.
-	for _, needle := range []string{"promise_env", "_initialize"} {
+	for _, needle := range []string{wasmweb.ImportModule, wasmweb.ExportInitialize} {
 		if !strings.Contains(string(embeddedWasmWebHarness), needle) {
 			t.Errorf("harness does not reference %q — wasm32-web binaries will not run", needle)
 		}

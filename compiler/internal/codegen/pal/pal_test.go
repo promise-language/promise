@@ -9,6 +9,8 @@ import (
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 func TestPosixPALEmitWrite(t *testing.T) {
@@ -1835,7 +1837,7 @@ func TestWasmWebFileReadStdinIsEOF(t *testing.T) {
 
 	// No host import: the EOF answer is decided in the module, so it needs no
 	// cooperation from the JS glue and cannot LinkError on a missing import.
-	if strings.Contains(out, "promise_env") {
+	if strings.Contains(out, wasmweb.ImportModule) {
 		t.Error("wasm32-web pal_file_read should not require a promise_env import")
 	}
 }

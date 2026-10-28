@@ -5,6 +5,7 @@ import (
 
 	"github.com/promise-language/promise/compiler/internal/ast"
 	"github.com/promise-language/promise/compiler/internal/types"
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // MetaTarget represents the kind of declaration a meta annotation is attached to.
@@ -638,6 +639,110 @@ func (c *Checker) exprMentionsWasm(expr ast.Expr) bool {
 		return c.exprMentionsWasm(e.Left) || c.exprMentionsWasm(e.Right)
 	}
 	return false
+}
+
+// validateWasmWebExtern checks a declaration that binds one of the wasm32-web
+// reactor symbols internal/wasmweb registers against that symbol's signature,
+// rejects a wasm32-web-only symbol that survived target filtering for any
+// other target, and rejects any declaration of a host export (docs/web-apps.md
+// "One name one definition"). It covers exactly the declarations codegen's
+// collectExterns binds — every body-less module-level function, with or
+// without an explicit `extern symbol — so no declaration reaches a registered
+// symbol unchecked.
+func (c *Checker) validateWasmWebExtern(d *ast.FuncDecl, sig *types.Signature) {
+	if d.Body != nil || sig == nil {
+		return
+	}
+	sym := ExternSymbol(d)
+	pos := d.Pos()
+	if ann := c.findAnnotation(d.Annotations, "extern"); ann != nil {
+		pos = ann.Pos()
+	}
+	// An export is the host's to call: a declaration would call the pump or
+	// enqueue, defined in the raw shape, in the bridge shape (invalid IR), or
+	// re-enter _initialize.
+	if wasmweb.IsExport(sym) {
+		c.errorf(pos, "`%s` is a wasm32-web export the host calls; Promise code cannot bind it with `extern", sym)
+		return
+	}
+	want, ok := wasmweb.Lookup(sym)
+	if !ok {
+		return
+	}
+	if !wasmWebSignatureMatches(sig, want) {
+		c.errorf(pos, "`extern(%q) must be declared %s", sym, want)
+	}
+	if want.WebOnly && c.filtersByTarget() && !c.matchTargetIdent("web") {
+		c.errorf(pos, "`%s` exists only on wasm32-web; gate the declaration with `target(web)", sym)
+	}
+}
+
+// wasmWebSignatureMatches reports whether sig is exactly want: same arity, each
+// parameter of the identical type passed by value, the identical result, and
+// neither failable nor generic. Parameter names are not compared — they never
+// reach the ABI.
+func wasmWebSignatureMatches(sig *types.Signature, want wasmweb.Signature) bool {
+	if sig.CanError() || len(sig.TypeParams()) > 0 || len(sig.Params()) != len(want.Params) {
+		return false
+	}
+	for i, p := range sig.Params() {
+		if p.Ref() != types.RefNone || p.IsVariadic() || !types.Identical(p.Type(), wasmWebType(want.Params[i].Type)) {
+			return false
+		}
+	}
+	result := sig.Result()
+	if result != nil && types.Identical(result, types.TypVoid) {
+		result = nil
+	}
+	if want.Result == "" {
+		return result == nil
+	}
+	return result != nil && types.Identical(result, wasmWebType(want.Result))
+}
+
+// wasmWebType resolves a wasmweb type spelling — `name` or `name[arg]` —
+// through the universe scope, so the registry's spellings mean exactly what the
+// same text means in Promise source. It returns nil for a spelling the universe
+// does not define, which then matches no declaration.
+func wasmWebType(spelling string) types.Type {
+	name, arg, generic := strings.Cut(spelling, "[")
+	tn, ok := types.Universe.Lookup(name).(*types.TypeName)
+	if !ok {
+		return nil
+	}
+	if !generic {
+		return tn.Type()
+	}
+	argType := wasmWebType(strings.TrimSuffix(arg, "]"))
+	if argType == nil {
+		return nil
+	}
+	return types.NewInstance(tn.Type(), []types.Type{argType})
+}
+
+// ExternSymbol returns the symbol a body-less function declaration binds — the
+// one definition shared by codegen's collectExterns and the sema extern checks.
+// If the `extern annotation has a string parameter, that is the symbol.
+// Otherwise, defaults to "promise_" + funcName.
+func ExternSymbol(fd *ast.FuncDecl) string {
+	for _, ann := range fd.Annotations {
+		if ann.Name == "extern" && len(ann.Params) > 0 {
+			sl, ok := ann.Params[0].Value.(*ast.StringLit)
+			if !ok {
+				continue
+			}
+			var s string
+			for _, p := range sl.Parts {
+				if t, ok := p.(ast.StringText); ok {
+					s += t.Text
+				}
+			}
+			if s != "" {
+				return s
+			}
+		}
+	}
+	return "promise_" + fd.Name
 }
 
 // ExtractWasmImport extracts the module and import name from a `wasm_import annotation.

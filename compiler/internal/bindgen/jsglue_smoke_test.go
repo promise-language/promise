@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // requireNode skips the test if Node.js isn't on PATH — these tests exercise
@@ -73,13 +75,13 @@ func buildSmokeWasmModule(exitCode byte) []byte {
 	// Import section: write (type 1) = func 0, exit (type 0) = func 1,
 	// monotonic_nanos (type 2) = func 2.
 	importSec := []byte{0x03}
-	importSec = append(importSec, nameBytes("promise_env")...)
+	importSec = append(importSec, nameBytes(wasmweb.ImportModule)...)
 	importSec = append(importSec, nameBytes("write")...)
 	importSec = append(importSec, 0x00, 0x01)
-	importSec = append(importSec, nameBytes("promise_env")...)
+	importSec = append(importSec, nameBytes(wasmweb.ImportModule)...)
 	importSec = append(importSec, nameBytes("exit")...)
 	importSec = append(importSec, 0x00, 0x00)
-	importSec = append(importSec, nameBytes("promise_env")...)
+	importSec = append(importSec, nameBytes(wasmweb.ImportModule)...)
 	importSec = append(importSec, nameBytes("monotonic_nanos")...)
 	importSec = append(importSec, 0x00, 0x02)
 	buf = append(buf, section(2, importSec)...)
@@ -95,7 +97,7 @@ func buildSmokeWasmModule(exitCode byte) []byte {
 	exportSec := []byte{0x02}
 	exportSec = append(exportSec, nameBytes("memory")...)
 	exportSec = append(exportSec, 0x02, 0x00)
-	exportSec = append(exportSec, nameBytes("_initialize")...)
+	exportSec = append(exportSec, nameBytes(wasmweb.ExportInitialize)...)
 	exportSec = append(exportSec, 0x00, 0x03)
 	buf = append(buf, section(7, exportSec)...)
 
@@ -268,7 +270,7 @@ func smokeLoaders() []smokeLoader {
 // free functions) — the minimal glue shape that still needs the base PAL
 // imports.
 func glueSmokeLoader() smokeLoader {
-	modules := []*Module{{Name: "test", ImportModule: "promise_env"}}
+	modules := []*Module{{Name: "test", ImportModule: wasmweb.ImportModule}}
 	return smokeLoader{name: "glue", js: GenerateJSGlue(modules), initArgs: []string{"frontend.wasm"}}
 }
 

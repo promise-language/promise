@@ -91,13 +91,20 @@ func ParseTargetInfo(triple string) TargetInfo {
 	return ti
 }
 
+// filtersByTarget reports whether c.target is known, so `target(cond)
+// filtering is in effect. The zero TargetInfo (unknown target, or a test
+// context) filters nothing.
+func (c *Checker) filtersByTarget() bool {
+	return c.target.OS != "" || c.target.Arch != ""
+}
+
 // matchesTarget returns true if the declaration should be compiled for the current target.
 // Returns true when:
 //   - c.target is zero (no filtering — unknown target or test context)
 //   - the declaration has no `target annotation
 //   - the declaration's `target(cond)` condition evaluates to true
 func (c *Checker) matchesTarget(annotations []*ast.MetaAnnotation) bool {
-	if c.target.OS == "" && c.target.Arch == "" {
+	if !c.filtersByTarget() {
 		return true // zero target = no filtering
 	}
 	for _, ann := range annotations {

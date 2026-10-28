@@ -141,10 +141,10 @@ func TestWasmLinkWebTargetExportsWebPump(t *testing.T) {
 // TestWasmLinkWebTargetExportsWebEnqueue verifies that the wasm32-web target
 // exports promise_web_enqueue — the entry point a real addEventListener
 // callback calls to push one event into a subscription's channel (§8, §14)
-// — and that wasm32-wasi does not. wasmweb/names.go's own comment on
-// ExportEnqueue warns that declaring the name there is not enough on its
-// own; this regression-tests the --export= flag that actually makes it
-// reachable from JS (without it, defineWebEnqueueFunc's body is defined but
+// — and that wasm32-wasi does not. Declaring the name in wasmweb is not
+// enough on its own; this regression-tests the --export= flag, from
+// wasmweb.Exports, that actually makes it reachable from JS (without it,
+// defineWebEnqueueFunc's body is defined but
 // wasm-ld strips it as unreferenced, and no event can ever be delivered).
 func TestWasmLinkWebTargetExportsWebEnqueue(t *testing.T) {
 	webArgs, err := buildWasmLinkArgs([]string{"dummy.o"}, "wasm32-web", "out.wasm", true)

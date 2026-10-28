@@ -12,6 +12,7 @@ import (
 	"github.com/llir/llvm/ir/value"
 
 	"github.com/promise-language/promise/compiler/internal/types"
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // definePALBodies adds LLVM IR function bodies to print/panic functions that were
@@ -651,7 +652,7 @@ func (c *Compiler) getOrDeclareWasmImport(name, importMod, importName string, re
 func (c *Compiler) emitWasmMonotonicNanos(blk *ir.Block) value.Value {
 	if c.isWasmWeb {
 		monoFn := c.getOrDeclareWasmImport("promise_env.monotonic_nanos",
-			"promise_env", "monotonic_nanos", irtypes.I64)
+			wasmweb.ImportModule, "monotonic_nanos", irtypes.I64)
 		return blk.NewCall(monoFn)
 	}
 	return c.emitWasiClockTimeGet(blk, wasmClockMonotonic)

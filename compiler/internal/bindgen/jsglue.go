@@ -5,6 +5,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // GenerateJSGlue generates the companion JavaScript file that implements the
@@ -345,7 +347,7 @@ func (g *jsGlueGenerator) emitImportObject(modules []*Module) {
 	for _, m := range modules {
 		g.writef("  %s: {\n", m.ImportModule)
 
-		if m.ImportModule == "promise_env" {
+		if m.ImportModule == wasmweb.ImportModule {
 			g.emitBasePromiseEnvImports()
 		}
 

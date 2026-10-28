@@ -1,8 +1,12 @@
 package codegen
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // Tests for wasm32-web delivery (docs/web-apps.md §7, §8, §8.1,
@@ -43,8 +47,8 @@ func TestWasmWebSubscriptionTableExists(t *testing.T) {
 func TestWasmWebDeliveryAbsentOnWasi(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-wasi")
 	assertNotContains(t, ir, "promise_web_subscriptions")
-	assertNotContains(t, ir, "promise_web_subscribe")
-	assertNotContains(t, ir, "promise_web_enqueue")
+	assertNotContains(t, ir, wasmweb.SubscribeFunc)
+	assertNotContains(t, ir, wasmweb.ExportEnqueue)
 }
 
 // promise_web_enqueue is exported with the documented signature (§14):
@@ -52,7 +56,7 @@ func TestWasmWebDeliveryAbsentOnWasi(t *testing.T) {
 func TestWebEnqueueExportSignature(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
 	assertContains(t, ir, "define i32 @promise_web_enqueue(i32")
-	enqueueFn := extractDefine(ir, "promise_web_enqueue")
+	enqueueFn := extractDefine(ir, wasmweb.ExportEnqueue)
 	if enqueueFn == "" {
 		t.Fatalf("expected @promise_web_enqueue to be defined\ngot:\n%s", ir)
 	}
@@ -66,7 +70,7 @@ func TestWebEnqueueExportSignature(t *testing.T) {
 // branch on bounds/active state rather than index unconditionally.
 func TestWebEnqueueBoundsChecksBeforeIndexing(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
-	enqueueFn := extractDefine(ir, "promise_web_enqueue")
+	enqueueFn := extractDefine(ir, wasmweb.ExportEnqueue)
 	if enqueueFn == "" {
 		t.Fatalf("expected @promise_web_enqueue to be defined\ngot:\n%s", ir)
 	}
@@ -85,7 +89,7 @@ func TestWebEnqueueBoundsChecksBeforeIndexing(t *testing.T) {
 // the subscription's stored policy field.
 func TestWebEnqueueDispatchesAllThreePolicies(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
-	enqueueFn := extractDefine(ir, "promise_web_enqueue")
+	enqueueFn := extractDefine(ir, wasmweb.ExportEnqueue)
 	if enqueueFn == "" {
 		t.Fatalf("expected @promise_web_enqueue to be defined\ngot:\n%s", ir)
 	}
@@ -109,7 +113,7 @@ func TestWebEnqueueDispatchesAllThreePolicies(t *testing.T) {
 // (channelStructType), so this arithmetic happens at i64, not i32.
 func TestWebEnqueueWrapsRingIndices(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
-	enqueueFn := extractDefine(ir, "promise_web_enqueue")
+	enqueueFn := extractDefine(ir, wasmweb.ExportEnqueue)
 	if enqueueFn == "" {
 		t.Fatalf("expected @promise_web_enqueue to be defined\ngot:\n%s", ir)
 	}
@@ -124,7 +128,7 @@ func TestWebEnqueueWrapsRingIndices(t *testing.T) {
 // than any invented wait/wake primitive.
 func TestWebEnqueueWakesChannelRecvWaiters(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
-	enqueueFn := extractDefine(ir, "promise_web_enqueue")
+	enqueueFn := extractDefine(ir, wasmweb.ExportEnqueue)
 	if enqueueFn == "" {
 		t.Fatalf("expected @promise_web_enqueue to be defined\ngot:\n%s", ir)
 	}
@@ -143,7 +147,7 @@ func TestWebEnqueueWakesChannelRecvWaiters(t *testing.T) {
 // TestWebEnqueueNeverAllocates below).
 func TestWebSubscribeAllocatesChannel(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
-	subscribeFn := extractDefine(ir, "promise_web_subscribe")
+	subscribeFn := extractDefine(ir, wasmweb.SubscribeFunc)
 	if subscribeFn == "" {
 		t.Fatalf("expected @promise_web_subscribe to be defined\ngot:\n%s", ir)
 	}
@@ -174,7 +178,7 @@ func TestWebChannelFuncExists(t *testing.T) {
 // underneath it at all (§14).
 func TestWebEnqueueNeverAllocates(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
-	enqueueFn := extractDefine(ir, "promise_web_enqueue")
+	enqueueFn := extractDefine(ir, wasmweb.ExportEnqueue)
 	if enqueueFn == "" {
 		t.Fatalf("expected @promise_web_enqueue to be defined\ngot:\n%s", ir)
 	}
@@ -190,7 +194,7 @@ func TestWebEnqueueNeverAllocates(t *testing.T) {
 // value owns that; web.pr calls unsubscribe before that value drops).
 func TestWebUnsubscribeClearsSlotAndDecrementsLiveness(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
-	unsubscribeFn := extractDefine(ir, "promise_web_unsubscribe")
+	unsubscribeFn := extractDefine(ir, wasmweb.UnsubscribeFunc)
 	if unsubscribeFn == "" {
 		t.Fatalf("expected @promise_web_unsubscribe to be defined\ngot:\n%s", ir)
 	}
@@ -199,5 +203,58 @@ func TestWebUnsubscribeClearsSlotAndDecrementsLiveness(t *testing.T) {
 	}
 	if !strings.Contains(unsubscribeFn, "@promise_web_live_registrations") {
 		t.Errorf("expected promise_web_unsubscribe to touch promise_web_live_registrations\ngot:\n%s", unsubscribeFn)
+	}
+}
+
+// The registry in internal/wasmweb is the contract sema enforces on every
+// `extern naming a delivery primitive (T2234). It is sound only if a
+// declaration of exactly the registered signature calls codegen's definition in
+// the definition's own shape: declare and call every registered symbol on
+// wasm32-web, then require each call's return and argument types to equal the
+// definition's.
+func TestWasmWebRegisteredSignaturesMatchDefinitions(t *testing.T) {
+	args := map[string]string{"i32": "0i32"}
+	var decls, calls strings.Builder
+	for i, s := range wasmweb.Signatures() {
+		fmt.Fprintf(&decls, "_w%d%s `extern(%q);\n", i, s, s.Sym)
+		var callArgs []string
+		for _, p := range s.Params {
+			a, ok := args[p.Type]
+			if !ok {
+				t.Fatalf("%s: no test argument for parameter type %s — add one", s.Sym, p.Type)
+			}
+			callArgs = append(callArgs, a)
+		}
+		fmt.Fprintf(&calls, "  _w%d(%s);\n", i, strings.Join(callArgs, ", "))
+	}
+	ir := generateIRForTarget(t, decls.String()+"main() {\n"+calls.String()+"}\n", "wasm32-web")
+
+	// shape is the return type and parameter types of one define or call.
+	shape := func(ret, list string) string {
+		var types []string
+		for _, p := range strings.Split(list, ",") {
+			if f := strings.Fields(p); len(f) > 0 {
+				types = append(types, f[0])
+			}
+		}
+		return ret + " (" + strings.Join(types, ", ") + ")"
+	}
+	for _, s := range wasmweb.Signatures() {
+		sym := regexp.QuoteMeta(s.Sym)
+		def := regexp.MustCompile(`(?m)^define (?:\w+ )*?(\S+) @` + sym + `\(([^)]*)\)`).FindStringSubmatch(ir)
+		if def == nil {
+			t.Errorf("%s is registered but not defined on wasm32-web", s.Sym)
+			continue
+		}
+		want := shape(def[1], def[2])
+		uses := regexp.MustCompile(`call (\S+) @`+sym+`\(([^)]*)\)`).FindAllStringSubmatch(ir, -1)
+		if len(uses) == 0 {
+			t.Errorf("%s: no call emitted for the registered declaration", s.Sym)
+		}
+		for _, u := range uses {
+			if got := shape(u[1], u[2]); got != want {
+				t.Errorf("%s: a declaration of %s calls it as %s, but it is defined as %s", s.Sym, s, got, want)
+			}
+		}
 	}
 }

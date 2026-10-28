@@ -5,6 +5,8 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
+
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // WasmWebPAL implements PAL for WebAssembly targeting browser environments.
@@ -24,7 +26,7 @@ func (p *WasmWebPAL) EmitWrite(module *ir.Module) *ir.Func {
 		ir.NewParam("buf", irtypes.I8Ptr),
 		ir.NewParam("len", irtypes.I64))
 	envWrite.FuncAttrs = append(envWrite.FuncAttrs,
-		ir.AttrPair{Key: "wasm-import-module", Value: "promise_env"},
+		ir.AttrPair{Key: "wasm-import-module", Value: wasmweb.ImportModule},
 		ir.AttrPair{Key: "wasm-import-name", Value: "write"})
 
 	// define i64 @pal_write(i32 %fd, i8* %buf, i64 %len)
@@ -47,7 +49,7 @@ func (p *WasmWebPAL) EmitExit(module *ir.Module) *ir.Func {
 		ir.NewParam("code", irtypes.I32))
 	addFuncAttr(envExit, enum.FuncAttrNoReturn)
 	envExit.FuncAttrs = append(envExit.FuncAttrs,
-		ir.AttrPair{Key: "wasm-import-module", Value: "promise_env"},
+		ir.AttrPair{Key: "wasm-import-module", Value: wasmweb.ImportModule},
 		ir.AttrPair{Key: "wasm-import-name", Value: "exit"})
 
 	// define void @pal_exit(i32 %code) noreturn
@@ -291,7 +293,7 @@ func (p *WasmWebPAL) EmitCryptoRandomBytes(module *ir.Module) *ir.Func {
 		ir.NewParam("buf", irtypes.I8Ptr),
 		ir.NewParam("len", irtypes.I32))
 	envRandom.FuncAttrs = append(envRandom.FuncAttrs,
-		ir.AttrPair{Key: "wasm-import-module", Value: "promise_env"},
+		ir.AttrPair{Key: "wasm-import-module", Value: wasmweb.ImportModule},
 		ir.AttrPair{Key: "wasm-import-name", Value: "random_bytes"})
 
 	fn := module.NewFunc("pal_crypto_random_bytes", irtypes.I32,

@@ -1566,6 +1566,8 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 
 	// Validate `wasm_import annotation
 	c.validateWasmImport(d)
+	// Validate a declaration binding a wasm32-web reactor symbol
+	c.validateWasmWebExtern(d, sig)
 
 	// Handle `embed annotation on getters
 	if embedPath, hasEmbed := extractEmbedPath(d.Annotations); hasEmbed {

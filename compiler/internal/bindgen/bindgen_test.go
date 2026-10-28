@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 	"github.com/promise-language/promise/compiler/internal/webidl"
 	"github.com/promise-language/promise/compiler/internal/wit"
 )
@@ -393,7 +394,7 @@ func TestCodegenResourceReturn(t *testing.T) {
 	// Non-canonical: method returning a resource type must construct from i32 handle.
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Document",
 			Drop: true,
@@ -418,7 +419,7 @@ func TestCodegenOptionalResourceReturn(t *testing.T) {
 	// Non-canonical: method returning optional resource checks handle == 0.
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Document",
 			Drop: true,
@@ -443,7 +444,7 @@ func TestCodegenResourceParam(t *testing.T) {
 	// Non-canonical: method taking a resource param passes ._handle to extern.
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Node",
 			Drop: true,
@@ -3144,7 +3145,7 @@ func TestWebIdlToIRInterface(t *testing.T) {
 		t.Fatalf("expected 1 module, got %d", len(modules))
 	}
 	m := modules[0]
-	if m.ImportModule != "promise_env" {
+	if m.ImportModule != wasmweb.ImportModule {
 		t.Errorf("expected import module 'promise_env', got %q", m.ImportModule)
 	}
 	if len(m.Resources) != 1 {
@@ -3557,7 +3558,7 @@ func TestWebIdlToIRMergedPartials(t *testing.T) {
 func TestGenerateJSGlueRefTable(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 	}}
 	out := GenerateJSGlue(modules)
 	assertContains(t, out, "function _refStore(obj)")
@@ -3568,7 +3569,7 @@ func TestGenerateJSGlueRefTable(t *testing.T) {
 func TestGenerateJSGlueStringHelpers(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 	}}
 	out := GenerateJSGlue(modules)
 	assertContains(t, out, "function _readString(ptr, len)")
@@ -3581,7 +3582,7 @@ func TestGenerateJSGlueStringHelpers(t *testing.T) {
 func TestGenerateJSGlueResourceDrop(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Element",
 			Drop: true,
@@ -3595,7 +3596,7 @@ func TestGenerateJSGlueResourceDrop(t *testing.T) {
 func TestGenerateJSGlueMethodImport(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Element",
 			Drop: true,
@@ -3624,7 +3625,7 @@ func stringResultModules() []*Module {
 	str := TypeRef{Kind: BuiltinKind, Builtin: "string"}
 	return []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Element",
 			Drop: true,
@@ -3679,7 +3680,7 @@ func TestGenerateJSGlueStringResultTrailingRetptr(t *testing.T) {
 func TestGenerateJSGlueConstructor(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Image",
 			Drop: true,
@@ -3702,12 +3703,12 @@ func TestGenerateJSGlueConstructor(t *testing.T) {
 func TestGenerateJSGlueInstantiation(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 	}}
 	out := GenerateJSGlue(modules)
 	assertContains(t, out, "WebAssembly.instantiateStreaming")
 	assertContains(t, out, "export async function init(wasmPath)")
-	assertContains(t, out, "_initialize")
+	assertContains(t, out, wasmweb.ExportInitialize)
 }
 
 // TestGenerateJSGlueInstantiationCatchesExitUnwind verifies init() wraps
@@ -3722,7 +3723,7 @@ func TestGenerateJSGlueInstantiation(t *testing.T) {
 func TestGenerateJSGlueInstantiationCatchesExitUnwind(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 	}}
 	out := GenerateJSGlue(modules)
 	assertContains(t, out, "class _ExitSignal")
@@ -3741,7 +3742,7 @@ func TestGenerateJSGlueInstantiationCatchesExitUnwind(t *testing.T) {
 func TestGenerateJSGluePromiseEnvImportsPresent(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 	}}
 	out := GenerateJSGlue(modules)
 	for _, want := range []string{"write(fd, ptr, len)", "exit(code)", "monotonic_nanos()"} {
@@ -3797,7 +3798,7 @@ func TestWebIdlEndToEnd(t *testing.T) {
 
 	// Generate JS glue
 	jsCode := GenerateJSGlue(modules)
-	if !strings.Contains(jsCode, "promise_env") {
+	if !strings.Contains(jsCode, wasmweb.ImportModule) {
 		t.Error("JS glue should reference promise_env import module")
 	}
 	if !strings.Contains(jsCode, `"[resource-drop]console"`) {
@@ -4116,7 +4117,7 @@ func TestConvertWebIdlBuiltinComprehensive(t *testing.T) {
 func TestGenerateJSGlueStaticMethod(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Math",
 			Drop: true,
@@ -4137,7 +4138,7 @@ func TestGenerateJSGlueStaticMethod(t *testing.T) {
 func TestGenerateJSGlueFreeFunc(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Functions: []Func{{
 			Name:       "alert",
 			Kind:       FuncFree,
@@ -4154,7 +4155,7 @@ func TestGenerateJSGlueFreeFunc(t *testing.T) {
 func TestGenerateJSGlueRefReturnType(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Document",
 			Drop: true,
@@ -4175,7 +4176,7 @@ func TestGenerateJSGlueRefReturnType(t *testing.T) {
 func TestGenerateJSGlueAttributeSetter(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Element",
 			Drop: true,
@@ -4208,7 +4209,7 @@ func TestGenerateJSGlueAttributeSetter(t *testing.T) {
 func TestGenerateJSGlueRefParam(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Node",
 			Drop: true,
@@ -4282,7 +4283,7 @@ func TestWebIdlArgNameCannotSpellGlueName(t *testing.T) {
 func TestGenerateJSGlueVoidReturnMethod(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Console",
 			Drop: true,
@@ -4305,7 +4306,7 @@ func TestGenerateJSGlueOptionalParam(t *testing.T) {
 	elem := TypeRef{Kind: BuiltinKind, Builtin: "s32"}
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Foo",
 			Drop: true,
@@ -4326,7 +4327,7 @@ func TestGenerateJSGlueOptionalParam(t *testing.T) {
 func TestGenerateJSGlueStringReturn(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Element",
 			Drop: true,
@@ -4347,7 +4348,7 @@ func TestGenerateJSGlueStringReturn(t *testing.T) {
 func TestGenerateJSGlueMethodNoImportName(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Foo",
 			Drop: true,
@@ -4367,7 +4368,7 @@ func TestGenerateJSGlueMethodNoImportName(t *testing.T) {
 func TestGenerateJSGlueNoDrop(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "ReadOnly",
 			Drop: false, // no drop function
@@ -4740,7 +4741,7 @@ func TestCodegenMethodWrapperOptionBuiltinParam(t *testing.T) {
 	optString := TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "string"}}
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Element",
 			Methods: []Func{{
@@ -4769,7 +4770,7 @@ func TestEmitGetterSetterFailable(t *testing.T) {
 	stringErr := TypeRef{Kind: BuiltinKind, Builtin: "string"}
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Element",
 			Drop: false,
@@ -5100,7 +5101,7 @@ func TestFormatExternReturnTypeMultiple(t *testing.T) {
 func TestGenerateJSGlueFreeFuncNoImportName(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Functions: []Func{{
 			Name: "do_thing",
 			Kind: FuncFree,
@@ -5115,7 +5116,7 @@ func TestGenerateJSGlueFreeFuncNoImportName(t *testing.T) {
 func TestGenerateJSGlueNullableStringReturn(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Storage",
 			Drop: true,
@@ -5458,7 +5459,7 @@ func TestCodegenConstructorWrapperMarksOwned(t *testing.T) {
 func TestCodegenBorrowFactoryNameCollision(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Slot",
 			Drop: true,
@@ -5501,7 +5502,7 @@ func TestCodegenBorrowFactoryNameNoFalseCollision(t *testing.T) {
 // from the seed list rather than repeated as a literal, so adding a fourth
 // ambient reference cannot leave it releasable.
 func TestGenerateJSGlueSeedsAmbientHandlesDeterministically(t *testing.T) {
-	js := GenerateJSGlue([]*Module{{Name: "test", ImportModule: "promise_env"}})
+	js := GenerateJSGlue([]*Module{{Name: "test", ImportModule: wasmweb.ImportModule}})
 	assertContains(t, js, "const _ambientRefs = [\n"+
 		`  typeof globalThis !== "undefined" ? globalThis : undefined,`+"\n"+
 		`  typeof document !== "undefined" ? document : undefined,`+"\n"+
@@ -5528,7 +5529,7 @@ func TestGenerateJSGlueSeedsAmbientHandlesDeterministically(t *testing.T) {
 func TestCodegenCreateFactoryNameCollision(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{{
 			Name: "Slot",
 			Drop: true,
@@ -5671,7 +5672,7 @@ func TestCodegenFactoryNameInheritedMemberKinds(t *testing.T) {
 func TestCodegenBorrowFactoryNameIsPerResource(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 		Resources: []Resource{
 			{Name: "Slot", Drop: true, Methods: []Func{
 				{Name: "borrow", Kind: FuncMethod, Results: []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}}, ImportName: "Slot.borrow"},
@@ -5737,7 +5738,7 @@ func TestCodegenResourceOwnershipShapeCanonicalABI(t *testing.T) {
 // for the same three objects. At module scope it runs exactly once, before any
 // import can observe the table.
 func TestGenerateJSGlueSeedsBeforeInit(t *testing.T) {
-	js := GenerateJSGlue([]*Module{{Name: "test", ImportModule: "promise_env"}})
+	js := GenerateJSGlue([]*Module{{Name: "test", ImportModule: wasmweb.ImportModule}})
 	seed := strings.Index(js, "for (const _ambient of _ambientRefs) _refStore(_ambient);")
 	if seed < 0 {
 		t.Fatal("ambient seeding loop not emitted")

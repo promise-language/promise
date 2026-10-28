@@ -1,6 +1,10 @@
 package bindgen
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
+)
 
 // #684: a derived wrapper is an `is` child of its parent, so an instance member
 // an ancestor declares under a factory's name is a slot the child's `global
@@ -157,7 +161,7 @@ func TestCodegenFactoryNameAncestorChainEnds(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := GeneratePromise([]*Module{{Name: "test", ImportModule: "promise_env", Resources: tc.resources}}, "web")
+			out := GeneratePromise([]*Module{{Name: "test", ImportModule: wasmweb.ImportModule, Resources: tc.resources}}, "web")
 			for _, want := range tc.want {
 				assertContains(t, out, want)
 			}

@@ -3,6 +3,8 @@ package codegen
 import (
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // Tests for the wasm32-web reactor top level (docs/web-apps.md §4,
@@ -31,9 +33,9 @@ func TestWasmWebReactorGlobalsExist(t *testing.T) {
 // wasm32-wasi must not gain any of this — it is unaffected (§18 non-goal).
 func TestWasmWebReactorGlobalsAbsentOnWasi(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-wasi")
-	assertNotContains(t, ir, "promise_web_live_registrations")
-	assertNotContains(t, ir, "promise_web_in_pump")
-	assertNotContains(t, ir, "promise_web_pump")
+	assertNotContains(t, ir, wasmweb.GlobalLiveRegistrations)
+	assertNotContains(t, ir, wasmweb.GlobalInPump)
+	assertNotContains(t, ir, wasmweb.ExportPump)
 	assertNotContains(t, ir, "promise_web_reactor_drain")
 }
 
@@ -44,7 +46,7 @@ func TestWasmWebReactorGlobalsAbsentOnWasi(t *testing.T) {
 // (unconditional `call void @pal_exit(i32 %code)` followed by unreachable).
 func TestInitializeGatesExitOnLiveness(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
-	initFn := extractDefine(ir, "_initialize")
+	initFn := extractDefine(ir, wasmweb.ExportInitialize)
 	if initFn == "" {
 		t.Fatalf("expected @_initialize to be defined\ngot:\n%s", ir)
 	}
@@ -130,7 +132,7 @@ func TestMainCallsCoopRunOnWasi(t *testing.T) {
 // on the step counter (amortized clock reads).
 func TestWebPumpRespectsStepAndTimeBudget(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
-	pumpFn := extractDefine(ir, "promise_web_pump")
+	pumpFn := extractDefine(ir, wasmweb.ExportPump)
 	if pumpFn == "" {
 		t.Fatalf("expected @promise_web_pump to be defined\ngot:\n%s", ir)
 	}
@@ -167,7 +169,7 @@ func TestSchedulePumpImportAttrs(t *testing.T) {
 // any work and checks promise_web_terminated before that (§10).
 func TestWebPumpGuardsReentrancyAndFault(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
-	pumpFn := extractDefine(ir, "promise_web_pump")
+	pumpFn := extractDefine(ir, wasmweb.ExportPump)
 	if pumpFn == "" {
 		t.Fatalf("expected @promise_web_pump to be defined\ngot:\n%s", ir)
 	}

@@ -532,9 +532,21 @@ definition.
 **Decision: a new Go package `compiler/internal/wasmweb` holds these names as
 constants**, together with the small helpers that derive anything name-shaped.
 It is imported by `internal/codegen` (which emits the exports), by
+`internal/sema` (which checks declarations against it), by
 `internal/bindgen/codegen.go` (which emits `.pr`), and by
 `internal/bindgen/jsglue.go` (which emits `.js`). No string literal for any of
 these names appears anywhere else, and a test asserts that.
+
+The package also records the signature of every symbol Promise code binds with
+`` `extern `` — the guest-side primitives behind the delivery surface. A
+declaration naming one is checked against the registered signature where it is
+written, so a mistyped declaration is a compile error at the annotation rather
+than a call in the wrong shape. A symbol that exists only on `wasm32-web` is
+rejected wherever its declaration survives `` `target `` filtering for another
+target. The exports above are outside that set: they are the host's to call, so
+a declaration naming one is rejected at the annotation on every target. This is
+[annotations.md](annotations.md#extern)'s closed,
+declaration-checked symbol set, applied to the symbols this design owns.
 
 The package is deliberately tiny and dependency-free so that both the compiler
 backend and the binding generators can depend on it without a cycle.

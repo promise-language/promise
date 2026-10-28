@@ -5,6 +5,8 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
+
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // defineWasmMemcmp emits a byte-by-byte memcmp for WASM (no libc).
@@ -112,7 +114,7 @@ func (c *Compiler) defineWasmUsleep() *ir.Func {
 func (c *Compiler) emitWasmStart(mainFn *ir.Func) {
 	name := "_start"
 	if c.isWasmWeb {
-		name = "_initialize"
+		name = wasmweb.ExportInitialize
 	}
 	startFn := c.module.NewFunc(name, irtypes.Void)
 	startFn.FuncAttrs = append(startFn.FuncAttrs, enum.FuncAttrNoUnwind)

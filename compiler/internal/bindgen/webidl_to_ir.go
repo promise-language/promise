@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 	"github.com/promise-language/promise/compiler/internal/webidl"
 )
 
@@ -104,7 +105,7 @@ func (c *webidlConverter) resource(iface *webidl.Interface) *convertedInterface 
 func (c *webidlConverter) convert() ([]*Module, error) {
 	m := &Module{
 		Name:         "web",
-		ImportModule: "promise_env",
+		ImportModule: wasmweb.ImportModule,
 	}
 
 	// Every lowering below inlines typedefs, so their table comes first.

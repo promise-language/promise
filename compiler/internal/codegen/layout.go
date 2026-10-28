@@ -696,7 +696,7 @@ func collectExterns(file *ast.File, info *sema.Info) []*ExternFunc {
 			continue
 		}
 
-		cName := externCName(fd)
+		cName := sema.ExternSymbol(fd)
 
 		paramTypes := make([]types.Type, len(sig.Params()))
 		for i, p := range sig.Params() {
@@ -717,30 +717,6 @@ func collectExterns(file *ast.File, info *sema.Info) []*ExternFunc {
 		})
 	}
 	return externs
-}
-
-// externCName extracts the C symbol name from an extern function declaration.
-// If the `extern annotation has a string parameter, that is used as the C name.
-// Otherwise, defaults to "promise_" + funcName.
-func externCName(fd *ast.FuncDecl) string {
-	for _, ann := range fd.Annotations {
-		if ann.Name == "extern" && len(ann.Params) > 0 {
-			sl, ok := ann.Params[0].Value.(*ast.StringLit)
-			if !ok {
-				continue
-			}
-			var s string
-			for _, p := range sl.Parts {
-				if t, ok := p.(ast.StringText); ok {
-					s += t.Text
-				}
-			}
-			if s != "" {
-				return s
-			}
-		}
-	}
-	return "promise_" + fd.Name
 }
 
 // computeEnumLayout creates a TypeDeclLayout for an enum type.

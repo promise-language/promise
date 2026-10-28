@@ -2328,7 +2328,12 @@ partial dictionary Opts {
 	if out, err := bindCmd.Output(); err != nil {
 		t.Fatalf("bind webidl -keep failed: %v\n%s%s", err, out, stderr.String())
 	}
-	for _, want := range []string{"keep: dropped Element.fancy: it names Fancy", "keep: dropped Opts.fancy: it names Fancy"} {
+	// Fancy is defined and the list drops it, so the report says so — not that
+	// it is undefined, as for a name no bound file defines (#723).
+	for _, want := range []string{
+		"keep: dropped Element.fancy: it names Fancy, which the keep list drops\n",
+		"keep: dropped Opts.fancy: it names Fancy, which the keep list drops\n",
+	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("bind stderr does not report the dropped member (want %q)\nstderr:\n%s", want, stderr.String())
 		}

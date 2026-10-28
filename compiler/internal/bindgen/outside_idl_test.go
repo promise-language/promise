@@ -206,18 +206,22 @@ func TestKeepListKeepsWhatNamesAKeptDefinition(t *testing.T) {
 }
 
 // WindowProxy names Window whether or not Window is bound, so an unbound Window
-// is the name left unresolved. An alias is known only from the bound IDL: with
-// the interface declaring it unbound, the identifier is its own name.
+// is the name left unresolved, and the bind error names it (#723). An alias is
+// known only from the bound IDL: with the interface declaring it unbound, the
+// identifier is its own name.
 func TestWebIdlNamesOutsideIDLUnbound(t *testing.T) {
-	modules := mustWebIdlToIR(t, parseMerged(t, `[Exposed=Window] interface A {
+	modules, err := WebIdlToIR(parseMerged(t, `[Exposed=Window] interface A {
 		readonly attribute WindowProxy? opener;
 		readonly attribute SVGMatrix m;
 	};`))
-	want := map[string]string{
-		"A.opener.get": "() -> Window?",
-		"A.m.get":      "() -> SVGMatrix",
+	if err == nil {
+		t.Fatalf("WebIdlToIR succeeded with %d modules, want the unbound names reported", len(modules))
 	}
-	if got := loweredSignatures(overloadResource(t, modules, "A")); !maps.Equal(got, want) {
-		t.Errorf("A lowered to %v, want %v", got, want)
+	want := []string{
+		"dict.webidl:2:12: A.opener names Window, which is not defined in the bound IDL files",
+		"dict.webidl:3:12: A.m names SVGMatrix, which is not defined in the bound IDL files",
+	}
+	if got := strings.Split(err.Error(), "\n"); !reflect.DeepEqual(got, want) {
+		t.Errorf("error:\n got %q\nwant %q", got, want)
 	}
 }

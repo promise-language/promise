@@ -141,13 +141,6 @@ func TestWebIdlTypedefInlinedAsTarget(t *testing.T) {
 			interface A { attribute CB? onfoo; };`,
 		},
 		{
-			// The unbound name is #723's case; the typedef only forwards it.
-			name: "typedef naming nothing bound",
-			typedefs: `typedef Missing M;
-			interface A { attribute M m; };`,
-			inline: `interface A { attribute Missing m; };`,
-		},
-		{
 			name: "typedef declared after its use",
 			typedefs: `interface A { attribute Name label; };
 			typedef DOMString Name;`,

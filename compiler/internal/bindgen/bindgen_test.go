@@ -3758,6 +3758,8 @@ func TestWebIdlEndToEnd(t *testing.T) {
 		undefined log(DOMString message);
 	};
 
+	interface Element {};
+
 	interface Document {
 		Element? getElementById(DOMString elementId);
 		Element createElement(DOMString localName);

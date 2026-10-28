@@ -26,9 +26,10 @@ import (
 // It fails when two values of one enum generate the same variant
 // (convertEnum), when a dictionary's inheritance cannot be flattened — an
 // ancestor that is not a dictionary in the file, or a cycle — when a typedef
-// refers to itself (typedefTargets), or when an anonymous getter, setter or
+// refers to itself (typedefTargets), when a type names a definition no bound
+// IDL file defines (unboundRefs), or when an anonymous getter, setter or
 // deleter cannot be reached by property access (anonymousSpecialError),
-// reporting every such value, dictionary, typedef and operation.
+// reporting every such value, dictionary, typedef, declaration and operation.
 //
 // Call webidl.Merge(file) before this function to apply partials, mixins, and
 // includes statements, and to record the members a derived interface
@@ -109,6 +110,7 @@ func (c *webidlConverter) convert() ([]*Module, error) {
 	// Every lowering below inlines typedefs, so their table comes first.
 	var errs []error
 	c.typedefs, errs = typedefTargets(c.file)
+	errs = append(errs, unboundRefs(c.file)...)
 
 	// Convert enums
 	for _, e := range c.file.Enums {
@@ -314,6 +316,87 @@ func typedefTargets(file *webidl.File) (map[string]*webidl.TypeRef, []error) {
 		delete(targets, name)
 	}
 	return targets, errs
+}
+
+// definedTypes returns every name a reference (firstRef) may carry that resolves
+// in the generated module: each interface (mixins excluded), dictionary, enum,
+// typedef and callback the merged file defines, and JsValue, which the lowering
+// itself produces. Any other name is defined in none of the bound IDL files
+// (docs/wasm-bindings.md, "Supported subset").
+func definedTypes(file *webidl.File) map[string]bool {
+	defined := map[string]bool{"JsValue": true}
+	for name := range interfacesByName(file) {
+		defined[name] = true
+	}
+	for _, d := range file.Dictionaries {
+		defined[d.Name] = true
+	}
+	for _, e := range file.Enums {
+		defined[e.Name] = true
+	}
+	for _, td := range file.Typedefs {
+		defined[td.Name] = true
+	}
+	for _, cb := range file.Callbacks {
+		defined[cb.Name] = true
+	}
+	return defined
+}
+
+// firstRef returns the first name the types reference for which match reports
+// true, or "". A reference is a name the type carries lowered with no typedef
+// inlined (convertWebIdlTypeRef), aliases being the merged file's
+// File.WindowAliases: a use of a typedef names the typedef, a name defined
+// outside IDL names what it lowers to, and a name inside a union, Promise<T> or
+// record<K, V> — each lowered to JsValue — is not one.
+func firstRef(aliases map[string]string, match func(name string) bool, types ...*webidl.TypeRef) string {
+	var hit string
+	for _, t := range types {
+		if t == nil {
+			continue
+		}
+		if eachName(convertWebIdlTypeRef(t, nil, aliases), func(name string) bool {
+			hit = name
+			return match(name)
+		}) {
+			return hit
+		}
+	}
+	return ""
+}
+
+// unboundRefs reports each declaration whose type references a definition no
+// bound IDL file defines (definedTypes) — the typedefs, then the dictionary
+// members, then the interface members, each in file order — at its position,
+// naming the first such reference (firstRef). The generated module would name a
+// type that does not exist. A mixin's members are reported on the interfaces
+// that include it.
+func unboundRefs(file *webidl.File) []error {
+	defined := definedTypes(file)
+	var errs []error
+	report := func(pos webidl.Pos, what string, types ...*webidl.TypeRef) {
+		if name := firstRef(file.WindowAliases, func(name string) bool { return !defined[name] }, types...); name != "" {
+			errs = append(errs, &webidl.ParseError{Pos: pos, Msg: fmt.Sprintf("%s names %s, which is not defined in the bound IDL files", what, name)})
+		}
+	}
+	for _, td := range file.Typedefs {
+		report(td.Pos, "typedef "+td.Name, td.Type)
+	}
+	for _, d := range file.Dictionaries {
+		for _, m := range d.Members {
+			report(m.Pos, d.Name+"."+m.Name, m.Type)
+		}
+	}
+	for _, iface := range file.Interfaces {
+		if isMixin(iface) {
+			continue
+		}
+		for _, m := range iface.Members {
+			_, label, _, types, pos := keepUnit(m)
+			report(pos, iface.Name+"."+label, types...)
+		}
+	}
+	return errs
 }
 
 // convertInterface converts one interface, given the instance members it

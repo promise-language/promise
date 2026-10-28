@@ -2559,7 +2559,8 @@ interface A {
 
 // TestBindWebIdlWindowProxyWithoutWindow: WindowProxy names Window, so with no
 // Window bound the name left unresolved is Window — the definition to bind —
-// and WindowProxy appears nowhere in the report (#722).
+// and WindowProxy appears nowhere in the report (#722). The report is bind's
+// own error, before its self-check (#723).
 func TestBindWebIdlWindowProxyWithoutWindow(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -2579,11 +2580,122 @@ func TestBindWebIdlWindowProxyWithoutWindow(t *testing.T) {
 		t.Fatalf("bind webidl succeeded with WindowProxy used and no Window bound (want it to fail)\n%s", out)
 	}
 	// The paths in the output carry this test's name, so match the reports.
-	if !strings.Contains(string(out), "undefined type: Window\n") {
+	if !strings.Contains(string(out), "A.opener names Window, which is not defined in the bound IDL files\n") {
 		t.Errorf("want the report to name Window, the definition WindowProxy names\noutput:\n%s", out)
 	}
-	if strings.Contains(string(out), "undefined type: WindowProxy") {
+	if strings.Contains(string(out), "names WindowProxy") {
 		t.Errorf("the report names WindowProxy, which no definition defines; want only Window\noutput:\n%s", out)
+	}
+	if strings.Contains(string(out), "undefined type") {
+		t.Errorf("the self-check reported the name; want bind to report it at its cause\noutput:\n%s", out)
+	}
+}
+
+// unboundRefIDL references Missing from a dictionary field and an operation's
+// return type; no bound file defines it (#723).
+const unboundRefIDL = `dictionary D {
+  Missing m;
+  long n;
+};
+
+[Exposed=Window]
+interface A {
+  attribute DOMString label;
+  Missing find();
+};
+`
+
+// TestBindWebIdlUnboundReferenceFailsLoudly: without a keep list, a type naming
+// a definition no bound IDL file defines is a bind error naming the
+// declaration, its position and the name — every one, before anything is
+// written, with or without the self-check (docs/wasm-bindings.md, "Supported
+// subset"). Before #723 the self-check failed later with `undefined type`.
+func TestBindWebIdlUnboundReferenceFailsLoudly(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "in.idl")
+	if err := os.WriteFile(idlPath, []byte(unboundRefIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		idlPath + ":2:3: D.m names Missing, which is not defined in the bound IDL files",
+		idlPath + ":9:3: A.find names Missing, which is not defined in the bound IDL files",
+	}
+
+	for _, check := range [][]string{nil, {"-no-check"}} {
+		outDir := filepath.Join(dir, "out"+strings.Join(check, ""))
+		args := append(append([]string{"bind", "webidl"}, check...), "-name", "probe", "-o", outDir, idlPath)
+		out, err := exec.Command(bin, args...).CombinedOutput()
+		if err == nil {
+			t.Fatalf("bind %v succeeded on IDL naming the unbound Missing (want an error)\n%s", check, out)
+		}
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+			t.Errorf("bind %v: want exit code 1, got %v", check, err)
+		}
+		if got := strings.Split(strings.TrimRight(string(out), "\n"), "\n"); !slices.Equal(got, want) {
+			t.Errorf("bind %v: output lines\n%q\nwant\n%q", check, got, want)
+		}
+		if _, err := os.Stat(outDir); !os.IsNotExist(err) {
+			t.Errorf("bind %v created %s despite the error (stat: %v)", check, outDir, err)
+		}
+	}
+}
+
+// TestBindWebIdlKeepListDropsUnboundReference: with a keep list, a name no
+// bound IDL file defines counts as a dropped definition — the field and the
+// member naming it are dropped and reported, and the rest binds and passes the
+// self-check, so a keep list never has to bind an unrelated spec (#723).
+func TestBindWebIdlKeepListDropsUnboundReference(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind self-check integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "in.idl")
+	if err := os.WriteFile(idlPath, []byte(unboundRefIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	keepPath := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(keepPath, []byte("A\nA.label\nA.find\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	var stderr bytes.Buffer
+	bindCmd := exec.Command(bin, "bind", "webidl", "-keep", keepPath, "-name", "probe", "-o", outDir, idlPath)
+	bindCmd.Stderr = &stderr
+	if out, err := bindCmd.Output(); err != nil {
+		t.Fatalf("bind webidl -keep failed (want the unbound references dropped and exit 0): %v\n%s%s", err, out, stderr.String())
+	}
+	want := []string{
+		"keep: dropped D.m: it names Missing, which is not defined in the bound IDL files",
+		"keep: dropped A.find: it names Missing, which is not defined in the bound IDL files",
+	}
+	if got := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n"); !slices.Equal(got, want) {
+		t.Errorf("bind stderr lines\n%q\nwant\n%q", got, want)
+	}
+
+	pr, err := os.ReadFile(filepath.Join(outDir, "probe.pr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(pr)
+	for _, want := range []string{"type D", "type A", "label"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("generated module is missing %q", want)
+		}
+	}
+	for _, absent := range []string{"Missing", "find"} {
+		if strings.Contains(src, absent) {
+			t.Errorf("generated module contains %q, which the keep list drops", absent)
+		}
 	}
 }
 

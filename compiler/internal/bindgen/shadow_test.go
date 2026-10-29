@@ -75,6 +75,19 @@ func TestWebIdlShadowedMemberNames(t *testing.T) {
 			},
 		},
 		{
+			// DOMRect.x as the IDL writes it (#171): inherit takes the
+			// ancestor's getter, but the attribute is read-write, so it is the
+			// same exact redeclaration.
+			name: "inherit attribute is an exact read-write redeclaration",
+			src: `interface DOMRectReadOnly { readonly attribute double x; };
+			interface DOMRect : DOMRectReadOnly { inherit attribute double x; };`,
+			resource: "DOMRect",
+			want: []overloadMethod{
+				{"x", "DOMRect.x.get", FuncMethod, ""},
+				{"x", "DOMRect.x.set", FuncMethod, "f64"},
+			},
+		},
+		{
 			// A typedef is its target (#721), so the redeclaration is exactly
 			// the inherited attribute and overrides it.
 			name: "a typedef of the inherited type is exactly alike",

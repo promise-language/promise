@@ -1431,6 +1431,67 @@ func TestParseStaticNonReadonlyAttribute(t *testing.T) {
 	}
 }
 
+// #171: an inherit attribute (DOMPoint's and DOMRect's shape) parses as the
+// read-write attribute it declares, keeping its extended attributes, and the
+// members after it still parse. WebIDL's InheritAttribute is `inherit
+// AttributeRest`, so `inherit` before anything but `attribute` is an error.
+func TestParseInheritAttribute(t *testing.T) {
+	src := `interface DOMPoint : DOMPointReadOnly {
+		[Replaceable] inherit attribute unrestricted double x;
+		inherit attribute unrestricted double y;
+		undefined reset();
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	members := file.Interfaces[0].Members
+	if len(members) != 3 {
+		t.Fatalf("expected 3 members, got %d", len(members))
+	}
+	for i, name := range []string{"x", "y"} {
+		attr, ok := members[i].(*Attribute)
+		if !ok {
+			t.Fatalf("member %d: expected *Attribute, got %T", i, members[i])
+		}
+		if attr.Name != name {
+			t.Errorf("member %d: expected name %q, got %q", i, name, attr.Name)
+		}
+		if attr.Type.Builtin != "unrestricted double" {
+			t.Errorf("member %d: expected 'unrestricted double', got %q", i, attr.Type.Builtin)
+		}
+		if attr.Readonly || attr.Static {
+			t.Errorf("member %d: expected a read-write instance attribute, got readonly=%v static=%v", i, attr.Readonly, attr.Static)
+		}
+	}
+	if !hasExtAttr(members[0].(*Attribute).ExtAttrs, "Replaceable") {
+		t.Error("expected [Replaceable] kept on x")
+	}
+	if op, ok := members[2].(*Operation); !ok || op.Name != "reset" {
+		t.Errorf("expected operation reset after the inherit attributes, got %#v", members[2])
+	}
+
+	errCases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"inherit readonly", "interface Foo { inherit readonly attribute double x; };", "expected attribute, got readonly"},
+		{"inherit without attribute", "interface Foo { inherit double x; };", "expected attribute, got"},
+	}
+	for _, tt := range errCases {
+		t.Run(tt.name, func(t *testing.T) {
+			_, errs := Parse(tt.src, "test.webidl")
+			if len(errs) == 0 {
+				t.Fatal("expected parse errors")
+			}
+			if !contains(errs[0].Error(), tt.want) {
+				t.Errorf("expected first error to contain %q, got: %v", tt.want, errs)
+			}
+		})
+	}
+}
+
 func TestParseIterableKeyValue(t *testing.T) {
 	src := `interface URLSearchParams {
 		iterable<USVString, USVString>;

@@ -12,14 +12,14 @@ import (
 // --- Lexer Tests ---
 
 func TestLexerKeywords(t *testing.T) {
-	src := `interface partial dictionary enum callback typedef mixin includes
+	src := `interface partial dictionary enum callback typedef mixin namespace includes
 		readonly attribute const static getter setter deleter constructor
 		optional iterable async required`
 	lex := NewLexer(src, "test.webidl")
 
 	expected := []TokenKind{
 		TokenInterface, TokenPartial, TokenDictionary, TokenEnum, TokenCallback,
-		TokenTypedef, TokenMixin, TokenIncludes,
+		TokenTypedef, TokenMixin, TokenNamespace, TokenIncludes,
 		TokenReadonly, TokenAttribute, TokenConst, TokenStatic,
 		TokenGetter, TokenSetter, TokenDeleter, TokenConstructor,
 		TokenOptional, TokenIterable, TokenAsync, TokenRequired,
@@ -1041,6 +1041,143 @@ func TestMergePartialDictionary(t *testing.T) {
 	}
 	if !dict.Members[2].Required {
 		t.Error("expected 'verbose' to be required")
+	}
+}
+
+// TestParseNamespace: a namespace holds regular operations, readonly attributes
+// and constants, each with its doc comment and position, an operation keeping
+// its leading extended attributes as it does on an interface. The namespace's
+// own extended attributes are dropped, as a dictionary's are.
+func TestParseNamespace(t *testing.T) {
+	src := `// The console.
+[Exposed=*]
+namespace console {
+  // Write a message.
+  [LegacyUnforgeable] undefined log(any... data);
+  readonly attribute DOMString label;
+  const unsigned short MAX = 4;
+};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(file.Namespaces) != 1 || len(file.Interfaces) != 0 || len(file.PartialNamespaces) != 0 {
+		t.Fatalf("want one namespace and nothing else, got %d namespaces, %d interfaces, %d partial namespaces",
+			len(file.Namespaces), len(file.Interfaces), len(file.PartialNamespaces))
+	}
+	ns := file.Namespaces[0]
+	if ns.Name != "console" || ns.Doc != "The console." || ns.Pos != (Pos{File: "test.webidl", Line: 3, Column: 1}) {
+		t.Errorf("namespace = %q, doc %q, at %+v; want console, %q, at 3:1", ns.Name, ns.Doc, ns.Pos, "The console.")
+	}
+	if len(ns.Members) != 3 {
+		t.Fatalf("want 3 members, got %d", len(ns.Members))
+	}
+	op, ok := ns.Members[0].(*Operation)
+	if !ok || op.Name != "log" || op.Static || op.Doc != "Write a message." || op.Pos.Line != 5 {
+		t.Errorf("member 0 = %+v, want the operation log, not static, documented, on line 5", ns.Members[0])
+	} else if len(op.ExtAttrs) != 1 || op.ExtAttrs[0].Name != "LegacyUnforgeable" {
+		t.Errorf("log's extended attributes = %+v, want [LegacyUnforgeable]", op.ExtAttrs)
+	}
+	if a, ok := ns.Members[1].(*Attribute); !ok || a.Name != "label" || !a.Readonly || a.Static || a.Pos.Line != 6 {
+		t.Errorf("member 1 = %+v, want the readonly attribute label on line 6", ns.Members[1])
+	}
+	if c, ok := ns.Members[2].(*Const); !ok || c.Name != "MAX" || c.Value != "4" || c.Pos.Line != 7 {
+		t.Errorf("member 2 = %+v, want the constant MAX = 4 on line 7", ns.Members[2])
+	}
+}
+
+func TestParsePartialNamespace(t *testing.T) {
+	src := `partial namespace CSS {
+  double px(double value);
+};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(file.Namespaces) != 0 || len(file.PartialNamespaces) != 1 {
+		t.Fatalf("want one partial namespace and no namespace, got %d partial, %d namespaces", len(file.PartialNamespaces), len(file.Namespaces))
+	}
+	pn := file.PartialNamespaces[0]
+	if pn.Name != "CSS" || pn.Pos != (Pos{File: "test.webidl", Line: 1, Column: 9}) {
+		t.Errorf("partial namespace = %q at %+v, want CSS at 1:9", pn.Name, pn.Pos)
+	}
+	if len(pn.Members) != 1 || pn.Members[0].(*Operation).Name != "px" {
+		t.Errorf("members = %+v, want the operation px", pn.Members)
+	}
+}
+
+// TestParseNamespaceMemberErrors: a namespace member is a regular operation, a
+// readonly attribute or a constant. Any other member — in a namespace or a
+// partial one — is reported where it starts and dropped, and the members after
+// it still parse.
+func TestParseNamespaceMemberErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, member string
+	}{
+		{"writable attribute", "attribute DOMString x;"},
+		{"static operation", "static undefined f();"},
+		{"static attribute", "static readonly attribute long x;"},
+		{"constructor", "constructor();"},
+		{"anonymous getter", "getter DOMString (unsigned long index);"},
+		{"named getter", "getter DOMString item(unsigned long index);"},
+		{"anonymous operation", "undefined (long x);"},
+		{"iterable", "iterable<long>;"},
+		{"maplike", "maplike<DOMString, long>;"},
+		{"readonly setlike", "readonly setlike<long>;"},
+		{"with extended attributes", "[SecureContext] attribute DOMString x;"},
+		// `stringifier;` parses as the regular operation toString() and a
+		// stringifier attribute as a plain one, so only the keyword marks them.
+		{"stringifier", "stringifier;"},
+		{"stringifier attribute", "stringifier readonly attribute DOMString s;"},
+		{"stringifier with extended attributes", "[SecureContext] stringifier;"},
+	} {
+		for _, partial := range []string{"", "partial "} {
+			t.Run(partial+tc.name, func(t *testing.T) {
+				src := partial + "namespace N {\n  undefined before();\n  " + tc.member + "\n  undefined after();\n};"
+				file, errs := Parse(src, "test.webidl")
+				want := "test.webidl:3:3: namespace N: a namespace member is a regular operation, a readonly attribute or a constant"
+				if len(errs) != 1 || errs[0].Error() != want {
+					t.Fatalf("errors = %v, want exactly %q", errs, want)
+				}
+				nss := file.Namespaces
+				if partial != "" {
+					nss = file.PartialNamespaces
+				}
+				if len(nss) != 1 {
+					t.Fatalf("want one namespace, got %d", len(nss))
+				}
+				var names []string
+				for _, m := range nss[0].Members {
+					names = append(names, m.(*Operation).Name)
+				}
+				if !reflect.DeepEqual(names, []string{"before", "after"}) {
+					t.Errorf("members = %q, want [before after]: the bad member dropped, the next one kept", names)
+				}
+			})
+		}
+	}
+}
+
+// TestMergePartialNamespace: Merge appends a partial namespace's members to its
+// namespace in input order, whether the partial comes before the namespace or
+// after it, as the files binding the two may be ordered either way.
+func TestMergePartialNamespace(t *testing.T) {
+	src := `partial namespace CSS { double a(); };
+namespace CSS { DOMString escape(DOMString ident); };
+partial namespace CSS { double b(); };`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if errs := Merge(file); len(errs) > 0 {
+		t.Fatalf("merge errors: %v", errs)
+	}
+	var names []string
+	for _, m := range file.Namespaces[0].Members {
+		names = append(names, m.(*Operation).Name)
+	}
+	if !reflect.DeepEqual(names, []string{"escape", "a", "b"}) {
+		t.Errorf("CSS members after the merge = %q, want [escape a b]", names)
 	}
 }
 
@@ -2192,6 +2329,31 @@ func TestMergeUnmatched(t *testing.T) {
 			members: map[string]int{"Foo": 1},
 		},
 		{
+			name: "partial namespace",
+			src:  "namespace Base { undefined a(); };\npartial namespace Unknown { undefined extra(); };",
+			want: []string{
+				"test.webidl:2:9: partial namespace Unknown: Unknown is not a namespace in the bound IDL files",
+			},
+			members: map[string]int{"Base": 1},
+		},
+		{
+			// A namespace is not an interface, in either direction.
+			name: "partial namespace naming an interface",
+			src:  "interface X { undefined a(); };\npartial namespace X { undefined b(); };",
+			want: []string{
+				"test.webidl:2:9: partial namespace X: X is not a namespace in the bound IDL files",
+			},
+			members: map[string]int{"X": 1},
+		},
+		{
+			name: "partial interface naming a namespace",
+			src:  "namespace X { undefined a(); };\npartial interface X { undefined b(); };",
+			want: []string{
+				"test.webidl:2:9: partial interface X: X is not an interface in the bound IDL files",
+			},
+			members: map[string]int{"X": 1},
+		},
+		{
 			name: "includes with no interface",
 			src:  "interface mixin Mix { undefined extra(); };\nMissing includes Mix;",
 			want: []string{
@@ -2264,6 +2426,11 @@ func TestMergeUnmatched(t *testing.T) {
 				for _, d := range file.Dictionaries {
 					if d.Name == name {
 						count = len(d.Members)
+					}
+				}
+				for _, ns := range file.Namespaces {
+					if ns.Name == name {
+						count = len(ns.Members)
 					}
 				}
 				if count != want {

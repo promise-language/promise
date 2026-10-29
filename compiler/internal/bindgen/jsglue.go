@@ -390,13 +390,14 @@ func (g *jsGlueGenerator) emitMethodImport(resourceName string, f Func) {
 
 	g.writef("    \"%s\"(%s) {\n", importName, strings.Join(jsParams, ", "))
 
+	owner := importOwner(importName)
 	switch f.Kind {
 	case FuncConstructor:
-		g.emitConstructorBody(resourceName, f, jsParams)
+		g.emitConstructorBody(owner, f, jsParams)
 	case FuncStatic:
-		g.emitStaticBody(resourceName, importName, f)
+		g.emitStaticBody(owner, importName, f)
 	default:
-		g.emitMethodBody(resourceName, importName, f)
+		g.emitMethodBody(owner, importName, f)
 	}
 
 	g.write("    },\n")
@@ -487,16 +488,16 @@ func returnsString(f Func) bool {
 	return isStringType(ret)
 }
 
-func (g *jsGlueGenerator) emitConstructorBody(resourceName string, f Func, jsParams []string) {
+func (g *jsGlueGenerator) emitConstructorBody(owner string, f Func, jsParams []string) {
 	// Convert parameters, call new Constructor(...), store ref
 	args := g.buildJSCallArgs(f)
-	g.writef("      const %s = new %s(%s);\n", jsConstructedLocal, resourceName, strings.Join(args, ", "))
+	g.writef("      const %s = new %s(%s);\n", jsConstructedLocal, owner, strings.Join(args, ", "))
 	g.writef("      return _refStore(%s);\n", jsConstructedLocal)
 }
 
-func (g *jsGlueGenerator) emitStaticBody(resourceName, importName string, f Func) {
+func (g *jsGlueGenerator) emitStaticBody(owner, importName string, f Func) {
 	args := g.buildJSCallArgs(f)
-	call := fmt.Sprintf("%s%s(%s)", resourceName, jsProperty(importMember(importName)), strings.Join(args, ", "))
+	call := fmt.Sprintf("%s%s(%s)", owner, jsProperty(importMember(importName)), strings.Join(args, ", "))
 	g.emitReturnConversion(f, call)
 }
 
@@ -508,7 +509,7 @@ func (g *jsGlueGenerator) emitStaticBody(resourceName, importName string, f Func
 // member's type, so such an import calls the declaring interface's own member,
 // read from its interface prototype object with the object as receiver
 // (docs/wasm-bindings.md, "WebIDL to Promise", interface inheritance).
-func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func) {
+func (g *jsGlueGenerator) emitMethodBody(owner, importName string, f Func) {
 	args := g.buildJSCallArgs(f)
 	member := importMember(importName)
 	const obj = "_refLoad(" + jsReceiverParam + ")"
@@ -521,7 +522,7 @@ func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func
 	if len(parts) == 3 && parts[2] == "get" {
 		call := obj + jsProperty(member)
 		if f.ViaPrototype {
-			call = fmt.Sprintf("Reflect.get(%s.prototype, \"%s\", %s)", resourceName, member, obj)
+			call = fmt.Sprintf("Reflect.get(%s.prototype, \"%s\", %s)", owner, member, obj)
 		}
 		g.emitReturnConversion(f, call)
 		return
@@ -529,7 +530,7 @@ func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func
 	if len(parts) == 3 && parts[2] == "set" {
 		value := strings.Join(args, ", ")
 		if f.ViaPrototype {
-			g.writef("      Reflect.set(%s.prototype, \"%s\", %s, %s);\n", resourceName, member, value, obj)
+			g.writef("      Reflect.set(%s.prototype, \"%s\", %s, %s);\n", owner, member, value, obj)
 		} else {
 			g.writef("      %s%s = %s;\n", obj, jsProperty(member), value)
 		}
@@ -555,7 +556,7 @@ func (g *jsGlueGenerator) emitMethodBody(resourceName, importName string, f Func
 
 	call := fmt.Sprintf("%s%s(%s)", obj, jsProperty(member), strings.Join(args, ", "))
 	if f.ViaPrototype {
-		call = fmt.Sprintf("Reflect.apply(%s.prototype%s, %s, [%s])", resourceName, jsProperty(member), obj, strings.Join(args, ", "))
+		call = fmt.Sprintf("Reflect.apply(%s.prototype%s, %s, [%s])", owner, jsProperty(member), obj, strings.Join(args, ", "))
 	}
 	g.emitReturnConversion(f, call)
 }
@@ -587,6 +588,18 @@ func importMember(importName string) string {
 		return importName
 	}
 	return parts[1]
+}
+
+// importOwner returns the JS object an import reaches its member through: the
+// first dotted component of its import name, the IDL name of the interface or
+// namespace that declares the member — "Element" in "Element.setAttribute",
+// "console" in "console.log". It is the one place the glue reads that name, so a
+// type named apart from its IDL definition (a namespace's Console) still reaches
+// the host object by the IDL name: its interface object for a constructor, a
+// static or a prototype read, or the namespace object itself.
+func importOwner(importName string) string {
+	owner, _, _ := strings.Cut(importName, ".")
+	return owner
 }
 
 // jsProperty returns the property access that reaches member, an IDL

@@ -462,3 +462,108 @@ func TestBindWebIdlDocumentRootIsSeededDocument(t *testing.T) {
 		}
 	}
 }
+
+// #170 end to end: a namespace binds as a type of `global` members named
+// apart from it (console → Console), and each member's import reaches the host
+// namespace object by its IDL name. Were the glue to name the object after the
+// type, `Console.log` would throw a ReferenceError and init() would reject. The
+// overload pins that both imports of a set call the one JS member.
+
+const namespaceIDL = `namespace console {
+  undefined log(DOMString message);
+};
+namespace probe {
+  DOMString echo(DOMString s);
+  DOMString echo(DOMString s, DOMString suffix);
+};
+`
+
+const namespaceMain = `use web "./web";
+
+main() {
+    web.Console.log("hello");
+    print_line(web.Probe.echo("a") + "|" + web.Probe.echo_2("a", "b"));
+}
+`
+
+// namespaceDriver stands in for the page's probe namespace, loads web/web.js
+// the way a page would (nodePageDriver), whose console.log it captures, and runs
+// the .wasm named by its one argument.
+const namespaceDriver = nodePageDriver + `
+const [wasmFile] = process.argv.slice(2);
+
+globalThis.probe = {
+  echo(s, suffix) { return "echo:" + s + (suffix === undefined ? "" : suffix); },
+};
+
+(async () => {
+  const mod = await import(pathToFileURL(path.join(dir, "web", "web.js")).href);
+  const result = { logs, errs };
+  try {
+    await mod.init(wasmFile);
+    result.ok = true;
+  } catch (e) {
+    result.ok = false;
+    result.message = e && e.message;
+  }
+  process.stdout.write("RESULT:" + JSON.stringify(result) + "\n");
+})();
+`
+
+func TestBindWebIdlNamespaceCallsHostObject(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+build+node integration test in short mode")
+	}
+	nodePath, err := resolveWasmRuntime("node")
+	if err != nil {
+		// Neither staged on this machine nor fetchable: a fact about the
+		// environment, not the tree.
+		t.Skipf("the pinned node is not obtainable here: %v", err)
+	}
+	bin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+
+	idlPath := filepath.Join(dir, "namespaces.idl")
+	if err := os.WriteFile(idlPath, []byte(namespaceIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	app := filepath.Join(dir, "app")
+	clitest.RunOK(t, bin, nil, "bind", "webidl", "-name", "web", "-o", filepath.Join(app, "web"), idlPath)
+	for name, content := range map[string]string{
+		"promise.toml": "[module]\nname = \"app\"\nepoch = \"" + bindEpoch() + "\"\n",
+		"main.pr":      namespaceMain,
+		"driver.cjs":   namespaceDriver,
+	} {
+		if err := os.WriteFile(filepath.Join(app, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	driver := filepath.Join(app, "driver.cjs")
+
+	builds := []struct {
+		name string
+		args []string
+	}{
+		{"debug", nil},
+		{"release", []string{"--release"}},
+	}
+	for _, b := range builds {
+		wasm := b.name + ".wasm"
+		args := append(append([]string{"build"}, b.args...), "-target", "wasm32-web", "-o", filepath.Join(app, wasm), app)
+		clitest.RunOK(t, bin, nil, args...)
+
+		got := runNodeDriver[bindgenGlueResult](t, nodePath, driver, wasm)
+		if !got.OK {
+			t.Errorf("%s: init() rejected: %q (logs %q, errs %q)", b.name, got.Message, got.Logs, got.Errs)
+			continue
+		}
+		want := []string{"hello", "echo:a|echo:ab"}
+		if strings.Join(got.Logs, "\n") != strings.Join(want, "\n") {
+			t.Errorf("%s: logs = %q, want %q", b.name, got.Logs, want)
+		}
+		if len(got.Errs) != 0 {
+			t.Errorf("%s: unexpected stderr output %q", b.name, got.Errs)
+		}
+	}
+}

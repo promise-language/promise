@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/promise-language/promise/compiler/internal/wasmweb"
 	"github.com/promise-language/promise/compiler/internal/webidl"
@@ -18,8 +19,10 @@ import (
 // derived interface reaches its parent's (T1507). A parent is converted before
 // the interfaces deriving from it, because a derived member's name depends on
 // what it inherits (docs/wasm-bindings.md, "Shadowed Members"); the resources
-// still come out in input order. Dictionaries become Records carrying their
-// inherited members as their own fields (flattened). Enums become IR Enums. A
+// still come out in input order. Each namespace produces one Resource too, after
+// the interfaces, whose every member is `global` (convertNamespace).
+// Dictionaries become Records carrying their inherited members as their own
+// fields (flattened). Enums become IR Enums. A
 // typedef names no type: each use of one lowers as its target written in its
 // place (convertWebIdlTypeRef). The file produces a single module named from the
 // first interface, or "web" if no interfaces are present.
@@ -28,9 +31,11 @@ import (
 // (convertEnum), when a dictionary's inheritance cannot be flattened — an
 // ancestor that is not a dictionary in the file, or a cycle — when a typedef
 // refers to itself (typedefTargets), when a type names a definition no bound
-// IDL file defines (unboundRefs), or when an anonymous getter, setter or
+// IDL file defines (unboundRefs), when a namespace's type name is already
+// another type's (namespaceTypeErrors), or when an anonymous getter, setter or
 // deleter cannot be reached by property access (anonymousSpecialError),
-// reporting every such value, dictionary, typedef, declaration and operation.
+// reporting every such value, dictionary, typedef, declaration, namespace and
+// operation.
 //
 // Call webidl.Merge(file) before this function to apply partials, mixins, and
 // includes statements, and to record the members a derived interface
@@ -112,6 +117,7 @@ func (c *webidlConverter) convert() ([]*Module, error) {
 	var errs []error
 	c.typedefs, errs = typedefTargets(c.file)
 	errs = append(errs, unboundRefs(c.file)...)
+	errs = append(errs, namespaceTypeErrors(c.file)...)
 
 	// Convert enums
 	for _, e := range c.file.Enums {
@@ -142,6 +148,11 @@ func (c *webidlConverter) convert() ([]*Module, error) {
 			continue
 		}
 		m.Resources = append(m.Resources, c.resource(iface).res)
+	}
+
+	// Convert namespaces as resources whose members are all `global`
+	for _, ns := range c.file.Namespaces {
+		m.Resources = append(m.Resources, c.convertNamespace(ns))
 	}
 	if errs = append(errs, c.errs...); len(errs) > 0 {
 		return nil, errors.Join(errs...)
@@ -368,10 +379,11 @@ func firstRef(aliases map[string]string, match func(name string) bool, types ...
 
 // unboundRefs reports each declaration whose type references a definition no
 // bound IDL file defines (definedTypes) — the typedefs, then the dictionary
-// members, then the interface members, each in file order — at its position,
-// naming the first such reference (firstRef). The generated module would name a
-// type that does not exist. A mixin's members are reported on the interfaces
-// that include it.
+// members, then the interface members, then the namespace members, each in file
+// order — at its position, naming the first such reference (firstRef). The
+// generated module would name a type that does not exist. A mixin's members are
+// reported on the interfaces that include it. A namespace is not a type, so its
+// name used as one is reported too.
 func unboundRefs(file *webidl.File) []error {
 	defined := definedTypes(file)
 	var errs []error
@@ -396,6 +408,53 @@ func unboundRefs(file *webidl.File) []error {
 			_, label, _, types, pos := keepUnit(m)
 			report(pos, iface.Name+"."+label, types...)
 		}
+	}
+	for _, ns := range file.Namespaces {
+		for _, m := range ns.Members {
+			_, label, _, types, pos := keepUnit(m)
+			report(pos, ns.Name+"."+label, types...)
+		}
+	}
+	return errs
+}
+
+// namespaceTypeName returns the name of the Promise type a namespace binds as:
+// its identifier with the first letter upper-cased, `console` → `Console`.
+// Promise names a type in PascalCase, and the module-level root named for a
+// seeded namespace (`console`, ambientRefs) must not redeclare the type's name
+// (docs/wasm-bindings.md, "WebIDL to Promise", namespaces).
+func namespaceTypeName(name string) string {
+	if name == "" {
+		return name
+	}
+	r, size := utf8.DecodeRuneInString(name)
+	return string(unicode.ToUpper(r)) + name[size:]
+}
+
+// namespaceTypeErrors reports each namespace, at its position, whose type name
+// (namespaceTypeName) is already the name of a type the module declares: an
+// interface's (mixins excluded), a dictionary's, an enum's or an earlier
+// namespace's. The generated module would declare that type twice. Typedefs and
+// callbacks declare no Promise type, so they take no name.
+func namespaceTypeErrors(file *webidl.File) []error {
+	taken := make(map[string]string) // type name → the definition declaring it
+	for name := range interfacesByName(file) {
+		taken[name] = "interface " + name
+	}
+	for _, d := range file.Dictionaries {
+		taken[d.Name] = "dictionary " + d.Name
+	}
+	for _, e := range file.Enums {
+		taken[e.Name] = "enum " + e.Name
+	}
+	var errs []error
+	for _, ns := range file.Namespaces {
+		typ := namespaceTypeName(ns.Name)
+		if other, ok := taken[typ]; ok {
+			errs = append(errs, &webidl.ParseError{Pos: ns.Pos, Msg: fmt.Sprintf("namespace %s: generates type %s, which %s also names", ns.Name, typ, other)})
+			continue
+		}
+		taken[typ] = "namespace " + ns.Name
 	}
 	return errs
 }
@@ -500,6 +559,39 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface, inherited ma
 	}
 
 	return res, names.visible()
+}
+
+// convertNamespace converts a namespace to a Resource named by
+// namespaceTypeName whose every member is `global`. A namespace's operations
+// and attributes live on the namespace object, as an interface's statics live
+// on its interface object, so each converts as that static would: as a member
+// of an interface of the namespace's IDL name, which names its import
+// (`console.log`) and so the object the glue calls (importOwner). Constants are
+// `global` already. Nothing owns a namespace object — no constructor or result
+// produces one — so the type has no drop; it keeps the borrow factory every
+// wrapper has, for a root over a seeded namespace object (docs/wasm-bindings.md,
+// "WebIDL to Promise", namespaces).
+func (c *webidlConverter) convertNamespace(ns *webidl.Namespace) Resource {
+	members := make([]webidl.Member, len(ns.Members))
+	for i, m := range ns.Members {
+		switch m := m.(type) {
+		case *webidl.Attribute:
+			static := *m
+			static.Static = true
+			members[i] = &static
+		case *webidl.Operation:
+			static := *m
+			static.Static = true
+			members[i] = &static
+		default:
+			members[i] = m
+		}
+	}
+	res, _ := c.convertInterface(&webidl.Interface{Name: ns.Name, Members: members, Pos: ns.Pos}, nil)
+	res.Name = namespaceTypeName(ns.Name)
+	res.Drop = false
+	res.Doc = webidlDoc(ns.Doc, "namespace", ns.Name)
+	return res
 }
 
 // slot is an instance member a derived interface inherits: the ordinal the

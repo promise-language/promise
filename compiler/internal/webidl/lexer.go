@@ -42,6 +42,7 @@ const (
 	TokenCallback
 	TokenTypedef
 	TokenMixin
+	TokenNamespace
 	TokenIncludes
 	TokenInherit
 	TokenAttribute
@@ -122,6 +123,7 @@ var tokenNames = map[TokenKind]string{
 	TokenCallback:          "callback",
 	TokenTypedef:           "typedef",
 	TokenMixin:             "mixin",
+	TokenNamespace:         "namespace",
 	TokenIncludes:          "includes",
 	TokenInherit:           "inherit",
 	TokenAttribute:         "attribute",
@@ -189,6 +191,7 @@ var keywords = map[string]TokenKind{
 	"callback":    TokenCallback,
 	"typedef":     TokenTypedef,
 	"mixin":       TokenMixin,
+	"namespace":   TokenNamespace,
 	"includes":    TokenIncludes,
 	"inherit":     TokenInherit,
 	"attribute":   TokenAttribute,

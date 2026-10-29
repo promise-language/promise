@@ -48,8 +48,10 @@ const (
 	//
 	// It never runs Promise code and never allocates on the Promise heap, so
 	// it is safe to call in any context — including from inside a Promise→JS
-	// call that is itself nested inside a pump. Returns EnqueueOK or
-	// EnqueueDropped.
+	// call that is itself nested inside a pump. Returns EnqueueNoRelease, or
+	// the reference-table handle the host must release: the arriving handle
+	// when it is rejected, the displaced handle when the subscription's
+	// overflow policy evicts or coalesces one.
 	ExportEnqueue = "promise_web_enqueue"
 )
 
@@ -69,11 +71,11 @@ const (
 	PumpTerminated = 2 // the instance has exited; further pumps do nothing
 )
 
-// Enqueue return codes (ExportEnqueue).
-const (
-	EnqueueOK      = 0 // queued
-	EnqueueDropped = 1 // dropped per the subscription's overflow policy
-)
+// EnqueueNoRelease is what ExportEnqueue returns when the host has nothing to
+// release. It is the reserved null handle of the JS reference table, so it can
+// never be confused with a handle; any other return is a handle the host must
+// release.
+const EnqueueNoRelease = 0
 
 // Internal delivery primitives (§19 phase 2). These never cross the wasm/JS
 // boundary — only ExportEnqueue does that — but they still get one name here
@@ -85,14 +87,16 @@ const (
 // wait/wake primitive, no new grammar.
 const (
 	// SubscribeFunc allocates a subscription's backing Channel[i32] and
-	// returns its sub_id, or -1 if the table is full.
+	// returns its sub_id — opaque and generation-tagged, so a sub_id whose
+	// subscription has ended is rejected everywhere — or -1 if the table is
+	// full.
 	//
 	//	promise_web_subscribe(capacity: i32, policy: i32) -> i32
 	SubscribeFunc = "promise_web_subscribe"
 
 	// ChannelFunc returns a subscription's backing channel pointer, for
-	// web.pr to wrap as a proper Channel[i32] value. Null if sub_id is out
-	// of range.
+	// web.pr to wrap as a proper Channel[i32] value. Null if sub_id is
+	// unknown, ended, or stale.
 	//
 	//	promise_web_channel(sub_id: i32) -> i8* (Channel[i32])
 	ChannelFunc = "promise_web_channel"

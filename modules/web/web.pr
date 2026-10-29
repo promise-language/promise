@@ -91,10 +91,16 @@ type EventSubscription `public `target(web) `doc("A live subscription to browser
   // in modules/io/io.pr follows the identical guard-field pattern), and
   // Channel.close() panics on a second call.
   bool _closed;
+  // The drop count at close(): the runtime rejects an ended subscription's
+  // ID, so its count is read before the ID is released.
+  i32 _dropped_at_close;
 
   // A silent drop that no one can observe is the failure mode this exists to
   // avoid (§8.1).
   get dropped i32 `public `doc("Number of events dropped so far because the queue was full.") {
+    if this._closed {
+      return this._dropped_at_close;
+    }
     return _web_subscription_dropped(this._sub_id);
   }
 
@@ -109,6 +115,9 @@ type EventSubscription `public `target(web) `doc("A live subscription to browser
   // Closing does not corrupt an in-flight handler (§8) — a handler that is
   // already running finishes normally.
   close(~this) `public `doc("Stops receiving events for this subscription's kinds. Also closes the underlying channel, so a parked `for e in subscription` loop (including one inside web.on) wakes with `none` and ends instead of parking forever.") {
+    if !this._closed {
+      this._dropped_at_close = _web_subscription_dropped(this._sub_id);
+    }
     _web_unsubscribe(this._sub_id);
     if !this._closed {
       this._channel.close();
@@ -120,6 +129,13 @@ type EventSubscription `public `target(web) `doc("A live subscription to browser
     _web_unsubscribe(this._sub_id);
     if !this._closed {
       this._channel.close();
+    }
+    // Queue entries are bare handles, so dropping the channel would release
+    // none of them: release each event no consumer read (docs/web-apps.md
+    // "Resource lifetime across the boundary"). The channel is closed, so
+    // this drains what is buffered and ends without parking.
+    for h in this._channel {
+      _event_drop(h);
     }
   }
 }
@@ -138,7 +154,7 @@ events_with_policy(Element target, string[] kinds, i32 capacity, i32 policy) Eve
   for kind in kinds {
     _web_add_event_listener(target._handle, kind, sub_id);
   }
-  return EventSubscription(_sub_id: sub_id, _channel: move ch, _closed: false);
+  return EventSubscription(_sub_id: sub_id, _channel: move ch, _closed: false, _dropped_at_close: 0);
 }
 
 // `for e in web.events(el, ["click"])` is the primitive every other

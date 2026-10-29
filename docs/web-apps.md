@@ -477,11 +477,14 @@ queue entry. On the Promise side it is wrapped as the generated resource type,
 and the existing `[resource-drop]` path releases the JS-side reference when the
 value is dropped.
 
-Two cases follow from that and need no new mechanism:
+Two cases follow from that, and both release through that same path:
 
-- **Events queued at close.** Closing a subscription drops the channel, which
-  drops its queued elements, which releases their handles. No leak, no special
-  case.
+- **Events queued at close.** Queue entries are bare `i32` handles, so dropping
+  the channel alone releases nothing. Closing a subscription closes its
+  channel; a consumer still iterating drains what is queued, and each event it
+  receives is released when that value is dropped. Whatever no consumer read is
+  drained by the subscription's own drop, which releases each remaining handle.
+  No leak.
 - **A DOM element removed while its events are in flight.** The handle keeps the
   JS object alive until the event value is dropped, which is the correct
   behaviour — the handler sees the event it was sent, and the object becomes
@@ -513,7 +516,7 @@ Two exports, one import. Nothing per-callback, nothing per-signature.
 | Name | Signature | Contract |
 |---|---|---|
 | `_initialize` | `() -> void` | Existing. Init, run `main`, drain, then exit-or-return per [The liveness rule](#the-liveness-rule). |
-| `promise_web_enqueue` | `(sub_id: i32, handle: i32) -> i32` | Push one event. Never runs Promise code, never allocates on the Promise heap, safe in any context including inside a pump. Returns 0 = queued, 1 = dropped per policy. |
+| `promise_web_enqueue` | `(sub_id: i32, handle: i32) -> i32` | Push one event. Never runs Promise code, never allocates on the Promise heap, safe in any context including inside a pump. Returns 0 when nothing must be released; otherwise the reference-table handle the host must release — the arriving handle when it is rejected, the displaced handle when the policy evicts or coalesces one. |
 | `promise_web_pump` | `() -> i32` | Drain within budget. Returns 0 = idle, 1 = work remains (a continuation has been scheduled), 2 = terminated. No-op returning immediately if already pumping ([Re entrancy](#re-entrancy)) or faulted ([Failure inside a handler](#failure-inside-a-handler)). |
 
 **Import (guest → host):**
@@ -521,6 +524,25 @@ Two exports, one import. Nothing per-callback, nothing per-signature.
 | Name | Signature |
 |---|---|
 | `promise_env.schedule_pump` | `(kind: i32, delay_ms: i32) -> void` |
+
+### The guest side primitive
+
+The runtime allocates each subscription's queue when the subscription is made:
+a buffered `Channel[i32]` with the requested capacity (default 256), one
+subscription per channel. Promise code reaches the subscribe,
+channel, unsubscribe and drop-count primitives with `` `extern ``, under the
+check in [One name one definition](#one-name-one-definition). Enqueue writes
+into that channel the way a channel send does and wakes a parked receiver, so
+the consumer is an ordinary `for e in events`.
+
+- **Coalesce acts per subscription.** It overwrites the newest queued handle
+  whatever that event's kind, so "the same kind" in
+  [Queue semantics and overflow](#queue-semantics-and-overflow) holds only for
+  a subscription that carries one kind. A `Coalesce` subscription therefore
+  carries one event kind, and should use a small capacity.
+- **The subscription ID is opaque to the host.** An ID whose subscription has
+  ended is rejected — enqueue returns the handle — and it never reaches a later
+  subscription, even one that reuses its place in the table.
 
 ### One name one definition
 

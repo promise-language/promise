@@ -1708,8 +1708,8 @@ func TestParseErrorNoFile(t *testing.T) {
 	}
 	errMsg := errs[0].Error()
 	// Should contain line:column without filename
-	if contains(errMsg, ".webidl") {
-		t.Errorf("error should not contain filename, got: %s", errMsg)
+	if !strings.HasPrefix(errMsg, "1:1: ") {
+		t.Errorf("error should start with line:column and no filename, got: %s", errMsg)
 	}
 }
 

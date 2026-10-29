@@ -56,6 +56,16 @@ func TestWebIdlUnboundReference(t *testing.T) {
 			want: []string{"dict.webidl:1:15: A.iterable names Missing, which is not defined in the bound IDL files"},
 		},
 		{
+			// Each member a maplike declares is checked as a written one is, and
+			// reported at the declaration.
+			name: "maplike value type",
+			src:  `interface A { maplike<DOMString, Missing>; };`,
+			want: []string{
+				"dict.webidl:1:15: A.get names Missing, which is not defined in the bound IDL files",
+				"dict.webidl:1:15: A.set names Missing, which is not defined in the bound IDL files",
+			},
+		},
+		{
 			// The lowered type carries the name inside a sequence and a nullable.
 			name: "sequence and nullable",
 			src: `interface A {

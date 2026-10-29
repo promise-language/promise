@@ -160,13 +160,21 @@ func TestApplyKeepList(t *testing.T) {
 			types: map[string][]string{},
 		},
 		{
-			// An entry for one of them keeps no interface the list does not name.
-			name: "a maplike member's entry does not keep its interface",
-			src: `interface Counts { maplike<DOMString, long>; };
-			interface Other { undefined m(); };`,
-			list: "Counts.get\nOther\n",
+			// A mutator the interface writes in place of the declaration's is a
+			// written member, kept by its own entry: no declared delete or clear
+			// stands in for the unlisted ones.
+			name: "a written setlike mutator is listed",
+			src: `interface FontFace {};
+			interface FontFaceSet {
+				setlike<FontFace>;
+				FontFaceSet add(FontFace font);
+				boolean delete(FontFace font);
+				undefined clear();
+			};`,
+			list: "FontFace\nFontFaceSet\nFontFaceSet.add\n",
 			resources: map[string][]string{
-				"Other": nil,
+				"FontFace":    nil,
+				"FontFaceSet": {"FontFaceSet.size.get", "FontFaceSet.has", "FontFaceSet.add"},
 			},
 			types: map[string][]string{},
 		},

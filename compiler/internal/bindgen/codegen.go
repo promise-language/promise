@@ -1300,6 +1300,12 @@ func (k kindRegistry) isHandle(ref TypeRef) bool {
 	return ok && (kind == namedResource || kind == namedForeign)
 }
 
+// isOptionalHandle reports whether ref is an option of a handle-crossing type
+// (isHandle): it crosses as that `_handle`, or 0 for none.
+func (k kindRegistry) isOptionalHandle(ref TypeRef) bool {
+	return ref.Kind == OptionKind && ref.Elem != nil && k.isHandle(*ref.Elem)
+}
+
 // isJsValue reports whether ref is the generated JsValue enum.
 func (k kindRegistry) isJsValue(ref TypeRef) bool {
 	kind, ok := k.kindOf(ref)
@@ -1308,9 +1314,11 @@ func (k kindRegistry) isJsValue(ref TypeRef) bool {
 
 // lowerArg returns the expression that passes parameter p to its extern, in
 // the non-canonical ABI: a JsValue converts to its ref (_js_value_to_ref), a
-// handle-crossing type passes its `_handle`, an optional built-in collapses to
-// its zero value (lowerOptionExternArg), and anything else converts as a
-// scalar (lowerScalarArg). Every wrapper's parameters lower here.
+// handle-crossing type passes its `_handle`, an optional handle-crossing type
+// passes its `_handle` or 0 for none (docs/wasm-bindings.md §"Reference Table
+// and Ownership"), an optional built-in collapses to its zero value
+// (lowerOptionExternArg), and anything else converts as a scalar
+// (lowerScalarArg). Every wrapper's parameters lower here.
 func (g *generator) lowerArg(p Param) string {
 	if !g.canonicalABI {
 		switch {
@@ -1318,6 +1326,8 @@ func (g *generator) lowerArg(p Param) string {
 			return jsValueToRef + "(" + p.Name + ")"
 		case g.kinds.isHandle(p.Type):
 			return p.Name + "._handle"
+		case g.kinds.isOptionalHandle(p.Type):
+			return p.Name + "?._handle ?: 0"
 		case isOptionOfBuiltin(p.Type):
 			return lowerOptionExternArg(p.Name, p.Type)
 		}
@@ -1341,7 +1351,7 @@ func (g *generator) resourceReturnType(results []TypeRef) (string, bool) {
 // 0 = null, and the wrapper checks the handle before constructing.
 func (g *generator) optionResourceReturnType(results []TypeRef) (string, bool) {
 	ref, ok := singleResultRef(results)
-	if !ok || ref.Kind != OptionKind || ref.Elem == nil || !g.kinds.isHandle(*ref.Elem) {
+	if !ok || !g.kinds.isOptionalHandle(ref) {
 		return "", false
 	}
 	return ref.Elem.Name, true

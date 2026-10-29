@@ -581,6 +581,12 @@ func (p *Parser) parseMemberBody() Member {
 		return p.parseAttribute(true, false)
 	case TokenAttribute:
 		return p.parseAttribute(false, false)
+	case TokenInherit:
+		// inherit attribute: the getter is the nearest ancestor's of that
+		// identifier, but the derived prototype still exposes a read-write
+		// accessor, so it binds as a writable attribute redeclaring it.
+		p.next()
+		return p.parseAttribute(false, false)
 	case TokenStatic:
 		p.next()
 		// Static attribute or static operation

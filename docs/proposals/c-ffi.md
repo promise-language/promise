@@ -16,29 +16,29 @@ together; no new annotation, keyword, pointer sigil, or block syntax is proposed
 
 ## Table of Contents
 
-1. [Motivation & Scope](#1-motivation--scope)
+1. [Motivation & Scope](#1-motivation-and-scope)
 2. [Building on `extern` and `raw`, Not Around Them](#2-building-on-extern-and-raw-not-around-them)
 3. [Design Tenets Applied to FFI](#3-design-tenets-applied-to-ffi)
-4. [New Surface — Overview](#4-new-surface--overview)
-5. [`` `raw `` Structs — the Foreign Struct Layout Grammar](#5-raw-structs--the-foreign-struct-layout-grammar)
-6. [Foreign Pointer Types (`cffi`)](#6-foreign-pointer-types-cffi)
-7. [`` `extern `` — Widening the Symbol Registry](#7-extern--widening-the-symbol-registry)
+4. [New Surface — Overview](#4-new-surface-overview)
+5. [`` `raw `` Structs — the Foreign Struct Layout Grammar](#5-raw-structs-as-the-foreign-struct-layout-grammar)
+6. [Foreign Pointer Types (`cffi`)](#6-foreign-pointer-types-in-cffi)
+7. [`` `extern `` — Widening the Symbol Registry](#7-widening-the-extern-symbol-registry)
 8. [Safety Boundary and Unchecked Operations](#8-safety-boundary-and-unchecked-operations)
 9. [C-ABI Type Mapping](#9-c-abi-type-mapping)
-10. [Calling Convention & Unsupported Shapes](#10-calling-convention--unsupported-shapes)
-11. [Ownership & the RAII Handle Pattern](#11-ownership--the-raii-handle-pattern)
+10. [Calling Convention & Unsupported Shapes](#10-calling-convention-and-unsupported-shapes)
+11. [Ownership & the RAII Handle Pattern](#11-ownership-and-the-raii-handle-pattern)
 12. [Error-Handling Convention](#12-error-handling-convention)
-13. [Linking Model — Static-First](#13-linking-model--static-first)
+13. [Linking Model — Static-First](#13-static-first-linking-model)
 14. [Platform Specifics](#14-platform-specifics)
 15. [The `promise bind c` Generator](#15-the-promise-bind-c-generator)
 16. [Worked Example: Binding SQLite](#16-worked-example-binding-sqlite)
-17. [Diagnostics & Compile-Time Checks](#17-diagnostics--compile-time-checks)
-18. [Non-Goals / Future Work](#18-non-goals--future-work)
+17. [Diagnostics & Compile-Time Checks](#17-diagnostics-and-compile-time-checks)
+18. [Non-Goals / Future Work](#18-non-goals-and-future-work)
 19. [Open Questions](#19-open-questions)
 
 ---
 
-## 1. Motivation & Scope
+## 1 Motivation and Scope
 
 Promise programs occasionally need functionality that only exists as a mature C library —
 SQLite is the running example throughout this document, but the same shape covers zlib,
@@ -68,9 +68,9 @@ pointers/callbacks *into* Promise (§18); variadic C functions; unions; bitfield
 returning a foreign struct **by value** across the boundary (§10) — only by pointer. These are
 deliberate cuts to ship a sound, useful subset first; each is revisited in §18.
 
-## 2. Building on `extern` and `raw`, Not Around Them
+## 2 Building on extern and raw Not Around Them
 
-[`annotations.md` §16](../annotations.md#16-not-annotations) — the ratified, binding list of
+[`annotations.md` §16](../annotations.md#not-annotations) — the ratified, binding list of
 names considered and rejected — already addresses this exact territory:
 
 > `` `unsafe `` | Nothing checked it and nothing was unlocked by it. The `unsafe { }` block and
@@ -111,7 +111,7 @@ name) and always-static pure-value-type dispatch already rely on. Neither confli
 resolved by this draft's own wording — both are amendments the ratifying change must make
 in the owning documents.
 
-## 3. Design Tenets Applied to FFI
+## 3 Design Tenets Applied to FFI
 
 - **Self-contained.** A project that binds a C library carries the library's source (or a
   pinned, checksummed artifact) *inside its own tree* — never "assumes `libsqlite3-dev` is
@@ -132,7 +132,7 @@ in the owning documents.
   apply the identical discipline one place further: the *types* legal at an `` `extern ``
   boundary are a closed, checked set, for the same reason the symbols are.
 
-## 4. New Surface — Overview
+## 4 New Surface Overview
 
 Nothing below is a new annotation. The compiler-provided pointer and string conversion
 types live in an explicitly imported catalog module, `cffi`, not auto-imported `std`.
@@ -152,7 +152,7 @@ home).
 | `[native]` | new `promise.toml` table | Declares vendored C sources/archives to compile and link (§13) |
 | `promise bind c` | new CLI subcommand | Generates `` `extern ``/`` `raw `` declarations from a C header (§15) |
 
-## 5. `` `raw `` Structs — the Foreign Struct Layout Grammar
+## 5 Raw Structs as the Foreign Struct Layout Grammar
 
 A struct that crosses the `` `extern `` boundary is built entirely from `` `raw `` fields:
 
@@ -208,7 +208,7 @@ Rules, enforced in sema and codegen using the `IsRaw()` field property:
   when required by the selected surface. No undocumented native-only packing mechanism
   exists. Use a C shim with supported scalar/pointer parameters instead.
 
-## 6. Foreign Pointer Types (`cffi`)
+## 6 Foreign Pointer Types in cffi
 
 These are compiler-provided types in an explicitly imported module, not ordinary stdlib
 surface a user could declare: `native` is writable only on declarations already predeclared
@@ -306,7 +306,7 @@ or misalignment. These are caller obligations, not inferred from the legality ma
 Constness checks constrain Promise's pointer operations, not arbitrary C: a foreign function
 can still return a misqualified pointer or violate its own header contract (§8).
 
-## 7. `` `extern `` — Widening the Symbol Registry
+## 7 Widening the extern Symbol Registry
 
 The annotation still names an explicit symbol; the Promise name marks the unchecked call:
 
@@ -347,7 +347,7 @@ producer obligation: symbol tables cannot prove that a binary implements its dec
   symbols fail before linking (§13.5). Unsupported header types require a supported C
   shim; neither handwritten bindings nor casts may bypass declaration validation.
 
-## 8. Safety Boundary and Unchecked Operations
+## 8 Safety Boundary and Unchecked Operations
 
 **Compiler implementation correctness is not caller memory safety.** `native` guarantees
 that an implementation exists; it does not certify a foreign pointer's provenance, lifetime,
@@ -377,7 +377,7 @@ No `unsafe` block is proposed. Naming and explicit imports identify the audit su
 are not an effect system or a lifetime proof. This limitation must be stated in the amended
 language and memory specifications rather than justified by the old `native` rationale.
 
-## 9. C-ABI Type Mapping
+## 9 C ABI Type Mapping
 
 The closed mapping referenced by §5 (field storage), §6 (pointees), and §7 (function
 parameters/results), subject to each position's restrictions:
@@ -500,7 +500,7 @@ For a zero-capacity call use `RawPtr[u8].null` only if the C function permits nu
 capacity; do not attempt to form an element address in empty storage. This example is also
 a required runtime fixture (§17), not a claim that the proposed API already compiles.
 
-## 10. Calling Convention & Unsupported Shapes
+## 10 Calling Convention and Unsupported Shapes
 
 **Calling convention.** Only the default C ABI for an explicitly supported target triple:
 
@@ -559,7 +559,7 @@ pointers in C function signatures), so the correct Promise-side signature is `Ra
   storage accesses.** Use supported C accessor shims rather than inventing layout or
   synchronization rules on the Promise side.
 
-## 11. Ownership & the RAII Handle Pattern
+## 11 Ownership and the RAII Handle Pattern
 
 The flagship idiom this document is built around: wrap a C handle in an ordinary Promise type
 and let `drop()` call the library's destructor. This maps Promise's existing ownership model
@@ -609,7 +609,7 @@ that replaces implicit field construction. It is not a complete public wrapper b
   accounting does not automatically observe C `malloc`; foreign-resource tests need C-side
   counters or suitable native instrumentation (§17).
 
-## 12. Error-Handling Convention
+## 12 Error Handling Convention
 
 An `` `extern `` function is never `!` — its failure signaling is whatever the C library
 defines, unmodified. The idiomatic pattern is a thin, safe, `!` wrapper one layer up:
@@ -620,7 +620,7 @@ live, then raises `SqliteError`. Calls inside a failable Promise function auto-p
 is not failable-call syntax. A failed string conversion uses `? { ... }` to select a fallback
 message, not `?!`.
 
-### Foreign-Call Execution and Thread-Local Errors
+### Foreign Call Execution and Thread Local Errors
 
 Every user-bound `extern` call is conservatively **potentially blocking**. When running on
 the scheduler, codegen releases the P with `promise_sched_enter_syscall`, calls C on the
@@ -653,14 +653,14 @@ state, when required by the API, also happens inside that shim, after scheduler 
 captured value is meaningful only under the C API's documented failure conditions. This
 keeps return values faithful to C without introducing an ambient Promise "last error".
 
-## 13. Linking Model — Static-First
+## 13 Static First Linking Model
 
 Consistent with the rest of Promise's distribution story (musl-static on Linux, no dynamic
 dependency on a system `libssl.so` for TLS — see [distribution.md](../distribution.md)), linking
 a C library into a Promise binary defaults to **static**, and the library's code is **vendored
 into the project itself** — never assumed to be pre-installed on the build or target machine.
 
-### 13.1 `promise.toml` — the `[native]` table
+### 13 1 The native Table in promise toml
 
 Proposed as an addition to [module-system.md](../module-system.md)'s manifest schema:
 
@@ -722,7 +722,7 @@ and linker/runtime identities.
 Changing only a header, define, sysroot, or archive must invalidate all affected downstream
 artifacts, not just the C compilation cache.
 
-### 13.2 Path A — Vendored C Source (preferred)
+### 13 2 Path A Preferred Vendored C Source
 
 For any library that is a reasonably small, portable C codebase (the leading example: SQLite
 ships as a single ~250K-line **amalgamation** file, `sqlite3.c`, specifically designed to be
@@ -752,7 +752,7 @@ Cross-compilation therefore requires an explicit host-tool/target-sysroot pair a
 in §17, not just a different compiler flag. Zero *user-installed* dependencies remains the
 goal; this proposal adds managed dependencies and distribution work to meet it.
 
-### 13.3 Path B — Vendored Prebuilt Static Archives (escape hatch)
+### 13 3 Path B Escape Hatch Vendored Prebuilt Static Archives
 
 For a library whose own build is too large or too complex to compile at every consumer's build
 time (autotools/CMake-heavy, code-generation steps, or simply too slow to recompile per project)
@@ -926,7 +926,7 @@ by the single cross-host fixture that exercises one library. A profile record is
 for this reason: correcting a host entry means publishing a new profile, which invalidates
 archives built against the old one exactly as any other identity change does.
 
-### 13.4 Non-Goal for v1 — Dynamic Loading
+### 13 4 Dynamic Loading Is a Non Goal for v1
 
 `dlopen`/`dlsym` (POSIX) and `LoadLibrary`/`GetProcAddress` (Windows), resolving against a
 library already installed on the machine running the binary, is **not** part of this document's
@@ -937,7 +937,7 @@ and it cannot be verified at build time, contradicting the "checked at the decla
 narrow cases that genuinely need it (a vendor driver library that cannot be statically vendored).
 No dynamic-loading manifest schema or runtime API is designed by this proposal.
 
-### 13.5 Catalog Modules and `[native]`
+### 13 5 Catalog Modules and the native Table
 
 Catalog modules are otherwise self-contained by construction — a catalog module's `promise.toml`
 may not have a `[require]` section (no dependency on remote/local Promise modules; see
@@ -974,7 +974,7 @@ that graph's semantics; Windows and Darwin use their equivalent archive-resoluti
 Unresolved transitive symbols are build errors naming the owning entry. Native machine objects
 link in both debug and release builds; cross-language LTO is not required in v1.
 
-## 14. Platform Specifics
+## 14 Platform Specifics
 
 **Linux.** Vendored sources compile to `.o` and link into the musl-static binary exactly like
 any other runtime object. A vendored library's own transitive libc usage (`malloc`, `memcpy`,
@@ -1006,7 +1006,7 @@ that survives filtering and requires an unavailable native symbol is a compile-t
 even if never called; an excluded declaration is not checked. This is not a runtime
 `unsupported` exception. A fallback needs no C toolchain or inactive native payload.
 
-## 15. The `promise bind c` Generator
+## 15 The promise bind c Generator
 
 Mirrors the existing `promise bind wit`/`promise bind webidl` subcommands
 (`compiler/cmd/promise/bind.go`):
@@ -1042,7 +1042,7 @@ promise bind c --native sqlite3 --target linux-amd64 -o sqlite_ffi.pr
   target separately and use existing target conditions where mappings differ; bindgen must
   not infer universal portability from a single host-target run.
 
-## 16. Worked Example: Binding SQLite
+## 16 Worked Example Binding SQLite
 
 Layout:
 
@@ -1193,7 +1193,7 @@ Application
 safety depends on the audited invariants above (§8). The example must become executable
 as part of implementing this proposal (§17).
 
-## 17. Diagnostics & Compile-Time Checks
+## 17 Diagnostics and Compile Time Checks
 
 Sema/build-time errors this proposal introduces (non-exhaustive, illustrative of the coverage
 expected before shipping):
@@ -1297,7 +1297,7 @@ integration tests. All advertised targets must pass these gates before being ena
 These tests validate specific contracts; they do not certify arbitrary linked C code or
 prove that a handwritten wrapper meets every memory/lifetime obligation.
 
-## 18. Non-Goals / Future Work
+## 18 Non Goals and Future Work
 
 Each cut in §1/§10, with what would need to change to lift it:
 
@@ -1324,7 +1324,7 @@ Each cut in §1/§10, with what would need to change to lift it:
 - **Remote third-party native archives and cross-language LTO.** Neither is part of v1's
   vendored machine-object contract.
 
-## 19. Open Questions
+## 19 Open Questions
 
 The draft now chooses all-`raw` layout without `native`, separate const/mutable pointers,
 explicit `cffi` imports, `_unchecked` naming, required symbol allow-lists, and managed Clang

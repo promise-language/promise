@@ -112,10 +112,16 @@ func (p *Parser) parseFile() *File {
 				file.Partials = append(file.Partials, partial)
 			case TokenDictionary:
 				file.PartialDicts = append(file.PartialDicts, p.parsePartialDictionary())
+			case TokenNamespace:
+				file.PartialNamespaces = append(file.PartialNamespaces, p.parseNamespace())
 			default:
-				p.errorf(partialTok.Pos, "expected interface, mixin, or dictionary after partial, got %s", partialTok.Kind)
+				p.errorf(partialTok.Pos, "expected interface, mixin, dictionary, or namespace after partial, got %s", partialTok.Kind)
 				p.next()
 			}
+		case TokenNamespace:
+			ns := p.parseNamespace()
+			ns.Doc = doc
+			file.Namespaces = append(file.Namespaces, ns)
 		case TokenMixin:
 			// Standalone: interface mixin Name { ... };
 			// But WebIDL spec uses "interface mixin", so this handles just "mixin"
@@ -154,13 +160,18 @@ func (p *Parser) parseDeclStart() (string, []*ExtAttr) {
 }
 
 func (p *Parser) tryParseExtAttrs() []*ExtAttr {
-	// Extended attributes are tokenized as "[...]" ident tokens
 	tok := p.peek()
-	if tok.Kind == TokenIdent && strings.HasPrefix(tok.Value, "[") && strings.HasSuffix(tok.Value, "]") {
+	if isExtAttrs(tok) {
 		p.next()
 		return parseExtAttrString(tok.Value[1 : len(tok.Value)-1])
 	}
 	return nil
+}
+
+// isExtAttrs reports whether tok is an extended attribute list, which the lexer
+// tokenizes as one "[...]" identifier token.
+func isExtAttrs(tok Token) bool {
+	return tok.Kind == TokenIdent && strings.HasPrefix(tok.Value, "[") && strings.HasSuffix(tok.Value, "]")
 }
 
 // parseExtAttrString parses the content between [ and ] into ExtAttr entries.
@@ -465,6 +476,55 @@ func (p *Parser) parseMixin() *Mixin {
 	p.expect(TokenSemicolon)
 
 	return m
+}
+
+// parseNamespace parses "namespace Name { ... };", the body of a partial
+// namespace included. A namespace member is a regular operation, a readonly
+// attribute or a constant (namespaceMember); any other member is reported at
+// the position it starts and dropped, since its lowering — every member bound
+// as `global` — would bind it wrongly. A stringifier is one: `stringifier;`
+// parses as the regular operation toString() and a stringifier attribute as a
+// plain one, so it is told apart by its keyword, before parseMember reads it.
+func (p *Parser) parseNamespace() *Namespace {
+	pos := p.expect(TokenNamespace).Pos
+	ns := &Namespace{
+		Name: p.next().Value,
+		Pos:  pos,
+	}
+
+	p.expect(TokenLBrace)
+	for !p.at(TokenRBrace) && !p.at(TokenEOF) {
+		memberPos := p.peek().Pos
+		keyword := p.peek()
+		if isExtAttrs(keyword) {
+			keyword = p.lex.PeekN(1)
+		}
+		member := p.parseMember()
+		if keyword.Kind == TokenStringifier || !namespaceMember(member) {
+			p.errorf(memberPos, "namespace %s: a namespace member is a regular operation, a readonly attribute or a constant", ns.Name)
+			continue
+		}
+		ns.Members = append(ns.Members, member)
+	}
+	p.expect(TokenRBrace)
+	p.expect(TokenSemicolon)
+
+	return ns
+}
+
+// namespaceMember reports whether m may be a member of a namespace: WebIDL's
+// NamespaceMember is a regular operation — named, neither static nor special —
+// a readonly attribute or a constant.
+func namespaceMember(m Member) bool {
+	switch m := m.(type) {
+	case *Operation:
+		return !m.Static && m.Special == "" && m.Name != ""
+	case *Attribute:
+		return m.Readonly && !m.Static
+	case *Const:
+		return true
+	}
+	return false
 }
 
 func (p *Parser) parseIncludes() *IncludesStatement {
@@ -979,18 +1039,19 @@ func (p *Parser) parseUnionType() *TypeRef {
 	return ref
 }
 
-// Merge applies partial interfaces, partial mixins, partial dictionaries and
-// includes statements to the definitions they extend, replaces each interface's
-// maplike or setlike declaration with the attribute and operations it declares
-// (expandCollections), then records on each interface the members an interface
-// inheriting from it redeclares (Interface.Redeclared) and those a named
-// property may hide (Interface.OverriddenBuiltIns), and on the file the
-// identifiers each [LegacyWindowAlias] names (File.WindowAliases). It returns an
-// error for each partial whose interface, mixin or dictionary is not in file,
-// and for each side of an includes statement that is not, after applying every
-// one that matches: nothing else would name the members they carry, so they
-// would otherwise vanish unreported. It also returns one for each maplike or
-// setlike declaration after an interface's first, which WebIDL forbids.
+// Merge applies partial interfaces, partial mixins, partial dictionaries,
+// partial namespaces and includes statements to the definitions they extend,
+// replaces each interface's maplike or setlike declaration with the attribute
+// and operations it declares (expandCollections), then records on each
+// interface the members an interface inheriting from it redeclares
+// (Interface.Redeclared) and those a named property may hide
+// (Interface.OverriddenBuiltIns), and on the file the identifiers each
+// [LegacyWindowAlias] names (File.WindowAliases). It returns an error for each
+// partial whose interface, mixin, dictionary or namespace is not in file, and
+// for each side of an includes statement that is not, after applying every one
+// that matches: nothing else would name the members they carry, so they would
+// otherwise vanish unreported. It also returns one for each maplike or setlike
+// declaration after an interface's first, which WebIDL forbids.
 // An "interface mixin", which the parser stores as an Interface marked _mixin,
 // is a mixin and never an interface: a partial interface, the left side of an
 // includes statement or an inheriting interface does not resolve to it.
@@ -1053,6 +1114,19 @@ func Merge(file *File) []*ParseError {
 			d.Members = append(d.Members, pd.Members...)
 		} else {
 			unbound(pd.Pos, "partial dictionary "+pd.Name, pd.Name, "a dictionary")
+		}
+	}
+
+	// Apply partial namespaces
+	nsMap := make(map[string]*Namespace)
+	for _, ns := range file.Namespaces {
+		nsMap[ns.Name] = ns
+	}
+	for _, pn := range file.PartialNamespaces {
+		if ns, ok := nsMap[pn.Name]; ok {
+			ns.Members = append(ns.Members, pn.Members...)
+		} else {
+			unbound(pn.Pos, "partial namespace "+pn.Name, pn.Name, "a namespace")
 		}
 	}
 

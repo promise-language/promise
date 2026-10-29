@@ -16,6 +16,10 @@ type File struct {
 	PartialDicts []*PartialDictionary
 	Mixins       []*Mixin
 	Includes     []*IncludesStatement
+	Namespaces   []*Namespace
+	// PartialNamespaces are the partial namespace definitions, which Merge
+	// applies to the namespaces of their names.
+	PartialNamespaces []*Namespace
 	// WindowAliases maps each identifier an interface's [LegacyWindowAlias]
 	// names to that interface's name: `SVGMatrix` to `DOMMatrix`. Merge sets it
 	// from the whole merged file; like Interface.Redeclared, nothing that later
@@ -37,6 +41,8 @@ func (f *File) Append(src *File) {
 	f.PartialDicts = append(f.PartialDicts, src.PartialDicts...)
 	f.Mixins = append(f.Mixins, src.Mixins...)
 	f.Includes = append(f.Includes, src.Includes...)
+	f.Namespaces = append(f.Namespaces, src.Namespaces...)
+	f.PartialNamespaces = append(f.PartialNamespaces, src.PartialNamespaces...)
 }
 
 // Interface represents a WebIDL interface declaration.
@@ -129,6 +135,16 @@ type PartialDictionary struct {
 
 // Mixin represents a WebIDL interface mixin definition.
 type Mixin struct {
+	Name    string
+	Members []Member
+	Doc     string
+	Pos     Pos
+}
+
+// Namespace represents a WebIDL namespace or partial namespace definition: an
+// object whose members live on it rather than on instances. Its members are
+// regular operations, readonly attributes and constants (parseNamespace).
+type Namespace struct {
 	Name    string
 	Members []Member
 	Doc     string

@@ -12,12 +12,13 @@ import (
 )
 
 // KeepList is the selection `promise bind webidl -keep` generates: the
-// interfaces it names and the members it names on them (docs/wasm-bindings.md,
-// "Generating a subset"). It selects from the input rather than declaring it, so
-// an entry that names nothing in the input selects nothing — a list derived from
-// compat data names far more than the bound specs define.
+// interfaces and namespaces it names and the members it names on them
+// (docs/wasm-bindings.md, "Generating a subset"). It selects from the input
+// rather than declaring it, so an entry that names nothing in the input selects
+// nothing — a list derived from compat data names far more than the bound specs
+// define.
 type KeepList struct {
-	interfaces map[string]bool // "Element"
+	interfaces map[string]bool // "Element", "console"
 	members    map[string]bool // "Element.setAttribute", "Event.constructor"
 }
 
@@ -75,14 +76,15 @@ type KeepDrop struct {
 // kept when `Interface.member` is listed (`Interface.constructor` for its
 // constructors); constants, iterable declarations, anonymous special
 // operations and the members a maplike or setlike declaration declares go with
-// their interface. Either keeps the member's whole unit.
-// Dictionaries, enums, typedefs and callbacks are not listed.
+// their interface. Either keeps the member's whole unit. A namespace is listed
+// as an interface is, and its members are kept as a kept interface's are
+// (keepNamespace). Dictionaries, enums, typedefs and callbacks are not listed.
 //
 // The closure, to a fixed point: a typedef whose type names a dropped definition
 // is dropped, and so is a dictionary whose parent is dropped or whose required
 // member names one. Then an optional dictionary member naming one is removed,
-// and so is an interface member — together with every member of its unit, on
-// its interface and on every kept interface inheriting from it.
+// and so is an interface or namespace member — together with every member of
+// its unit, on its interface and on every kept interface inheriting from it.
 //
 // A member's unit is its Promise name (keepUnit), which is what WebIdlToIR
 // counts its overload set by, and the unit spans the `is` chain, so the
@@ -220,6 +222,16 @@ func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 	}
 	file.Interfaces = interfaces
 
+	var namespaces []*webidl.Namespace
+	for _, ns := range file.Namespaces {
+		if !keep.interfaces[ns.Name] {
+			continue
+		}
+		drops = append(drops, keepNamespace(ns, keep, droppedRef)...)
+		namespaces = append(namespaces, ns)
+	}
+	file.Namespaces = namespaces
+
 	for i := range drops {
 		drops[i].Unbound = !defined[drops[i].Ref]
 	}
@@ -268,6 +280,19 @@ func descendantKeeps(own map[*webidl.Interface]map[memberUnit]bool, ifaces map[s
 		}
 	}
 	return units
+}
+
+// keepNamespace reduces a kept namespace as keepMembers reduces a kept interface
+// that inherits from nothing: to the units it keeps by itself (unitsOf), less
+// each unit whose members name a dropped definition. A namespace has no `is`
+// chain for a unit to span.
+func keepNamespace(ns *webidl.Namespace, keep *KeepList, droppedRef func(...*webidl.TypeRef) string) []KeepDrop {
+	iface := &webidl.Interface{Name: ns.Name, Members: ns.Members}
+	own, _ := unitsOf(iface, keep)
+	selection := selectMembers(iface, func(unit memberUnit) bool { return own[unit] }, droppedRef)
+	drops := keepMembers(iface, map[*webidl.Interface]*memberSelection{iface: selection}, nil, nil)
+	ns.Members = iface.Members
+	return drops
 }
 
 // memberSelection is a kept interface's selected members, each with its unit

@@ -987,6 +987,48 @@ func TestApplyKeepList(t *testing.T) {
 				{What: "P.legacycaller", Ref: "Fancy"},
 			},
 		},
+		{
+			// #170: a namespace is listed as an interface is, by its IDL name,
+			// and its members as a kept interface's are: a listed member, and a
+			// constant, which goes with its namespace. CSS is not listed, so its
+			// listed member keeps nothing.
+			name: "a namespace is listed as an interface is",
+			src: `namespace console {
+				undefined log(DOMString message);
+				undefined warn(DOMString message);
+				const unsigned short MAX = 4;
+			};
+			partial namespace console { undefined count(); };
+			namespace CSS { DOMString escape(DOMString ident); };`,
+			list: "console\nconsole.log\nconsole.count\nCSS.escape\n",
+			resources: map[string][]string{
+				"Console": {"console.log", "console.MAX", "console.count"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// A kept namespace's member naming a dropped definition, or one no
+			// bound file defines, is dropped with its unit, as an interface's is.
+			name: "a namespace member naming a dropped definition is dropped",
+			src: `interface Fancy {};
+			namespace ns {
+				Fancy make();
+				undefined put(DOMString value);
+				undefined put(Fancy value);
+				Missing find();
+				readonly attribute DOMString label;
+			};`,
+			list: "ns\nns.make\nns.put\nns.find\nns.label\n",
+			resources: map[string][]string{
+				"Ns": {"ns.label.get"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "ns.make", Ref: "Fancy"},
+				{What: "ns.put", Ref: "Fancy"},
+				{What: "ns.find", Ref: "Missing", Unbound: true},
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

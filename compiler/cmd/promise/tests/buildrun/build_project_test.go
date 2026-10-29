@@ -689,6 +689,82 @@ interface Element {
 	}
 }
 
+// TestBindWebIdlJsValueCompilesClean is the end-to-end acceptance for #173's
+// JsValue marshalling: every wrapper kind that takes or returns `any`/`object`
+// — constructor, attribute, operation, nullable result, static — binds with
+// its self-check on, and a program building each variant compiles for
+// wasm32-web, importing the glue's js_value_* conversions. The conversions are
+// module-level and target-filtered, never methods of the enum, so the module —
+// the enum, and a dictionary naming it — still checks on the host target.
+func TestBindWebIdlJsValueCompilesClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "thing.idl")
+	idl := `dictionary Opts {
+	any detail;
+};
+
+[Exposed=Window]
+interface Thing {
+	constructor(any init);
+	attribute any data;
+	any echo(any x);
+	object? find();
+	static any make(any seed);
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	if out, err := exec.Command(bin, "bind", "webidl", "-name", "thing", "-o", outDir, idlPath).CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	// The host check runs before the web-only user file exists: it is the
+	// generated module alone that must check there.
+	if out, err := exec.Command(bin, "check", outDir).CombinedOutput(); err != nil {
+		t.Fatalf("host check of the generated module failed (want ok): %v\n%s", err, out)
+	}
+
+	userPath := filepath.Join(outDir, "use_thing.pr")
+	user := `main() ` + "`target(web)" + ` {
+    thing := Thing.create(JsValue.Undefined);
+    for v in [JsValue.Null, JsValue.Bool(value: true), JsValue.Number(value: 1.5), JsValue.Str(value: "s")] {
+        JsValue echoed = thing.echo(v);
+    }
+    JsValue data = thing.data;
+    thing.data = JsValue.Str(value: "next");
+    JsValue? found = thing.find();
+    JsValue made = Thing.make(JsValue.Number(value: 2.0));
+    opts := Opts(detail: JsValue.Null);
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	ir := string(out)
+	for _, name := range []string{
+		"js_value_undefined", "js_value_null", "js_value_bool", "js_value_number", "js_value_str",
+		"js_value_tag", "js_value_get_bool", "js_value_get_number", "js_value_get_str", "js_value_release",
+	} {
+		if !strings.Contains(ir, `"wasm-import-name"="`+name+`"`) {
+			t.Errorf("generated IR does not import %s", name)
+		}
+	}
+}
+
 // TestGCRemovedPrintsNotice verifies the `gc` verb no longer runs a sweep but
 // stays routable, exiting non-zero with a redirect to the mechanisms that
 // replaced it (T1009): `remove` for exclusive-blob reclamation and

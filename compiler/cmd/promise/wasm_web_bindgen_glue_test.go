@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -314,6 +315,194 @@ func TestBindWebIdlMaplikeSetlikeRoundTrip(t *testing.T) {
 		}
 		if got.Counts != `[["c",3]]` || got.Tags != `["x"]` {
 			t.Errorf("%s: host collections = %s and %s, want [[\"c\",3]] and [\"x\"]", b.name, got.Counts, got.Tags)
+		}
+		if len(got.Errs) != 0 {
+			t.Errorf("%s: unexpected stderr output %q", b.name, got.Errs)
+		}
+	}
+}
+
+// #173 end to end: a JsValue crosses between a bound module built for
+// wasm32-web and the glue generated beside it, both ways. The two halves of the
+// crossing — _js_value_to_ref/_js_value_from_ref and their externs in the
+// module, the js_value_* imports in the glue — are rendered by two generators
+// from one variant table, and each half's text has tests of its own; this is
+// the test of them agreeing at runtime: each variant lifts as itself, a held
+// object goes back to the host as the same object, and every primitive slot,
+// going out or coming back, is released.
+
+const jsValueGlueIDL = `interface Thing {
+  attribute any data;
+  any echo(any x);
+  any make(DOMString kind);
+  object? find(DOMString key);
+};
+`
+
+// jsValueGlueRounds is how many times jsValueGlueMain sends each primitive
+// variant through echo. Each crossing takes a slot going out (the builder's
+// temporary) and one coming back (the result's), and both are released, so
+// every round reuses the same slot; were either release missing for any one
+// variant, jsValueGlueRounds slots would stay taken.
+const jsValueGlueRounds = 100
+
+// Handle 1 is the ambient globalThis (T1510), so the driver stands in for a
+// Thing by putting its members on the global object.
+var jsValueGlueMain = `describe(JsValue v) string {
+    return match v {
+        Undefined => "undefined",
+        Null => "null",
+        Bool(b) => "bool:{b}",
+        Number(n) => "number:{n}",
+        Str(s) => "str:{s}",
+        Object(r) => "object",
+        Array(r) => "array",
+        Function(r) => "function",
+    };
+}
+
+main() {
+    t := Thing.borrow(1);
+    held := t.data;
+    print_line("data=" + describe(held));
+    print_line("back=" + describe(t.echo(held)));
+    for kind in ["array", "function", "bigint"] {
+        print_line(kind + "=" + describe(t.make(kind)));
+    }
+    print_line("found=" + describe(t.find("yes") ?: JsValue.Str(value: "none")));
+    print_line("missing=" + describe(t.find("no") ?: JsValue.Str(value: "none")));
+    t.data = JsValue.Str(value: "set");
+    for i in 0..` + strconv.Itoa(jsValueGlueRounds) + ` {
+        for v in [JsValue.Undefined, JsValue.Null, JsValue.Bool(value: true), JsValue.Bool(value: false), JsValue.Number(value: 1.5), JsValue.Str(value: "héllo")] {
+            got := describe(t.echo(v));
+            if i == 0 {
+                print_line(got);
+            }
+        }
+    }
+}
+`
+
+// jsValueGlueDriver loads the generated thing.js the way a page would
+// (nodePageDriver) and runs the .wasm named by its one argument. Besides the
+// program's output it reports whether echo received the held object itself,
+// what the data setter stored, and the handle a fresh _refStore gets once the
+// program is done.
+const jsValueGlueDriver = nodePageDriver + `
+const [wasmFile] = process.argv.slice(2);
+
+const held = { held: true };
+let echoedHeld = false;
+const made = { array: [1], function: () => 1, bigint: 10n };
+globalThis.data = held;
+globalThis.echo = (x) => {
+  if (x === held) echoedHeld = true;
+  return x;
+};
+globalThis.make = (kind) => made[kind];
+globalThis.find = (key) => (key === "yes" ? {} : null);
+
+(async () => {
+  const mod = await import(pathToFileURL(path.join(dir, "thing.js")).href);
+  const result = { logs, errs };
+  try {
+    await mod.init(wasmFile);
+    result.ok = true;
+  } catch (e) {
+    result.ok = false;
+    result.message = e && e.message;
+  }
+  result.echoedHeld = echoedHeld;
+  result.data = globalThis.data;
+  result.nextHandle = mod._refStore({ probe: true });
+  process.stdout.write("RESULT:" + JSON.stringify(result) + "\n");
+})();
+`
+
+type jsValueGlueResult struct {
+	OK         bool     `json:"ok"`
+	Message    string   `json:"message"`
+	Logs       []string `json:"logs"`
+	Errs       []string `json:"errs"`
+	EchoedHeld bool     `json:"echoedHeld"`
+	Data       any      `json:"data"`
+	NextHandle int      `json:"nextHandle"`
+}
+
+func TestBindWebIdlGlueRoundTripsJsValues(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+build+node integration test in short mode")
+	}
+	nodePath, err := resolveWasmRuntime("node")
+	if err != nil {
+		// Neither staged on this machine nor fetchable: a fact about the
+		// environment, not the tree.
+		t.Skipf("the pinned node is not obtainable here: %v", err)
+	}
+	bin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+
+	idlPath := filepath.Join(dir, "thing.idl")
+	if err := os.WriteFile(idlPath, []byte(jsValueGlueIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	clitest.RunOK(t, bin, nil, "bind", "webidl", "-name", "thing", "-o", outDir, idlPath)
+	if err := os.WriteFile(filepath.Join(outDir, "main.pr"), []byte(jsValueGlueMain), 0644); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(outDir, "driver.cjs")
+	if err := os.WriteFile(driver, []byte(jsValueGlueDriver), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The debug allocator rejects a pal_free of a block it did not hand out,
+	// such as a Str result's host-written bytes released the wrong way.
+	builds := []struct {
+		name string
+		args []string
+	}{
+		{"debug", nil},
+		{"release", []string{"--release"}},
+	}
+	for _, b := range builds {
+		wasm := b.name + ".wasm"
+		args := append(append([]string{"build"}, b.args...), "-target", "wasm32-web", "-o", filepath.Join(outDir, wasm), outDir)
+		clitest.RunOK(t, bin, nil, args...)
+
+		got := runNodeDriver[jsValueGlueResult](t, nodePath, driver, wasm)
+		if !got.OK {
+			t.Errorf("%s: init() rejected: %q (logs %q, errs %q)", b.name, got.Message, got.Logs, got.Errs)
+			continue
+		}
+		want := []string{
+			"data=object",
+			"back=object",
+			"array=array",
+			"function=function",
+			"bigint=object", // a JS value no other variant takes lifts as Object
+			"found=object",
+			"missing=str:none", // a null object? result is none
+			// The primitives echoed back: each built in the glue, lifted by tag.
+			"undefined",
+			"null",
+			"bool:true", // a bool is stored as a JS boolean, so it lifts as Bool, not Number
+			"bool:false",
+			"number:1.5",
+			"str:héllo", // multi-byte UTF-8 out through js_value_str and back through js_value_get_str
+		}
+		if strings.Join(got.Logs, "\n") != strings.Join(want, "\n") {
+			t.Errorf("%s: logs = %q, want %q", b.name, got.Logs, want)
+		}
+		if !got.EchoedHeld {
+			t.Errorf("%s: echo did not receive the object data returned; a held Object must cross back as its own handle", b.name)
+		}
+		if got.Data != "set" {
+			t.Errorf("%s: data = %#v after the setter, want the JS string \"set\"", b.name, got.Data)
+		}
+		if got.NextHandle >= jsValueGlueRounds {
+			t.Errorf("%s: a fresh _refStore returned handle %d after %d rounds of primitive crossings; a primitive's slot is not being released", b.name, got.NextHandle, jsValueGlueRounds)
 		}
 		if len(got.Errs) != 0 {
 			t.Errorf("%s: unexpected stderr output %q", b.name, got.Errs)

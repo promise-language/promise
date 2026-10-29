@@ -21,6 +21,7 @@ func GeneratePromiseWithOptions(modules []*Module, target string, canonicalABI b
 	g := &generator{
 		target:       target,
 		canonicalABI: canonicalABI,
+		kinds:        namedKinds(modules),
 	}
 	if canonicalABI {
 		listElemTypes := collectListElemTypes(modules)
@@ -40,6 +41,9 @@ type generator struct {
 	// resources indexes the module being emitted's resources by name, for
 	// resolving a Resource.Parent (ancestors).
 	resources map[string]Resource
+	// kinds classifies every name the modules define (namedKinds), which
+	// decides how a wrapper lowers and lifts a value of that type.
+	kinds kindRegistry
 }
 
 func (g *generator) line(format string, args ...interface{}) {
@@ -60,9 +64,12 @@ func (g *generator) emitModule(m *Module) {
 		g.resources[r.Name] = r
 	}
 
-	// Emit JsValue enum if any type references it
+	// Emit JsValue enum, and the functions it crosses the boundary through, if
+	// any type references it
 	if m.HasJsValue {
 		g.emitJsValueEnum()
+		g.blank()
+		g.emitJsValueConversions(m.ImportModule)
 		g.blank()
 	}
 
@@ -90,16 +97,19 @@ func (g *generator) emitModule(m *Module) {
 // emitJsValueEnum emits the JsValue enum type used to represent dynamic
 // JavaScript values (any, object, Promise<T>, record<K,V>, unions, etc.).
 func (g *generator) emitJsValueEnum() {
-	g.line("enum JsValue `public%s {", docAnnot("Represents a dynamic JavaScript value."))
+	g.line("enum %s `public%s {", jsValueName, docAnnot("Represents a dynamic JavaScript value."))
 	g.indent++
-	g.line("Undefined,")
-	g.line("Null,")
-	g.line("Bool(bool value),")
-	g.line("Number(f64 value),")
-	g.line("Str(string value),")
-	g.line("Object(int _js_ref),")
-	g.line("Array(int _js_ref),")
-	g.line("Function(int _js_ref),")
+	for _, c := range jsValueCases {
+		switch {
+		case c.holdsRef:
+			// A ref is an index into the glue's i32 reference table.
+			g.line("%s(i32 _js_ref),", c.name)
+		case c.payload != "":
+			g.line("%s(%s value),", c.name, c.payload)
+		default:
+			g.line("%s,", c.name)
+		}
+	}
 	g.blank()
 	g.line("get is_undefined bool `public%s {", docAnnot("Returns true if this value is undefined."))
 	g.indent++
@@ -130,19 +140,101 @@ func (g *generator) emitJsValueEnum() {
 	g.line("return match this { Str(v) => v, _ => none };")
 	g.indent--
 	g.line("}")
-	g.blank()
-	// _to_ref lowers a JsValue to its i32 JS ref-table handle for the FFI write
-	// path (params/setters). Only the ref-carrying variants carry a handle;
-	// primitives box to 0 (undefined) — boxing them needs a JS-side import,
-	// tracked as T0734. Internal (not `public): only the generated boundary code
-	// calls it, within the same module.
-	g.line("_to_ref(this) i32 {")
+	g.indent--
+	g.line("}")
+}
+
+// emitJsValueConversions emits the two private functions a JsValue crosses
+// the boundary through, as one i32 handle into the glue's reference table, and
+// the glue imports they call (docs/wasm-bindings.md §"JsValue the Dynamic
+// Value Enum"). Both convert eagerly, rendered from jsValueCases:
+//
+//   - _js_value_to_ref passes the handle a ref-holding variant keeps, and has
+//     the glue store any other variant's value in a temporary slot, which the
+//     import receiving it releases once read (_refTake in the glue).
+//   - _js_value_from_ref asks the glue which variant the handle's value is. A
+//     ref-holding variant keeps the handle; any other copies the value out
+//     and releases its slot, which nothing else refers to.
+//
+// They are module-level functions beside their externs, never methods of the
+// enum: `target filters only a top-level declaration, so the enum, which
+// makes no host call, compiles on every target.
+func (g *generator) emitJsValueConversions(importModule string) {
+	g.line("%s(%s value) i32 `target(%s) {", jsValueToRef, jsValueName, g.target)
 	g.indent++
-	g.line("return match this { Object(r) => r as i32, Array(r) => r as i32, Function(r) => r as i32, _ => 0i32 };")
+	g.line("return match value {")
+	g.indent++
+	for _, c := range jsValueCases {
+		switch {
+		case c.holdsRef:
+			g.line("%s(r) => r,", c.name)
+		case c.payload != "":
+			g.line("%s(v) => _%s(v),", c.name, jsValueBuilder(c))
+		default:
+			g.line("%s => _%s(),", c.name, jsValueBuilder(c))
+		}
+	}
+	g.indent--
+	g.line("};")
 	g.indent--
 	g.line("}")
+	g.blank()
+
+	g.line("%s(i32 ref) %s `target(%s) {", jsValueFromRef, jsValueName, g.target)
+	g.indent++
+	g.line("tag := _%s(ref);", jsValueTagImport)
+	fallback := ""
+	for i, c := range jsValueCases {
+		if c.jsTest == "" {
+			fallback = c.name
+			continue
+		}
+		g.line("if tag == %d {", i)
+		g.indent++
+		switch {
+		case c.holdsRef:
+			g.line("return %s.%s(_js_ref: ref);", jsValueName, c.name)
+		case c.payload != "":
+			g.line("lifted := %s.%s(value: _%s(ref));", jsValueName, c.name, jsValueGetter(c))
+			g.line("_%s(ref);", jsValueReleaseImport)
+			g.line("return lifted;")
+		default:
+			g.line("_%s(ref);", jsValueReleaseImport)
+			g.line("return %s.%s;", jsValueName, c.name)
+		}
+		g.indent--
+		g.line("}")
+	}
+	g.line("return %s.%s(_js_ref: ref);", jsValueName, fallback)
 	g.indent--
 	g.line("}")
+
+	extern := func(name, params, ret string) {
+		g.blank()
+		g.line("_%s(%s)%s", name, params, ret)
+		g.indent++
+		g.line("`extern(\"%s\")", name)
+		g.line("`wasm_import(\"%s\", \"%s\")", importModule, name)
+		g.line("`target(%s);", g.target)
+		g.indent--
+	}
+	for _, c := range jsValueCases {
+		if c.holdsRef {
+			continue
+		}
+		params := ""
+		if c.payload != "" {
+			params = c.payload + " value"
+		}
+		extern(jsValueBuilder(c), params, " i32")
+	}
+	extern(jsValueTagImport, "i32 ref", " i32")
+	for _, c := range jsValueCases {
+		if c.payload != "" {
+			extern(jsValueGetter(c), "i32 ref", " "+c.payload)
+		}
+	}
+	extern(jsValueReleaseImport, "i32 ref", "")
 }
 
 func (g *generator) emitType(t Type, importModule string) {
@@ -542,22 +634,22 @@ func (g *generator) emitStaticWrapper(m Func, resourceName, importModule string)
 	}
 
 	// Check for resource return types
-	resReturn, isResReturn := resourceReturnType(m.Results)
-	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
+	resReturn, isResReturn := g.resourceReturnType(m.Results)
+	optResReturn, isOptResReturn := g.optionResourceReturnType(m.Results)
 	locals := newWrapperLocals(m.Params)
 
-	if !g.canonicalABI && jsValueReturnType(m.Results) {
+	if !g.canonicalABI && g.jsValueReturnType(m.Results) {
 		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("%s := %s(%s)%s;", locals.ref, externName, externParams, raise)
-		g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
+		g.line("return %s(%s);", jsValueFromRef, locals.ref)
 		g.indent--
-	} else if !g.canonicalABI && optionJsValueReturnType(m.Results) {
+	} else if !g.canonicalABI && g.optionJsValueReturnType(m.Results) {
 		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("%s := %s(%s)%s;", locals.ref, externName, externParams, raise)
 		g.line("if %s == 0 { return none; }", locals.ref)
-		g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
+		g.line("return %s(%s);", jsValueFromRef, locals.ref)
 		g.indent--
 	} else if !g.canonicalABI && isResReturn {
 		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
@@ -620,20 +712,20 @@ func (g *generator) emitGetterWrapper(m Func, resourceName, importModule string)
 		annotations += " `global"
 	}
 
-	resReturn, isResReturn := resourceReturnType(m.Results)
-	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
+	resReturn, isResReturn := g.resourceReturnType(m.Results)
+	optResReturn, isOptResReturn := g.optionResourceReturnType(m.Results)
 	locals := newWrapperLocals(m.Params)
 
 	g.line("get %s%s %s %s%s {", m.Name, failMark, retType, annotations, docAnnot(m.Doc))
 	g.indent++
 	switch {
-	case !g.canonicalABI && jsValueReturnType(m.Results):
+	case !g.canonicalABI && g.jsValueReturnType(m.Results):
 		g.line("%s := %s(%s)%s;", locals.ref, externName, externArgs, raise)
-		g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
-	case !g.canonicalABI && optionJsValueReturnType(m.Results):
+		g.line("return %s(%s);", jsValueFromRef, locals.ref)
+	case !g.canonicalABI && g.optionJsValueReturnType(m.Results):
 		g.line("%s := %s(%s)%s;", locals.ref, externName, externArgs, raise)
 		g.line("if %s == 0 { return none; }", locals.ref)
-		g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
+		g.line("return %s(%s);", jsValueFromRef, locals.ref)
 	case !g.canonicalABI && isResReturn:
 		g.line("%s := %s(%s)%s;", locals.handle, externName, externArgs, raise)
 		g.line("return %s(_handle: %s, _owned: true);", resReturn, locals.handle)
@@ -667,20 +759,8 @@ func (g *generator) emitSetterWrapper(m Func, resourceName, importModule string)
 	}
 	paramSig := fmt.Sprintf("%s %s", promiseType(p.Type), p.Name)
 
-	// Lower the value param at the FFI boundary (JsValue → JS ref, resource →
-	// handle, Option<Builtin> → elvis-default). JsValue is checked first because
-	// isRefType is also true for it (T0723).
-	var valueArg string
-	switch {
-	case !g.canonicalABI && isJsValueRef(p.Type):
-		valueArg = p.Name + "._to_ref()"
-	case !g.canonicalABI && isRefType(p.Type):
-		valueArg = p.Name + "._handle"
-	case !g.canonicalABI && isOptionOfBuiltin(p.Type):
-		valueArg = lowerOptionExternArg(p.Name, p.Type)
-	default:
-		valueArg = g.lowerScalarArg(p.Name, p.Type)
-	}
+	// Lower the value param at the FFI boundary (lowerArg).
+	valueArg := g.lowerArg(p)
 
 	externArgs := valueArg
 	annotations := "`public"
@@ -709,23 +789,11 @@ func (g *generator) emitMethodWrapper(m Func, resourceName, importModule string)
 		raise = "^"
 	}
 
-	// Build extern call args: this._handle, then params (._handle for resources,
-	// elvis-default for Option<Builtin> — see lowerOptionExternArg)
-	var callArgs []string
-	callArgs = append(callArgs, "this._handle")
-	for _, p := range m.Params {
-		// JsValue before isRefType: lowers via _to_ref(), not a _handle (T0723).
-		if !g.canonicalABI && isJsValueRef(p.Type) {
-			callArgs = append(callArgs, p.Name+"._to_ref()")
-		} else if !g.canonicalABI && isRefType(p.Type) {
-			callArgs = append(callArgs, p.Name+"._handle")
-		} else if !g.canonicalABI && isOptionOfBuiltin(p.Type) {
-			callArgs = append(callArgs, lowerOptionExternArg(p.Name, p.Type))
-		} else {
-			callArgs = append(callArgs, g.lowerScalarArg(p.Name, p.Type))
-		}
+	// Build extern call args: this._handle, then each param lowered (lowerArg).
+	externCallArgs := "this._handle"
+	if args := g.formatExternCallArgs(m.Params); args != "" {
+		externCallArgs += ", " + args
 	}
-	externCallArgs := strings.Join(callArgs, ", ")
 
 	thisParam := "this"
 	if params != "" {
@@ -733,22 +801,22 @@ func (g *generator) emitMethodWrapper(m Func, resourceName, importModule string)
 	}
 
 	// Check for resource return types (need handle→resource construction)
-	resReturn, isResReturn := resourceReturnType(m.Results)
-	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
+	resReturn, isResReturn := g.resourceReturnType(m.Results)
+	optResReturn, isOptResReturn := g.optionResourceReturnType(m.Results)
 	locals := newWrapperLocals(m.Params)
 
-	if !g.canonicalABI && jsValueReturnType(m.Results) {
+	if !g.canonicalABI && g.jsValueReturnType(m.Results) {
 		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("%s := %s(%s)%s;", locals.ref, externName, externCallArgs, raise)
-		g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
+		g.line("return %s(%s);", jsValueFromRef, locals.ref)
 		g.indent--
-	} else if !g.canonicalABI && optionJsValueReturnType(m.Results) {
+	} else if !g.canonicalABI && g.optionJsValueReturnType(m.Results) {
 		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("%s := %s(%s)%s;", locals.ref, externName, externCallArgs, raise)
 		g.line("if %s == 0 { return none; }", locals.ref)
-		g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
+		g.line("return %s(%s);", jsValueFromRef, locals.ref)
 		g.indent--
 	} else if !g.canonicalABI && isResReturn {
 		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
@@ -857,13 +925,13 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 			} else {
 				g.line("return %s;", lifted)
 			}
-		} else if !g.canonicalABI && jsValueReturnType(f.Results) {
+		} else if !g.canonicalABI && g.jsValueReturnType(f.Results) {
 			g.line("%s := %s(%s)%s;", locals.ref, externName, externCallArgs, raise)
-			g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
-		} else if !g.canonicalABI && optionJsValueReturnType(f.Results) {
+			g.line("return %s(%s);", jsValueFromRef, locals.ref)
+		} else if !g.canonicalABI && g.optionJsValueReturnType(f.Results) {
 			g.line("%s := %s(%s)%s;", locals.ref, externName, externCallArgs, raise)
 			g.line("if %s == 0 { return none; }", locals.ref)
-			g.line("return JsValue.Object(_js_ref: %s as int);", locals.ref)
+			g.line("return %s(%s);", jsValueFromRef, locals.ref)
 		} else {
 			g.line("return %s;", g.liftScalarCall(fmt.Sprintf("%s(%s)%s", externName, externCallArgs, raise), f.Results))
 		}
@@ -925,17 +993,7 @@ func (g *generator) formatExternParams(params []Param) string {
 func (g *generator) formatExternCallArgs(params []Param) string {
 	var parts []string
 	for _, p := range params {
-		// JsValue must be checked before isRefType (which is also true for it):
-		// it lowers to its i32 JS ref via _to_ref(), not a resource _handle (T0723).
-		if !g.canonicalABI && isJsValueRef(p.Type) {
-			parts = append(parts, p.Name+"._to_ref()")
-		} else if !g.canonicalABI && isRefType(p.Type) {
-			parts = append(parts, p.Name+"._handle")
-		} else if !g.canonicalABI && isOptionOfBuiltin(p.Type) {
-			parts = append(parts, lowerOptionExternArg(p.Name, p.Type))
-		} else {
-			parts = append(parts, g.lowerScalarArg(p.Name, p.Type))
-		}
+		parts = append(parts, g.lowerArg(p))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -1162,64 +1220,146 @@ func singleResultRef(results []TypeRef) (TypeRef, bool) {
 	return ref, true
 }
 
-// resourceReturnType returns the resource type name if the function returns a single
-// NamedKind type (resource). Used to detect when wrapper must construct from handle.
-func resourceReturnType(results []TypeRef) (string, bool) {
+// namedKind is what a NamedKind TypeRef names among the modules being
+// generated. It decides how a wrapper lowers a value of that type into its
+// extern's i32 and lifts the extern's i32 back; the extern itself is i32 for
+// every kind (promiseExternType).
+type namedKind int
+
+const (
+	// namedForeign names nothing the modules define. It crosses as an opaque
+	// handle, as a resource does — the generated module then fails to compile
+	// with `undefined type` at the name, never at the lowering.
+	namedForeign namedKind = iota
+	// namedResource is a WebIDL interface or WIT resource:
+	// x._handle / T(_handle: h, _owned: true).
+	namedResource
+	// namedJsValue is the generated JsValue enum:
+	// _js_value_to_ref(x) / _js_value_from_ref(r).
+	namedJsValue
+	// namedRecord is a WebIDL dictionary or WIT record: no lowering yet
+	// (#174, #177).
+	namedRecord
+	// namedEnum is a WebIDL or WIT enum: no lowering yet (#175).
+	namedEnum
+	// namedVariant is a WIT variant: no lowering.
+	namedVariant
+	// namedFlags is a WIT flags type: no lowering.
+	namedFlags
+)
+
+// kindRegistry maps every name the modules define to its namedKind. Both
+// generators read it: codegen to lower and lift wrapper values, the JS glue to
+// load their arguments.
+type kindRegistry map[string]namedKind
+
+// namedKinds classifies every name the modules define, once per generation,
+// across all modules because they are emitted into one file. JsValue is the
+// name the lowering itself produces, so it is JsValue whether or not a module
+// emits the enum. An alias is not a kind: WebIDL inlines a typedef at every
+// use (convertWebIdlTypeRef) and #726 does the same for a WIT alias, so no
+// reference names one.
+func namedKinds(modules []*Module) kindRegistry {
+	kinds := kindRegistry{jsValueName: namedJsValue}
+	for _, m := range modules {
+		for _, r := range m.Resources {
+			kinds[r.Name] = namedResource
+		}
+		for _, t := range m.Types {
+			switch t.Kind {
+			case TypeRecord:
+				kinds[t.Name] = namedRecord
+			case TypeEnum:
+				kinds[t.Name] = namedEnum
+			case TypeVariant:
+				kinds[t.Name] = namedVariant
+			case TypeFlags:
+				kinds[t.Name] = namedFlags
+			}
+		}
+	}
+	return kinds
+}
+
+// kindOf returns what ref names, or false when ref is not a NamedKind. A name
+// the modules do not define is namedForeign.
+func (k kindRegistry) kindOf(ref TypeRef) (namedKind, bool) {
+	if ref.Kind != NamedKind {
+		return 0, false
+	}
+	if kind, ok := k[ref.Name]; ok {
+		return kind, true
+	}
+	return namedForeign, true
+}
+
+// isHandle reports whether ref crosses as the `_handle` of its wrapper: a
+// resource, or a name the modules do not define (namedForeign).
+func (k kindRegistry) isHandle(ref TypeRef) bool {
+	kind, ok := k.kindOf(ref)
+	return ok && (kind == namedResource || kind == namedForeign)
+}
+
+// isJsValue reports whether ref is the generated JsValue enum.
+func (k kindRegistry) isJsValue(ref TypeRef) bool {
+	kind, ok := k.kindOf(ref)
+	return ok && kind == namedJsValue
+}
+
+// lowerArg returns the expression that passes parameter p to its extern, in
+// the non-canonical ABI: a JsValue converts to its ref (_js_value_to_ref), a
+// handle-crossing type passes its `_handle`, an optional built-in collapses to
+// its zero value (lowerOptionExternArg), and anything else converts as a
+// scalar (lowerScalarArg). Every wrapper's parameters lower here.
+func (g *generator) lowerArg(p Param) string {
+	if !g.canonicalABI {
+		switch {
+		case g.kinds.isJsValue(p.Type):
+			return jsValueToRef + "(" + p.Name + ")"
+		case g.kinds.isHandle(p.Type):
+			return p.Name + "._handle"
+		case isOptionOfBuiltin(p.Type):
+			return lowerOptionExternArg(p.Name, p.Type)
+		}
+	}
+	return g.lowerScalarArg(p.Name, p.Type)
+}
+
+// resourceReturnType returns the wrapper type name if the function returns a
+// single handle-crossing type (isHandle): the wrapper constructs it from the
+// extern's handle.
+func (g *generator) resourceReturnType(results []TypeRef) (string, bool) {
 	ref, ok := singleResultRef(results)
-	if !ok {
+	if !ok || !g.kinds.isHandle(ref) {
 		return "", false
 	}
-	// JsValue is a NamedKind but NOT a resource — it has no _handle field and
-	// marshals as an opaque JS ref (see jsValueReturnType / isJsValueRef, T0723).
-	if ref.Kind == NamedKind && ref.Name != "JsValue" {
-		return ref.Name, true
-	}
-	return "", false
+	return ref.Name, true
 }
 
-// optionResourceReturnType returns the resource type name if the function returns
-// an optional resource (OptionKind wrapping NamedKind). The extern returns i32
-// where 0 = null, and the wrapper checks handle before constructing.
-func optionResourceReturnType(results []TypeRef) (string, bool) {
+// optionResourceReturnType returns the wrapper type name if the function
+// returns an optional handle-crossing type. The extern returns i32 where
+// 0 = null, and the wrapper checks the handle before constructing.
+func (g *generator) optionResourceReturnType(results []TypeRef) (string, bool) {
 	ref, ok := singleResultRef(results)
-	if !ok {
+	if !ok || ref.Kind != OptionKind || ref.Elem == nil || !g.kinds.isHandle(*ref.Elem) {
 		return "", false
 	}
-	// Exclude Option<JsValue> — handled by optionJsValueReturnType (T0723).
-	if ref.Kind == OptionKind && ref.Elem != nil && ref.Elem.Kind == NamedKind && ref.Elem.Name != "JsValue" {
-		return ref.Elem.Name, true
-	}
-	return "", false
+	return ref.Elem.Name, true
 }
 
-// isJsValueRef reports whether ref is the bindgen-emitted JsValue enum. JsValue is
-// a NamedKind like a resource, but it is NOT a resource: it has no _handle field
-// and marshals across the FFI as an opaque i32 JS ref-table handle, lifted into the
-// JsValue enum on the Promise side. Used to route JsValue away from the
-// resource-handle param/result paths (see codegen wrappers, T0723).
-func isJsValueRef(ref TypeRef) bool {
-	return ref.Kind == NamedKind && ref.Name == "JsValue"
-}
-
-// jsValueReturnType reports whether the single result (unwrapping result<T, E> to
-// its Ok type) is JsValue. The wrapper lifts the extern's i32 ref into a
-// JsValue.Object value.
-func jsValueReturnType(results []TypeRef) bool {
+// jsValueReturnType reports whether the single result (unwrapping result<T, E>
+// to its Ok type) is JsValue. The wrapper lifts the extern's i32 ref with
+// _js_value_from_ref.
+func (g *generator) jsValueReturnType(results []TypeRef) bool {
 	ref, ok := singleResultRef(results)
-	if !ok {
-		return false
-	}
-	return isJsValueRef(ref)
+	return ok && g.kinds.isJsValue(ref)
 }
 
 // optionJsValueReturnType reports whether the single result (unwrapping
 // result<T, E>) is Option<JsValue>. The extern returns i32 where 0 = none.
-func optionJsValueReturnType(results []TypeRef) bool {
+func (g *generator) optionJsValueReturnType(results []TypeRef) bool {
 	ref, ok := singleResultRef(results)
-	if !ok {
-		return false
-	}
-	return ref.Kind == OptionKind && ref.Elem != nil && isJsValueRef(*ref.Elem)
+	return ok && ref.Kind == OptionKind && ref.Elem != nil && g.kinds.isJsValue(*ref.Elem)
 }
 
 func isFailable(results []TypeRef) bool {

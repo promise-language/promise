@@ -85,7 +85,7 @@ func TestCodegenNamespace(t *testing.T) {
 	for _, s := range []string{
 		"type Console `structural(protocol: false) `public `target(web) `doc(\"`console` (WebIDL namespace)\") {",
 		"    borrow(i32 handle) Console `public `global ",
-		"    log(JsValue data) `public `global `doc(\"`console.log` (WebIDL operation)\") {\n        _console_log(data._to_ref());",
+		"    log(JsValue data) `public `global `doc(\"`console.log` (WebIDL operation)\") {\n        _console_log(_js_value_to_ref(data));",
 		"    get label string `public `global ",
 		"    count_2(string label) `public `global ",
 		"`wasm_import(\"promise_env\", \"console.count.2\")",
@@ -100,7 +100,7 @@ func TestCodegenNamespace(t *testing.T) {
 // never the type's Console, which no host defines.
 func TestWebIdlNamespaceGlue(t *testing.T) {
 	glue := GenerateJSGlue(overloadIR(t, namespaceFixture))
-	assertContains(t, glue, "    \"console.log\"(data) {\n      console.log(_refLoad(data));\n")
+	assertContains(t, glue, "    \"console.log\"(data) {\n      console.log(_refTake(data));\n")
 	assertContains(t, glue, "    \"console.count.2\"(label$ptr, label$len) {\n      console.count(_readString(label$ptr, label$len));\n")
 	assertNotContains(t, glue, "Console.")
 	assertNotContains(t, glue, "[resource-drop]")

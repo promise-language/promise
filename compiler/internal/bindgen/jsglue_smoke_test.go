@@ -2,6 +2,7 @@ package bindgen
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -916,5 +917,90 @@ func TestGenerateJSGlueRefTablePinsAmbientHandles(t *testing.T) {
 		if !ok {
 			t.Errorf("ref-table invariant %q does not hold", name)
 		}
+	}
+}
+
+// jsValueGlueIDL binds an interface taking and returning `any`, so the glue
+// carries the JsValue runtime and imports (#173).
+const jsValueGlueIDL = `interface Target {
+  undefined take(any x);
+  any give();
+};`
+
+// TestGenerateJSGlueJsValueSyntaxValid parses the glue of a module that has
+// JsValue: its runtime, its imports and the _refTake argument reads.
+func TestGenerateJSGlueJsValueSyntaxValid(t *testing.T) {
+	nodePath := requireNode(t)
+	nodeCheckGlue(t, nodePath, GenerateJSGlue(overloadIR(t, jsValueGlueIDL)))
+}
+
+// TestGenerateJSGlueJsValueReachesHost calls the JsValue imports as the
+// generated conversions would (#173). It reports:
+//   - the tag js_value_tag gives each kind of JS value — a bigint and a symbol
+//     falling back to Object;
+//   - the tag of each builder's value: a bool crossing as 1 or 0 is stored as a
+//     JS boolean, so it lifts back as Bool, not Number;
+//   - what the getters read back;
+//   - what Target.take received for a built string ("AB", the smoke module's
+//     first two bytes) and for an object handle;
+//   - that the builder's temporary slot is released once the import has read
+//     it, and handed out again by the next _refStore, while a handle a JsValue
+//     holds stays loaded;
+//   - that js_value_release clears its slot;
+//   - that a host which throws on the argument still has its temporary slot
+//     released, because _refTake reads it before the call.
+//
+// js_value_get_str is not called: writing a string result needs the module's
+// cabi_realloc, which the smoke module does not export.
+// TestBindWebIdlGlueRoundTripsJsValues (cmd/promise) runs it in a built module.
+func TestGenerateJSGlueJsValueReachesHost(t *testing.T) {
+	nodePath := requireNode(t)
+	loader := smokeLoader{name: "glue", js: GenerateJSGlue(overloadIR(t, jsValueGlueIDL)), initArgs: []string{"frontend.wasm"}}
+	result := runSmokeDriver(t, nodePath, loader, 0, importCallDriver(`
+  const env = imports.promise_env;
+  const received = [];
+  const self = mod._refStore({ take(x) { received.push(x); } });
+  const tags = [undefined, null, true, 1.5, "s", {}, [], () => {}, 10n, Symbol("q")]
+    .map((v) => env.js_value_tag(mod._refStore(v)));
+  const built = {
+    undefined: env.js_value_undefined(),
+    null: env.js_value_null(),
+    true: env.js_value_bool(1),
+    false: env.js_value_bool(0),
+    number: env.js_value_number(2.5),
+    str: env.js_value_str(0, 2),
+  };
+  const builtTags = {};
+  for (const [k, h] of Object.entries(built)) builtTags[k] = env.js_value_tag(h);
+  const got = [env.js_value_get_bool(built.true), env.js_value_get_bool(built.false), env.js_value_get_number(built.number)];
+
+  env["Target.take"](self, built.str);
+  const tempReleased = mod._refLoad(built.str) === undefined;
+  const tempReused = mod._refStore("next") === built.str;
+  const held = mod._refStore({ held: true });
+  env["Target.take"](self, held);
+  const heldKept = mod._refLoad(held) !== undefined;
+  env.js_value_release(held);
+  const releasedCleared = mod._refLoad(held) === undefined;
+
+  const thrower = mod._refStore({ take() { throw new Error("host threw"); } });
+  const doomed = env.js_value_str(0, 2);
+  let threw = false;
+  try { env["Target.take"](thrower, doomed); } catch (e) { threw = e.message === "host threw"; }
+  const thrownReleased = mod._refLoad(doomed) === undefined;
+  process.stdout.write("RESULT:" + JSON.stringify({ tags, builtTags, got, received, tempReleased, tempReused, heldKept, releasedCleared, threw, thrownReleased }) + "\n");
+`))
+
+	tag := func(name string) int { return jsValueTag(t, name) }
+	want := fmt.Sprintf(`RESULT:{"tags":[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d],`+
+		`"builtTags":{"undefined":%d,"null":%d,"true":%d,"false":%d,"number":%d,"str":%d},`+
+		`"got":[1,0,2.5],"received":["AB",{"held":true}],`+
+		`"tempReleased":true,"tempReused":true,"heldKept":true,"releasedCleared":true,`+
+		`"threw":true,"thrownReleased":true}`,
+		tag("Undefined"), tag("Null"), tag("Bool"), tag("Number"), tag("Str"),
+		tag("Object"), tag("Array"), tag("Function"), tag("Object"), tag("Object"),
+		tag("Undefined"), tag("Null"), tag("Bool"), tag("Bool"), tag("Number"), tag("Str"))
+	if result != want {
+		t.Errorf("JsValue imports delivered\n%s\nwant\n%s", result, want)
 	}
 }

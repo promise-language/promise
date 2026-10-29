@@ -86,7 +86,7 @@ func TestWrapperLocalsAvoidParams(t *testing.T) {
 			generate: webidl("any n(long ref);"),
 			want: []string{
 				"ref_ := _y_n(this._handle, ref);",
-				"return JsValue.Object(_js_ref: ref_ as int);",
+				"return _js_value_from_ref(ref_);",
 			},
 		},
 		{
@@ -95,7 +95,7 @@ func TestWrapperLocalsAvoidParams(t *testing.T) {
 			want: []string{
 				"ref_ := _y_o(this._handle, ref);",
 				"if ref_ == 0 { return none; }",
-				"return JsValue.Object(_js_ref: ref_ as int);",
+				"return _js_value_from_ref(ref_);",
 			},
 		},
 		{
@@ -120,7 +120,7 @@ func TestWrapperLocalsAvoidParams(t *testing.T) {
 			generate: webidl("static any v(long ref);"),
 			want: []string{
 				"ref_ := _y_v(ref);",
-				"return JsValue.Object(_js_ref: ref_ as int);",
+				"return _js_value_from_ref(ref_);",
 			},
 		},
 		{
@@ -129,7 +129,7 @@ func TestWrapperLocalsAvoidParams(t *testing.T) {
 			want: []string{
 				"ref_ := _y_t(ref);",
 				"if ref_ == 0 { return none; }",
-				"return JsValue.Object(_js_ref: ref_ as int);",
+				"return _js_value_from_ref(ref_);",
 			},
 		},
 		{
@@ -161,7 +161,7 @@ func TestWrapperLocalsAvoidParams(t *testing.T) {
 			generate: freeFunc(jsValue),
 			want: []string{
 				"ref_ := _f(ref);",
-				"return JsValue.Object(_js_ref: ref_ as int);",
+				"return _js_value_from_ref(ref_);",
 			},
 		},
 		{
@@ -170,7 +170,7 @@ func TestWrapperLocalsAvoidParams(t *testing.T) {
 			want: []string{
 				"ref_ := _f(ref);",
 				"if ref_ == 0 { return none; }",
-				"return JsValue.Object(_js_ref: ref_ as int);",
+				"return _js_value_from_ref(ref_);",
 			},
 		},
 	}

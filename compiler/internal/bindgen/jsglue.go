@@ -2,6 +2,7 @@ package bindgen
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -18,12 +19,15 @@ import (
 // - Per-import function implementations dispatching to actual DOM/browser APIs
 // - WASM instantiation boilerplate
 func GenerateJSGlue(modules []*Module) string {
-	g := &jsGlueGenerator{}
+	g := &jsGlueGenerator{kinds: namedKinds(modules)}
 	return g.generate(modules)
 }
 
 type jsGlueGenerator struct {
 	buf strings.Builder
+	// kinds classifies the names the modules define (namedKinds), the same
+	// registry the Promise side lowers and lifts by.
+	kinds kindRegistry
 }
 
 func (g *jsGlueGenerator) generate(modules []*Module) string {
@@ -31,6 +35,9 @@ func (g *jsGlueGenerator) generate(modules []*Module) string {
 	g.emitPALRuntime()
 	g.emitRefTable()
 	g.emitStringHelpers()
+	if slices.ContainsFunc(modules, func(m *Module) bool { return m.HasJsValue }) {
+		g.emitJsValueRuntime()
+	}
 	g.emitImportObject(modules)
 	g.emitInstantiation()
 	return g.buf.String()
@@ -184,6 +191,73 @@ function _writeStringResult(retptr, str) {
 }
 
 `)
+}
+
+// emitJsValueRuntime writes the glue's half of JsValue's crossing
+// (docs/wasm-bindings.md §"JsValue the Dynamic Value Enum"; the Promise half is
+// codegen.go's emitJsValueConversions). A builder import stores a value the
+// program built in a temporary slot, and the import that receives it as an
+// argument reads it with _refTake, which releases a temporary slot once read —
+// before the host call, so a host that throws leaks nothing. Every other
+// handle, an Object a JsValue holds among them, stays where it is.
+// _jsValueTag is rendered from jsValueCases, the table _js_value_from_ref
+// dispatches on, so a tag means the same variant on both sides.
+func (g *jsGlueGenerator) emitJsValueRuntime() {
+	g.write(`// --- JsValue ---
+const _tempRefs = new Set();
+
+function _refStoreTemp(value) {
+  const handle = _refStore(value);
+  _tempRefs.add(handle);
+  return handle;
+}
+
+function _refTake(handle) {
+  const value = _refLoad(handle);
+  if (_tempRefs.delete(handle)) _refRelease(handle);
+  return value;
+}
+
+// The JsValue variant a JS value lifts as, by its tag.
+function _jsValueTag(v) {
+`)
+	fallback := 0
+	for i, c := range jsValueCases {
+		if c.jsTest == "" {
+			fallback = i
+			continue
+		}
+		g.writef("  if (%s) return %d;\n", c.jsTest, i)
+	}
+	g.writef("  return %d;\n}\n\n", fallback)
+}
+
+// emitJsValueImports writes the imports codegen.go's emitJsValueConversions
+// declares, from the same jsValueCases: a builder per variant that holds no
+// ref, js_value_tag, a getter per primitive, and js_value_release.
+func (g *jsGlueGenerator) emitJsValueImports() {
+	for _, c := range jsValueCases {
+		if c.holdsRef {
+			continue
+		}
+		g.writef("    %s(%s) {\n      return _refStoreTemp(%s);\n    },\n", jsValueBuilder(c), jsValueBuilderParams(c), c.jsStore)
+	}
+	g.writef("    %s(handle) {\n      return _jsValueTag(_refLoad(handle));\n    },\n", jsValueTagImport)
+	for _, c := range jsValueCases {
+		if c.payload == "" {
+			continue
+		}
+		switch c.payload {
+		case "string":
+			// The canonical (ptr, len) pair, through the trailing return pointer.
+			g.writef("    %s(handle, retptr) {\n      _writeStringResult(retptr, _refLoad(handle));\n    },\n", jsValueGetter(c))
+		case "bool":
+			g.writef("    %s(handle) {\n      return _refLoad(handle) ? 1 : 0;\n    },\n", jsValueGetter(c))
+		default:
+			g.writef("    %s(handle) {\n      return _refLoad(handle);\n    },\n", jsValueGetter(c))
+		}
+	}
+	g.writef("    %s(handle) {\n      _refRelease(handle);\n    },\n", jsValueReleaseImport)
 }
 
 // emitPALRuntime writes the module-level base PAL runtime both loaders share
@@ -349,6 +423,10 @@ func (g *jsGlueGenerator) emitImportObject(modules []*Module) {
 
 		if m.ImportModule == wasmweb.ImportModule {
 			g.emitBasePromiseEnvImports()
+		}
+
+		if m.HasJsValue {
+			g.emitJsValueImports()
 		}
 
 		// Resource drop functions. Import name must match the WIT/component-model
@@ -625,6 +703,10 @@ func (g *jsGlueGenerator) buildJSCallArgs(f Func) []string {
 		if isStringType(ref) {
 			pointer, length := jsStringParams(name)
 			args = append(args, fmt.Sprintf("_readString(%s, %s)", pointer, length))
+		} else if g.kinds.isJsValue(ref) {
+			// A JsValue argument may be a temporary slot its builder made
+			// (emitJsValueRuntime), released once read.
+			args = append(args, fmt.Sprintf("_refTake(%s)", name))
 		} else if isRefType(ref) {
 			args = append(args, fmt.Sprintf("_refLoad(%s)", name))
 		} else {
@@ -716,7 +798,7 @@ func isStringType(ref TypeRef) bool {
 // _refStore/_refLoad, identical to a resource), so the existing read/write glue is
 // correct for it here. The Promise (WASM) side is where JsValue diverges from a
 // resource — it marshals to/from the JsValue *enum* rather than an `i32 _handle`
-// field; that asymmetry is handled in codegen.go (isJsValueRef and friends, T0723).
+// field; that asymmetry is decided by the kind registry (namedKinds) in codegen.go.
 // Do NOT exclude JsValue here, or the JS-side conversion will break.
 func isRefType(ref TypeRef) bool {
 	if ref.Kind == NamedKind {

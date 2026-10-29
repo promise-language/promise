@@ -604,9 +604,9 @@ enum JsValue `public `doc("Represents a dynamic JavaScript value.") {
     Bool(bool value),
     Number(f64 value),
     Str(string value),
-    Object(int _js_ref),
-    Array(int _js_ref),
-    Function(int _js_ref),
+    Object(i32 _js_ref),
+    Array(i32 _js_ref),
+    Function(i32 _js_ref),
 
     get is_undefined bool `public {
         match this {
@@ -654,6 +654,8 @@ enum JsValue `public `doc("Represents a dynamic JavaScript value.") {
 ```
 
 Primitive JS values (`boolean`, `number`, `string`, `null`, `undefined`) are extracted and stored directly in the enum variants — no JS reference needed. Complex JS values (`object`, `array`, `function`) are stored as opaque `_js_ref` handles managed by the JS glue's reference table. This avoids runtime type tagging while keeping the representation fully explicit and pattern-matchable.
+
+**Crossing the boundary.** A `JsValue` crosses as one `i32` handle into the glue's reference table, in both directions, so an extern taking or returning one declares `i32`. The binding converts eagerly, in two private module-level functions that sit beside its externs and carry the same `` `target `` — not in methods of the enum, which carries none, so the conversions' host calls never stop the enum compiling on other targets. Lowering passes the handle an `Object`, `Array` or `Function` variant keeps; any other variant's value the glue stores in a temporary slot, which the import receiving it releases once it has read it. Lifting asks the glue which variant the handle's value is: an object, array or function keeps the handle in its variant, while a primitive is copied into its variant and its slot released. A JS value that is none of the others — a `bigint`, a `symbol` — lifts as `Object`.
 
 ### Canonical ABI Representation
 

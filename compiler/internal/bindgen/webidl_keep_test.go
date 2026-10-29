@@ -148,6 +148,53 @@ func TestApplyKeepList(t *testing.T) {
 			types: map[string][]string{},
 		},
 		{
+			// So do the members a maplike or setlike declaration declares.
+			name: "maplike and setlike members go with their interface",
+			src: `interface Counts { maplike<DOMString, long>; };
+			interface Tags { readonly setlike<DOMString>; };`,
+			list: "Counts\nTags\n",
+			resources: map[string][]string{
+				"Counts": {"Counts.size.get", "Counts.has", "Counts.get", "Counts.set", "Counts.delete", "Counts.clear"},
+				"Tags":   {"Tags.size.get", "Tags.has"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// A mutator the interface writes in place of the declaration's is a
+			// written member, kept by its own entry: no declared delete or clear
+			// stands in for the unlisted ones.
+			name: "a written setlike mutator is listed",
+			src: `interface FontFace {};
+			interface FontFaceSet {
+				setlike<FontFace>;
+				FontFaceSet add(FontFace font);
+				boolean delete(FontFace font);
+				undefined clear();
+			};`,
+			list: "FontFace\nFontFaceSet\nFontFaceSet.add\n",
+			resources: map[string][]string{
+				"FontFace":    nil,
+				"FontFaceSet": {"FontFaceSet.size.get", "FontFaceSet.has", "FontFaceSet.add"},
+			},
+			types: map[string][]string{},
+		},
+		{
+			// Each member is its own unit: those naming the dropped value type
+			// go, the rest stay.
+			name: "maplike members naming a dropped definition",
+			src: `interface Gone {};
+			interface Counts { maplike<DOMString, Gone>; };`,
+			list: "Counts\n",
+			resources: map[string][]string{
+				"Counts": {"Counts.size.get", "Counts.has", "Counts.delete", "Counts.clear"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "Counts.get", Ref: "Gone"},
+				{What: "Counts.set", Ref: "Gone"},
+			},
+		},
+		{
 			name: "constructor entry keeps every constructor",
 			src: `interface ImageData {
 				constructor(unsigned long sw, unsigned long sh);

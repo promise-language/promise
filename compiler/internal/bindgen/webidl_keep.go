@@ -73,8 +73,9 @@ type KeepDrop struct {
 // it: an ancestor stays, with its listed members and the units its kept
 // descendants keep, so the `is` clause resolves. A member of a kept interface is
 // kept when `Interface.member` is listed (`Interface.constructor` for its
-// constructors); constants, iterable declarations and anonymous special
-// operations go with their interface. Either keeps the member's whole unit.
+// constructors); constants, iterable declarations, anonymous special
+// operations and the members a maplike or setlike declaration declares go with
+// their interface. Either keeps the member's whole unit.
 // Dictionaries, enums, typedefs and callbacks are not listed.
 //
 // The closure, to a fixed point: a typedef whose type names a dropped definition
@@ -370,16 +371,19 @@ type memberUnit struct {
 // name a KeepDrop reports it by: an attribute's or operation's identifier, an
 // anonymous special operation's keyword, `constructor` for every constructor;
 // the types it references; and its position, which unboundRefs reports it at.
+// A member a maplike or setlike declaration declares (DeclaredBy) is not
+// listed: it goes with its interface. webidl.Merge has replaced every such
+// declaration with its members, so none reaches here.
 func keepUnit(m webidl.Member) (unit memberUnit, label string, listed bool, types []*webidl.TypeRef, pos webidl.Pos) {
 	switch m := m.(type) {
 	case *webidl.Attribute:
-		label, listed, types, pos = m.Name, true, []*webidl.TypeRef{m.Type}, m.Pos
+		label, listed, types, pos = m.Name, m.DeclaredBy == "", []*webidl.TypeRef{m.Type}, m.Pos
 	case *webidl.Operation:
 		types = []*webidl.TypeRef{m.Return}
 		for _, p := range m.Params {
 			types = append(types, p.Type)
 		}
-		label, listed, pos = m.Name, true, m.Pos
+		label, listed, pos = m.Name, m.DeclaredBy == "", m.Pos
 		if m.Name == "" {
 			label, listed = m.Special, false
 		}

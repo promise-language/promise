@@ -180,6 +180,147 @@ func TestBindWebIdlGlueRoundTripsStrings(t *testing.T) {
 	}
 }
 
+// #168 end to end: the members a maplike and a setlike declaration bind reach a
+// real JS Map and Set — the collections whose protocol WebIDL's maplike and
+// setlike mirror — through the glue generated beside them, in both directions:
+// the program reads back what it wrote, and the driver reads the host objects
+// the program left behind.
+
+const collectionsIDL = `interface Counts { maplike<DOMString, long>; };
+interface Tags { setlike<DOMString>; };
+interface Store {
+  readonly attribute Counts counts;
+  readonly attribute Tags tags;
+};
+`
+
+// A missing key's get is not read: a built-in result crosses absent as its
+// zero value (#752).
+const collectionsMain = `main() {
+    store := Store.borrow(1);
+    c := store.counts;
+    c._set("a", 1);
+    c._set("b", -2);
+    print_line("size:" + c.size.to_string(base: 10));
+    print_line("get:" + (c._get("a") ?: 0i32).to_string(base: 10) + "," + (c._get("b") ?: 0i32).to_string(base: 10));
+    print_line("has:" + c.has("b").to_string() + "," + c.has("z").to_string());
+    print_line("delete:" + c.delete("b").to_string() + "," + c.delete("b").to_string());
+    c.clear();
+    print_line("cleared:" + c.size.to_string(base: 10));
+    c._set("c", 3);
+
+    t := store.tags;
+    t.add("x");
+    t.add("x");
+    t.add("y");
+    print_line("tags:" + t.size.to_string(base: 10));
+    print_line("tags has:" + t.has("x").to_string() + "," + t.has("z").to_string());
+    print_line("tags delete:" + t.delete("y").to_string() + "," + t.delete("y").to_string());
+}
+`
+
+// collectionsDriver puts the Map and Set on the global object, handle 1 (T1510),
+// loads the generated store.js the way a page would (nodePageDriver) and runs
+// the .wasm named by its one argument. It reports one RESULT: line of JSON,
+// with the collections' contents afterwards.
+const collectionsDriver = nodePageDriver + `
+const [wasmFile] = process.argv.slice(2);
+
+globalThis.counts = new Map();
+globalThis.tags = new Set();
+
+(async () => {
+  const mod = await import(pathToFileURL(path.join(dir, "store.js")).href);
+  const result = { logs, errs };
+  try {
+    await mod.init(wasmFile);
+    result.ok = true;
+  } catch (e) {
+    result.ok = false;
+    result.message = e && e.message;
+  }
+  result.counts = JSON.stringify([...globalThis.counts]);
+  result.tags = JSON.stringify([...globalThis.tags]);
+  process.stdout.write("RESULT:" + JSON.stringify(result) + "\n");
+})();
+`
+
+type collectionsResult struct {
+	OK      bool     `json:"ok"`
+	Message string   `json:"message"`
+	Logs    []string `json:"logs"`
+	Errs    []string `json:"errs"`
+	Counts  string   `json:"counts"`
+	Tags    string   `json:"tags"`
+}
+
+func TestBindWebIdlMaplikeSetlikeRoundTrip(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+build+node integration test in short mode")
+	}
+	nodePath, err := resolveWasmRuntime("node")
+	if err != nil {
+		// Neither staged on this machine nor fetchable: a fact about the
+		// environment, not the tree.
+		t.Skipf("the pinned node is not obtainable here: %v", err)
+	}
+	bin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+
+	idlPath := filepath.Join(dir, "store.idl")
+	if err := os.WriteFile(idlPath, []byte(collectionsIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	clitest.RunOK(t, bin, nil, "bind", "webidl", "-name", "store", "-o", outDir, idlPath)
+	if err := os.WriteFile(filepath.Join(outDir, "main.pr"), []byte(collectionsMain), 0644); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(outDir, "driver.cjs")
+	if err := os.WriteFile(driver, []byte(collectionsDriver), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	builds := []struct {
+		name string
+		args []string
+	}{
+		{"debug", nil},
+		{"release", []string{"--release"}},
+	}
+	for _, b := range builds {
+		wasm := b.name + ".wasm"
+		args := append(append([]string{"build"}, b.args...), "-target", "wasm32-web", "-o", filepath.Join(outDir, wasm), outDir)
+		clitest.RunOK(t, bin, nil, args...)
+
+		got := runNodeDriver[collectionsResult](t, nodePath, driver, wasm)
+		if !got.OK {
+			t.Errorf("%s: init() rejected: %q (logs %q, errs %q)", b.name, got.Message, got.Logs, got.Errs)
+			continue
+		}
+		want := []string{
+			"size:2",
+			"get:1,-2",
+			"has:true,false",
+			"delete:true,false", // a second delete finds nothing
+			"cleared:0",
+			"tags:2", // adding a value twice holds it once
+			"tags has:true,false",
+			"tags delete:true,false",
+		}
+		if strings.Join(got.Logs, "\n") != strings.Join(want, "\n") {
+			t.Errorf("%s: logs = %q, want %q", b.name, got.Logs, want)
+		}
+		if got.Counts != `[["c",3]]` || got.Tags != `["x"]` {
+			t.Errorf("%s: host collections = %s and %s, want [[\"c\",3]] and [\"x\"]", b.name, got.Counts, got.Tags)
+		}
+		if len(got.Errs) != 0 {
+			t.Errorf("%s: unexpected stderr output %q", b.name, got.Errs)
+		}
+	}
+}
+
 // #660 end to end: a program reaches the page through the generated
 // `web.document` root, writing no handle number, and the root is the document
 // the glue seeded. Dropping it frees nothing — were slot 2 freed,

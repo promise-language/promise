@@ -5,6 +5,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -1313,6 +1314,349 @@ func TestParseIterableKeyValue(t *testing.T) {
 	}
 }
 
+// --- maplike / setlike (#168) ---
+
+// idlType writes a type reference back in IDL spelling, for the kinds the
+// maplike and setlike tests use.
+func idlType(ref *TypeRef) string {
+	s := ref.Builtin
+	if ref.Kind == NamedType {
+		s = ref.Name
+	}
+	if ref.Nullable {
+		s += "?"
+	}
+	return s
+}
+
+// idlMember writes an attribute or operation back in IDL spelling, prefixed
+// with what declares it: "maplike: boolean has(DOMString key)".
+func idlMember(t *testing.T, m Member) string {
+	t.Helper()
+	switch m := m.(type) {
+	case *Attribute:
+		ro := ""
+		if m.Readonly {
+			ro = "readonly "
+		}
+		return fmt.Sprintf("%s: %sattribute %s %s", m.DeclaredBy, ro, idlType(m.Type), m.Name)
+	case *Operation:
+		var params []string
+		for _, p := range m.Params {
+			params = append(params, idlType(p.Type)+" "+p.Name)
+		}
+		return fmt.Sprintf("%s: %s %s(%s)", m.DeclaredBy, idlType(m.Return), m.Name, strings.Join(params, ", "))
+	}
+	t.Fatalf("member %T is not an attribute or an operation", m)
+	return ""
+}
+
+func TestParseMaplikeSetlike(t *testing.T) {
+	cases := []struct {
+		name string
+		decl string
+		want Member
+	}{
+		{
+			name: "maplike",
+			decl: "maplike<DOMString, long>;",
+			want: &Maplike{
+				KeyType:   &TypeRef{Kind: BuiltinType, Builtin: "DOMString"},
+				ValueType: &TypeRef{Kind: BuiltinType, Builtin: "long"},
+				Pos:       Pos{File: "test.webidl", Line: 1, Column: 15},
+			},
+		},
+		{
+			// The position is the keyword's, after `readonly`.
+			name: "readonly maplike",
+			decl: "readonly maplike<DOMString, Node?>;",
+			want: &Maplike{
+				KeyType:   &TypeRef{Kind: BuiltinType, Builtin: "DOMString"},
+				ValueType: &TypeRef{Kind: NamedType, Name: "Node", Nullable: true},
+				Readonly:  true,
+				Pos:       Pos{File: "test.webidl", Line: 1, Column: 24},
+			},
+		},
+		{
+			name: "setlike",
+			decl: "setlike<DOMString>;",
+			want: &Setlike{
+				ValueType: &TypeRef{Kind: BuiltinType, Builtin: "DOMString"},
+				Pos:       Pos{File: "test.webidl", Line: 1, Column: 15},
+			},
+		},
+		{
+			name: "readonly setlike",
+			decl: "readonly setlike<long long>;",
+			want: &Setlike{
+				ValueType: &TypeRef{Kind: BuiltinType, Builtin: "long long"},
+				Readonly:  true,
+				Pos:       Pos{File: "test.webidl", Line: 1, Column: 24},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			file, errs := Parse("interface A { "+tc.decl+" };", "test.webidl")
+			if len(errs) > 0 {
+				t.Fatalf("unexpected errors: %v", errs)
+			}
+			members := file.Interfaces[0].Members
+			if len(members) != 1 || !reflect.DeepEqual(members[0], tc.want) {
+				t.Errorf("members = %#v, want [%#v]", members, tc.want)
+			}
+		})
+	}
+
+	// Like legacycaller, maplike and setlike start a declaration only at the
+	// start of a member: anywhere else they still name something.
+	t.Run("identifiers elsewhere", func(t *testing.T) {
+		src := "interface A { undefined f(long maplike, long setlike); attribute long setlike; readonly attribute long maplike; };"
+		file, errs := Parse(src, "test.webidl")
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		members := file.Interfaces[0].Members
+		if len(members) != 3 {
+			t.Fatalf("got %d members, want 3", len(members))
+		}
+		op, ok := members[0].(*Operation)
+		if !ok || len(op.Params) != 2 || op.Params[0].Name != "maplike" || op.Params[1].Name != "setlike" {
+			t.Errorf("members[0] = %#v, want f with params maplike, setlike", members[0])
+		}
+		for i, name := range []string{"setlike", "maplike"} {
+			if a, ok := members[i+1].(*Attribute); !ok || a.Name != name {
+				t.Errorf("members[%d] = %#v, want attribute %s", i+1, members[i+1], name)
+			}
+		}
+	})
+}
+
+// A declaration with the other kind's arity is reported where it goes wrong.
+func TestParseMaplikeSetlikeArity(t *testing.T) {
+	cases := []struct {
+		name, decl, want string
+	}{
+		{"maplike with one type", "maplike<DOMString>;", "test.webidl:1:32: expected ,, got >"},
+		{"setlike with two types", "setlike<DOMString, long>;", "test.webidl:1:32: expected >, got ,"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, errs := Parse("interface A { "+tc.decl+" };", "test.webidl")
+			if len(errs) == 0 || errs[0].Error() != tc.want {
+				t.Errorf("errors = %v, want first %q", errs, tc.want)
+			}
+		})
+	}
+}
+
+// Merge replaces a maplike or setlike declaration with the members WebIDL
+// declares for it, in its place, each carrying the declaration's position and
+// doc comment, and DeclaredBy its keyword.
+func TestMergeExpandsMaplikeSetlike(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want []string
+	}{
+		{
+			name: "maplike",
+			src:  "interface A { maplike<DOMString, long>; };",
+			want: []string{
+				"maplike: readonly attribute unsigned long size",
+				"maplike: boolean has(DOMString key)",
+				"maplike: long? get(DOMString key)",
+				"maplike: undefined set(DOMString key, long value)",
+				"maplike: boolean delete(DOMString key)",
+				"maplike: undefined clear()",
+			},
+		},
+		{
+			name: "readonly maplike",
+			src:  "interface A { readonly maplike<DOMString, Node>; }; interface Node {};",
+			want: []string{
+				"maplike: readonly attribute unsigned long size",
+				"maplike: boolean has(DOMString key)",
+				"maplike: Node? get(DOMString key)",
+			},
+		},
+		{
+			// get's result is nullable once, and set's value stays as declared.
+			name: "maplike of a nullable value",
+			src:  "interface A { maplike<long, long?>; };",
+			want: []string{
+				"maplike: readonly attribute unsigned long size",
+				"maplike: boolean has(long key)",
+				"maplike: long? get(long key)",
+				"maplike: undefined set(long key, long? value)",
+				"maplike: boolean delete(long key)",
+				"maplike: undefined clear()",
+			},
+		},
+		{
+			name: "setlike",
+			src:  "interface A { setlike<DOMString>; };",
+			want: []string{
+				"setlike: readonly attribute unsigned long size",
+				"setlike: boolean has(DOMString value)",
+				"setlike: undefined add(DOMString value)",
+				"setlike: boolean delete(DOMString value)",
+				"setlike: undefined clear()",
+			},
+		},
+		{
+			name: "readonly setlike",
+			src:  "interface A { readonly setlike<long>; };",
+			want: []string{
+				"setlike: readonly attribute unsigned long size",
+				"setlike: boolean has(long value)",
+			},
+		},
+		{
+			// In its place among the members the IDL writes, which keep theirs.
+			name: "beside written members",
+			src:  "interface A { undefined before(); readonly setlike<long>; attribute long after; };",
+			want: []string{
+				": undefined before()",
+				"setlike: readonly attribute unsigned long size",
+				"setlike: boolean has(long value)",
+				": attribute long after",
+			},
+		},
+		{
+			name: "from a partial interface",
+			src:  "interface A {}; partial interface A { readonly setlike<long>; };",
+			want: []string{
+				"setlike: readonly attribute unsigned long size",
+				"setlike: boolean has(long value)",
+			},
+		},
+		{
+			// A regular operation the interface writes by a mutator's name
+			// overrides it, as CSS Font Loading's FontFaceSet writes all three.
+			name: "setlike with written mutators",
+			src: `interface A {
+				setlike<FontFace>;
+				A add(FontFace font);
+				boolean delete(FontFace font);
+				undefined clear();
+			};
+			interface FontFace {};`,
+			want: []string{
+				"setlike: readonly attribute unsigned long size",
+				"setlike: boolean has(FontFace value)",
+				": A add(FontFace font)",
+				": boolean delete(FontFace font)",
+				": undefined clear()",
+			},
+		},
+		{
+			// Before the declaration or after it, and only by its own name; a
+			// static operation is not a regular one.
+			name: "maplike with a written set",
+			src:  "interface A { undefined set(DOMString name, long value); static undefined clear(); maplike<DOMString, long>; };",
+			want: []string{
+				": undefined set(DOMString name, long value)",
+				": undefined clear()",
+				"maplike: readonly attribute unsigned long size",
+				"maplike: boolean has(DOMString key)",
+				"maplike: long? get(DOMString key)",
+				"maplike: boolean delete(DOMString key)",
+				"maplike: undefined clear()",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			file, errs := Parse(tc.src, "test.webidl")
+			if len(errs) > 0 {
+				t.Fatalf("unexpected errors: %v", errs)
+			}
+			if errs := Merge(file); len(errs) > 0 {
+				t.Fatalf("merge errors: %v", errs)
+			}
+			var got []string
+			for _, m := range file.Interfaces[0].Members {
+				got = append(got, idlMember(t, m))
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("members =\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(tc.want, "\n  "))
+			}
+		})
+	}
+
+	t.Run("position and doc", func(t *testing.T) {
+		file, errs := Parse("interface A {\n  // Counts.\n  maplike<DOMString, long>;\n};", "test.webidl")
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		if errs := Merge(file); len(errs) > 0 {
+			t.Fatalf("merge errors: %v", errs)
+		}
+		want := Pos{File: "test.webidl", Line: 3, Column: 3}
+		for _, m := range file.Interfaces[0].Members {
+			var pos Pos
+			switch m := m.(type) {
+			case *Attribute:
+				pos = m.Pos
+			case *Operation:
+				pos = m.Pos
+			}
+			if doc := memberDoc(t, m); pos != want || doc != "Counts." {
+				t.Errorf("%s: at %s with doc %q, want %s and %q", idlMember(t, m), pos, doc, want, "Counts.")
+			}
+		}
+	})
+}
+
+// WebIDL permits one maplike or setlike declaration per interface: each after
+// the first, counted once partials are merged, is reported at its position.
+func TestMergeRejectsSecondMaplikeSetlike(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want []string
+	}{
+		{
+			name: "two maplikes",
+			src:  "interface A { maplike<long, long>; maplike<long, long>; };",
+			want: []string{"test.webidl:1:36: interface A declares a second maplike or setlike (the first is at test.webidl:1:15); WebIDL permits one"},
+		},
+		{
+			name: "a maplike and a setlike, and a third",
+			src:  "interface A { maplike<long, long>;\nreadonly setlike<long>;\nsetlike<long>; };",
+			want: []string{
+				"test.webidl:2:10: interface A declares a second maplike or setlike (the first is at test.webidl:1:15); WebIDL permits one",
+				"test.webidl:3:1: interface A declares a second maplike or setlike (the first is at test.webidl:1:15); WebIDL permits one",
+			},
+		},
+		{
+			name: "one in a partial interface",
+			src:  "interface A { setlike<long>; };\npartial interface A { maplike<long, long>; };",
+			want: []string{"test.webidl:2:23: interface A declares a second maplike or setlike (the first is at test.webidl:1:15); WebIDL permits one"},
+		},
+		{
+			name: "one on each of two interfaces",
+			src:  "interface P { setlike<long>; };\ninterface C { maplike<long, long>; };",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			file, errs := Parse(tc.src, "test.webidl")
+			if len(errs) > 0 {
+				t.Fatalf("unexpected errors: %v", errs)
+			}
+			var got []string
+			for _, e := range Merge(file) {
+				got = append(got, e.Error())
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("merge errors = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseErrorRecovery(t *testing.T) {
 	// Invalid top-level token
 	src := `@ interface Foo {};`
@@ -1364,8 +1708,8 @@ func TestParseErrorNoFile(t *testing.T) {
 	}
 	errMsg := errs[0].Error()
 	// Should contain line:column without filename
-	if contains(errMsg, ".webidl") {
-		t.Errorf("error should not contain filename, got: %s", errMsg)
+	if !strings.HasPrefix(errMsg, "1:1: ") {
+		t.Errorf("error should start with line:column and no filename, got: %s", errMsg)
 	}
 }
 
@@ -2020,6 +2364,14 @@ func TestMergeRecordsRedeclared(t *testing.T) {
 			};`,
 		},
 		{
+			// Merge expands a maplike before recording, so the members it
+			// declares are regular ones like any the IDL writes.
+			name: "member a maplike declares",
+			src: `interface P { maplike<DOMString, long>; };
+			interface C : P { boolean has(long key); };`,
+			want: map[string][]string{"P": {"has"}},
+		},
+		{
 			// A static lives on the interface object, so the child's regular m
 			// and a shadow nothing the parent's imports resolve.
 			name: "statics on the parent",
@@ -2344,6 +2696,10 @@ func memberDoc(t *testing.T, m Member) string {
 		return m.Doc
 	case *Const:
 		return m.Doc
+	case *Maplike:
+		return m.Doc
+	case *Setlike:
+		return m.Doc
 	}
 	t.Fatalf("member %T carries no doc", m)
 	return ""
@@ -2437,12 +2793,16 @@ func TestParseMemberDocComments(t *testing.T) {
 		stringifier attribute DOMString href;
 		// str2.
 		stringifier;
+		// map.
+		maplike<DOMString, long>;
+		// set.
+		readonly setlike<long>;
 	};`
 	file, errs := Parse(src, "test.webidl")
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	want := []string{"ro.", "rw.", "st.", "op.", "sop.", "ov1.", "ov2.", "get.", "ctor.", "const.", "ce.", "ce2.", "str.", "str2."}
+	want := []string{"ro.", "rw.", "st.", "op.", "sop.", "ov1.", "ov2.", "get.", "ctor.", "const.", "ce.", "ce2.", "str.", "str2.", "map.", "set."}
 	members := file.Interfaces[0].Members
 	if len(members) != len(want) {
 		t.Fatalf("got %d members, want %d", len(members), len(want))

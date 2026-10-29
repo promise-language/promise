@@ -3,6 +3,8 @@
 // IR for Promise code generation.
 package webidl
 
+import "fmt"
+
 // File is the top-level AST node representing a parsed .webidl file.
 type File struct {
 	Interfaces   []*Interface
@@ -152,8 +154,11 @@ type Attribute struct {
 	Readonly bool
 	Static   bool
 	ExtAttrs []*ExtAttr // the member's leading extended attributes
-	Doc      string
-	Pos      Pos
+	// DeclaredBy is "maplike" or "setlike" for a member Merge expanded from
+	// such a declaration, and "" for one the IDL writes.
+	DeclaredBy string
+	Doc        string
+	Pos        Pos
 }
 
 func (*Attribute) member() {}
@@ -166,8 +171,11 @@ type Operation struct {
 	Static   bool
 	Special  string     // "getter", "setter", "deleter", "stringifier", "legacycaller" or ""
 	ExtAttrs []*ExtAttr // the member's leading extended attributes
-	Doc      string
-	Pos      Pos
+	// DeclaredBy is "maplike" or "setlike" for a member Merge expanded from
+	// such a declaration, and "" for one the IDL writes.
+	DeclaredBy string
+	Doc        string
+	Pos        Pos
 }
 
 func (*Operation) member() {}
@@ -200,6 +208,29 @@ type Iterable struct {
 }
 
 func (*Iterable) member() {}
+
+// Maplike represents a maplike<K, V> declaration, Readonly when written
+// `readonly maplike`. Merge replaces it with the members it declares.
+type Maplike struct {
+	KeyType   *TypeRef
+	ValueType *TypeRef
+	Readonly  bool
+	Doc       string
+	Pos       Pos
+}
+
+func (*Maplike) member() {}
+
+// Setlike represents a setlike<T> declaration, Readonly when written
+// `readonly setlike`. Merge replaces it with the members it declares.
+type Setlike struct {
+	ValueType *TypeRef
+	Readonly  bool
+	Doc       string
+	Pos       Pos
+}
+
+func (*Setlike) member() {}
 
 // Param is a named function parameter.
 type Param struct {
@@ -247,4 +278,13 @@ type Pos struct {
 	File   string
 	Line   int
 	Column int
+}
+
+// String writes the position as file:line:column, or line:column when it names
+// no file.
+func (p Pos) String() string {
+	if p.File != "" {
+		return fmt.Sprintf("%s:%d:%d", p.File, p.Line, p.Column)
+	}
+	return fmt.Sprintf("%d:%d", p.Line, p.Column)
 }

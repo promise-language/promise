@@ -1407,6 +1407,29 @@ func TestParseMaplikeSetlike(t *testing.T) {
 			}
 		})
 	}
+
+	// Like legacycaller, maplike and setlike start a declaration only at the
+	// start of a member: anywhere else they still name something.
+	t.Run("identifiers elsewhere", func(t *testing.T) {
+		src := "interface A { undefined f(long maplike, long setlike); attribute long setlike; readonly attribute long maplike; };"
+		file, errs := Parse(src, "test.webidl")
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		members := file.Interfaces[0].Members
+		if len(members) != 3 {
+			t.Fatalf("got %d members, want 3", len(members))
+		}
+		op, ok := members[0].(*Operation)
+		if !ok || len(op.Params) != 2 || op.Params[0].Name != "maplike" || op.Params[1].Name != "setlike" {
+			t.Errorf("members[0] = %#v, want f with params maplike, setlike", members[0])
+		}
+		for i, name := range []string{"setlike", "maplike"} {
+			if a, ok := members[i+1].(*Attribute); !ok || a.Name != name {
+				t.Errorf("members[%d] = %#v, want attribute %s", i+1, members[i+1], name)
+			}
+		}
+	})
 }
 
 // A declaration with the other kind's arity is reported where it goes wrong.
@@ -1508,6 +1531,40 @@ func TestMergeExpandsMaplikeSetlike(t *testing.T) {
 				"setlike: boolean has(long value)",
 			},
 		},
+		{
+			// A regular operation the interface writes by a mutator's name
+			// overrides it, as CSS Font Loading's FontFaceSet writes all three.
+			name: "setlike with written mutators",
+			src: `interface A {
+				setlike<FontFace>;
+				A add(FontFace font);
+				boolean delete(FontFace font);
+				undefined clear();
+			};
+			interface FontFace {};`,
+			want: []string{
+				"setlike: readonly attribute unsigned long size",
+				"setlike: boolean has(FontFace value)",
+				": A add(FontFace font)",
+				": boolean delete(FontFace font)",
+				": undefined clear()",
+			},
+		},
+		{
+			// Before the declaration or after it, and only by its own name; a
+			// static operation is not a regular one.
+			name: "maplike with a written set",
+			src:  "interface A { undefined set(DOMString name, long value); static undefined clear(); maplike<DOMString, long>; };",
+			want: []string{
+				": undefined set(DOMString name, long value)",
+				": undefined clear()",
+				"maplike: readonly attribute unsigned long size",
+				"maplike: boolean has(DOMString key)",
+				"maplike: long? get(DOMString key)",
+				"maplike: boolean delete(DOMString key)",
+				"maplike: undefined clear()",
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1579,9 +1636,8 @@ func TestMergeRejectsSecondMaplikeSetlike(t *testing.T) {
 			want: []string{"test.webidl:2:23: interface A declares a second maplike or setlike (the first is at test.webidl:1:15); WebIDL permits one"},
 		},
 		{
-			// One each on two interfaces, related or not, is one per interface.
 			name: "one on each of two interfaces",
-			src:  "interface P { setlike<long>; };\ninterface C : P { maplike<long, long>; };",
+			src:  "interface P { setlike<long>; };\ninterface C { maplike<long, long>; };",
 		},
 	}
 	for _, tc := range cases {

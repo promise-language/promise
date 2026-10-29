@@ -1106,7 +1106,7 @@ func expandCollections(file *File) []*ParseError {
 				errs = append(errs, &ParseError{Pos: c.pos, Msg: fmt.Sprintf("interface %s declares a second maplike or setlike (the first is at %s); WebIDL permits one", iface.Name, first.pos)})
 			default:
 				first = &c
-				members = append(members, c.members()...)
+				members = append(members, c.members(regularOperations(iface))...)
 			}
 		}
 		if first != nil {
@@ -1139,6 +1139,17 @@ func asCollection(m Member) (collection, bool) {
 	return collection{}, false
 }
 
+// regularOperations returns the names of the regular operations iface writes.
+func regularOperations(iface *Interface) map[string]bool {
+	names := map[string]bool{}
+	for _, m := range iface.Members {
+		if op, ok := m.(*Operation); ok && op.Name != "" && !op.Static {
+			names[op.Name] = true
+		}
+	}
+	return names
+}
+
 // members returns the members the declaration declares, each at its position
 // and with its doc comment, DeclaredBy its keyword:
 // `readonly attribute unsigned long size`, `boolean has(K key)` and, for a
@@ -1146,8 +1157,11 @@ func asCollection(m Member) (collection, bool) {
 // `undefined set(K key, V value)` or a setlike's `undefined add(V value)`, and
 // `boolean delete(K key)` and `undefined clear()` — a setlike's key parameters
 // being named value. set and add return nothing: the JS method returns the
-// collection itself, which the caller already holds.
-func (c collection) members() []Member {
+// collection itself, which the caller already holds. WebIDL lets the interface
+// of a read-write declaration write its own set, add, delete or clear as a
+// regular operation (written), which overrides the one the declaration would
+// declare: FontFaceSet's `FontFaceSet add(FontFace font)` is its only add.
+func (c collection) members(written map[string]bool) []Member {
 	builtin := func(name string) *TypeRef { return &TypeRef{Kind: BuiltinType, Builtin: name} }
 	op := func(name string, ret *TypeRef, params ...*Param) *Operation {
 		return &Operation{Name: name, Params: params, Return: ret, DeclaredBy: c.keyword, Doc: c.doc, Pos: c.pos}
@@ -1168,15 +1182,22 @@ func (c collection) members() []Member {
 	if c.readonly {
 		return members
 	}
+	var mutators []*Operation
 	if c.value != nil {
-		members = append(members, op("set", builtin("undefined"), key(), &Param{Name: "value", Type: c.value}))
+		mutators = append(mutators, op("set", builtin("undefined"), key(), &Param{Name: "value", Type: c.value}))
 	} else {
-		members = append(members, op("add", builtin("undefined"), key()))
+		mutators = append(mutators, op("add", builtin("undefined"), key()))
 	}
-	return append(members,
+	mutators = append(mutators,
 		op("delete", builtin("boolean"), key()),
 		op("clear", builtin("undefined")),
 	)
+	for _, m := range mutators {
+		if !written[m.Name] {
+			members = append(members, m)
+		}
+	}
+	return members
 }
 
 // recordWindowAliases sets File.WindowAliases: each identifier a

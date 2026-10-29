@@ -13,10 +13,7 @@ type ParseError struct {
 }
 
 func (e *ParseError) Error() string {
-	if e.Pos.File != "" {
-		return fmt.Sprintf("%s:%d:%d: %s", e.Pos.File, e.Pos.Line, e.Pos.Column, e.Msg)
-	}
-	return fmt.Sprintf("%d:%d: %s", e.Pos.Line, e.Pos.Column, e.Msg)
+	return e.Pos.String() + ": " + e.Msg
 }
 
 // Parser is a recursive descent parser for WebIDL.
@@ -501,6 +498,10 @@ func (p *Parser) parseMember() Member {
 		m.Doc = doc
 	case *Const:
 		m.Doc = doc
+	case *Maplike:
+		m.Doc = doc
+	case *Setlike:
+		m.Doc = doc
 	}
 	return member
 }
@@ -514,6 +515,9 @@ func (p *Parser) parseMemberBody() Member {
 		return p.parseConst()
 	case TokenReadonly:
 		p.next()
+		if collection := p.tryParseCollection(true); collection != nil {
+			return collection
+		}
 		return p.parseAttribute(true, false)
 	case TokenAttribute:
 		return p.parseAttribute(false, false)
@@ -565,6 +569,9 @@ func (p *Parser) parseMemberBody() Member {
 		// async operation — parse as regular operation
 		return p.parseOperation(false, "")
 	default:
+		if collection := p.tryParseCollection(false); collection != nil {
+			return collection
+		}
 		// legacycaller is a special keyword only here, at the start of a member;
 		// the lexer leaves it an identifier, so it still names anything elsewhere.
 		if tok.Kind == TokenIdent && tok.Value == "legacycaller" {
@@ -659,6 +666,36 @@ func (p *Parser) parseIterable() *Iterable {
 	p.expect(TokenRAngle)
 	p.expect(TokenSemicolon)
 	return it
+}
+
+// tryParseCollection parses a maplike or setlike declaration if one starts
+// here, after its `readonly` (readonly), and returns nil otherwise. Like
+// legacycaller, maplike and setlike are keywords only at the start of a member:
+// the lexer leaves them identifiers, so they still name anything elsewhere.
+func (p *Parser) tryParseCollection(readonly bool) Member {
+	tok := p.peek()
+	if tok.Kind != TokenIdent {
+		return nil
+	}
+	switch tok.Value {
+	case "maplike":
+		p.next()
+		p.expect(TokenLAngle)
+		m := &Maplike{KeyType: p.parseTypeRef(), Readonly: readonly, Pos: tok.Pos}
+		p.expect(TokenComma)
+		m.ValueType = p.parseTypeRef()
+		p.expect(TokenRAngle)
+		p.expect(TokenSemicolon)
+		return m
+	case "setlike":
+		p.next()
+		p.expect(TokenLAngle)
+		s := &Setlike{ValueType: p.parseTypeRef(), Readonly: readonly, Pos: tok.Pos}
+		p.expect(TokenRAngle)
+		p.expect(TokenSemicolon)
+		return s
+	}
+	return nil
 }
 
 // argumentNameKeywords is WebIDL's ArgumentNameKeyword production: the keywords
@@ -943,15 +980,17 @@ func (p *Parser) parseUnionType() *TypeRef {
 }
 
 // Merge applies partial interfaces, partial mixins, partial dictionaries and
-// includes statements to the definitions they extend, then records on each
-// interface the members an interface inheriting from it redeclares
-// (Interface.Redeclared) and those a named property may hide
-// (Interface.OverriddenBuiltIns), and on the file the identifiers each
-// [LegacyWindowAlias] names (File.WindowAliases). It returns an error for each
-// partial whose interface, mixin or dictionary is not in file, and for each side
-// of an includes statement that is not, after applying every one that matches:
-// nothing else would name the members they carry, so they would otherwise
-// vanish unreported.
+// includes statements to the definitions they extend, replaces each interface's
+// maplike or setlike declaration with the attribute and operations it declares
+// (expandCollections), then records on each interface the members an interface
+// inheriting from it redeclares (Interface.Redeclared) and those a named
+// property may hide (Interface.OverriddenBuiltIns), and on the file the
+// identifiers each [LegacyWindowAlias] names (File.WindowAliases). It returns an
+// error for each partial whose interface, mixin or dictionary is not in file,
+// and for each side of an includes statement that is not, after applying every
+// one that matches: nothing else would name the members they carry, so they
+// would otherwise vanish unreported. It also returns one for each maplike or
+// setlike declaration after an interface's first, which WebIDL forbids.
 // An "interface mixin", which the parser stores as an Interface marked _mixin,
 // is a mixin and never an interface: a partial interface, the left side of an
 // includes statement or an inheriting interface does not resolve to it.
@@ -1033,11 +1072,111 @@ func Merge(file *File) []*ParseError {
 		}
 	}
 
+	// After the partials, so a declaration one contributes counts; before the
+	// records, so the members a declaration declares count as regular ones.
+	errs = append(errs, expandCollections(file)...)
+
 	// Last, so a member a partial or a mixin contributes counts on either side.
 	recordRedeclared(file, ifaceMap)
 	recordOverriddenBuiltIns(file, ifaceMap)
 	recordWindowAliases(file, ifaceMap)
 	return errs
+}
+
+// expandCollections replaces the maplike or setlike declaration of each
+// interface of a merged file, mixins excluded, with the members it declares
+// (collection.members), in its place. WebIDL permits one such declaration per
+// interface: each further one is reported, at its position, and dropped. An
+// interface holding one gets a fresh member list, so none shared with a mixin
+// is written.
+func expandCollections(file *File) []*ParseError {
+	var errs []*ParseError
+	for _, iface := range file.Interfaces {
+		if hasExtAttr(iface.ExtAttrs, "_mixin") {
+			continue
+		}
+		var members []Member
+		var first *collection
+		for _, m := range iface.Members {
+			c, ok := asCollection(m)
+			switch {
+			case !ok:
+				members = append(members, m)
+			case first != nil:
+				errs = append(errs, &ParseError{Pos: c.pos, Msg: fmt.Sprintf("interface %s declares a second maplike or setlike (the first is at %s); WebIDL permits one", iface.Name, first.pos)})
+			default:
+				first = &c
+				members = append(members, c.members()...)
+			}
+		}
+		if first != nil {
+			iface.Members = members
+		}
+	}
+	return errs
+}
+
+// collection is a maplike or setlike declaration, read the same way for both:
+// a setlike's element is its key, and it has no value.
+type collection struct {
+	keyword  string // "maplike" or "setlike"
+	keyName  string // the name of the parameter the key is passed as
+	key      *TypeRef
+	value    *TypeRef // nil for a setlike
+	readonly bool
+	doc      string
+	pos      Pos
+}
+
+// asCollection reads m as a maplike or setlike declaration, or reports false.
+func asCollection(m Member) (collection, bool) {
+	switch d := m.(type) {
+	case *Maplike:
+		return collection{"maplike", "key", d.KeyType, d.ValueType, d.Readonly, d.Doc, d.Pos}, true
+	case *Setlike:
+		return collection{"setlike", "value", d.ValueType, nil, d.Readonly, d.Doc, d.Pos}, true
+	}
+	return collection{}, false
+}
+
+// members returns the members the declaration declares, each at its position
+// and with its doc comment, DeclaredBy its keyword:
+// `readonly attribute unsigned long size`, `boolean has(K key)` and, for a
+// maplike, `V? get(K key)`; unless readonly, then a maplike's
+// `undefined set(K key, V value)` or a setlike's `undefined add(V value)`, and
+// `boolean delete(K key)` and `undefined clear()` — a setlike's key parameters
+// being named value. set and add return nothing: the JS method returns the
+// collection itself, which the caller already holds.
+func (c collection) members() []Member {
+	builtin := func(name string) *TypeRef { return &TypeRef{Kind: BuiltinType, Builtin: name} }
+	op := func(name string, ret *TypeRef, params ...*Param) *Operation {
+		return &Operation{Name: name, Params: params, Return: ret, DeclaredBy: c.keyword, Doc: c.doc, Pos: c.pos}
+	}
+	key := func() *Param { return &Param{Name: c.keyName, Type: c.key} }
+
+	members := []Member{
+		&Attribute{Name: "size", Type: builtin("unsigned long"), Readonly: true, DeclaredBy: c.keyword, Doc: c.doc, Pos: c.pos},
+		op("has", builtin("boolean"), key()),
+	}
+	if c.value != nil {
+		// A copy: setting Nullable on the value type itself would make set's
+		// parameter nullable too.
+		absentable := *c.value
+		absentable.Nullable = true
+		members = append(members, op("get", &absentable, key()))
+	}
+	if c.readonly {
+		return members
+	}
+	if c.value != nil {
+		members = append(members, op("set", builtin("undefined"), key(), &Param{Name: "value", Type: c.value}))
+	} else {
+		members = append(members, op("add", builtin("undefined"), key()))
+	}
+	return append(members,
+		op("delete", builtin("boolean"), key()),
+		op("clear", builtin("undefined")),
+	)
 }
 
 // recordWindowAliases sets File.WindowAliases: each identifier a

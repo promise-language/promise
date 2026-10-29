@@ -522,6 +522,7 @@ type Compiler struct {
 	webInPumpGlobal        *ir.Global  // @promise_web_in_pump (non-TLS, i8) — wasm32-web only; re-entrancy guard (§5)
 	webTerminatedGlobal    *ir.Global  // @promise_web_terminated (non-TLS, i8) — wasm32-web only; set once the instance has exited/faulted (§10)
 	webSubscriptionsGlobal *ir.Global  // @promise_web_subscriptions (non-TLS, [256 x SubSlot]) — wasm32-web only; the fixed-size subscription table (§8, §19 phase 2)
+	webSubGenerationGlobal *ir.Global  // @promise_web_subscription_generation (non-TLS, i32) — wasm32-web only; the generation the next subscription ID carries
 	panicFlagGlobal        *ir.Global  // @__promise_panic_flag (TLS, i8) — 1 = panic in flight
 	panicMsgTlsGlobal      *ir.Global  // @__promise_panic_msg (TLS, i8*) — C string pointer to panic message
 	panicTypeTlsGlobal     *ir.Global  // @__promise_panic_type (TLS, i8) — 1=.rodata, 2=heap-allocated

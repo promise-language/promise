@@ -390,12 +390,14 @@ func (g *jsGlueGenerator) emitBasePromiseEnvImports() {
 // emitWebModuleImports writes the host side of modules/web/web.pr's
 // `wasm_import`s (docs/web-apps.md#it-must-be-usable-without-bindgen). An
 // event listener stores each event in the ref table, pushes its handle into
-// the program's subscription through promise_web_enqueue, and pumps so the
-// subscriber runs before the listener returns.
+// the program's subscription through promise_web_enqueue, releases the handle
+// enqueue hands back — the rejected event, or the one its overflow policy
+// displaced; the reserved null handle when there is none, which _refRelease
+// ignores — and pumps so the subscriber runs before the listener returns.
 func (g *jsGlueGenerator) emitWebModuleImports() {
 	g.write(`    web_add_event_listener(target, kind_ptr, kind_len, sub_id) {
       _refLoad(target).addEventListener(_readString(kind_ptr, kind_len), (event) => {
-        wasm.exports.promise_web_enqueue(sub_id, _refStore(event));
+        _refRelease(wasm.exports.promise_web_enqueue(sub_id, _refStore(event)));
         wasm.exports.promise_web_pump();
       });
     },

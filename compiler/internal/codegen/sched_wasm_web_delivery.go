@@ -30,6 +30,14 @@ import (
 // side is then just ordinary `for e in events` over that channel: zero new
 // coroutine-suspend code, zero new grammar, 100% existing, tested machinery.
 //
+// A queue entry is a bare reference-table handle, so the host learns from
+// every enqueue which handle, if any, it must now release: the arriving one
+// when it is rejected, the displaced one when the policy evicts or coalesces.
+// Subscription IDs are opaque and generation-tagged, so one whose
+// subscription has ended is rejected rather than reaching a later
+// subscription that reuses its slot (docs/web-apps.md "The guest side
+// primitive").
+//
 // promise_web_subscribe/unsubscribe/subscription_dropped are internal-only:
 // they never cross the wasm/JS boundary (only ExportEnqueue and _initialize
 // do — §14's "two exports, one import" is unchanged by this file). Phase 3
@@ -41,16 +49,31 @@ import (
 // channel itself now owns the ring buffer, head/tail/count, mutex, and
 // waiter lists — the slot only needs to remember which channel and policy.
 const (
-	subFieldActive  = 0 // i32  0 = free slot, 1 = in use
+	subFieldID      = 0 // i32  the ID the slot was subscribed under; 0 = free slot
 	subFieldPolicy  = 1 // i32  wasmweb.QueueDropOldest / DropNewest / Coalesce
 	subFieldDropped = 2 // i32  drop count (§8.1 — must stay observable)
 	subFieldChannel = 3 // i8*  the subscription's Channel[i32] (promise_channel_new), non-owning
 )
 
+// A subscription ID is (generation << wasmWebSubSlotBits) | slot. The
+// generation is one global counter, advanced on every subscribe, that runs
+// from 1 to wasmWebSubGenerationLimit-1 and then wraps back to 1, so an ID is
+// always positive: never 0 (a free slot's subFieldID) and never the -1 a full
+// table returns. An ID whose subscription has ended no longer equals its
+// slot's subFieldID — not even after the slot is reused, because the reuse
+// carries a later generation — so it is rejected rather than reaching the
+// newer subscription (docs/web-apps.md "The guest side primitive").
+const (
+	wasmWebSubSlotBits        = 8
+	wasmWebSubGenerationLimit = 1 << (31 - wasmWebSubSlotBits)
+)
+
 // wasmWebMaxSubscriptions bounds the subscription table so that
 // promise_web_enqueue — which must be safe to call in any context, including
 // from JS with no Promise stack underneath it (§14) — never has to grow it.
-const wasmWebMaxSubscriptions = 256
+// It is exactly the slot numbers an ID can carry, so masking any i32 with
+// wasmWebMaxSubscriptions-1 yields an index inside the table.
+const wasmWebMaxSubscriptions = 1 << wasmWebSubSlotBits
 
 // wasmWebSubChannelElemSize is the element size (bytes) of every
 // subscription's backing channel. Fixed at 4 (i32) because the queue entry
@@ -60,7 +83,7 @@ const wasmWebSubChannelElemSize = 4
 
 func wasmWebSubSlotType() *irtypes.StructType {
 	return irtypes.NewStruct(
-		irtypes.I32,   // active
+		irtypes.I32,   // id
 		irtypes.I32,   // policy
 		irtypes.I32,   // dropped
 		irtypes.I8Ptr, // channel
@@ -71,11 +94,24 @@ func wasmWebSubTableType() *irtypes.ArrayType {
 	return irtypes.NewArray(wasmWebMaxSubscriptions, wasmWebSubSlotType())
 }
 
-// wasmWebSubField GEPs to one field of subscription slot subID within the
-// fixed global table.
-func (c *Compiler) wasmWebSubField(blk *ir.Block, subID value.Value, field int) *ir.InstGetElementPtr {
+// wasmWebSubField GEPs to one field of the table's slot number slot.
+func (c *Compiler) wasmWebSubField(blk *ir.Block, slot value.Value, field int) *ir.InstGetElementPtr {
 	return blk.NewGetElementPtr(wasmWebSubTableType(), c.webSubscriptionsGlobal,
-		constant.NewInt(irtypes.I32, 0), subID, constant.NewInt(irtypes.I32, int64(field)))
+		constant.NewInt(irtypes.I32, 0), slot, constant.NewInt(irtypes.I32, int64(field)))
+}
+
+// wasmWebLookupSub decodes subscription ID subID, which may be any i32 the
+// host or Promise code passes. slot is the slot number it names — masked into
+// the table, so indexing with it is safe whatever subID is — and ok is an i1
+// that is true only when subID is positive and is the ID slot currently holds:
+// an unknown, ended, or stale ID is not ok.
+func (c *Compiler) wasmWebLookupSub(blk *ir.Block, subID value.Value) (slot, ok value.Value) {
+	slot = blk.NewAnd(subID, constant.NewInt(irtypes.I32, wasmWebMaxSubscriptions-1))
+	held := blk.NewLoad(irtypes.I32, c.wasmWebSubField(blk, slot, subFieldID))
+	ok = blk.NewAnd(
+		blk.NewICmp(enum.IPredSGT, subID, constant.NewInt(irtypes.I32, 0)),
+		blk.NewICmp(enum.IPredEQ, held, subID))
+	return slot, ok
 }
 
 // wasmWebChanField GEPs to one field of a channel struct (compiler_runtime_types.go's
@@ -148,13 +184,18 @@ func (c *Compiler) wasmWebGetOrDeclareFunc(name string, retType irtypes.Type, pa
 	return fn
 }
 
-// defineWebSubscriptionGlobals declares the fixed-size subscription table.
-// Only called when c.isWasmWeb.
+// defineWebSubscriptionGlobals declares the fixed-size subscription table and
+// the generation counter subscription IDs carry. Only called when
+// c.isWasmWeb.
 func (c *Compiler) defineWebSubscriptionGlobals() {
 	tableTy := wasmWebSubTableType()
 	table := c.module.NewGlobal("promise_web_subscriptions", tableTy)
 	table.Init = constant.NewZeroInitializer(tableTy)
 	c.webSubscriptionsGlobal = table
+
+	generation := c.module.NewGlobal("promise_web_subscription_generation", irtypes.I32)
+	generation.Init = constant.NewInt(irtypes.I32, 1)
+	c.webSubGenerationGlobal = generation
 }
 
 // defineWebSubscribeFunc emits internal
@@ -162,16 +203,17 @@ func (c *Compiler) defineWebSubscriptionGlobals() {
 //
 // Finds a free slot, allocates a fresh Channel[i32] via the existing
 // promise_channel_new (compiler_runtime_types.go — the same allocator every
-// `Channel[T](cap)` literal uses), and returns the sub_id, or -1 if the table
-// is full. Increments GlobalLiveRegistrations (§4.1): a program with at
-// least one live subscription is a reactor.
+// `Channel[T](cap)` literal uses), and returns the subscription's opaque,
+// generation-tagged ID (see wasmWebSubSlotBits), or -1 if the table is full.
+// Increments GlobalLiveRegistrations (§4.1): a program with at least one
+// live subscription is a reactor.
 //
 // The slot holds the channel pointer but does not own a reference to it —
 // web.pr's subscription wrapper owns the Channel[i32] value it gets back
 // (via promise_web_channel) and is responsible for calling
 // promise_web_unsubscribe before that value is dropped (§12). Once
-// unsubscribe marks the slot inactive, promise_web_enqueue can never touch a
-// freed channel.
+// unsubscribe frees the slot, promise_web_enqueue can never touch a freed
+// channel.
 func (c *Compiler) defineWebSubscribeFunc() {
 	fn := c.wasmWebGetOrDeclareFunc(wasmweb.SubscribeFunc, irtypes.Void,
 		ir.NewParam("sret", irtypes.I8Ptr),
@@ -199,9 +241,8 @@ func (c *Compiler) defineWebSubscribeFunc() {
 	inBounds := loop.NewICmp(enum.IPredSLT, idxPhi, constant.NewInt(irtypes.I32, wasmWebMaxSubscriptions))
 	loop.NewCondBr(inBounds, checkActiveBlk, notFoundBlk)
 
-	activeField := c.wasmWebSubField(checkActiveBlk, idxPhi, subFieldActive)
-	active := checkActiveBlk.NewLoad(irtypes.I32, activeField)
-	isFree := checkActiveBlk.NewICmp(enum.IPredEQ, active, constant.NewInt(irtypes.I32, 0))
+	held := checkActiveBlk.NewLoad(irtypes.I32, c.wasmWebSubField(checkActiveBlk, idxPhi, subFieldID))
+	isFree := checkActiveBlk.NewICmp(enum.IPredEQ, held, constant.NewInt(irtypes.I32, 0))
 	checkActiveBlk.NewCondBr(isFree, foundBlk, nextIterBlk)
 
 	idxNext := nextIterBlk.NewAdd(idxPhi, constant.NewInt(irtypes.I32, 1))
@@ -213,15 +254,23 @@ func (c *Compiler) defineWebSubscribeFunc() {
 	chPtr := foundBlk.NewCall(c.funcs["promise_channel_new"], capI64,
 		constant.NewInt(irtypes.I64, wasmWebSubChannelElemSize))
 
+	// Tag the slot number with the current generation, then advance the
+	// generation, wrapping past the limit back to 1 so no ID is ever 0.
+	gen := foundBlk.NewLoad(irtypes.I32, c.webSubGenerationGlobal)
+	id := foundBlk.NewOr(foundBlk.NewShl(gen, constant.NewInt(irtypes.I32, wasmWebSubSlotBits)), idxPhi)
+	nextGen := foundBlk.NewAdd(gen, constant.NewInt(irtypes.I32, 1))
+	wraps := foundBlk.NewICmp(enum.IPredEQ, nextGen, constant.NewInt(irtypes.I32, wasmWebSubGenerationLimit))
+	foundBlk.NewStore(foundBlk.NewSelect(wraps, constant.NewInt(irtypes.I32, 1), nextGen), c.webSubGenerationGlobal)
+
 	foundBlk.NewStore(policyParam, c.wasmWebSubField(foundBlk, idxPhi, subFieldPolicy))
 	foundBlk.NewStore(constant.NewInt(irtypes.I32, 0), c.wasmWebSubField(foundBlk, idxPhi, subFieldDropped))
 	foundBlk.NewStore(chPtr, c.wasmWebSubField(foundBlk, idxPhi, subFieldChannel))
-	foundBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.wasmWebSubField(foundBlk, idxPhi, subFieldActive))
+	foundBlk.NewStore(id, c.wasmWebSubField(foundBlk, idxPhi, subFieldID))
 
 	live := foundBlk.NewLoad(irtypes.I32, c.webLiveRegsGlobal)
 	foundBlk.NewStore(foundBlk.NewAdd(live, constant.NewInt(irtypes.I32, 1)), c.webLiveRegsGlobal)
 
-	c.wasmWebBoxI32Sret(foundBlk, sretParam, idxPhi)
+	c.wasmWebBoxI32Sret(foundBlk, sretParam, id)
 	foundBlk.NewRet(nil)
 
 	c.wasmWebBoxI32Sret(notFoundBlk, sretParam, constant.NewInt(irtypes.I32, -1))
@@ -235,7 +284,7 @@ func (c *Compiler) defineWebSubscribeFunc() {
 // Channel[i32] value (container types are raw i8* internally — see
 // extern.go's isOpaqueContainerType handling — so a plain `extern declared
 // to return Channel[i32] receives this pointer directly, no unpacking).
-// Out-of-range returns null.
+// An unknown, ended, or stale sub_id returns null.
 func (c *Compiler) defineWebChannelFunc() {
 	fn := c.wasmWebGetOrDeclareFunc(wasmweb.ChannelFunc, irtypes.I8Ptr,
 		ir.NewParam("sub_id", irtypes.I8Ptr))
@@ -243,17 +292,14 @@ func (c *Compiler) defineWebChannelFunc() {
 	subParamBoxed := fn.Params[0]
 
 	entry := fn.NewBlock(".entry")
-	inBoundsBlk := fn.NewBlock("in_bounds")
+	liveBlk := fn.NewBlock("live")
 	nullRetBlk := fn.NewBlock("null_ret")
 
-	subParam := c.wasmWebUnboxI32Param(entry, subParamBoxed)
-	inBounds := entry.NewAnd(
-		entry.NewICmp(enum.IPredSGE, subParam, constant.NewInt(irtypes.I32, 0)),
-		entry.NewICmp(enum.IPredSLT, subParam, constant.NewInt(irtypes.I32, wasmWebMaxSubscriptions)))
-	entry.NewCondBr(inBounds, inBoundsBlk, nullRetBlk)
+	slot, ok := c.wasmWebLookupSub(entry, c.wasmWebUnboxI32Param(entry, subParamBoxed))
+	entry.NewCondBr(ok, liveBlk, nullRetBlk)
 
-	ch := inBoundsBlk.NewLoad(irtypes.I8Ptr, c.wasmWebSubField(inBoundsBlk, subParam, subFieldChannel))
-	inBoundsBlk.NewRet(ch)
+	ch := liveBlk.NewLoad(irtypes.I8Ptr, c.wasmWebSubField(liveBlk, slot, subFieldChannel))
+	liveBlk.NewRet(ch)
 
 	nullRetBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 
@@ -269,8 +315,10 @@ func (c *Compiler) defineWebChannelFunc() {
 // ordinary command (§13). Does not touch the channel itself: web.pr's
 // subscription wrapper calls this before its Channel[i32] field drops (§12),
 // and the channel's own drop path (existing, unchanged) frees the buffer,
-// mutex, and cond vars once nothing references it anymore. Out-of-range or
-// already-inactive sub_id is a silent no-op.
+// mutex, and cond vars once nothing references it anymore. An unknown,
+// ended, or stale sub_id is a silent no-op: it cannot free a slot that has
+// since been reused, or decrement liveness for a subscription it does not
+// own.
 func (c *Compiler) defineWebUnsubscribeFunc() {
 	fn := c.wasmWebGetOrDeclareFunc(wasmweb.UnsubscribeFunc, irtypes.Void,
 		ir.NewParam("sub_id", irtypes.I8Ptr))
@@ -278,23 +326,14 @@ func (c *Compiler) defineWebUnsubscribeFunc() {
 	idParamBoxed := fn.Params[0]
 
 	entry := fn.NewBlock(".entry")
-	inBoundsBlk := fn.NewBlock("in_bounds")
 	activeBlk := fn.NewBlock("active")
 	doneBlk := fn.NewBlock("done")
 
-	idParam := c.wasmWebUnboxI32Param(entry, idParamBoxed)
-	inBounds := entry.NewAnd(
-		entry.NewICmp(enum.IPredSGE, idParam, constant.NewInt(irtypes.I32, 0)),
-		entry.NewICmp(enum.IPredSLT, idParam, constant.NewInt(irtypes.I32, wasmWebMaxSubscriptions)))
-	entry.NewCondBr(inBounds, inBoundsBlk, doneBlk)
+	slot, ok := c.wasmWebLookupSub(entry, c.wasmWebUnboxI32Param(entry, idParamBoxed))
+	entry.NewCondBr(ok, activeBlk, doneBlk)
 
-	activeField := c.wasmWebSubField(inBoundsBlk, idParam, subFieldActive)
-	active := inBoundsBlk.NewLoad(irtypes.I32, activeField)
-	isActive := inBoundsBlk.NewICmp(enum.IPredNE, active, constant.NewInt(irtypes.I32, 0))
-	inBoundsBlk.NewCondBr(isActive, activeBlk, doneBlk)
-
-	activeBlk.NewStore(constant.NewInt(irtypes.I32, 0), activeField)
-	activeBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.wasmWebSubField(activeBlk, idParam, subFieldChannel))
+	activeBlk.NewStore(constant.NewInt(irtypes.I32, 0), c.wasmWebSubField(activeBlk, slot, subFieldID))
+	activeBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.wasmWebSubField(activeBlk, slot, subFieldChannel))
 
 	live := activeBlk.NewLoad(irtypes.I32, c.webLiveRegsGlobal)
 	activeBlk.NewStore(activeBlk.NewSub(live, constant.NewInt(irtypes.I32, 1)), c.webLiveRegsGlobal)
@@ -318,9 +357,14 @@ func (c *Compiler) defineWebUnsubscribeFunc() {
 // `for e in events` resumes through entirely existing, unmodified machinery.
 // promise_waiter_wake_one only moves a G pointer between lists and onto a run
 // queue; it does not execute Promise code or allocate, so this still holds
-// enqueue's contract. Applies the subscription's overflow policy (§8.1) and
-// returns EnqueueOK / EnqueueDropped. An out-of-range or inactive sub_id is
-// EnqueueDropped, never a trap — JS holds only an untrusted integer id.
+// enqueue's contract. Applies the subscription's overflow policy (§8.1).
+//
+// Returns the reference-table handle the host must release, or
+// EnqueueNoRelease when there is none: the arriving handle when it is
+// rejected — the instance has terminated, sub_id is unknown, ended, or stale,
+// the channel is closed, or DropNewest refuses it — and the handle a
+// DropOldest eviction or a Coalesce overwrite displaced. A bad sub_id is never
+// a trap — JS holds only an untrusted integer id.
 func (c *Compiler) defineWebEnqueueFunc() {
 	subParam := ir.NewParam("sub_id", irtypes.I32)
 	handleParam := ir.NewParam("handle", irtypes.I32)
@@ -328,9 +372,10 @@ func (c *Compiler) defineWebEnqueueFunc() {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	entry := fn.NewBlock(".entry")
-	inBoundsBlk := fn.NewBlock("in_bounds")
+	lookupBlk := fn.NewBlock("lookup")
 	activeBlk := fn.NewBlock("active")
-	droppedRetBlk := fn.NewBlock("dropped_ret")
+	rejectBlk := fn.NewBlock("reject")
+	closedBlk := fn.NewBlock("closed")
 	lockedBlk := fn.NewBlock("locked")
 	hasRoomBlk := fn.NewBlock("has_room")
 	pushBlk := fn.NewBlock("push")
@@ -340,24 +385,28 @@ func (c *Compiler) defineWebEnqueueFunc() {
 	dropNewestBlk := fn.NewBlock("drop_newest")
 	coalesceBlk := fn.NewBlock("coalesce")
 
-	inBounds := entry.NewAnd(
-		entry.NewICmp(enum.IPredSGE, subParam, constant.NewInt(irtypes.I32, 0)),
-		entry.NewICmp(enum.IPredSLT, subParam, constant.NewInt(irtypes.I32, wasmWebMaxSubscriptions)))
-	entry.NewCondBr(inBounds, inBoundsBlk, droppedRetBlk)
+	// A terminated instance takes nothing more (§10).
+	terminated := entry.NewLoad(irtypes.I8, c.webTerminatedGlobal)
+	isTerminated := entry.NewICmp(enum.IPredNE, terminated, constant.NewInt(irtypes.I8, 0))
+	entry.NewCondBr(isTerminated, rejectBlk, lookupBlk)
 
-	activeField := c.wasmWebSubField(inBoundsBlk, subParam, subFieldActive)
-	active := inBoundsBlk.NewLoad(irtypes.I32, activeField)
-	isActive := inBoundsBlk.NewICmp(enum.IPredNE, active, constant.NewInt(irtypes.I32, 0))
-	inBoundsBlk.NewCondBr(isActive, activeBlk, droppedRetBlk)
+	slot, ok := c.wasmWebLookupSub(lookupBlk, subParam)
+	lookupBlk.NewCondBr(ok, activeBlk, rejectBlk)
 
-	droppedRetBlk.NewRet(constant.NewInt(irtypes.I32, wasmweb.EnqueueDropped))
+	rejectBlk.NewRet(handleParam)
 
 	// active: load the channel pointer and lock its mutex before touching
 	// any of its fields (matching genReceiveChannel's own locking discipline).
-	ch := activeBlk.NewLoad(irtypes.I8Ptr, c.wasmWebSubField(activeBlk, subParam, subFieldChannel))
+	// A channel its owner has closed takes no more sends.
+	ch := activeBlk.NewLoad(irtypes.I8Ptr, c.wasmWebSubField(activeBlk, slot, subFieldChannel))
 	mtx := activeBlk.NewLoad(irtypes.I8Ptr, c.wasmWebChanField(activeBlk, ch, chanFieldMutex))
 	activeBlk.NewCall(c.palMutexLock, mtx)
-	activeBlk.NewBr(lockedBlk)
+	closed := activeBlk.NewLoad(irtypes.I8, c.wasmWebChanField(activeBlk, ch, chanFieldClosed))
+	isClosed := activeBlk.NewICmp(enum.IPredNE, closed, constant.NewInt(irtypes.I8, 0))
+	activeBlk.NewCondBr(isClosed, closedBlk, lockedBlk)
+
+	closedBlk.NewCall(c.palMutexUnlock, mtx)
+	closedBlk.NewBr(rejectBlk)
 
 	// locked: room check against capacity/count.
 	capacity := lockedBlk.NewLoad(irtypes.I64, c.wasmWebChanField(lockedBlk, ch, chanFieldCapacity))
@@ -371,8 +420,8 @@ func (c *Compiler) defineWebEnqueueFunc() {
 	buf := hasRoomBlk.NewLoad(irtypes.I8Ptr, c.wasmWebChanField(hasRoomBlk, ch, chanFieldBuffer))
 	hasRoomBlk.NewBr(pushBlk)
 
-	slot := pushBlk.NewGetElementPtr(irtypes.I32, pushBlk.NewBitCast(buf, irtypes.NewPointer(irtypes.I32)), tail)
-	pushBlk.NewStore(handleParam, slot)
+	tailSlot := pushBlk.NewGetElementPtr(irtypes.I32, pushBlk.NewBitCast(buf, irtypes.NewPointer(irtypes.I32)), tail)
+	pushBlk.NewStore(handleParam, tailSlot)
 	newTail := pushBlk.NewURem(pushBlk.NewAdd(tail, constant.NewInt(irtypes.I64, 1)), capacity)
 	pushBlk.NewStore(newTail, tailField)
 	countField := c.wasmWebChanField(pushBlk, ch, chanFieldCount)
@@ -386,7 +435,7 @@ func (c *Compiler) defineWebEnqueueFunc() {
 	pushBlk.NewCall(c.palMutexUnlock, mtx)
 	pushBlk.NewBr(okRetBlk)
 
-	okRetBlk.NewRet(constant.NewInt(irtypes.I32, wasmweb.EnqueueOK))
+	okRetBlk.NewRet(constant.NewInt(irtypes.I32, wasmweb.EnqueueNoRelease))
 
 	// policy_switch: full — dispatch on the subscription's overflow policy
 	// (§8.1). All three policy blocks are dominated by lockedBlk, so
@@ -397,50 +446,55 @@ func (c *Compiler) defineWebEnqueueFunc() {
 	tail2 := policySwitchBlk.NewLoad(irtypes.I64, tailField2)
 	buf2 := policySwitchBlk.NewLoad(irtypes.I8Ptr, c.wasmWebChanField(policySwitchBlk, ch, chanFieldBuffer))
 	buf2I32 := policySwitchBlk.NewBitCast(buf2, irtypes.NewPointer(irtypes.I32))
-	droppedField := c.wasmWebSubField(policySwitchBlk, subParam, subFieldDropped)
+	droppedField := c.wasmWebSubField(policySwitchBlk, slot, subFieldDropped)
 	dropped := policySwitchBlk.NewLoad(irtypes.I32, droppedField)
 	policySwitchBlk.NewStore(policySwitchBlk.NewAdd(dropped, constant.NewInt(irtypes.I32, 1)), droppedField)
 
-	policy := policySwitchBlk.NewLoad(irtypes.I32, c.wasmWebSubField(policySwitchBlk, subParam, subFieldPolicy))
+	policy := policySwitchBlk.NewLoad(irtypes.I32, c.wasmWebSubField(policySwitchBlk, slot, subFieldPolicy))
 	policySwitchBlk.NewSwitch(policy, dropNewestBlk,
 		ir.NewCase(constant.NewInt(irtypes.I32, wasmweb.QueueDropOldest), dropOldestBlk),
 		ir.NewCase(constant.NewInt(irtypes.I32, wasmweb.QueueCoalesce), coalesceBlk),
 	)
 
 	// drop_oldest (default policy): evict the oldest, push the new arrival at
-	// tail. Count is unchanged — the ring stays full. No wake needed: the
-	// receiver already knows the channel is non-empty (it was already full).
+	// tail, and hand the evicted handle back for the host to release. Count is
+	// unchanged — the ring stays full. No wake needed: the receiver already
+	// knows the channel is non-empty (it was already full).
+	evicted := dropOldestBlk.NewLoad(irtypes.I32, dropOldestBlk.NewGetElementPtr(irtypes.I32, buf2I32, head))
 	newHead := dropOldestBlk.NewURem(dropOldestBlk.NewAdd(head, constant.NewInt(irtypes.I64, 1)), capacity)
 	dropOldestBlk.NewStore(newHead, headField)
 	dropOldestBlk.NewStore(handleParam, dropOldestBlk.NewGetElementPtr(irtypes.I32, buf2I32, tail2))
 	newTail2 := dropOldestBlk.NewURem(dropOldestBlk.NewAdd(tail2, constant.NewInt(irtypes.I64, 1)), capacity)
 	dropOldestBlk.NewStore(newTail2, tailField2)
 	dropOldestBlk.NewCall(c.palMutexUnlock, mtx)
-	dropOldestBlk.NewBr(okRetBlk)
+	dropOldestBlk.NewRet(evicted)
 
 	// drop_newest: reject the arriving event, keep what's already queued.
 	dropNewestBlk.NewCall(c.palMutexUnlock, mtx)
-	dropNewestBlk.NewBr(droppedRetBlk)
+	dropNewestBlk.NewBr(rejectBlk)
 
 	// coalesce: overwrite the most recently queued slot ((tail - 1) mod cap)
 	// in place — the newest still-unread event replaces it rather than
-	// growing the backlog. Kind is not distinguished at this layer (the queue
-	// entry is opaque per §14); a subscription mixing kinds and opting into
-	// Coalesce will coalesce across kinds too — web.pr is expected to
-	// restrict Coalesce to single-kind subscriptions.
+	// growing the backlog — and hand the replaced handle back for the host to
+	// release. Kind is not distinguished at this layer (the queue entry is
+	// opaque per §14), so a Coalesce subscription should carry one event kind
+	// (docs/web-apps.md "The guest side primitive").
 	lastIdx := coalesceBlk.NewURem(
 		coalesceBlk.NewAdd(coalesceBlk.NewAdd(tail2, capacity), constant.NewInt(irtypes.I64, -1)),
 		capacity)
-	coalesceBlk.NewStore(handleParam, coalesceBlk.NewGetElementPtr(irtypes.I32, buf2I32, lastIdx))
+	lastSlot := coalesceBlk.NewGetElementPtr(irtypes.I32, buf2I32, lastIdx)
+	replaced := coalesceBlk.NewLoad(irtypes.I32, lastSlot)
+	coalesceBlk.NewStore(handleParam, lastSlot)
 	coalesceBlk.NewCall(c.palMutexUnlock, mtx)
-	coalesceBlk.NewBr(okRetBlk)
+	coalesceBlk.NewRet(replaced)
 
 	c.funcs[wasmweb.ExportEnqueue] = fn
 }
 
 // defineWebSubscriptionDroppedFunc emits internal
 // @promise_web_subscription_dropped(i32 %sub_id) → i32 — the accessor behind
-// web.pr's subscription.dropped (§8.1). Out-of-range returns 0.
+// web.pr's subscription.dropped (§8.1). An unknown, ended, or stale sub_id
+// returns 0.
 func (c *Compiler) defineWebSubscriptionDroppedFunc() {
 	fn := c.wasmWebGetOrDeclareFunc(wasmweb.SubscriptionDroppedFunc, irtypes.Void,
 		ir.NewParam("sret", irtypes.I8Ptr),
@@ -449,18 +503,15 @@ func (c *Compiler) defineWebSubscriptionDroppedFunc() {
 	sretParam, subParamBoxed := fn.Params[0], fn.Params[1]
 
 	entry := fn.NewBlock(".entry")
-	inBoundsBlk := fn.NewBlock("in_bounds")
+	liveBlk := fn.NewBlock("live")
 	zeroRetBlk := fn.NewBlock("zero_ret")
 
-	subParam := c.wasmWebUnboxI32Param(entry, subParamBoxed)
-	inBounds := entry.NewAnd(
-		entry.NewICmp(enum.IPredSGE, subParam, constant.NewInt(irtypes.I32, 0)),
-		entry.NewICmp(enum.IPredSLT, subParam, constant.NewInt(irtypes.I32, wasmWebMaxSubscriptions)))
-	entry.NewCondBr(inBounds, inBoundsBlk, zeroRetBlk)
+	slot, ok := c.wasmWebLookupSub(entry, c.wasmWebUnboxI32Param(entry, subParamBoxed))
+	entry.NewCondBr(ok, liveBlk, zeroRetBlk)
 
-	dropped := inBoundsBlk.NewLoad(irtypes.I32, c.wasmWebSubField(inBoundsBlk, subParam, subFieldDropped))
-	c.wasmWebBoxI32Sret(inBoundsBlk, sretParam, dropped)
-	inBoundsBlk.NewRet(nil)
+	dropped := liveBlk.NewLoad(irtypes.I32, c.wasmWebSubField(liveBlk, slot, subFieldDropped))
+	c.wasmWebBoxI32Sret(liveBlk, sretParam, dropped)
+	liveBlk.NewRet(nil)
 
 	c.wasmWebBoxI32Sret(zeroRetBlk, sretParam, constant.NewInt(irtypes.I32, 0))
 	zeroRetBlk.NewRet(nil)

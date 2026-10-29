@@ -6,14 +6,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/llir/llvm/ir/constant"
+	irtypes "github.com/llir/llvm/ir/types"
+
 	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // Tests for wasm32-web delivery (docs/web-apps.md §7, §8, §8.1,
 // §19 phase 2): the subscription table and the exported promise_web_enqueue.
-// Like sched_wasm_web_test.go, these are Go IR-shape tests (§17.1) — nothing
-// here is reachable from Promise source yet (that's modules/web), so there
-// is nothing to drive end-to-end from a .pr program at this layer.
+// Like sched_wasm_web_test.go, these are Go IR-shape tests (§17.1); the
+// behaviour is driven end to end under node, with the test playing the host,
+// by cmd/promise's TestWebDeliveryQueueSemantics.
 //
 // Each subscription is backed by a real Channel[i32] (promise_channel_new),
 // not a custom ring buffer — promise_web_enqueue writes into that channel's
@@ -65,23 +68,63 @@ func TestWebEnqueueExportSignature(t *testing.T) {
 	}
 }
 
-// An out-of-range or inactive sub_id never traps — enqueue must be safe to
-// call with any untrusted integer JS supplies. That means the function must
-// branch on bounds/active state rather than index unconditionally.
-func TestWebEnqueueBoundsChecksBeforeIndexing(t *testing.T) {
+// An unknown, ended, or stale sub_id never traps — enqueue must be safe to
+// call with any untrusted integer JS supplies. The ID is masked into the
+// table before indexing, accepted only when it is positive and equals the
+// slot's stored ID, and a rejected event's own handle goes back to the host
+// to release. The behaviour is driven end to end under node by
+// TestWebDeliveryQueueSemantics (cmd/promise).
+func TestWebEnqueueRejectsUnknownIDs(t *testing.T) {
 	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
 	enqueueFn := extractDefine(ir, wasmweb.ExportEnqueue)
 	if enqueueFn == "" {
 		t.Fatalf("expected @promise_web_enqueue to be defined\ngot:\n%s", ir)
 	}
-	if !strings.Contains(enqueueFn, "icmp sge i32") || !strings.Contains(enqueueFn, "icmp slt i32") {
-		t.Errorf("expected promise_web_enqueue to range-check sub_id before touching the table\ngot:\n%s", enqueueFn)
+	for _, want := range []string{
+		fmt.Sprintf("and i32 %%sub_id, %d", wasmWebMaxSubscriptions-1),
+		"icmp sgt i32 %sub_id, 0",
+		"icmp eq i32",
+	} {
+		if !strings.Contains(enqueueFn, want) {
+			t.Errorf("expected promise_web_enqueue to check sub_id with %q before touching the channel\ngot:\n%s", want, enqueueFn)
+		}
 	}
-	if !strings.Contains(enqueueFn, "ret i32 1") {
-		t.Errorf("expected an EnqueueDropped (1) return path for the out-of-range/inactive case\ngot:\n%s", enqueueFn)
+	if !strings.Contains(enqueueFn, "ret i32 %handle") {
+		t.Errorf("expected a rejection path returning the arriving handle\ngot:\n%s", enqueueFn)
 	}
-	if !strings.Contains(enqueueFn, "ret i32 0") {
-		t.Errorf("expected an EnqueueOK (0) return path\ngot:\n%s", enqueueFn)
+	// A terminated instance takes nothing more. Today the flag is set only once
+	// no subscription is live, so no run-time test can reach this check with a
+	// live ID.
+	if !strings.Contains(enqueueFn, "@"+wasmweb.GlobalTerminated) {
+		t.Errorf("expected promise_web_enqueue to reject once the instance has terminated\ngot:\n%s", enqueueFn)
+	}
+	if !strings.Contains(enqueueFn, fmt.Sprintf("ret i32 %d", wasmweb.EnqueueNoRelease)) {
+		t.Errorf("expected an EnqueueNoRelease return path\ngot:\n%s", enqueueFn)
+	}
+}
+
+// The generation a subscription ID carries wraps from the last value back to
+// 1, never to 0, so no ID is ever 0 (a free slot) or negative. Reaching the
+// wrap at run time takes 2^23 subscriptions, so the select that skips 0 is
+// checked here.
+func TestWebSubscribeGenerationSkipsZeroOnWrap(t *testing.T) {
+	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
+	assertContains(t, ir, "@promise_web_subscription_generation = global i32 1")
+	subscribeFn := extractDefine(ir, wasmweb.SubscribeFunc)
+	if subscribeFn == "" {
+		t.Fatalf("expected @promise_web_subscribe to be defined\ngot:\n%s", ir)
+	}
+	// llir spells a large constant in hex; take its spelling from llir itself.
+	limit := constant.NewInt(irtypes.I32, wasmWebSubGenerationLimit).Ident()
+	wrap := regexp.MustCompile(`(%\S+) = icmp eq i32 %\S+, ` + regexp.QuoteMeta(limit)).FindStringSubmatch(subscribeFn)
+	if wrap == nil {
+		t.Fatalf("expected the next generation to be compared with %d\ngot:\n%s", wasmWebSubGenerationLimit, subscribeFn)
+	}
+	if !strings.Contains(subscribeFn, "select i1 "+wrap[1]+", i32 1, i32 ") {
+		t.Errorf("expected the wrapped generation to restart at 1\ngot:\n%s", subscribeFn)
+	}
+	if !regexp.MustCompile(`shl i32 %\S+, ` + fmt.Sprint(wasmWebSubSlotBits)).MatchString(subscribeFn) {
+		t.Errorf("expected the ID to shift the generation above the slot bits\ngot:\n%s", subscribeFn)
 	}
 }
 

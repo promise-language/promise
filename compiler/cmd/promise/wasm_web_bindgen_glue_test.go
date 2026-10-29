@@ -756,3 +756,192 @@ func TestBindWebIdlNamespaceCallsHostObject(t *testing.T) {
 		}
 	}
 }
+
+// #163 end to end: an optional or nullable interface argument crosses as its
+// handle, or 0 for none, which the glue reads as `undefined` — at a method, an
+// optional argument, a static, a setter and a constructor. Before #163 the
+// wrapper passed the `Peer?` itself to the extern's i32, and bind's self-check
+// rejected the module. The attribute takes the value back: the `undefined` a
+// `none` became returns as 0 and lifts as `none`, and the global object as a
+// handle to itself. An owned wrapper passed as an option is released after the
+// call, as one passed bare is.
+
+const optionalHandleIDL = `interface Peer {
+  constructor(optional Peer owner);
+  undefined take(Peer? p);
+  undefined takeOptional(optional Peer p);
+  static undefined takeStatic(Peer? p);
+  attribute Peer? peer;
+  readonly attribute Peer me;
+  undefined hold(Peer? p);
+};
+`
+
+// optionalHandleRounds is how many times optionalHandleMain passes each of two
+// owned wrappers, a `Peer?` and a `Peer`, to a `Peer?` parameter. Each takes a
+// slot from its getter and releases it when it drops, so every round reuses
+// the same slots; were either kept, optionalHandleRounds slots would stay taken.
+const optionalHandleRounds = 100
+
+var optionalHandleMain = `presence(Peer? p) string {
+    if p is present {
+        return "present";
+    }
+    return "absent";
+}
+
+main() {
+    host := Peer.borrow(1);
+    host.take(none);
+    host.take(Peer.borrow(1));
+    host.take_optional(none);
+    host.take_optional(Peer.borrow(1));
+    Peer.take_static(none);
+    Peer.take_static(Peer.borrow(1));
+    host.peer = none;
+    print_line("peer=" + presence(host.peer));
+    host.peer = Peer.borrow(1);
+    print_line("peer=" + presence(host.peer));
+    host.take(host.peer);
+    Peer.create(none);
+    Peer.create(Peer.borrow(1));
+    for _ in 0..` + strconv.Itoa(optionalHandleRounds) + ` {
+        host.hold(host.peer);
+        host.hold(host.me);
+    }
+}
+`
+
+// optionalHandleDriver puts the instance members on the global object, handle 1
+// (T1510), and the static and the constructor on a Peer class. Each records
+// what it received: "undefined", "global" for the global object, or its type.
+// The peer attribute returns what it was last set to, me returns the global
+// object, and hold counts the global objects it receives. It loads the
+// generated peer.js the way a page would (nodePageDriver), runs the .wasm named
+// by its one argument and reports one RESULT: line of JSON, with the handle a
+// fresh _refStore gets once the program is done.
+const optionalHandleDriver = nodePageDriver + `
+const [wasmFile] = process.argv.slice(2);
+
+const seen = [];
+const record = (site, v) => {
+  seen.push(site + ":" + (v === undefined ? "undefined" : v === globalThis ? "global" : typeof v));
+};
+globalThis.take = (p) => record("take", p);
+globalThis.takeOptional = (p) => record("takeOptional", p);
+let peer = null;
+Object.defineProperty(globalThis, "peer", {
+  get() { return peer; },
+  set(v) { record("peer", v); peer = v; },
+  configurable: true,
+});
+Object.defineProperty(globalThis, "me", {
+  get() { return globalThis; },
+  configurable: true,
+});
+let held = 0;
+globalThis.hold = (p) => {
+  if (p === globalThis) held++;
+};
+globalThis.Peer = class {
+  constructor(owner) { record("constructor", owner); }
+  static takeStatic(p) { record("takeStatic", p); }
+};
+
+(async () => {
+  const mod = await import(pathToFileURL(path.join(dir, "peer.js")).href);
+  const result = { logs, errs };
+  try {
+    await mod.init(wasmFile);
+    result.ok = true;
+  } catch (e) {
+    result.ok = false;
+    result.message = e && e.message;
+  }
+  result.seen = seen;
+  result.held = held;
+  result.nextHandle = mod._refStore({ probe: true });
+  process.stdout.write("RESULT:" + JSON.stringify(result) + "\n");
+})();
+`
+
+type optionalHandleResult struct {
+	OK         bool     `json:"ok"`
+	Message    string   `json:"message"`
+	Logs       []string `json:"logs"`
+	Errs       []string `json:"errs"`
+	Seen       []string `json:"seen"`
+	Held       int      `json:"held"`
+	NextHandle int      `json:"nextHandle"`
+}
+
+func TestBindWebIdlGlueOptionalHandleParams(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+build+node integration test in short mode")
+	}
+	nodePath, err := resolveWasmRuntime("node")
+	if err != nil {
+		// Neither staged on this machine nor fetchable: a fact about the
+		// environment, not the tree.
+		t.Skipf("the pinned node is not obtainable here: %v", err)
+	}
+	bin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+
+	idlPath := filepath.Join(dir, "peer.idl")
+	if err := os.WriteFile(idlPath, []byte(optionalHandleIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	clitest.RunOK(t, bin, nil, "bind", "webidl", "-name", "peer", "-o", outDir, idlPath)
+	if err := os.WriteFile(filepath.Join(outDir, "main.pr"), []byte(optionalHandleMain), 0644); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(outDir, "driver.cjs")
+	if err := os.WriteFile(driver, []byte(optionalHandleDriver), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	builds := []struct {
+		name string
+		args []string
+	}{
+		{"debug", nil},
+		{"release", []string{"--release"}},
+	}
+	for _, b := range builds {
+		wasm := b.name + ".wasm"
+		args := append(append([]string{"build"}, b.args...), "-target", "wasm32-web", "-o", filepath.Join(outDir, wasm), outDir)
+		clitest.RunOK(t, bin, nil, args...)
+
+		got := runNodeDriver[optionalHandleResult](t, nodePath, driver, wasm)
+		if !got.OK {
+			t.Errorf("%s: init() rejected: %q (logs %q, errs %q)", b.name, got.Message, got.Logs, got.Errs)
+			continue
+		}
+		want := []string{
+			"take:undefined", "take:global",
+			"takeOptional:undefined", "takeOptional:global",
+			"takeStatic:undefined", "takeStatic:global",
+			"peer:undefined", "peer:global",
+			"take:global", // the peer read back, passed on
+			"constructor:undefined", "constructor:global",
+		}
+		if strings.Join(got.Seen, "\n") != strings.Join(want, "\n") {
+			t.Errorf("%s: the host received %q, want %q", b.name, got.Seen, want)
+		}
+		if wantLogs := []string{"peer=absent", "peer=present"}; strings.Join(got.Logs, "\n") != strings.Join(wantLogs, "\n") {
+			t.Errorf("%s: logs = %q, want %q", b.name, got.Logs, wantLogs)
+		}
+		if got.Held != 2*optionalHandleRounds {
+			t.Errorf("%s: hold received the global object %d times, want %d", b.name, got.Held, 2*optionalHandleRounds)
+		}
+		if got.NextHandle >= optionalHandleRounds {
+			t.Errorf("%s: a fresh _refStore returned handle %d after %d rounds of owned wrappers passed as options; their slots are not being released", b.name, got.NextHandle, optionalHandleRounds)
+		}
+		if len(got.Errs) != 0 {
+			t.Errorf("%s: unexpected stderr output %q", b.name, got.Errs)
+		}
+	}
+}

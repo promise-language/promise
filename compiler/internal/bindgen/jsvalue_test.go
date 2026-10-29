@@ -55,6 +55,19 @@ func TestNamedKinds(t *testing.T) {
 			if j := kinds.isJsValue(ref); j != (c.want == namedJsValue) {
 				t.Errorf("isJsValue(%s) = %v, want %v", c.name, j, c.want == namedJsValue)
 			}
+			// An option crosses as its handle or 0 exactly when the type
+			// itself crosses as a handle (#163); the bare type is no option.
+			opt := TypeRef{Kind: OptionKind, Elem: &ref}
+			if h := kinds.isOptionalHandle(opt); h != c.handle {
+				t.Errorf("isOptionalHandle(%s?) = %v, want %v", c.name, h, c.handle)
+			}
+			if kinds.isOptionalHandle(ref) {
+				t.Errorf("isOptionalHandle(%s) = true, want false for a type that is not an option", c.name)
+			}
+			// A nested option (#756) has no single handle to pass.
+			if kinds.isOptionalHandle(TypeRef{Kind: OptionKind, Elem: &opt}) {
+				t.Errorf("isOptionalHandle(%s??) = true, want false", c.name)
+			}
 		})
 	}
 

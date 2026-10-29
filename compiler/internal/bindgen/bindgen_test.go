@@ -531,6 +531,59 @@ func TestLowerOptionExternArg(t *testing.T) {
 	}
 }
 
+// TestOptionalHandleParamLowersToHandleOrZero covers #163: an optional or
+// nullable interface parameter crosses as its `_handle`, or 0 for none, at
+// every wrapper site — constructor, method, static and setter. An option of a
+// type that does not cross as a handle (a dictionary, JsValue) is not taken
+// for one, and an optional built-in keeps its zero-value sentinel.
+func TestOptionalHandleParamLowersToHandleOrZero(t *testing.T) {
+	out := GeneratePromise(overloadIR(t, `dictionary Init { long size; };
+interface Node {
+	constructor(optional Node owner);
+	Node? insertBefore(Node node, Node? child);
+	undefined focus(optional Node opt);
+	static undefined adopt(Node? n);
+	attribute Node? parent;
+	undefined configure(optional Init init, optional any x, optional DOMString s);
+};`), "web")
+
+	assertContains(t, out, "handle := _node_constructor(owner?._handle ?: 0);")
+	assertContains(t, out, "handle := _node_insert_before(this._handle, node._handle, child?._handle ?: 0);")
+	assertContains(t, out, "_node_focus(this._handle, opt?._handle ?: 0);")
+	assertContains(t, out, "_node_adopt(n?._handle ?: 0);")
+	assertContains(t, out, "_node_set_parent(this._handle, value?._handle ?: 0);")
+	// The extern still takes the handle as an i32.
+	assertContains(t, out, "_node_insert_before(i32 handle, i32 node, i32 child) i32")
+	assertNotContains(t, out, "init?._handle")
+	assertNotContains(t, out, "x?._handle")
+	assertContains(t, out, `s ?: ""`)
+}
+
+// TestWitOptionalResourceParamLowersToHandleOrZero: a WIT `option<R>` over a
+// bare resource is the same optional handle, so the non-canonical binding
+// lowers it as WebIDL's does (#163), at a method and at a free function, whose
+// wrapper builds its call apart from the resource emitters. The canonical ABI
+// does not lower through lowerArg and is left as it was.
+func TestWitOptionalResourceParamLowersToHandleOrZero(t *testing.T) {
+	src := `package test:res;
+
+interface types {
+  resource node {
+    adopt: func(child: option<node>);
+  }
+  release: func(n: option<node>);
+}
+`
+	file, errs := wit.Parse(src, "test.wit")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	out := GeneratePromise(WitToIR(file), "wasi")
+	assertContains(t, out, "_node_adopt(this._handle, child?._handle ?: 0);")
+	assertContains(t, out, "_release(n?._handle ?: 0);")
+	assertNotContains(t, GeneratePromiseWithOptions(WitToIR(file), "wasi", true), "?._handle")
+}
+
 func TestCodegenFreeFunc(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",

@@ -1092,7 +1092,7 @@ non-zero.
 
 ### Reference Table and Ownership
 
-JS objects (DOM elements, fetch responses, etc.) cannot live in WASM linear memory. The glue layer maintains a reference table: an array indexed by `i32` handles.
+JS objects (DOM elements, fetch responses, etc.) cannot live in WASM linear memory. The glue layer maintains a reference table: an array indexed by `i32` handles. Handle 0 refers to no object: it is how an absent value of an interface type crosses, in both directions. A `T?` parameter passes 0 for `none`, which the glue reads as `undefined` — to WebIDL a missing optional argument, and `null` for a nullable type — and a `null` or `undefined` result comes back as 0, which the wrapper lifts as `none`.
 
 In the Promise binding module, each Web API type wraps a `_handle` into that
 table — the same field a WIT resource wraps, since one generator emits both:

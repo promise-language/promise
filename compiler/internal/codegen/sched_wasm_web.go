@@ -6,6 +6,7 @@ import (
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 
+	"github.com/promise-language/promise/compiler/internal/codegen/pal"
 	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
@@ -44,12 +45,44 @@ func (c *Compiler) defineWebReactorGlobals() {
 
 	// @promise_web_terminated = global i8 0
 	// Set once the instance has exited or faulted (§10); further host entries
-	// return without running anything. Nothing sets this to 1 yet in Phase 1
-	// except the drain-to-clean-termination path itself, immediately before
-	// pal_exit.
-	terminated := c.module.NewGlobal(wasmweb.GlobalTerminated, irtypes.I8)
-	terminated.Init = constant.NewInt(irtypes.I8, 0)
-	c.webTerminatedGlobal = terminated
+	// return without running anything. pal_exit (emitted before this) defines
+	// and sets it, so every exit path — a clean drain, an explicit exit, a
+	// panic, a deadlock — marks the instance terminated.
+	c.webTerminatedGlobal = pal.WebTerminatedGlobal(c.module)
+}
+
+// emitWebDrainVerdict ends a reactor drain that found nothing runnable (blk):
+// it releases the re-entrancy guard (§5) and applies the liveness rule (§4.1).
+// Live registrations gate the decision before main_done is consulted, so a
+// reactor whose main() already returned while its consumers park on a live
+// subscription is idle, not terminated. It returns the block reached when the
+// instance is idle and the one reached when main is done with nothing live;
+// the caller terminates both. With neither, the program is deadlocked and
+// aborts with promise_sched_coop_run's message and exit code.
+func (c *Compiler) emitWebDrainVerdict(fn *ir.Func, blk *ir.Block) (idle, done *ir.Block) {
+	idle = fn.NewBlock("idle")
+	checkMainDone := fn.NewBlock("check_main_done")
+	done = fn.NewBlock("main_done")
+	deadlock := fn.NewBlock("deadlock")
+
+	blk.NewStore(constant.NewInt(irtypes.I8, 0), c.webInPumpGlobal)
+	live := blk.NewLoad(irtypes.I32, c.webLiveRegsGlobal)
+	isLive := blk.NewICmp(enum.IPredNE, live, constant.NewInt(irtypes.I32, 0))
+	blk.NewCondBr(isLive, idle, checkMainDone)
+
+	mdField := checkMainDone.NewGetElementPtr(schedStructType(), c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMainDone)))
+	mainDone := checkMainDone.NewLoad(irtypes.I8, mdField)
+	mainIsDone := checkMainDone.NewICmp(enum.IPredNE, mainDone, constant.NewInt(irtypes.I8, 0))
+	checkMainDone.NewCondBr(mainIsDone, done, deadlock)
+
+	msg := c.getTaskDeadlockMsgGlobal()
+	msgPtr := deadlock.NewGetElementPtr(msg.ContentType, msg,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	deadlock.NewCall(c.palWrite, constant.NewInt(irtypes.I32, 2), msgPtr, constant.NewInt(irtypes.I64, 45))
+	deadlock.NewCall(c.palExit, constant.NewInt(irtypes.I32, 2))
+	deadlock.NewUnreachable()
+	return idle, done
 }
 
 // defineWebReactorDrainFunc emits @promise_web_reactor_drain() → i8.
@@ -73,20 +106,20 @@ func (c *Compiler) defineWebReactorGlobals() {
 // Deadlock (nothing runnable, zero live registrations, main not done) still
 // aborts internally exactly as promise_sched_coop_run does today — it never
 // returns.
+//
+// It is the outermost pump, so it holds the re-entrancy guard (§5) for its
+// whole run: a host entry made while main runs — a Promise→JS call that
+// dispatches an event synchronously — enqueues and returns without pumping,
+// and this drain observes the event.
 func (c *Compiler) defineWebReactorDrainFunc() {
 	fn := c.module.NewFunc("promise_web_reactor_drain", irtypes.I8)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
-	schedTy := schedStructType()
-
 	entry := fn.NewBlock(".entry")
 	loop := fn.NewBlock("loop")
 	stoppedBlk := fn.NewBlock("stopped")
-	liveBlk := fn.NewBlock("live")
-	checkMainDoneBlk := fn.NewBlock("check_main_done")
-	terminateCleanBlk := fn.NewBlock("terminate_clean")
-	deadlockBlk := fn.NewBlock("deadlock")
 
+	entry.NewStore(constant.NewInt(irtypes.I8, 1), c.webInPumpGlobal)
 	entry.NewBr(loop)
 
 	// loop: run one cooperative step. stepR: 0 = nothing runnable, 1 = ran a G
@@ -98,43 +131,13 @@ func (c *Compiler) defineWebReactorDrainFunc() {
 	ranG := loop.NewICmp(enum.IPredEQ, stepR, constant.NewInt(irtypes.I8, 1))
 	loop.NewCondBr(ranG, loop, stoppedBlk)
 
-	// stopped: nothing runnable (or defensively, a deadline). Apply the
-	// liveness rule (§4.1) — live registrations gate the decision before
-	// main_done is even consulted, so a reactor whose main() already
-	// returned but whose consumer goroutines are parked on a live
-	// subscription is correctly reported idle, not terminated.
-	live := stoppedBlk.NewLoad(irtypes.I32, c.webLiveRegsGlobal)
-	isLive := stoppedBlk.NewICmp(enum.IPredNE, live, constant.NewInt(irtypes.I32, 0))
-	stoppedBlk.NewCondBr(isLive, liveBlk, checkMainDoneBlk)
-
-	// live: reactor stays alive — caller (_initialize) must return, not exit.
-	liveBlk.NewRet(constant.NewInt(irtypes.I8, 1))
-
-	// check_main_done: zero live registrations — either clean completion
-	// (identical to today) or a genuine deadlock (identical to today).
-	mdField := checkMainDoneBlk.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMainDone)))
-	mainDone := checkMainDoneBlk.NewLoad(irtypes.I8, mdField)
-	mainIsDone := checkMainDoneBlk.NewICmp(enum.IPredNE, mainDone, constant.NewInt(irtypes.I8, 0))
-	checkMainDoneBlk.NewCondBr(mainIsDone, terminateCleanBlk, deadlockBlk)
-
-	// terminate_clean: main completed, no live registrations — caller must
-	// pal_exit(0), same outcome as today's unconditional exit.
-	terminateCleanBlk.NewRet(constant.NewInt(irtypes.I8, 0))
-
-	// deadlock: terminal — write message to stderr and exit(2). Same message
-	// and exit code as promise_sched_coop_run's deadlock path; a distinct
-	// .rodata global because both functions are emitted in the same module
-	// on wasm32-web.
-	deadlockMsg := constant.NewCharArrayFromString("fatal: all goroutines are asleep - deadlock!\n")
-	deadlockGlobal := c.module.NewGlobalDef(".str.web_reactor_deadlock", deadlockMsg)
-	deadlockGlobal.Immutable = true
-	deadlockGlobal.Linkage = enum.LinkagePrivate
-	deadlockPtr := deadlockBlk.NewGetElementPtr(deadlockGlobal.ContentType, deadlockGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	deadlockBlk.NewCall(c.palWrite, constant.NewInt(irtypes.I32, 2), deadlockPtr, constant.NewInt(irtypes.I64, 45))
-	deadlockBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 2))
-	deadlockBlk.NewUnreachable()
+	// stopped: nothing runnable (or defensively, a deadline). Idle — the
+	// reactor stays alive, so the caller (_initialize) must return, not exit;
+	// main done with nothing live — the caller must pal_exit(0), same outcome
+	// as today's unconditional exit.
+	idle, done := c.emitWebDrainVerdict(fn, stoppedBlk)
+	idle.NewRet(constant.NewInt(irtypes.I8, 1))
+	done.NewRet(constant.NewInt(irtypes.I8, 0))
 
 	c.funcs["promise_web_reactor_drain"] = fn
 }
@@ -157,8 +160,6 @@ func (c *Compiler) defineWebPumpFunc() {
 	fn := c.module.NewFunc(wasmweb.ExportPump, irtypes.I32)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
-	schedTy := schedStructType()
-
 	entry := fn.NewBlock(".entry")
 	terminatedRetBlk := fn.NewBlock("terminated_ret")
 	checkInPumpBlk := fn.NewBlock("check_in_pump")
@@ -170,10 +171,6 @@ func (c *Compiler) defineWebPumpFunc() {
 	timeCheckBlk := fn.NewBlock("time_check")
 	budgetExhaustedBlk := fn.NewBlock("budget_exhausted")
 	drainedBlk := fn.NewBlock("drained")
-	idleRetBlk := fn.NewBlock("idle_ret")
-	checkMainDoneBlk := fn.NewBlock("check_main_done")
-	terminateCleanBlk := fn.NewBlock("terminate_clean")
-	deadlockBlk := fn.NewBlock("deadlock")
 
 	// entry: faulted instances no-op (§10).
 	terminated := entry.NewLoad(irtypes.I8, c.webTerminatedGlobal)
@@ -233,43 +230,15 @@ func (c *Compiler) defineWebPumpFunc() {
 	budgetExhaustedBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.webInPumpGlobal)
 	budgetExhaustedBlk.NewRet(constant.NewInt(irtypes.I32, wasmweb.PumpMore))
 
-	// drained: nothing runnable — apply the liveness rule (§4.1), same
-	// decision as defineWebReactorDrainFunc's "stopped" block.
-	live := drainedBlk.NewLoad(irtypes.I32, c.webLiveRegsGlobal)
-	isLive := drainedBlk.NewICmp(enum.IPredNE, live, constant.NewInt(irtypes.I32, 0))
-	drainedBlk.NewCondBr(isLive, idleRetBlk, checkMainDoneBlk)
-
-	// idle_ret: reactor stays alive, nothing to do until the next host entry.
-	idleRetBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.webInPumpGlobal)
-	idleRetBlk.NewRet(constant.NewInt(irtypes.I32, wasmweb.PumpIdle))
-
-	// check_main_done: zero live registrations.
-	mdField := checkMainDoneBlk.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMainDone)))
-	mainDone := checkMainDoneBlk.NewLoad(irtypes.I8, mdField)
-	mainIsDone := checkMainDoneBlk.NewICmp(enum.IPredNE, mainDone, constant.NewInt(irtypes.I8, 0))
-	checkMainDoneBlk.NewCondBr(mainIsDone, terminateCleanBlk, deadlockBlk)
-
-	// terminate_clean: the reactor has drained with nothing left that could
-	// ever wake it (§13 — "a program with no live registrations terminates on
-	// drain, exactly as today"). Mark terminated so any further host entry
-	// (racing with pal_exit, which does not return) is a safe no-op, then
-	// exit(0).
-	terminateCleanBlk.NewStore(constant.NewInt(irtypes.I8, 1), c.webTerminatedGlobal)
-	terminateCleanBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.webInPumpGlobal)
-	terminateCleanBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 0))
-	terminateCleanBlk.NewUnreachable()
-
-	// deadlock: nothing runnable, zero live registrations, main not done.
-	deadlockMsg := constant.NewCharArrayFromString("fatal: all goroutines are asleep - deadlock!\n")
-	deadlockGlobal := c.module.NewGlobalDef(".str.web_pump_deadlock", deadlockMsg)
-	deadlockGlobal.Immutable = true
-	deadlockGlobal.Linkage = enum.LinkagePrivate
-	deadlockPtr := deadlockBlk.NewGetElementPtr(deadlockGlobal.ContentType, deadlockGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	deadlockBlk.NewCall(c.palWrite, constant.NewInt(irtypes.I32, 2), deadlockPtr, constant.NewInt(irtypes.I64, 45))
-	deadlockBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 2))
-	deadlockBlk.NewUnreachable()
+	// drained: nothing runnable. Idle — the reactor stays alive, nothing to
+	// do until the next host entry. Main done with nothing live — the reactor
+	// has drained with nothing left that could ever wake it (§13 — "a program
+	// with no live registrations terminates on drain, exactly as today"), so
+	// exit(0); pal_exit marks the instance terminated.
+	idle, done := c.emitWebDrainVerdict(fn, drainedBlk)
+	idle.NewRet(constant.NewInt(irtypes.I32, wasmweb.PumpIdle))
+	done.NewCall(c.palExit, constant.NewInt(irtypes.I32, 0))
+	done.NewUnreachable()
 
 	c.funcs[wasmweb.ExportPump] = fn
 }

@@ -25,13 +25,14 @@ import (
 // its own per-test deadline rather than at the process-level backstop (which is
 // per-test-timeout + 30s).
 
-// runtimeUnobtainable matches the compiler's own report that it could not get
-// the pinned wasmtime — the two spellings resolveWasmRuntime produces when this
-// machine has neither staged the runtime nor can reach a blob host.
-var runtimeUnobtainable = regexp.MustCompile(`(could not obtain the pinned|carries no pinned) wasmtime`)
+// runtimeUnobtainable matches the compiler's own report that it could not get a
+// pinned WASM runtime — wasmtime for wasm32-wasi, node for wasm32-web — the two
+// spellings resolveWasmRuntime produces when this machine has neither staged the
+// runtime nor can reach a blob host.
+var runtimeUnobtainable = regexp.MustCompile(`(?:could not obtain the pinned|carries no pinned) (wasmtime|node)`)
 
 // skipIfRuntimeUnobtainable skips when a run failed because this machine could
-// not get the pinned wasmtime. That is a fact about the environment, not about
+// not get the pinned runtime. That is a fact about the environment, not about
 // the tree, so it is a skip; any OTHER failure is the test's own business and is
 // asserted on below.
 //
@@ -44,9 +45,9 @@ var runtimeUnobtainable = regexp.MustCompile(`(could not obtain the pinned|carri
 // resolution rules — a skip whose premise the product itself states.
 func skipIfRuntimeUnobtainable(t *testing.T, combined string) {
 	t.Helper()
-	if runtimeUnobtainable.MatchString(combined) {
-		t.Skip("the pinned wasmtime is not staged on this machine and could not be fetched — " +
-			"stage it with `bin/prereqs -wasm` to run this wasm32-wasi test")
+	if m := runtimeUnobtainable.FindStringSubmatch(combined); m != nil {
+		t.Skipf("the pinned %s is not staged on this machine and could not be fetched — "+
+			"stage it with `bin/prereqs -wasm` to run this test", m[1])
 	}
 }
 

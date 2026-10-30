@@ -3773,6 +3773,8 @@ func TestGenerateJSGlueInstantiation(t *testing.T) {
 // .message string (which would also swallow unrelated JS errors carrying the
 // same text), and must still propagate a non-zero code — see
 // TestLoaderSmokeSurfacesNonZeroExit for the corresponding behavioral proof.
+// The try/catch is _enter's, which every host entry — init's _initialize and
+// each pump — goes through.
 func TestGenerateJSGlueInstantiationCatchesExitUnwind(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
@@ -3781,7 +3783,8 @@ func TestGenerateJSGlueInstantiationCatchesExitUnwind(t *testing.T) {
 	out := GenerateJSGlue(modules)
 	assertContains(t, out, "class _ExitSignal")
 	assertContains(t, out, "try {")
-	assertContains(t, out, "wasm.exports._initialize();")
+	assertContains(t, out, "_enter(() => wasm.exports."+wasmweb.ExportInitialize+"());")
+	assertContains(t, out, "_enter(() => wasm.exports."+wasmweb.ExportPump+"());")
 	assertContains(t, out, "e instanceof _ExitSignal")
 	assertContains(t, out, "e.code !== 0")
 }

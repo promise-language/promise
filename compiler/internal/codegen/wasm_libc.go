@@ -111,13 +111,32 @@ func (c *Compiler) defineWasmUsleep() *ir.Func {
 // sched_wasm_web_delivery.go's promise_web_subscribe is the only writer of
 // live registrations) takes the pal_exit branch, so this stays bit-for-bit
 // unaffected for such programs.
-func (c *Compiler) emitWasmStart(mainFn *ir.Func) {
+//
+// gateOnLiveness says @main's result is that liveness verdict. Only the program
+// main (wrapMainWithScheduler) returns one; the generated batch-test main
+// (GenerateTestMain) returns an exit code — 1 when a test failed — and has
+// already decided every verdict, so for it `_initialize` exits with that code
+// exactly as `_start` does. A test file with its own main reaches
+// GenerateTestMain with the program main's entry point already emitted; the
+// entry point is rebuilt in place rather than kept, since its gate would read
+// a failing batch's exit code 1 as "stay alive".
+func (c *Compiler) emitWasmStart(mainFn *ir.Func, gateOnLiveness bool) {
 	name := "_start"
 	if c.isWasmWeb {
 		name = wasmweb.ExportInitialize
 	}
-	startFn := c.module.NewFunc(name, irtypes.Void)
-	startFn.FuncAttrs = append(startFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	var startFn *ir.Func
+	for _, f := range c.module.Funcs {
+		if f.Name() == name {
+			startFn = f
+			startFn.Blocks = nil
+			break
+		}
+	}
+	if startFn == nil {
+		startFn = c.module.NewFunc(name, irtypes.Void)
+		startFn.FuncAttrs = append(startFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	}
 	entry := startFn.NewBlock(".entry")
 
 	// Call @main(argc=0, argv=null) — WASM has no command-line arguments
@@ -125,7 +144,7 @@ func (c *Compiler) emitWasmStart(mainFn *ir.Func) {
 		constant.NewInt(irtypes.I32, 0),
 		constant.NewNull(irtypes.NewPointer(irtypes.I8Ptr)))
 
-	if c.isWasmWeb {
+	if c.isWasmWeb && gateOnLiveness {
 		stayAlive := entry.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
 		exitBlk := startFn.NewBlock("exit")
 		returnBlk := startFn.NewBlock("return")
@@ -138,7 +157,8 @@ func (c *Compiler) emitWasmStart(mainFn *ir.Func) {
 		return
 	}
 
-	// wasm32-wasi: exit with main's return code, unconditionally.
+	// wasm32-wasi, or a batch-test main: exit with main's return code,
+	// unconditionally.
 	entry.NewCall(c.palExit, result)
 	entry.NewUnreachable()
 }

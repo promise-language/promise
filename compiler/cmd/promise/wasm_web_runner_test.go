@@ -40,10 +40,17 @@ func TestEmbeddedWasmWebHarnessNonEmpty(t *testing.T) {
 	// Sanity-check that the harness references the imports the wasm32-web PAL
 	// produces. If the harness is rewritten without these names, tests will
 	// trap on instantiate.
-	for _, needle := range []string{wasmweb.ImportModule, wasmweb.ExportInitialize} {
+	for _, needle := range []string{wasmweb.ImportModule + ": new Proxy(", "instance.exports." + wasmweb.ExportInitialize + "()"} {
 		if !strings.Contains(string(embeddedWasmWebHarness), needle) {
 			t.Errorf("harness does not reference %q — wasm32-web binaries will not run", needle)
 		}
+	}
+	// A program still a reactor when _initialize returns fails as "reactor
+	// idle" rather than passing (docs/web-apps.md "Testing a web application");
+	// the testrun tests prove it end to end.
+	if !strings.Contains(string(embeddedWasmWebHarness), "harness: reactor idle") ||
+		!strings.Contains(string(embeddedWasmWebHarness), "exitWith(3);\n})();") {
+		t.Error("harness does not fail a reactor idle after _initialize with exit 3")
 	}
 }
 

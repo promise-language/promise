@@ -41,8 +41,28 @@ func (p *WasmWebPAL) EmitWrite(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// WebTerminatedGlobal returns @promise_web_terminated (wasmweb.GlobalTerminated),
+// defining it on first use. It is set once the instance has exited, and the
+// reactor's host entries (promise_web_enqueue, promise_web_pump) check it
+// first, so an exited instance takes nothing more (docs/web-apps.md "Failure
+// inside a handler"). @pal_exit is its one writer.
+func WebTerminatedGlobal(module *ir.Module) *ir.Global {
+	for _, g := range module.Globals {
+		if g.Name() == wasmweb.GlobalTerminated {
+			return g
+		}
+	}
+	g := module.NewGlobal(wasmweb.GlobalTerminated, irtypes.I8)
+	g.Init = constant.NewInt(irtypes.I8, 0)
+	return g
+}
+
 // EmitExit declares a JS-provided exit function and defines @pal_exit.
 // Signature: @pal_exit(i32 %code) → void [noreturn]
+//
+// It marks the instance terminated before calling out, because the host's exit
+// throws to unwind and a later host entry must find the instance exited — after
+// a clean drain, an explicit exit, a panic or a deadlock alike.
 func (p *WasmWebPAL) EmitExit(module *ir.Module) *ir.Func {
 	// declare void @promise_env_exit(i32) noreturn
 	envExit := getOrDeclareFunc(module, "promise_env_exit", irtypes.Void,
@@ -57,6 +77,7 @@ func (p *WasmWebPAL) EmitExit(module *ir.Module) *ir.Func {
 		ir.NewParam("code", irtypes.I32))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
+	entry.NewStore(constant.NewInt(irtypes.I8, 1), WebTerminatedGlobal(module))
 	entry.NewCall(envExit, fn.Params[0])
 	entry.NewUnreachable()
 

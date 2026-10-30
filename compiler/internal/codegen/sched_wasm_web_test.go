@@ -183,3 +183,79 @@ func TestWebPumpGuardsReentrancyAndFault(t *testing.T) {
 		t.Errorf("expected a PumpTerminated (2) return path\ngot:\n%s", pumpFn)
 	}
 }
+
+// The generated batch-test main returns an exit code — 1 when a test failed —
+// not a liveness verdict, so its `_initialize` exits with that code exactly as
+// wasm32-wasi's `_start` does. Read as "stay alive", a failing batch returned
+// from `_initialize` and the harness exited 0. A file with its own main already
+// has the program's liveness-gated `_initialize` when the batch main replaces
+// that main; it is rebuilt, not kept.
+func TestTestMainInitializeExitsWithBatchResult(t *testing.T) {
+	for _, c := range []struct{ name, src string }{
+		{"tests_only", "t_one() `test { int x = 1; }\n"},
+		{"with_its_main", "main() { print_line(\"hi\"); }\nt_one() `test { int x = 1; }\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ir := generateTestMainIRForTarget(t, c.src, "wasm32-web")
+			if n := strings.Count(ir, "define void @"+wasmweb.ExportInitialize+"("); n != 1 {
+				t.Errorf("expected one definition of @%s, got %d", wasmweb.ExportInitialize, n)
+			}
+			initFn := extractDefine(ir, wasmweb.ExportInitialize)
+			if initFn == "" {
+				t.Fatalf("expected @_initialize to be defined\ngot:\n%s", ir)
+			}
+			if !strings.Contains(initFn, "%0 = call i32 @main(") || !strings.Contains(initFn, "call void @pal_exit(i32 %0)") {
+				t.Errorf("expected _initialize to exit with the batch main's result\ngot:\n%s", initFn)
+			}
+			if strings.Contains(initFn, "ret void") {
+				t.Errorf("a batch-test _initialize must never return to the host\ngot:\n%s", initFn)
+			}
+		})
+	}
+}
+
+// _initialize's drain is the outermost pump (§5): it holds the re-entrancy
+// guard from before its first step until it stops, so a host entry made while
+// main runs does not nest a pump inside main's own step.
+func TestReactorDrainHoldsInPump(t *testing.T) {
+	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
+	drain := extractDefine(ir, "promise_web_reactor_drain")
+	if drain == "" {
+		t.Fatalf("expected @promise_web_reactor_drain to be defined\ngot:\n%s", ir)
+	}
+	set := strings.Index(drain, "store i8 1, i8* @promise_web_in_pump")
+	step := strings.Index(drain, "call i8 @promise_sched_coop_step()")
+	if set < 0 || step < 0 || set > step {
+		t.Errorf("expected the drain to set promise_web_in_pump before its first step\ngot:\n%s", drain)
+	}
+	clear := strings.Index(drain, "store i8 0, i8* @promise_web_in_pump")
+	idle := strings.Index(drain, "ret i8 1")
+	done := strings.Index(drain, "ret i8 0")
+	if clear < 0 || idle < 0 || done < 0 || clear > idle || clear > done {
+		t.Errorf("expected the drain to clear promise_web_in_pump before both of its returns\ngot:\n%s", drain)
+	}
+}
+
+// pal_exit is the one writer of promise_web_terminated, so every exit — not
+// only a pump's clean drain — leaves the instance terminated, and an exited
+// instance takes no further host entry (§10).
+func TestPalExitMarksTerminated(t *testing.T) {
+	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
+	exitFn := extractDefine(ir, "pal_exit")
+	mark := strings.Index(exitFn, "store i8 1, i8* @"+wasmweb.GlobalTerminated)
+	call := strings.Index(exitFn, "call void @promise_env_exit(")
+	if mark < 0 || call < 0 || mark > call {
+		t.Errorf("expected pal_exit to mark the instance terminated before calling out\ngot:\n%s", exitFn)
+	}
+	if n := strings.Count(ir, "@"+wasmweb.GlobalTerminated+" = "); n != 1 {
+		t.Errorf("expected exactly one definition of @%s, got %d", wasmweb.GlobalTerminated, n)
+	}
+	if pump := extractDefine(ir, wasmweb.ExportPump); strings.Contains(pump, "store i8 1, i8* @"+wasmweb.GlobalTerminated) {
+		t.Errorf("expected pal_exit to be the only writer of @%s\ngot:\n%s", wasmweb.GlobalTerminated, pump)
+	}
+
+	wasi := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-wasi")
+	if exitFn := extractDefine(wasi, "pal_exit"); strings.Contains(exitFn, "store") {
+		t.Errorf("wasm32-wasi's pal_exit must stay a bare proc_exit\ngot:\n%s", exitFn)
+	}
+}

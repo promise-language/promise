@@ -517,7 +517,7 @@ Two exports, one import. Nothing per-callback, nothing per-signature.
 |---|---|---|
 | `_initialize` | `() -> void` | Existing. Init, run `main`, drain, then exit-or-return per [The liveness rule](#the-liveness-rule). |
 | `promise_web_enqueue` | `(sub_id: i32, handle: i32) -> i32` | Push one event. Never runs Promise code, never allocates on the Promise heap, safe in any context including inside a pump. Returns 0 when nothing must be released; otherwise the reference-table handle the host must release — the arriving handle when it is rejected, the displaced handle when the policy evicts or coalesces one. |
-| `promise_web_pump` | `() -> i32` | Drain within budget. Returns 0 = idle, 1 = work remains (a continuation has been scheduled), 2 = terminated. No-op returning immediately if already pumping ([Re entrancy](#re-entrancy)) or faulted ([Failure inside a handler](#failure-inside-a-handler)). |
+| `promise_web_pump` | `() -> i32` | Drain within budget. Returns 0 = idle; 1 = a continuation is in flight — scheduled through `schedule_pump`, or an outer pump still running ([Re entrancy](#re-entrancy)); 2 = the instance has exited, however it exited — a drain that ended the program, an explicit exit, a panic ([Failure inside a handler](#failure-inside-a-handler)), a deadlock. A call while a pump is running, or after the instance has exited, runs nothing. |
 
 **Import (guest → host):**
 
@@ -1036,10 +1036,10 @@ reaches.
 ## Testing a web application
 
 [Testing the execution model](#testing-the-execution-model) specifies how the Layer 1 primitive is tested. An application is tested the
-way every other Promise program is — `bin/test --wasm-web` and
-`bin/verify --wasm-web` run the suite for `wasm32-web`, and a single file is
-`bin/promise test -target wasm32-web <file>` — with one difference that decides
-what those runs can prove.
+way every other Promise program is — `bin/test --wasm-web` and the
+`tested:wasm-web` gate (`bin/run tested:wasm-web`) run the suite for
+`wasm32-web`, and a single file is `bin/promise test -target wasm32-web <file>` —
+with one difference that decides what those runs can prove.
 
 The runner for this target is Node with an embedded harness
 (`compiler/cmd/promise/wasm_web_harness.js`). The harness implements the base
@@ -1057,6 +1057,15 @@ worked example of a test that asserts only that last property and says so. It
 covers none of DOM behaviour, real events, or the JS→WASM direction: those need
 a browser, which is [Testing the execution model](#testing-the-execution-model)'s third layer and lives with the `web` module rather
 than in this repository.
+
+**A program still a reactor when `_initialize` returns fails under the
+harness**, reported as `reactor idle` with exit status 3. The harness delivers
+no host events, so such a program would wait forever, and because it never
+terminates its leak accounting would never run
+([Program lifetime and termination](#program-lifetime-and-termination)). A test
+of a program that registers anything therefore ends every registration before
+`main` returns. A batch-test binary is never a reactor: it exits once its tests
+have run, with their verdict as its status.
 
 ## Non goals
 

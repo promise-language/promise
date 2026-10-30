@@ -76,14 +76,14 @@ func GenerateBootstrapJS(wasmBase string) string {
 	g.emitWebModuleImports()
 	g.write("};\n\n")
 	g.writef(`export async function init(importObject = {}) {
-  const response = await fetch("%s");
+  const response = await fetch("%[1]s");
   const { instance } = await WebAssembly.instantiateStreaming(response, {
     ...importObject,
-    promise_env: { ...basePromiseEnv, ...(importObject.promise_env || {}) },
+    %[2]s: { ...basePromiseEnv, ...(importObject.%[2]s || {}) },
   });
   wasm = instance;
 
-`, wasmBase)
+`, wasmBase, wasmweb.ImportModule)
 	g.emitRunInitialize()
 	g.write(`
   return wasm.exports;
@@ -282,13 +282,13 @@ func (g *jsGlueGenerator) emitJsValueImports() {
 // out of several print() calls. Buffering per fd and flushing only on
 // complete lines fixes both.
 func (g *jsGlueGenerator) emitPALRuntime() {
-	g.write(`let wasm;
+	g.writef(`let wasm;
 
 const _decoder = new TextDecoder("utf-8");
 
 export class _ExitSignal extends Error {
   constructor(code) {
-    super("promise_env.exit");
+    super("%s.exit");
     this.code = code;
   }
 }
@@ -315,18 +315,51 @@ function _flushRemainder() {
   }
 }
 
+`, wasmweb.ImportModule)
+	g.writef(`// Set by the exit import, which every exit passes through — a drain that
+// ends the program, a panic, the debug allocator's abort. Once set, the
+// loader makes no further call into the instance.
+let _exited = false;
+
+// _enter makes one host entry into the instance. The instance unwinds through
+// the exit import, so a normal end is an _ExitSignal with code 0, which is
+// swallowed; any other code, or any other error, propagates to whoever made
+// the entry, so a failure is never silent.
+function _enter(entry) {
+  if (_exited) return;
+  try {
+    entry();
+  } catch (e) {
+    _flushRemainder();
+    if (!(e instanceof _ExitSignal) || e.code !== 0) throw e;
+  }
+}
+
 // schedule_pump (docs/web-apps.md#budget-and-continuation): the reactor asks
-// the host to call promise_web_pump again. kind 0 = ASAP (a MessageChannel,
+// the host to call %[1]s again. kind 0 = ASAP (a MessageChannel,
 // free of setTimeout(0)'s ~4ms clamp), 1 = Timer (setTimeout(delayMs)),
-// 2 = AnimationFrame (requestAnimationFrame).
+// 2 = AnimationFrame (requestAnimationFrame). A drain may end the program, so
+// a pump is a host entry like any other.
 let _asapChannel;
 const _asapQueue = [];
 
 function _pump() {
-  wasm.exports.promise_web_pump();
+  _enter(() => wasm.exports.%[1]s());
 }
 
-function _schedulePump(kind, delayMs) {
+// _deliver hands one event to subscription id and pumps so its subscriber
+// runs (docs/web-apps.md#delivery-js-enqueues-and-promise-code-consumes). The
+// handle enqueue hands back — the rejected event, or the one the overflow
+// policy displaced — is released; the null handle it returns otherwise is
+// ignored by _refRelease.
+function _deliver(id, obj) {
+  if (_exited) return;
+  _refRelease(wasm.exports.%[2]s(id, _refStore(obj)));
+  _pump();
+}
+
+`, wasmweb.ExportPump, wasmweb.ExportEnqueue)
+	g.write(`function _schedulePump(kind, delayMs) {
   if (kind === 1) {
     setTimeout(_pump, delayMs);
     return;
@@ -335,22 +368,25 @@ function _schedulePump(kind, delayMs) {
     requestAnimationFrame(_pump);
     return;
   }
+  // In Node.js a port holds the process open while it is ref'd, and assigning
+  // onmessage refs it. It is ref'd exactly while a continuation is pending: an
+  // idle loader holds nothing open, so liveness comes only from real
+  // registrations (docs/web-apps.md#the-liveness-rule), and a scheduled pump
+  // still runs rather than the process exiting with work left. Browsers have no
+  // such concept.
   if (!_asapChannel) {
     _asapChannel = new MessageChannel();
     _asapChannel.port1.onmessage = () => {
       const fn = _asapQueue.shift();
+      if (_asapQueue.length === 0 && typeof _asapChannel.port1.unref === "function") {
+        _asapChannel.port1.unref();
+      }
       if (fn) fn();
     };
-    // In Node.js, assigning onmessage starts and refs the port, which would
-    // hold the process open on its own; unref it (after the assignment, which
-    // re-refs) so liveness comes only from real registrations
-    // (docs/web-apps.md#the-liveness-rule). Browsers have no such concept.
-    if (typeof _asapChannel.port1.unref === "function") {
-      _asapChannel.port1.unref();
-      _asapChannel.port2.unref();
-    }
+    if (typeof _asapChannel.port2.unref === "function") _asapChannel.port2.unref();
   }
   _asapQueue.push(_pump);
+  if (typeof _asapChannel.port1.ref === "function") _asapChannel.port1.ref();
   _asapChannel.port2.postMessage(null);
 }
 
@@ -376,29 +412,27 @@ func (g *jsGlueGenerator) emitBasePromiseEnvImports() {
       return BigInt(lenN);
     },
     exit(code) {
+      _exited = true;
       throw new _ExitSignal(Number(code));
     },
     monotonic_nanos() {
       return BigInt(Math.round(performance.now() * 1e6));
     },
-    schedule_pump(kind, delayMs) {
+`)
+	g.writef(`    %s(kind, delayMs) {
       _schedulePump(kind, delayMs);
     },
-`)
+`, wasmweb.SchedulePumpImport)
 }
 
 // emitWebModuleImports writes the host side of modules/web/web.pr's
 // `wasm_import`s (docs/web-apps.md#it-must-be-usable-without-bindgen). An
-// event listener stores each event in the ref table, pushes its handle into
-// the program's subscription through promise_web_enqueue, releases the handle
-// enqueue hands back — the rejected event, or the one its overflow policy
-// displaced; the reserved null handle when there is none, which _refRelease
-// ignores — and pumps so the subscriber runs before the listener returns.
+// event listener delivers each event to the program's subscription
+// (_deliver), so the subscriber runs before the listener returns.
 func (g *jsGlueGenerator) emitWebModuleImports() {
 	g.write(`    web_add_event_listener(target, kind_ptr, kind_len, sub_id) {
       _refLoad(target).addEventListener(_readString(kind_ptr, kind_len), (event) => {
-        _refRelease(wasm.exports.promise_web_enqueue(sub_id, _refStore(event)));
-        wasm.exports.promise_web_pump();
+        _deliver(sub_id, event);
       });
     },
     console_log(handle, message_ptr, message_len) {
@@ -767,25 +801,19 @@ export { _refStore, _refLoad, _refRelease };
 // emitRunInitialize writes the body both loaders' init() run once the
 // instance is bound to wasm: call _initialize and classify how it ended.
 func (g *jsGlueGenerator) emitRunInitialize() {
-	g.write(`  // Call WASM _initialize if exported. A normal main() return is signaled by
-  // pal_exit(0), which lowers to the promise_env.exit import — the only way
-  // to abort a synchronous WASM call from a JS import is to throw, so exit()
-  // always throws to unwind the call stack. That's expected on success, not
-  // a crash, so swallow exactly that case; a non-zero code (a panic, or an
-  // explicit exit()) must still propagate so the caller learns the run
-  // failed instead of getting exports back silently (T1506).
-  if (wasm.exports._initialize) {
-    try {
-      wasm.exports._initialize();
-    } catch (e) {
-      if (!(e instanceof _ExitSignal) || e.code !== 0) {
-        _flushRemainder();
-        throw e;
-      }
-    }
+	g.writef(`  // Call WASM %[1]s if exported. A program with no live registration ends
+  // it in pal_exit, which lowers to the exit import — the only way to abort a
+  // synchronous WASM call from a JS import is to throw, so exit() always
+  // throws to unwind the call stack. That's expected on success, not a crash,
+  // so _enter swallows exactly that case; a non-zero code (a panic, or an
+  // explicit exit()) must still propagate so the caller learns the run failed
+  // instead of getting exports back silently (T1506). A reactor's %[1]s
+  // returns normally, leaving the instance alive for later host entries.
+  if (wasm.exports.%[1]s) {
+    _enter(() => wasm.exports.%[1]s());
   }
   _flushRemainder();
-`)
+`, wasmweb.ExportInitialize)
 }
 
 // isStringType checks if a TypeRef maps to a string in the binding IR.

@@ -16,7 +16,6 @@ import (
 	"github.com/promise-language/promise/compiler/internal/ast"
 	"github.com/promise-language/promise/compiler/internal/sema"
 	"github.com/promise-language/promise/compiler/internal/types"
-	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // formatDurationNs formats a nanosecond duration as a human-readable string
@@ -2250,24 +2249,13 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		doneBlock.NewRet(retVal)
 	}
 
-	// WASM: emit the entry point if not already present (test-only files have
-	// no user main). On wasm32-wasi this is @_start; on wasm32-web it is
-	// @_initialize (called from JS / Node harness — there is no WASI runtime).
+	// WASM: emit the entry point. On wasm32-wasi this is @_start; on wasm32-web
+	// it is @_initialize (called from JS / Node harness — there is no WASI
+	// runtime). A file with its own main already has one, built around that
+	// main's liveness verdict; emitWasmStart rebuilds it, because this main's
+	// result is the batch's exit code.
 	if c.isWasm {
-		entryName := "_start"
-		if c.isWasmWeb {
-			entryName = wasmweb.ExportInitialize
-		}
-		hasEntry := false
-		for _, f := range c.module.Funcs {
-			if f.Name() == entryName {
-				hasEntry = true
-				break
-			}
-		}
-		if !hasEntry {
-			c.emitWasmStart(mainFn)
-		}
+		c.emitWasmStart(mainFn, false)
 	}
 
 	// Windows: emit the self-contained crt0 entry + CRT-replacement runtime

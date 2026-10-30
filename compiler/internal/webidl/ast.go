@@ -216,10 +216,13 @@ type Constructor struct {
 
 func (*Constructor) member() {}
 
-// Iterable represents an iterable<T> or iterable<K, V> declaration.
+// Iterable represents an iterable<T> or iterable<K, V> declaration, Async when
+// written `async_iterable` (or the older `async iterable`). An async iterable's
+// argument list is parsed but not kept: the declaration binds no member (#769).
 type Iterable struct {
 	KeyType   *TypeRef // nil for single-type iterable
 	ValueType *TypeRef
+	Async     bool
 	Pos       Pos
 }
 
@@ -268,7 +271,7 @@ type TypeRef struct {
 	Kind     TypeRefKind
 	Builtin  string     // for BuiltinType
 	Name     string     // for NamedType
-	Elem     *TypeRef   // for SequenceType, FrozenArrayType, ObservableArrayType, PromiseType, NullableType
+	Elem     *TypeRef   // for SequenceType, FrozenArrayType, ObservableArrayType, PromiseType, AsyncSequenceType, NullableType
 	Key      *TypeRef   // for RecordType
 	Value    *TypeRef   // for RecordType
 	Members  []*TypeRef // for UnionType
@@ -287,6 +290,7 @@ const (
 	PromiseType
 	RecordType
 	UnionType
+	AsyncSequenceType
 )
 
 // Pos represents a source position.

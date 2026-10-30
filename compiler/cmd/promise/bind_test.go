@@ -110,3 +110,60 @@ func TestRunBindWebIdlScaffoldEpoch(t *testing.T) {
 
 	assertScaffoldEpoch(t, outDir, wantBindEpoch(t))
 }
+
+// TestRunBindWebIdlModuleName: `bind webidl` names the module by -name, or else
+// by its first input file, as given, without its `.idl` or `.webidl` suffix and
+// with `-` written `_` — never by an interface, whether the first one is named
+// Web or anything else (#60; docs/wasm-bindings.md §"The bind Subcommand").
+func TestRunBindWebIdlModuleName(t *testing.T) {
+	cases := []struct {
+		name  string
+		files []string // the first declares iface, each other one an interface of its own
+		iface string
+		args  []string
+		want  string
+	}{
+		{name: "the first input file", files: []string{"other.idl"}, iface: "Document", want: "other"},
+		{name: "a first interface named Web", files: []string{"other.idl"}, iface: "Web", want: "other"},
+		{name: "-name", files: []string{"other.idl"}, iface: "Document", args: []string{"-name", "web"}, want: "web"},
+		{name: "a hyphenated file", files: []string{"css-anchor.idl"}, iface: "Document", want: "css_anchor"},
+		{name: "a .webidl file", files: []string{"dom.webidl"}, iface: "Document", want: "dom"},
+		{name: "the first of several", files: []string{"zeta.idl", "alpha.idl"}, iface: "Document", want: "zeta"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var paths []string
+			for i, file := range tc.files {
+				iface := tc.iface
+				if i > 0 {
+					iface = fmt.Sprintf("Extra%d", i)
+				}
+				path := filepath.Join(dir, file)
+				idl := "[Exposed=Window]\ninterface " + iface + " { readonly attribute long n; };\n"
+				if err := os.WriteFile(path, []byte(idl), 0644); err != nil {
+					t.Fatal(err)
+				}
+				paths = append(paths, path)
+			}
+			outDir := filepath.Join(dir, "out")
+
+			silenceStdout(t, func() {
+				runBindWebIdl(append(append([]string{"-o", outDir}, tc.args...), paths...))
+			})
+
+			for _, ext := range []string{".pr", ".js"} {
+				if _, err := os.Stat(filepath.Join(outDir, tc.want+ext)); err != nil {
+					t.Errorf("module file not written under the module name: %v", err)
+				}
+			}
+			toml, err := os.ReadFile(filepath.Join(outDir, "promise.toml"))
+			if err != nil {
+				t.Fatalf("promise.toml not written: %v", err)
+			}
+			if want := fmt.Sprintf("name = %q", tc.want); !strings.Contains(string(toml), want) {
+				t.Errorf("promise.toml missing %s; got:\n%s", want, toml)
+			}
+		})
+	}
+}

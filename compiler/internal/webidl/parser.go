@@ -626,15 +626,23 @@ func (p *Parser) parseMemberBody() Member {
 	case TokenConstructor:
 		return p.parseConstructor()
 	case TokenIterable:
-		return p.parseIterable()
+		p.next()
+		return p.parseIterable(tok.Pos, false)
 	case TokenAsync:
 		p.next()
 		if p.at(TokenIterable) {
-			return p.parseIterable()
+			return p.parseIterable(p.next().Pos, true)
 		}
 		// async operation — parse as regular operation
 		return p.parseOperation(false, "")
 	default:
+		// Like legacycaller, maplike and setlike, async_iterable is a keyword only
+		// here, at the start of a member: the lexer leaves it an identifier, so it
+		// still names anything elsewhere.
+		if tok.Kind == TokenIdent && tok.Value == "async_iterable" {
+			p.next()
+			return p.parseIterable(tok.Pos, true)
+		}
 		if collection := p.tryParseCollection(false); collection != nil {
 			return collection
 		}
@@ -720,16 +728,23 @@ func (p *Parser) parseConstructor() *Constructor {
 	}
 }
 
-func (p *Parser) parseIterable() *Iterable {
-	pos := p.expect(TokenIterable).Pos
+// parseIterable parses an iterable declaration at pos, after its keyword:
+// `iterable`, or for an async one `async_iterable` or `async iterable`. Only an
+// async iterable may take an argument list, which is parsed and not kept
+// (Iterable).
+func (p *Parser) parseIterable(pos Pos, async bool) *Iterable {
 	p.expect(TokenLAngle)
 	first := p.parseTypeRef()
-	it := &Iterable{ValueType: first, Pos: pos}
+	it := &Iterable{ValueType: first, Async: async, Pos: pos}
 	if p.match(TokenComma) {
 		it.KeyType = first
 		it.ValueType = p.parseTypeRef()
 	}
 	p.expect(TokenRAngle)
+	if async && p.match(TokenLParen) {
+		p.parseParams()
+		p.expect(TokenRParen)
+	}
 	p.expect(TokenSemicolon)
 	return it
 }
@@ -1023,6 +1038,14 @@ func (p *Parser) parseSingleType() *TypeRef {
 
 	case TokenIdent:
 		p.next()
+		// async_sequence is a keyword only before `<`: the lexer leaves it an
+		// identifier, and a type name is never followed by `<`.
+		if tok.Value == "async_sequence" && p.at(TokenLAngle) {
+			p.next()
+			elem := p.parseTypeRef()
+			p.expect(TokenRAngle)
+			return &TypeRef{Kind: AsyncSequenceType, Elem: elem}
+		}
 		return &TypeRef{Kind: NamedType, Name: tok.Value}
 
 	default:

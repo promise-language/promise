@@ -4610,6 +4610,29 @@ func TestWebIdlJsValueMethodParamAndResult(t *testing.T) {
 	assertNotContains(t, out, "x._handle")
 }
 
+// TestWebIdlAsyncSequenceAndAsyncIterable: an `async_sequence<T>` argument binds
+// as JsValue — the host's async iterable object, crossing as a ref — and an
+// `async_iterable` declaration binds no member (#60; docs/wasm-bindings.md
+// §"Supported subset").
+func TestWebIdlAsyncSequenceAndAsyncIterable(t *testing.T) {
+	modules := mustWebIdlToIR(t, parseMerged(t, `interface Stream {
+		undefined pipe(async_sequence<DOMString> chunks);
+		async_iterable<any>(optional DOMString mode);
+	};`))
+	var got []string
+	for _, f := range modules[0].Resources[0].Methods {
+		got = append(got, f.Name)
+	}
+	if want := []string{"pipe"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Stream methods = %q, want %q", got, want)
+	}
+
+	out := GeneratePromise(modules, "web")
+	assertContains(t, out, "pipe(this, JsValue chunks) `public `doc(\"`Stream.pipe` (WebIDL operation)\") {")
+	assertContains(t, out, "_stream_pipe(this._handle, _js_value_to_ref(chunks));")
+	assertContains(t, out, "_stream_pipe(i32 handle, i32 chunks)")
+}
+
 // TestResourceReturnTypeExcludesJsValue verifies the predicate split between
 // handles and JsValue: a JsValue result is NOT a resource return but IS a
 // jsValueReturnType, while a name the modules do not define still crosses as a

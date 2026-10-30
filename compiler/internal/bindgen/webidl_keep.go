@@ -394,8 +394,9 @@ type memberUnit struct {
 // keepUnit returns a member's unit; its label — the name a keep list names it
 // by, if listed reports that a list must name it for it to be kept, and the
 // name a KeepDrop reports it by: an attribute's or operation's identifier, an
-// anonymous special operation's keyword, `constructor` for every constructor;
-// the types it references; and its position, which unboundRefs reports it at.
+// anonymous special operation's keyword, `constructor` for every constructor,
+// `iterable` or `async_iterable` for an iterable declaration; the types it
+// references; and its position, which unboundRefs reports it at.
 // A member a maplike or setlike declaration declares (DeclaredBy) is not
 // listed: it goes with its interface. webidl.Merge has replaced every such
 // declaration with its members, so none reaches here.
@@ -421,6 +422,9 @@ func keepUnit(m webidl.Member) (unit memberUnit, label string, listed bool, type
 		label, listed, types, pos = m.Name, false, []*webidl.TypeRef{m.Type}, m.Pos
 	case *webidl.Iterable:
 		label, listed, types, pos = "iterable", false, []*webidl.TypeRef{m.KeyType, m.ValueType}, m.Pos
+		if m.Async {
+			label = "async_iterable"
+		}
 	default:
 		// A member kind added to the parser must decide here whether a keep list
 		// names it; letting it through unexamined would bypass the filter.

@@ -480,6 +480,10 @@ func (g *jsGlueGenerator) emitImportObject(modules []*Module) {
 			for _, method := range res.Methods {
 				g.emitMethodImport(res.Name, method)
 			}
+
+			if res.Parent != "" {
+				g.emitConversionImport(res)
+			}
 		}
 
 		// Free functions
@@ -517,6 +521,22 @@ func (g *jsGlueGenerator) emitMethodImport(resourceName string, f Func) {
 	g.write("    },\n")
 }
 
+// emitConversionImport implements the import of res's checked conversion
+// (codegen.go's conversionFunc): whether the object a wrapper's handle holds is
+// an instance of res's interface object, answered with a new handle to that
+// object, which the converted wrapper owns, or with 0. The failure path stores
+// nothing, so it has nothing to release. An interface the host does not define
+// has no instances, so a missing interface object is a 0 — not the
+// ReferenceError a bare `instanceof` would throw out of the import. A
+// Resource's Name is its interface's IDL name (convertInterface), which is the
+// global the interface object is reached by.
+func (g *jsGlueGenerator) emitConversionImport(res Resource) {
+	g.writef("    \"%s\"(%s) {\n", conversionImportName(res.Name), jsReceiverParam)
+	g.writef("      const %s = _refLoad(%s);\n", jsResultLocal, jsReceiverParam)
+	g.writef("      return typeof %[1]s === \"function\" && %[2]s instanceof %[1]s ? _refStore(%[2]s) : 0;\n", res.Name, jsResultLocal)
+	g.write("    },\n")
+}
+
 func (g *jsGlueGenerator) emitFreeFuncImport(f Func) {
 	importName := f.ImportName
 	if importName == "" {
@@ -534,7 +554,8 @@ func (g *jsGlueGenerator) emitFreeFuncImport(f Func) {
 // arguments — the receiver handle a method takes first, and the return pointer
 // a string result comes back through, last — and the locals an import body
 // declares beside them: the object a constructor creates, and a nullable
-// interface result tested for null before it is stored. Each begins with a `$`,
+// interface result tested for null — or the object a conversion tests for its
+// interface — before it is stored. Each begins with a `$`,
 // and a name derived from a WebIDL argument never does: the WebIDL lexer's
 // identifiers are letters, digits, `_` and `-` (isIdentStart, isIdentContinue),
 // idlToSnake writes each `-` as `_` (or drops a leading one) and with

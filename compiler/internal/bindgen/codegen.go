@@ -378,18 +378,25 @@ func hasMemberNamed(r Resource, ancestors []Resource, name string) bool {
 	return false
 }
 
-// borrowFactoryName returns the name of the generated non-owning wrapper factory
-// for a resource, which inherits from ancestors — normally "borrow", falling back
-// to "borrow_handle" when the type already has a member of that name, its own or
+// generatedMemberName returns the name of a `global member the generator adds
+// to the type of r, which inherits from ancestors: name, falling back to
+// name + "_handle" when the type already has a member of that name, its own or
 // an inherited instance member (hasMemberNamed). One fallback level is enough: a
 // type with both `borrow` and `borrow_handle` is vanishingly unlikely and fails
 // loudly when the generated module is compiled, which beats an unbounded name
-// search that silently renames the factory (T1510).
-func borrowFactoryName(r Resource, ancestors []Resource) string {
-	if hasMemberNamed(r, ancestors, "borrow") {
-		return "borrow_handle"
+// search that silently renames the member (T1510).
+func generatedMemberName(r Resource, ancestors []Resource, name string) string {
+	if hasMemberNamed(r, ancestors, name) {
+		return name + "_handle"
 	}
-	return "borrow"
+	return name
+}
+
+// borrowFactoryName returns the name of the generated non-owning wrapper factory
+// for a resource, which inherits from ancestors: "borrow", or "borrow_handle"
+// (generatedMemberName).
+func borrowFactoryName(r Resource, ancestors []Resource) string {
+	return generatedMemberName(r, ancestors, "borrow")
 }
 
 // createDoc is the `doc text on a generated owning factory whose IDL/WIT
@@ -400,15 +407,52 @@ const createDoc = "Construct a new resource, taking ownership of the handle the 
 	"The returned wrapper releases that handle when it drops."
 
 // createFactoryName returns the name of the generated owning factory for a
-// resource, which inherits from ancestors — normally "create", falling back to
-// "create_handle" when the type already has a member of that name, its own or an
-// inherited instance member (hasMemberNamed). Same single fallback level, for the
-// same reason, as borrowFactoryName (T1974).
+// resource, which inherits from ancestors: "create", or "create_handle"
+// (generatedMemberName, T1974).
 func createFactoryName(r Resource, ancestors []Resource) string {
-	if hasMemberNamed(r, ancestors, "create") {
-		return "create_handle"
+	return generatedMemberName(r, ancestors, "create")
+}
+
+// conversionDoc is the `doc text on every generated checked conversion
+// (conversionFunc). The half a caller cannot read off the signature is the
+// ownership of what it returns, and that the wrapper passed in is unaffected.
+const conversionDoc = "Convert a wrapper whose host object is an instance of this interface to this type, " +
+	"or none when it is not. The returned wrapper owns a handle of its own, which it releases " +
+	"when it drops; the wrapper passed in is unchanged and keeps its own handle."
+
+// conversionImportName returns the import of the checked conversion to the
+// interface named name, its IDL name. Both generators name it from here — the
+// Promise extern (conversionFunc) and the glue entry implementing it
+// (emitConversionImport) — so the two cannot disagree. A `[` cannot appear in
+// an IDL identifier, so no import an IDL member generates can take this name.
+func conversionImportName(name string) string {
+	return "[cast]" + name
+}
+
+// conversionFunc returns the checked conversion generated for r, a derived
+// interface inheriting from ancestors (docs/wasm-bindings.md, "WebIDL to
+// Promise", interface inheritance): a static `from` (or `from_handle`,
+// generatedMemberName) taking any wrapper of r's inheritance chain — its
+// parameter is typed as the chain's root, so a derived wrapper is accepted as
+// it is anywhere a parent is — and returning an owning r over a handle the host
+// mints for the same object, or none when the object is not an instance of r.
+// The root is the last ancestor the module resolves, or r's own parent when it
+// resolves none; an unbound one still fails the module with `undefined type`.
+func conversionFunc(r Resource, ancestors []Resource) Func {
+	root := r.Parent
+	if len(ancestors) > 0 {
+		root = ancestors[len(ancestors)-1].Name
 	}
-	return "create"
+	self := TypeRef{Kind: NamedKind, Name: r.Name}
+	return Func{
+		Name:       generatedMemberName(r, ancestors, "from"),
+		Params:     []Param{{Name: "wrapper", Type: TypeRef{Kind: NamedKind, Name: root}}},
+		Results:    []TypeRef{{Kind: OptionKind, Elem: &self}},
+		ImportName: conversionImportName(r.Name),
+		Kind:       FuncStatic,
+		OwnerType:  r.Name,
+		Doc:        conversionDoc,
+	}
 }
 
 // constructorFactoryName returns the owning factory a constructor is emitted as:
@@ -452,13 +496,25 @@ func (g *generator) emitResource(r Resource, importModule string) {
 	// ownership. Used by the host-object roots (emitAmbientRoots) to wrap the
 	// loader's seeded handles, and to hand an existing wrapper's handle to an API
 	// expecting a different resource type, neither of which may be released twice.
-	borrowName := borrowFactoryName(r, g.ancestors(r))
+	ancestors := g.ancestors(r)
+	borrowName := borrowFactoryName(r, ancestors)
 	g.line("%s(i32 handle) %s `public `global%s {", borrowName, r.Name, docAnnot(borrowDoc))
 	g.indent++
 	g.line("return %s(_handle: handle, _owned: false);", r.Name)
 	g.indent--
 	g.line("}")
 	g.blank()
+
+	// The checked conversion to a derived interface — the downcast the `is`
+	// upcast leaves out. `as` cannot be it: a wrapper's Promise type is the one
+	// its IDL result declares, never the host object's (#766).
+	var conversion *Func
+	if r.Parent != "" {
+		c := conversionFunc(r, ancestors)
+		conversion = &c
+		g.emitStaticWrapper(c, r.Name, importModule)
+		g.blank()
+	}
 
 	// Methods
 	for _, m := range r.Methods {
@@ -486,6 +542,10 @@ func (g *generator) emitResource(r Resource, importModule string) {
 	for _, m := range r.Methods {
 		g.blank()
 		g.emitResourceMethodExtern(m, r.Name, importModule)
+	}
+	if conversion != nil {
+		g.blank()
+		g.emitResourceMethodExtern(*conversion, r.Name, importModule)
 	}
 
 	// Drop extern

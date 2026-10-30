@@ -515,6 +515,26 @@ parent that is not among the bound IDL files is still named in the `is` clause, 
 module fails to compile with `undefined type` rather than silently omitting the inherited
 members.
 
+The other direction is a checked conversion. A wrapper's Promise type is the type its IDL result
+declares, whatever the host object is: `create_element("input")` returns an `Element`, so `as` and
+`is` ([Type Checking and Casting](language-design.md#type-checking-and-casting)), which test the
+Promise type, never reach an `HTMLInputElement`. Instead, each interface `C` that has a parent
+declares a `` `global `` `from(R wrapper) C?`, where `R` is the root of `C`'s inheritance chain, so
+a wrapper of any interface in the chain is accepted as it is. A root has nothing to convert from
+and declares none. The conversion's import, `[cast]C`, asks the host whether the wrapper's object
+is an instance of `C`'s interface object (`instanceof`, on the glue's global; an interface the
+host does not define has no instances). If it is not, `from` returns `none` and no handle is
+minted. If it is, the host stores the same object under a new handle, and `from` returns an owning
+wrapper over it. The wrapper passed in is unchanged, owned or borrowed, and keeps its own handle,
+so each of the two releases its own handle exactly once, in either order:
+
+```promise
+input := web.HTMLInputElement.from(el);   // el an Element; input an HTMLInputElement?
+if input {
+    print_line(input.value);
+}
+```
+
 Resolving a member on the object reaches a different member when an interface between the
 declaring one and the object's real interface redeclares it, and that member's result would cross
 under the declaring interface's type. So the import of a member that any interface inheriting from
@@ -715,16 +735,18 @@ WIT resources have lifecycle semantics that map naturally to Promise's ownership
 | resource drop | `drop(~this)` calls host's `[resource-drop]` import **when `_owned`** |
 | (generated) | `R.borrow(i32 handle) R` — non-owning wrapper around a handle someone else owns |
 
-**Factory names.** A factory is named `create_handle` or `borrow_handle` instead when the type
-already has a member of the default name: one the resource declares, other than its constructor,
-or an instance operation or attribute it inherits from any ancestor — a `` `global `` factory of
-that name would take over the inherited slot and must satisfy it
+**Factory names.** A factory is named `create_handle` or `borrow_handle` instead, and an
+interface's checked conversion ([interface inheritance](#webidl-to-promise)) `from_handle`, when
+the type already has a member of the default name: one the resource declares, other than its
+constructor, or an instance operation or attribute it inherits from any ancestor — a
+`` `global `` of that name would take over the inherited slot and must satisfy it
 ([Override signatures](language-design.md#how-inheritance-maps-to-vtables)). An inherited static
 operation, static attribute or constant does not count: the factory hides it, as a derived
 interface's `` `global `` hides its parent's ([Shadowed Members](#shadowed-members)). An
 overloaded constructor's ordinal goes on whichever name applies: `create_2`, or `create_handle_2`.
-There is one fallback level: a type that also has a member named `create_handle` or
-`borrow_handle` fails to compile, rather than having its factory silently renamed again.
+There is one fallback level: a type that also has a member named `create_handle`,
+`borrow_handle` or `from_handle` fails to compile, rather than having its factory silently renamed
+again.
 
 Example generated binding for a WIT filesystem resource:
 
@@ -911,7 +933,7 @@ The `promise bind` output for each IDL follows a consistent pattern:
 1. **Type definitions** — Promise types mapped from IDL records/variants/enums/resources
 2. **Private extern declarations** — low-level imports with `wasm_import` annotations
 3. **Public API wrappers** — ergonomic methods that marshal between Promise types and the canonical ABI
-4. **`doc` annotations** — on all public declarations. A declaration's text is the IDL documentation comment on the construct it binds: in WIT the `///` comment before the item; in WebIDL the `//` and `/* … */` comments directly before a definition or member, either before its extended attributes or between them and the declaration. A blank line between a comment and the declaration detaches it, so a file's header comment documents nothing, and neither does a comment that follows code on the same line. Specification IDL carries almost no comments — the prose that documents a member lives in the specification's text, outside the IDL block — so a WebIDL interface, namespace, dictionary, enum, attribute, operation or constant with no comment carries a generated line naming what it binds, on the interface that binds it: `` `Element.setAttribute` (WebIDL operation) ``. An attribute's getter and setter carry the same line, and so does every overload of one operation. The declarations the generator adds itself carry fixed text: the `borrow` factory, the host-object roots, the `JsValue` members, and an owning factory whose constructor has no comment, which states the ownership the factory takes.
+4. **`doc` annotations** — on all public declarations. A declaration's text is the IDL documentation comment on the construct it binds: in WIT the `///` comment before the item; in WebIDL the `//` and `/* … */` comments directly before a definition or member, either before its extended attributes or between them and the declaration. A blank line between a comment and the declaration detaches it, so a file's header comment documents nothing, and neither does a comment that follows code on the same line. Specification IDL carries almost no comments — the prose that documents a member lives in the specification's text, outside the IDL block — so a WebIDL interface, namespace, dictionary, enum, attribute, operation or constant with no comment carries a generated line naming what it binds, on the interface that binds it: `` `Element.setAttribute` (WebIDL operation) ``. An attribute's getter and setter carry the same line, and so does every overload of one operation. The declarations the generator adds itself carry fixed text: the `borrow` factory, the `from` conversion, which states the ownership of the wrapper it returns, the host-object roots, the `JsValue` members, and an owning factory whose constructor has no comment, which states the ownership the factory takes.
 
 ---
 
@@ -1140,7 +1162,8 @@ per wrapper, not per type, and is carried in the `_owned` field:
 
 - **Owned.** Every wrapper the bindings build around a handle the host has just
   minted for the program — `R.create(...)`, the factory a `constructor` generates,
-  and any method, static method, or getter returning a resource — is owning
+  any method, static method, or getter returning a resource, and the wrapper an
+  interface's checked conversion `C.from(...)` returns — is owning
   (`_owned: true`). Its drop releases the handle.
 - **Borrowed.** `R.borrow(handle)` wraps a handle that somebody else owns. Its drop
   releases nothing, so the owner (or the host) stays responsible for the handle.

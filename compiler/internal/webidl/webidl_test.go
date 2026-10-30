@@ -1390,6 +1390,18 @@ func TestParseAsyncIterable(t *testing.T) {
 		}
 	})
 
+	// The argument list is not kept, but it is still parsed as one: a malformed
+	// list is an error, not something skipped to its `)`.
+	t.Run("malformed argument list", func(t *testing.T) {
+		_, errs := Parse("interface Foo { async_iterable<any>(long x y); };", "test.webidl")
+		if len(errs) == 0 {
+			t.Fatal("expected parse errors")
+		}
+		if want := "test.webidl:1:44: expected ), got identifier"; !contains(errs[0].Error(), want) {
+			t.Errorf("expected first error to contain %q, got: %v", want, errs)
+		}
+	})
+
 	// Only an async iterable takes an argument list.
 	t.Run("sync with an argument list", func(t *testing.T) {
 		_, errs := Parse("interface Foo { iterable<long>(long x); };", "test.webidl")

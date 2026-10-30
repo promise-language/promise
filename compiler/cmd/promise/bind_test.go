@@ -112,34 +112,44 @@ func TestRunBindWebIdlScaffoldEpoch(t *testing.T) {
 }
 
 // TestRunBindWebIdlModuleName: `bind webidl` names the module by -name, or else
-// by its first input file with `-` written `_` — never by an interface, whether
-// the first one is named Web or anything else (#60; docs/wasm-bindings.md §"The
-// bind Subcommand").
+// by its first input file, as given, without its `.idl` or `.webidl` suffix and
+// with `-` written `_` — never by an interface, whether the first one is named
+// Web or anything else (#60; docs/wasm-bindings.md §"The bind Subcommand").
 func TestRunBindWebIdlModuleName(t *testing.T) {
 	cases := []struct {
 		name  string
-		file  string
+		files []string // the first declares iface, each other one an interface of its own
 		iface string
 		args  []string
 		want  string
 	}{
-		{name: "the first input file", file: "other.idl", iface: "Document", want: "other"},
-		{name: "a first interface named Web", file: "other.idl", iface: "Web", want: "other"},
-		{name: "-name", file: "other.idl", iface: "Document", args: []string{"-name", "web"}, want: "web"},
-		{name: "a hyphenated file", file: "css-anchor.idl", iface: "Document", want: "css_anchor"},
+		{name: "the first input file", files: []string{"other.idl"}, iface: "Document", want: "other"},
+		{name: "a first interface named Web", files: []string{"other.idl"}, iface: "Web", want: "other"},
+		{name: "-name", files: []string{"other.idl"}, iface: "Document", args: []string{"-name", "web"}, want: "web"},
+		{name: "a hyphenated file", files: []string{"css-anchor.idl"}, iface: "Document", want: "css_anchor"},
+		{name: "a .webidl file", files: []string{"dom.webidl"}, iface: "Document", want: "dom"},
+		{name: "the first of several", files: []string{"zeta.idl", "alpha.idl"}, iface: "Document", want: "zeta"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			idlPath := filepath.Join(dir, tc.file)
-			idl := "[Exposed=Window]\ninterface " + tc.iface + " { readonly attribute long n; };\n"
-			if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
-				t.Fatal(err)
+			var paths []string
+			for i, file := range tc.files {
+				iface := tc.iface
+				if i > 0 {
+					iface = fmt.Sprintf("Extra%d", i)
+				}
+				path := filepath.Join(dir, file)
+				idl := "[Exposed=Window]\ninterface " + iface + " { readonly attribute long n; };\n"
+				if err := os.WriteFile(path, []byte(idl), 0644); err != nil {
+					t.Fatal(err)
+				}
+				paths = append(paths, path)
 			}
 			outDir := filepath.Join(dir, "out")
 
 			silenceStdout(t, func() {
-				runBindWebIdl(append(append([]string{"-o", outDir}, tc.args...), idlPath))
+				runBindWebIdl(append(append([]string{"-o", outDir}, tc.args...), paths...))
 			})
 
 			for _, ext := range []string{".pr", ".js"} {

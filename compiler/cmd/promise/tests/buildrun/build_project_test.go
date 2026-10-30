@@ -693,9 +693,11 @@ interface Element {
 // JsValue marshalling: every wrapper kind that takes or returns `any`/`object`
 // — constructor, attribute, operation, nullable result, static — binds with
 // its self-check on, and a program building each variant compiles for
-// wasm32-web, importing the glue's js_value_* conversions. The conversions are
-// module-level and target-filtered, never methods of the enum, so the module —
-// the enum, and a dictionary naming it — still checks on the host target.
+// wasm32-web, importing the glue's js_value_* conversions. An optional or
+// nullable argument (#750) does too, at each of those sites, passed `none` or a
+// value. The conversions are module-level and target-filtered, never methods of
+// the enum, so the module — the enum, and a dictionary naming it — still checks
+// on the host target.
 func TestBindWebIdlJsValueCompilesClean(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -716,6 +718,15 @@ interface Thing {
 	any echo(any x);
 	object? find();
 	static any make(any seed);
+	undefined f(optional any x);
+	undefined g(object? y);
+	static undefined s(optional any z);
+	attribute object? maybe;
+};
+
+[Exposed=Window]
+interface Other {
+	constructor(optional any init);
 };
 `
 	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
@@ -744,6 +755,19 @@ interface Thing {
     JsValue? found = thing.find();
     JsValue made = Thing.make(JsValue.Number(value: 2.0));
     opts := Opts(detail: JsValue.Null);
+    thing.f(none);
+    thing.f(JsValue.Str(value: "x"));
+    thing.g(none);
+    thing.g(JsValue.Null);
+    Thing.s(none);
+    Thing.s(JsValue.Bool(value: true));
+    thing.maybe = none;
+    thing.maybe = found;
+    JsValue? kept = JsValue.Number(value: 3.0);
+    thing.f(kept);
+    thing.f(kept);
+    other := Other.create(none);
+    another := Other.create(JsValue.Undefined);
 }
 `
 	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {

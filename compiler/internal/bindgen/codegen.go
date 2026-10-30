@@ -1312,13 +1312,20 @@ func (k kindRegistry) isJsValue(ref TypeRef) bool {
 	return ok && kind == namedJsValue
 }
 
+// isOptionalJsValue reports whether ref is an option of the JsValue enum.
+func (k kindRegistry) isOptionalJsValue(ref TypeRef) bool {
+	return ref.Kind == OptionKind && ref.Elem != nil && k.isJsValue(*ref.Elem)
+}
+
 // lowerArg returns the expression that passes parameter p to its extern, in
 // the non-canonical ABI: a JsValue converts to its ref (_js_value_to_ref), a
 // handle-crossing type passes its `_handle`, an optional handle-crossing type
 // passes its `_handle` or 0 for none (docs/wasm-bindings.md §"Reference Table
-// and Ownership"), an optional built-in collapses to its zero value
-// (lowerOptionExternArg), and anything else converts as a scalar
-// (lowerScalarArg). Every wrapper's parameters lower here.
+// and Ownership"), an optional JsValue converts its value, or Undefined for
+// none, to its ref (docs/wasm-bindings.md §"JsValue the Dynamic Value Enum"),
+// an optional built-in collapses to its zero value (lowerOptionExternArg), and
+// anything else converts as a scalar (lowerScalarArg). Every wrapper's
+// parameters lower here.
 func (g *generator) lowerArg(p Param) string {
 	if !g.canonicalABI {
 		switch {
@@ -1328,6 +1335,8 @@ func (g *generator) lowerArg(p Param) string {
 			return p.Name + "._handle"
 		case g.kinds.isOptionalHandle(p.Type):
 			return p.Name + "?._handle ?: 0"
+		case g.kinds.isOptionalJsValue(p.Type):
+			return jsValueToRef + "(" + p.Name + " ?: " + jsValueName + ".Undefined)"
 		case isOptionOfBuiltin(p.Type):
 			return lowerOptionExternArg(p.Name, p.Type)
 		}
@@ -1369,7 +1378,7 @@ func (g *generator) jsValueReturnType(results []TypeRef) bool {
 // result<T, E>) is Option<JsValue>. The extern returns i32 where 0 = none.
 func (g *generator) optionJsValueReturnType(results []TypeRef) bool {
 	ref, ok := singleResultRef(results)
-	return ok && ref.Kind == OptionKind && ref.Elem != nil && g.kinds.isJsValue(*ref.Elem)
+	return ok && g.kinds.isOptionalJsValue(ref)
 }
 
 func isFailable(results []TypeRef) bool {

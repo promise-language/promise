@@ -69,6 +69,19 @@ interface FontFaceSet {
 	}
 }
 
+// #752: get of a key the map does not hold is absent, so its extern returns the
+// `V?` itself, through a presence flag and the value, and the glue writes the
+// host's undefined as none rather than as the 0 a stored value can also be.
+func TestWebIdlMaplikeGetResultCrossesAsOptional(t *testing.T) {
+	modules := mustWebIdlToIR(t, parseMerged(t, `interface Counts { maplike<DOMString, long>; };`))
+	out := GeneratePromise(modules, "web")
+	assertContains(t, out, "_counts__get(i32 handle, string key) i32?\n")
+	assertContains(t, out, "return _counts__get(this._handle, key);")
+	glue := GenerateJSGlue(modules)
+	assertContains(t, glue, `"Counts.get"($handle, key$ptr, key$len, $retptr) {`)
+	assertContains(t, glue, `_writeOptionalResult($retptr, _refLoad($handle).get(_readString(key$ptr, key$len)), "setInt32");`)
+}
+
 // methodSignature writes a method as its import and its Promise signature:
 // "Counts.has: has(string key) bool", a getter prefixed "get".
 func methodSignature(f Func) string {

@@ -5,10 +5,12 @@ import (
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
 	"github.com/promise-language/promise/compiler/internal/types"
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // lookupLayout resolves a TypeDeclLayout for any Promise type (named or enum).
@@ -140,9 +142,20 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 		// pointer to Promise's private boxed-string value struct (T1506). Decided
 		// once here and carried on ext.WasmStringResult, because genExternCall has
 		// to pass the return area and lift the result to match. Exactly `string`:
-		// a `string?` result keeps its optional sret form.
+		// a `string?` result is the optional lowering below.
 		isWasmStringResult := isWasmImport && !ext.IsFailable && ext.ResultType == types.Type(types.TypString)
 		if isWasmStringResult {
+			hasSret = false
+		}
+
+		// WASM imports: a `T?` result, T a string or a scalar of one core value,
+		// comes back as a presence flag and the value, written through a trailing
+		// return pointer the caller supplies (wasmweb.OptionalResult*), rather than
+		// into an sret pointer to Promise's internal {i1, T} optional, which a host
+		// cannot build (#752). Carried on ext.WasmOptionalResult for genExternCall,
+		// as isWasmStringResult is. Any other optional keeps its sret form.
+		isWasmOptionalResult := isWasmImport && !ext.IsFailable && wasmOptionalResultValue(ext.ResultType) != nil
+		if isWasmOptionalResult {
 			hasSret = false
 		}
 
@@ -152,6 +165,7 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 			ext.HasSret = hasSret
 			ext.RawABI = isRawABI
 			ext.WasmStringResult = isWasmStringResult
+			ext.WasmOptionalResult = isWasmOptionalResult
 			c.funcs[ext.PromiseName] = fn
 			continue
 		}
@@ -227,13 +241,13 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 			params = append(params, ir.NewParam(paramName, irtypes.I8Ptr))
 		}
 
-		if isWasmStringResult {
+		if isWasmStringResult || isWasmOptionalResult {
 			// Last, where the canonical ABI places a lowered import's return pointer.
 			params = append(params, ir.NewParam("retptr", irtypes.I8Ptr))
 		}
 
 		retType := irtypes.Type(irtypes.Void)
-		if !ext.IsFailable && ext.ResultType != nil && !isWasmStringResult {
+		if !ext.IsFailable && ext.ResultType != nil && !isWasmStringResult && !isWasmOptionalResult {
 			if isOpaqueContainerType(ext.ResultType) {
 				retType = irtypes.I8Ptr
 			} else if !hasSret {
@@ -255,9 +269,45 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 		ext.HasSret = hasSret
 		ext.RawABI = isRawABI
 		ext.WasmStringResult = isWasmStringResult
+		ext.WasmOptionalResult = isWasmOptionalResult
 		c.funcs[ext.PromiseName] = fn
 		cFuncs[ext.CName] = fn
 	}
+}
+
+// wasmOptionalResultValue returns the LLVM type of the value a wasm_import `T?`
+// result carries in its return area, or nil when result is no such optional.
+// T is a string, whose value is its (ptr, len) pair, or a scalar of one wasm
+// core value, which is that value as the import would return it directly: i32
+// for a bool, a char and every integer of 32 bits or fewer, else i64, float or
+// double (docs/wasm-bindings.md §"Helper Symbols and Their ABI"). A wider
+// integer has no core value, so its optional keeps the sret form.
+func wasmOptionalResultValue(result types.Type) irtypes.Type {
+	opt, ok := result.(*types.Optional)
+	if !ok {
+		return nil
+	}
+	named, ok := opt.Elem().(*types.Named)
+	if !ok {
+		return nil
+	}
+	if named == types.TypString {
+		return wasmStringPairType()
+	}
+	switch t := llvmNamedType(named); t {
+	case irtypes.I1, irtypes.I8, irtypes.I16, irtypes.I32:
+		return irtypes.I32
+	case irtypes.I64, irtypes.Float, irtypes.Double:
+		return t
+	}
+	return nil
+}
+
+// wasmStringPairType is the (ptr, len) pair a host writes a wasm_import string
+// result as: the whole return area of a `string` result, and the value of a
+// `string?` one.
+func wasmStringPairType() *irtypes.StructType {
+	return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I32)
 }
 
 // genExternCall generates an extern function call with ABI coercion.
@@ -348,28 +398,21 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 	}
 
 	// WASM import string result: the host writes the canonical (ptr, len) pair
-	// through the trailing return pointer, the bytes being a buffer it allocated
-	// with cabi_realloc. Copy them into a Promise-owned string, then release the
-	// buffer with pal_free: cabi_realloc allocates through the PAL, so the
-	// buffer is an ordinary Promise allocation (T1506, #261). The area is zeroed
-	// before each call so a host that writes nothing yields "" rather than a
-	// stale pointer from a previous call through the same entry alloca — and
-	// pal_free of that null pointer is a no-op.
+	// through the trailing return pointer. The area is zeroed before each call
+	// so a host that writes nothing yields "" rather than a stale pointer from a
+	// previous call through the same entry alloca — and pal_free of that null
+	// pointer is a no-op.
 	if ext.WasmStringResult {
-		retAreaType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I32)
+		retAreaType := wasmStringPairType()
 		retArea := c.createEntryAlloca(retAreaType)
 		c.block.NewStore(constant.NewZeroInitializer(retAreaType), retArea)
 		callArgs = append(callArgs, c.block.NewBitCast(retArea, irtypes.I8Ptr))
 		c.block.NewCall(ext.IRFunc, callArgs...)
+		return c.liftWasmImportString(retArea)
+	}
 
-		zero := constant.NewInt(irtypes.I32, 0)
-		ptrField := c.block.NewGetElementPtr(retAreaType, retArea, zero, zero)
-		lenField := c.block.NewGetElementPtr(retAreaType, retArea, zero, constant.NewInt(irtypes.I32, 1))
-		dataPtr := c.block.NewLoad(irtypes.I8Ptr, ptrField)
-		dataLen := c.block.NewZExt(c.block.NewLoad(irtypes.I32, lenField), irtypes.I64)
-		str := c.block.NewCall(c.funcs["promise_string_new"], dataPtr, dataLen)
-		c.block.NewCall(c.palFree, dataPtr)
-		return str
+	if ext.WasmOptionalResult {
+		return c.genWasmOptionalResultCall(ext, callArgs)
 	}
 
 	// Container return types return i8* directly — no sret (non-failable only)
@@ -407,6 +450,78 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 		return c.unpackFromValueStruct(result, named, layout)
 	}
 	return nil
+}
+
+// liftWasmImportString copies the string a host wrote as the (ptr, len) pair at
+// pair, a *wasmStringPairType, into a Promise-owned string, then releases the
+// host's buffer with pal_free. The host allocated it with cabi_realloc, which
+// allocates through the PAL, so the buffer is an ordinary Promise allocation
+// (T1506, #261).
+func (c *Compiler) liftWasmImportString(pair value.Value) value.Value {
+	pairType := wasmStringPairType()
+	zero := constant.NewInt(irtypes.I32, 0)
+	ptrField := c.block.NewGetElementPtr(pairType, pair, zero, zero)
+	lenField := c.block.NewGetElementPtr(pairType, pair, zero, constant.NewInt(irtypes.I32, 1))
+	dataPtr := c.block.NewLoad(irtypes.I8Ptr, ptrField)
+	dataLen := c.block.NewZExt(c.block.NewLoad(irtypes.I32, lenField), irtypes.I64)
+	str := c.block.NewCall(c.funcs["promise_string_new"], dataPtr, dataLen)
+	c.block.NewCall(c.palFree, dataPtr)
+	return str
+}
+
+// genWasmOptionalResultCall calls a wasm_import whose `T?` result crosses
+// through a trailing return area (ExternFunc.WasmOptionalResult) and lifts the
+// result to Promise's {i1, T} optional: none when the host's presence flag is 0,
+// else the value it wrote. The area is zeroed before each call, so a host that
+// writes nothing returns none.
+func (c *Compiler) genWasmOptionalResultCall(ext *ExternFunc, callArgs []value.Value) value.Value {
+	// [2 x i64]: wasmweb.OptionalResultSize bytes, aligned to 8.
+	areaType := irtypes.NewArray(wasmweb.OptionalResultSize/8, irtypes.I64)
+	area := c.createEntryAlloca(areaType)
+	c.block.NewStore(constant.NewZeroInitializer(areaType), area)
+	areaPtr := c.block.NewBitCast(area, irtypes.I8Ptr)
+	c.block.NewCall(ext.IRFunc, append(callArgs, areaPtr)...)
+
+	at := func(offset int64, typ irtypes.Type) value.Value {
+		field := c.block.NewGetElementPtr(irtypes.I8, areaPtr, constant.NewInt(irtypes.I32, offset))
+		return c.block.NewBitCast(field, irtypes.NewPointer(typ))
+	}
+	flag := c.block.NewLoad(irtypes.I32, at(wasmweb.OptionalResultFlagOffset, irtypes.I32))
+	present := c.block.NewICmp(enum.IPredNE, flag, constant.NewInt(irtypes.I32, 0))
+
+	optType := c.resolveType(ext.ResultType).(*irtypes.StructType)
+	none := c.zeroValue(optType)
+	valueType := wasmOptionalResultValue(ext.ResultType)
+	valuePtr := at(wasmweb.OptionalResultValueOffset, valueType)
+
+	if _, isString := valueType.(*irtypes.StructType); isString {
+		// Only a present string has a buffer to copy and release, so the
+		// absent path allocates nothing.
+		presentBlk := c.newBlock("wasm.opt.present")
+		mergeBlk := c.newBlock("wasm.opt.merge")
+		absentExit := c.block
+		c.block.NewCondBr(present, presentBlk, mergeBlk)
+		c.block = presentBlk
+		some := c.wrapOptional(c.liftWasmImportString(valuePtr), optType)
+		presentExit := c.block
+		c.block.NewBr(mergeBlk)
+		c.block = mergeBlk
+		return c.block.NewPhi(ir.NewIncoming(some, presentExit), ir.NewIncoming(none, absentExit))
+	}
+
+	// A scalar's core value converts to its internal type: an i32 truncates to
+	// a narrower integer, and becomes a bool by a non-zero test, as a canonical
+	// ABI bool lifts.
+	raw := c.block.NewLoad(valueType, valuePtr)
+	var val value.Value = raw
+	if internal, ok := optType.Fields[1].(*irtypes.IntType); ok && internal.BitSize < 32 {
+		if internal.BitSize == 1 {
+			val = c.block.NewICmp(enum.IPredNE, raw, constant.NewInt(irtypes.I32, 0))
+		} else {
+			val = c.block.NewTrunc(raw, internal)
+		}
+	}
+	return c.block.NewSelect(present, c.wrapOptional(val, optType), none)
 }
 
 // packToValueStruct packs a Promise internal value into a promise_T_v struct.

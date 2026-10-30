@@ -3719,8 +3719,10 @@ func TestGenerateJSGlueStringResultTrailingRetptr(t *testing.T) {
 	out := GenerateJSGlue(stringResultModules())
 	assertContains(t, out, `"Element.innerHTML.get"($handle, $retptr)`)
 	assertContains(t, out, "_writeStringResult($retptr, _refLoad($handle).innerHTML);")
+	// A nullable string takes the same trailing pointer, to a presence flag and
+	// the pair (#752): TestGenerateJSGlueNullableBuiltinResults.
 	assertContains(t, out, `"Element.getAttribute"($handle, name$ptr, name$len, $retptr)`)
-	assertContains(t, out, "_writeStringResult($retptr, _refLoad($handle).getAttribute(_readString(name$ptr, name$len)));")
+	assertContains(t, out, `_writeOptionalResult($retptr, _refLoad($handle).getAttribute(_readString(name$ptr, name$len)), "string");`)
 	assertContains(t, out, `"Element.describe"(n, $retptr)`)
 	assertContains(t, out, "_writeStringResult($retptr, Element.describe(n));")
 	// A scalar result is returned directly and takes no return pointer.
@@ -4814,6 +4816,65 @@ func TestWebIdlAttributeNullableBuiltinSetter(t *testing.T) {
 	assertContains(t, out, `_element_set_title(this._handle, value ?: "");`)
 	// Extern signature collapses the Option<string> to a bare string.
 	assertContains(t, out, "_element_set_title(i32 handle, string value)")
+	// The getter's result does not: it keeps the `string?` (#752). Only a
+	// parameter's none still collapses to its zero value (#164).
+	assertContains(t, out, "_element_title(i32 handle) string?\n")
+}
+
+// #752: a nullable built-in result's extern keeps the `T?` the wrapper returns,
+// which the compiler lowers to a presence flag and the value through a trailing
+// return area, so the host can return null as none. The wrapper returns the
+// extern's result as it is, with no zero-value default, in every member shape,
+// and the glue writes each one's result through that area: an operation, an
+// attribute getter, a static, and an anonymous getter, whose property access
+// yields undefined for a key the object does not support.
+func TestWebIdlNullableBuiltinResultExternKeepsOptional(t *testing.T) {
+	src := `interface Element {
+		DOMString? getAttribute(DOMString name);
+		long? count(DOMString key);
+		attribute boolean? flag;
+		static double? ratio();
+		getter DOMString? (DOMString name);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := mustWebIdlToIR(t, file)
+	out := GeneratePromise(modules, "web")
+	for _, want := range []string{
+		"_element_get_attribute(i32 handle, string name) string?\n",
+		"return _element_get_attribute(this._handle, name);",
+		"_element_count(i32 handle, string key) i32?\n",
+		"return _element_count(this._handle, key);",
+		"_element_flag(i32 handle) bool?\n",
+		"return _element_flag(this._handle);",
+		"_element_ratio() f64?\n",
+		"return _element_ratio();",
+		"_element_getter(i32 handle, string name) string?\n",
+		"return _element_getter(this._handle, name);",
+	} {
+		assertContains(t, out, want)
+	}
+	assertNotContains(t, out, ") string\n")
+	assertNotContains(t, out, ") i32\n")
+
+	glue := GenerateJSGlue(modules)
+	for _, want := range []string{
+		`"Element.getAttribute"($handle, name$ptr, name$len, $retptr) {
+      _writeOptionalResult($retptr, _refLoad($handle).getAttribute(_readString(name$ptr, name$len)), "string");`,
+		`"Element.count"($handle, key$ptr, key$len, $retptr) {
+      _writeOptionalResult($retptr, _refLoad($handle).count(_readString(key$ptr, key$len)), "setInt32");`,
+		`"Element.flag.get"($handle, $retptr) {
+      _writeOptionalResult($retptr, _refLoad($handle).flag, "setInt32");`,
+		`"Element.ratio"($retptr) {
+      _writeOptionalResult($retptr, Element.ratio(), "setFloat64");`,
+		`"Element.getter"($handle, name$ptr, name$len, $retptr) {
+      _writeOptionalResult($retptr, _refLoad($handle)[_readString(name$ptr, name$len)], "string");`,
+	} {
+		assertContains(t, glue, want)
+	}
+	assertNotContains(t, glue, "_writeStringResult($retptr")
 }
 
 // TestCodegenMethodWrapperOptionBuiltinParam exercises the Option<Builtin>
@@ -5222,10 +5283,63 @@ func TestGenerateJSGlueNullableStringReturn(t *testing.T) {
 		}},
 	}}
 	out := GenerateJSGlue(modules)
-	// null is handled inside _writeStringResult, which writes (0, 0).
+	// null is absent: _writeOptionalResult writes the presence flag 0 (#752).
 	assertContains(t, out, `"Storage.getItem"($handle, key$ptr, key$len, $retptr)`)
-	assertContains(t, out, "_writeStringResult($retptr, _refLoad($handle).getItem(_readString(key$ptr, key$len)));")
+	assertContains(t, out, `_writeOptionalResult($retptr, _refLoad($handle).getItem(_readString(key$ptr, key$len)), "string");`)
+	assertNotContains(t, out, "_writeStringResult($retptr, _refLoad($handle).getItem")
 	assertNotContains(t, out, "return 0;")
+}
+
+// #752: a nullable built-in result of any type crosses through the trailing
+// return pointer as a presence flag and the value, which _writeOptionalResult
+// writes with the DataView setter of the core value the type crosses as. A
+// non-null scalar is still returned directly, with no return pointer.
+func TestGenerateJSGlueNullableBuiltinResults(t *testing.T) {
+	cases := []struct{ builtin, member, setter string }{
+		{"s32", "count", "setInt32"},
+		{"bool", "flag", "setInt32"},
+		{"u8", "level", "setInt32"},
+		{"f32", "scale", "setFloat32"},
+		{"f64", "ratio", "setFloat64"},
+		{"s64", "stamp", "setBigInt64"},
+		{"string", "label", "string"},
+	}
+	var methods []Func
+	for _, c := range cases {
+		methods = append(methods, Func{
+			Name: c.member, Kind: FuncMethod, OwnerType: "Thing", ImportName: "Thing." + c.member,
+			Results: []TypeRef{{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: c.builtin}}},
+		})
+	}
+	methods = append(methods, Func{
+		Name: "total", Kind: FuncMethod, OwnerType: "Thing", ImportName: "Thing.total",
+		Results: []TypeRef{{Kind: BuiltinKind, Builtin: "s32"}},
+	})
+	out := GenerateJSGlue([]*Module{{
+		Name:         "test",
+		ImportModule: wasmweb.ImportModule,
+		Resources:    []Resource{{Name: "Thing", Methods: methods}},
+	}})
+	for _, c := range cases {
+		t.Run(c.builtin, func(t *testing.T) {
+			assertContains(t, out, `"Thing.`+c.member+`"($handle, $retptr) {
+      _writeOptionalResult($retptr, _refLoad($handle).`+c.member+`(), "`+c.setter+`");
+    },`)
+		})
+	}
+	assertContains(t, out, `"Thing.total"($handle) {
+      return _refLoad($handle).total();
+    },`)
+
+	// The helper reads its offsets from the layout codegen reads the area by.
+	assertContains(t, out, "function _writeOptionalResult(retptr, v, setter) {")
+	assertContains(t, out, fmt.Sprintf("if (setter === \"string\") _writeStringResult(retptr + %d, v);", wasmweb.OptionalResultValueOffset))
+	assertContains(t, out, fmt.Sprintf("[setter](retptr + %d, v, true);", wasmweb.OptionalResultValueOffset))
+	assertContains(t, out, fmt.Sprintf(".setInt32(retptr + %d, present ? 1 : 0, true);", wasmweb.OptionalResultFlagOffset))
+	assertContains(t, out, "const present = v != null;")
+
+	// The bootstrap loader binds no WebIDL import, so it carries no helper.
+	assertNotContains(t, GenerateBootstrapJS("app.wasm"), "_writeOptionalResult")
 }
 
 func TestWebIdlOptionalParam(t *testing.T) {

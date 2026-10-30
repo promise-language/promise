@@ -7,7 +7,8 @@
 // JavaScript that calls them (internal/bindgen/jsglue.go). GitHub #10 was
 // caused by exactly that kind of split — two generators independently invented
 // a name for the same logical thing and drifted apart — so the names live here
-// and nowhere else.
+// and nowhere else. So does the layout of the return area a `T?` import result
+// crosses through, which the backend reads and the JavaScript glue writes.
 //
 // The package is deliberately tiny and dependency-free so both the backend and
 // the binding generators can import it without a cycle.
@@ -23,6 +24,19 @@ import (
 // ImportModule is the WASM import module name the JS glue supplies. Every
 // promise_env.* import the runtime declares uses this as its module.
 const ImportModule = "promise_env"
+
+// The return area of a `wasm_import` whose result is `T?`, `T` a string or a
+// scalar of one core value (docs/wasm-bindings.md §"Helper Symbols and Their
+// ABI"). The caller passes it as the trailing return pointer, OptionalResultSize
+// bytes aligned to 8 and zeroed before the call. The host writes an i32 presence
+// flag at OptionalResultFlagOffset, 1 for a value and 0 for none, and only for a
+// value the value at OptionalResultValueOffset: the core value the import would
+// return directly, or a string's (ptr, len) pair.
+const (
+	OptionalResultFlagOffset  = 0
+	OptionalResultValueOffset = 8
+	OptionalResultSize        = 16
+)
 
 // Exports called by the host (JS → WASM). A name added here must also be added
 // to Exports, which is what registers it with the linker.

@@ -35,6 +35,7 @@ func (g *jsGlueGenerator) generate(modules []*Module) string {
 	g.emitPALRuntime()
 	g.emitRefTable()
 	g.emitStringHelpers()
+	g.emitOptionalResultHelper()
 	if slices.ContainsFunc(modules, func(m *Module) bool { return m.HasJsValue }) {
 		g.emitJsValueRuntime()
 	}
@@ -180,7 +181,7 @@ function _writeString(str) {
 // A string result crosses as the canonical (ptr, len) pair, written through the
 // trailing return pointer the caller supplies; the caller copies the bytes into
 // its own string and frees the buffer. null/undefined write (0, 0), the empty
-// string — a nullable DOMString result is a bare string at the boundary.
+// string.
 function _writeStringResult(retptr, str) {
   let ptr = 0, len = 0;
   if (str != null) ({ ptr, len } = _writeString(String(str)));
@@ -191,6 +192,49 @@ function _writeStringResult(retptr, str) {
 }
 
 `)
+}
+
+// emitOptionalResultHelper writes _writeOptionalResult, which every import whose
+// result is a nullable built-in returns through (emitReturnConversion). Its
+// offsets are rendered from wasmweb, the layout codegen reads the return area by
+// (docs/wasm-bindings.md §"Helper Symbols and Their ABI").
+func (g *jsGlueGenerator) emitOptionalResultHelper() {
+	g.writef(`// A nullable built-in result crosses through the trailing return pointer: an
+// i32 presence flag at offset %[1]d, then, when present, the value at offset %[2]d —
+// a string as _writeStringResult writes it, anything else through the DataView
+// setter its core type names. null and undefined are absent.
+function _writeOptionalResult(retptr, v, setter) {
+  const present = v != null;
+  if (present) {
+    if (setter === "string") _writeStringResult(retptr + %[2]d, v);
+    else new DataView(wasm.exports.memory.buffer)[setter](retptr + %[2]d, v, true);
+  }
+  // A fresh view: _writeStringResult's allocation may have grown memory.
+  new DataView(wasm.exports.memory.buffer).setInt32(retptr + %[1]d, present ? 1 : 0, true);
+}
+
+`, wasmweb.OptionalResultFlagOffset, wasmweb.OptionalResultValueOffset)
+}
+
+// optionalResultSetter names how _writeOptionalResult writes a present value of
+// the built-in elem: "string" for a string, else the DataView setter of the core
+// value it crosses as (flattenBuiltin). Each setter converts as the JS API does a
+// value returned directly — ToInt32, ToBigInt64, or ToNumber then rounding — so a
+// present value crosses exactly as a non-null result of its type would.
+func optionalResultSetter(elem TypeRef) string {
+	if isStringType(elem) {
+		return "string"
+	}
+	switch flattenBuiltin(elem.Builtin)[0] {
+	case FlatI64:
+		return "setBigInt64"
+	case FlatF32:
+		return "setFloat32"
+	case FlatF64:
+		return "setFloat64"
+	default:
+		return "setInt32"
+	}
 }
 
 // emitJsValueRuntime writes the glue's half of JsValue's crossing
@@ -580,26 +624,31 @@ func (g *jsGlueGenerator) buildJSParams(f Func) []string {
 		}
 	}
 
-	// A string result comes back through a trailing return pointer — last, the
-	// position codegen's declareExterns gives it (see _writeStringResult).
-	if returnsString(f) {
+	// A string or nullable built-in result comes back through a trailing return
+	// pointer — last, the position codegen's declareExterns gives it (see
+	// _writeStringResult and _writeOptionalResult).
+	if _, nullable := nullableBuiltinResult(f); nullable || returnsString(f) {
 		params = append(params, jsReturnPointerParam)
 	}
 
 	return params
 }
 
-// returnsString reports whether f's flat result is a string, a nullable one
-// included: the extern declares a bare string for both (promiseExternType).
+// returnsString reports whether f's result is a string, which the extern
+// declares as a bare string. A nullable one is a nullable built-in result
+// (nullableBuiltinResult).
 func returnsString(f Func) bool {
-	if len(f.Results) == 0 {
-		return false
+	return len(f.Results) > 0 && isStringType(f.Results[0])
+}
+
+// nullableBuiltinResult returns the built-in of f's result when it is a nullable
+// built-in, which the extern declares as `T?` and the host returns through a
+// presence flag and the value (promiseExternResultType, _writeOptionalResult).
+func nullableBuiltinResult(f Func) (TypeRef, bool) {
+	if len(f.Results) == 0 || !isOptionOfBuiltin(f.Results[0]) {
+		return TypeRef{}, false
 	}
-	ret := f.Results[0]
-	if ret.Kind == OptionKind && ret.Elem != nil {
-		ret = *ret.Elem
-	}
-	return isStringType(ret)
+	return *f.Results[0].Elem, true
 }
 
 func (g *jsGlueGenerator) emitConstructorBody(owner string, f Func, jsParams []string) {
@@ -755,6 +804,11 @@ func (g *jsGlueGenerator) buildJSCallArgs(f Func) []string {
 func (g *jsGlueGenerator) emitReturnConversion(f Func, call string) {
 	if len(f.Results) == 0 {
 		g.writef("      %s;\n", call)
+		return
+	}
+	if elem, nullable := nullableBuiltinResult(f); nullable {
+		// Presence flag and value through the trailing retptr, nothing returned
+		g.writef("      _writeOptionalResult(%s, %s, \"%s\");\n", jsReturnPointerParam, call, optionalResultSetter(elem))
 		return
 	}
 	if returnsString(f) {

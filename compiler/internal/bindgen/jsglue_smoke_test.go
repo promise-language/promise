@@ -746,6 +746,88 @@ func TestGenerateJSGlueAnonymousSpecialReachesHost(t *testing.T) {
 	}
 }
 
+// TestGenerateJSGlueConversionChecksHostObject calls the checked conversions'
+// imports (#766) against a minimal DOM: host classes for the bound chain, an
+// HTMLDivElement the IDL does not bind, and no HTMLDialogElement at all, though
+// the IDL binds one. An input converts to HTMLInputElement as a new handle to
+// the same object, through which the value setter reaches it — "AB", (0, 2) in
+// the smoke module's data segment — and a div converts to its HTMLElement
+// ancestor. A div does not convert to HTMLInputElement and takes no slot, so
+// the failure path has nothing to release; nothing converts to an interface the
+// host does not define, and asking does not throw. Releasing the converted
+// handle leaves the source's: the two wrappers release one each.
+func TestGenerateJSGlueConversionChecksHostObject(t *testing.T) {
+	nodePath := requireNode(t)
+	src := `interface EventTarget {};
+interface Node : EventTarget {};
+interface Element : Node {};
+interface HTMLElement : Element {};
+interface HTMLInputElement : HTMLElement { attribute DOMString value; };
+interface HTMLDialogElement : HTMLElement {};`
+	loader := smokeLoader{name: "glue", js: GenerateJSGlue(overloadIR(t, src)), initArgs: []string{"frontend.wasm"}}
+	result := runSmokeDriver(t, nodePath, loader, 0, importCallDriver(`
+  class EventTarget {}
+  class Node extends EventTarget {}
+  class Element extends Node {}
+  class HTMLElement extends Element {}
+  class HTMLInputElement extends HTMLElement {
+    constructor() { super(); this.value = ""; }
+  }
+  class HTMLDivElement extends HTMLElement {}
+  Object.assign(globalThis, { EventTarget, Node, Element, HTMLElement, HTMLInputElement, HTMLDivElement });
+
+  const env = imports.promise_env;
+  const input = new HTMLInputElement();
+  const div = new HTMLDivElement();
+  const source = mod._refStore(input);
+  const divSource = mod._refStore(div);
+  const checks = {};
+
+  const converted = env["`+conversionImportName("HTMLInputElement")+`"](source);
+  checks.input_new_handle = converted > 0 && converted !== source;
+  checks.input_same_object = mod._refLoad(converted) === input;
+  env["HTMLInputElement.value.set"](converted, 0, 2);
+  checks.input_value_set = input.value === "AB";
+
+  const ancestor = env["`+conversionImportName("HTMLElement")+`"](divSource);
+  checks.div_to_ancestor = ancestor > 0 && mod._refLoad(ancestor) === div;
+  env["[resource-drop]`+toKebab("HTMLElement")+`"](ancestor);
+
+  const next = mod._refStore({ tag: "probe" });
+  mod._refRelease(next);
+  checks.div_not_input = env["`+conversionImportName("HTMLInputElement")+`"](divSource) === 0;
+  try {
+    checks.undefined_interface = env["`+conversionImportName("HTMLDialogElement")+`"](source) === 0;
+  } catch (e) {
+    checks.undefined_interface = false;
+  }
+  checks.failure_takes_no_slot = mod._refStore({ tag: "probe" }) === next;
+
+  env["[resource-drop]`+toKebab("HTMLInputElement")+`"](converted);
+  checks.source_survives_release = mod._refLoad(source) === input;
+  process.stdout.write("RESULT:" + JSON.stringify(checks) + "\n");
+`))
+
+	payload := strings.TrimPrefix(result, "RESULT:")
+	if strings.HasPrefix(payload, "ERR ") {
+		t.Fatalf("conversion driver failed: %s", result)
+	}
+	var checks map[string]bool
+	if err := json.Unmarshal([]byte(payload), &checks); err != nil {
+		t.Fatalf("cannot parse driver result %q: %v", result, err)
+	}
+	for _, name := range []string{
+		"input_new_handle", "input_same_object", "input_value_set", "div_to_ancestor",
+		"div_not_input", "undefined_interface", "failure_takes_no_slot", "source_survives_release",
+	} {
+		if ok, reported := checks[name]; !reported {
+			t.Errorf("driver did not report %q: %s", name, result)
+		} else if !ok {
+			t.Errorf("check %q does not hold", name)
+		}
+	}
+}
+
 // TestGenerateJSGlueHyphenatedMembersSyntaxValid parses the glue for members
 // named with a `-` (#719). Dot access to one, `obj.margin-top = value`, is not
 // an assignment target, so the whole module would be a SyntaxError.

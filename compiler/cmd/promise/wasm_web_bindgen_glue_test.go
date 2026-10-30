@@ -1147,3 +1147,326 @@ func TestBindWebIdlGlueOptionalHandleParams(t *testing.T) {
 		}
 	}
 }
+
+// #766 end to end: a module consuming the bindings converts the Element
+// createElement returns to the HTMLInputElement its host object is, through the
+// generated checked conversion, and reads the input's value back; a div does
+// not convert. The converted wrapper owns a handle of its own, so each of the
+// two wrappers releases exactly one: none leaks across the rounds, none is
+// released twice — a slot on the free list twice would come back from two
+// fresh _refStore calls — and an input whose Element has already dropped still
+// answers through its own handle.
+
+const conversionIDL = `interface EventTarget {};
+interface Node : EventTarget {};
+interface Element : Node {};
+interface HTMLElement : Element {};
+interface HTMLInputElement : HTMLElement { attribute DOMString value; };
+interface Document : Node { Element createElement(DOMString localName); };
+`
+
+// conversionRounds is how many times conversionMain converts an input and a
+// div. Each round takes a slot for every Element and one for the converted
+// input, and releases all of them, so every round reuses the same slots.
+const conversionRounds = 100
+
+var conversionMain = `use web "./web";
+
+convert(string tag) string {
+    made := web.document.create_element(tag);
+    input := web.HTMLInputElement.from(made);
+    if input {
+        input.value = "typed-" + tag;
+        return "input:" + input.value;
+    }
+    return "none:" + tag;
+}
+
+// The Element drops when this returns, before its conversion is used.
+converted_input() web.HTMLInputElement? {
+    made := web.document.create_element("input");
+    return web.HTMLInputElement.from(made);
+}
+
+outlives() string {
+    input := converted_input();
+    if input {
+        input.value = "kept";
+        return input.value;
+    }
+    return "none";
+}
+
+main() {
+    for _ in 0..` + strconv.Itoa(conversionRounds) + ` {
+        convert("input");
+        convert("div");
+    }
+    print_line(convert("input"));
+    print_line(convert("div"));
+    print_line(outlives());
+}
+`
+
+// conversionDriver stands in for the page's DOM before the glue is imported,
+// because the glue seeds the document's slot at module evaluation: host
+// classes for the bound chain, and an HTMLDivElement the IDL does not bind. It
+// loads web/web.js the way a page would (nodePageDriver) and runs the .wasm
+// named by its first argument, the program converting its second argument's
+// rounds. Once it is done it reports the values of the inputs the program
+// made, how many slots above the three ambient ones still hold an object, and
+// the handles twice that many rounds of fresh _refStore calls get. Each
+// conversion round takes at most three slots and the three calls after them
+// five, so the count's bound, two rounds past the last, covers every slot the
+// program could have taken.
+const conversionDriver = nodePageDriver + `
+const [wasmFile, rounds] = process.argv.slice(2);
+
+class EventTarget {}
+class Node extends EventTarget {}
+class Element extends Node {}
+class HTMLElement extends Element {}
+class HTMLInputElement extends HTMLElement {
+  constructor() { super(); this.value = ""; }
+}
+class HTMLDivElement extends HTMLElement {}
+Object.assign(globalThis, { EventTarget, Node, Element, HTMLElement, HTMLInputElement, HTMLDivElement });
+
+const made = [];
+globalThis.document = {
+  createElement(tag) {
+    const el = tag === "input" ? new HTMLInputElement() : new HTMLDivElement();
+    made.push(el);
+    return el;
+  },
+};
+
+(async () => {
+  const mod = await import(pathToFileURL(path.join(dir, "web", "web.js")).href);
+  const result = { logs, errs };
+  try {
+    await mod.init(wasmFile);
+    result.ok = true;
+  } catch (e) {
+    result.ok = false;
+    result.message = e && e.message;
+  }
+  result.inputValues = made.filter((el) => el instanceof HTMLInputElement).map((el) => el.value);
+  result.live = 0;
+  for (let h = 4; h < 4 + 3 * (Number(rounds) + 2); h++) {
+    if (mod._refLoad(h) !== undefined) result.live++;
+  }
+  result.handles = [];
+  for (let i = 0; i < 2 * Number(rounds); i++) result.handles.push(mod._refStore({ probe: i }));
+  process.stdout.write("RESULT:" + JSON.stringify(result) + "\n");
+})();
+`
+
+type conversionResult struct {
+	OK          bool     `json:"ok"`
+	Message     string   `json:"message"`
+	Logs        []string `json:"logs"`
+	Errs        []string `json:"errs"`
+	InputValues []string `json:"inputValues"`
+	Live        int      `json:"live"`
+	Handles     []int    `json:"handles"`
+}
+
+func TestBindWebIdlConvertsToDerivedInterface(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+build+node integration test in short mode")
+	}
+	nodePath, err := resolveWasmRuntime("node")
+	if err != nil {
+		// Neither staged on this machine nor fetchable: a fact about the
+		// environment, not the tree.
+		t.Skipf("the pinned node is not obtainable here: %v", err)
+	}
+	bin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+
+	idlPath := filepath.Join(dir, "dom.idl")
+	if err := os.WriteFile(idlPath, []byte(conversionIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	app := filepath.Join(dir, "app")
+	clitest.RunOK(t, bin, nil, "bind", "webidl", "-name", "web", "-o", filepath.Join(app, "web"), idlPath)
+	for name, content := range map[string]string{
+		"promise.toml": "[module]\nname = \"app\"\nepoch = \"" + bindEpoch() + "\"\n",
+		"main.pr":      conversionMain,
+		"driver.cjs":   conversionDriver,
+	} {
+		if err := os.WriteFile(filepath.Join(app, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	driver := filepath.Join(app, "driver.cjs")
+
+	builds := []struct {
+		name string
+		args []string
+	}{
+		{"debug", nil},
+		{"release", []string{"--release"}},
+	}
+	for _, b := range builds {
+		wasm := b.name + ".wasm"
+		args := append(append([]string{"build"}, b.args...), "-target", "wasm32-web", "-o", filepath.Join(app, wasm), app)
+		clitest.RunOK(t, bin, nil, args...)
+
+		got := runNodeDriver[conversionResult](t, nodePath, driver, wasm, strconv.Itoa(conversionRounds))
+		if !got.OK {
+			t.Errorf("%s: init() rejected: %q (logs %q, errs %q)", b.name, got.Message, got.Logs, got.Errs)
+			continue
+		}
+		if want := []string{"input:typed-input", "none:div", "kept"}; strings.Join(got.Logs, "\n") != strings.Join(want, "\n") {
+			t.Errorf("%s: logs = %q, want %q", b.name, got.Logs, want)
+		}
+		wantValues := make([]string, 0, conversionRounds+2)
+		for range conversionRounds + 1 {
+			wantValues = append(wantValues, "typed-input")
+		}
+		wantValues = append(wantValues, "kept")
+		if strings.Join(got.InputValues, ",") != strings.Join(wantValues, ",") {
+			t.Errorf("%s: the host inputs' values = %q, want %q: a value set through the converted wrapper must reach the input itself", b.name, got.InputValues, wantValues)
+		}
+		seen := map[int]bool{}
+		for _, h := range got.Handles {
+			if seen[h] {
+				t.Errorf("%s: two fresh _refStore calls both returned handle %d: a converted or source wrapper released its handle twice", b.name, h)
+				break
+			}
+			seen[h] = true
+		}
+		if got.Live != 0 {
+			t.Errorf("%s: %d slots still hold an object after %d rounds of conversions; a converted or source wrapper is not releasing its handle", b.name, got.Live, conversionRounds)
+		}
+		if len(got.Errs) != 0 {
+			t.Errorf("%s: unexpected stderr output %q", b.name, got.Errs)
+		}
+	}
+}
+
+// #766 end to end, where the conversion cannot be named `from`
+// (docs/wasm-bindings.md §"Factory names"): Own declares a static `from` and P
+// an instance one, which C inherits, so each of the three converts by
+// `from_handle` — a `global `from` on C would override P's instance member,
+// and bind's self-check would reject the module. H sees only its root's static
+// `from`, which its conversion hides. Each conversion still reaches its
+// `[cast]` import, and each `from` the IDL declares still reaches the host's.
+
+const conversionFallbackIDL = `interface R { static undefined from(DOMString s); };
+interface Own : R { static undefined from(DOMString s); };
+interface P : R { undefined from(DOMString s); };
+interface C : P {};
+interface H : R {};
+interface Document { R make(DOMString kind); };
+`
+
+const conversionFallbackMain = `use web "./web";
+
+// The interfaces r's host object converts to, each followed by a ";".
+convertible(web.R r) string {
+    s := "";
+    own := web.Own.from_handle(r);
+    if own {
+        s = s + "Own;";
+    }
+    p := web.P.from_handle(r);
+    if p {
+        p.from("via-p");
+        s = s + "P;";
+    }
+    c := web.C.from_handle(r);
+    if c {
+        s = s + "C;";
+    }
+    h := web.H.from(r);
+    if h {
+        s = s + "H;";
+    }
+    return s;
+}
+
+main() {
+    web.R.from("r");
+    web.Own.from("own");
+    print_line(convertible(web.document.make("c")));
+    print_line(convertible(web.document.make("h")));
+    print_line(convertible(web.document.make("own")));
+}
+`
+
+// conversionFallbackDriver stands in for the page's host classes, whose `from`
+// members log the call, and for the document that makes an object of the
+// class its kind names, before loading web/web.js the way a page would
+// (nodePageDriver) and running the .wasm named by its one argument.
+const conversionFallbackDriver = nodePageDriver + `
+const [wasmFile] = process.argv.slice(2);
+
+class R { static from(s) { console.log("R.from " + s); } }
+class Own extends R { static from(s) { console.log("Own.from " + s); } }
+class P extends R { from(s) { console.log("P#from " + s); } }
+class C extends P {}
+class H extends R {}
+Object.assign(globalThis, { R, Own, P, C, H });
+globalThis.document = { make(kind) { return new ({ c: C, h: H, own: Own })[kind](); } };
+
+(async () => {
+  const mod = await import(pathToFileURL(path.join(dir, "web", "web.js")).href);
+  const result = { logs, errs };
+  try {
+    await mod.init(wasmFile);
+    result.ok = true;
+  } catch (e) {
+    result.ok = false;
+    result.message = e && e.message;
+  }
+  process.stdout.write("RESULT:" + JSON.stringify(result) + "\n");
+})();
+`
+
+func TestBindWebIdlConversionFallbackName(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+build+node integration test in short mode")
+	}
+	nodePath, err := resolveWasmRuntime("node")
+	if err != nil {
+		// Neither staged on this machine nor fetchable: a fact about the
+		// environment, not the tree.
+		t.Skipf("the pinned node is not obtainable here: %v", err)
+	}
+	bin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+
+	idlPath := filepath.Join(dir, "fallback.idl")
+	if err := os.WriteFile(idlPath, []byte(conversionFallbackIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	app := filepath.Join(dir, "app")
+	clitest.RunOK(t, bin, nil, "bind", "webidl", "-name", "web", "-o", filepath.Join(app, "web"), idlPath)
+	for name, content := range map[string]string{
+		"promise.toml": "[module]\nname = \"app\"\nepoch = \"" + bindEpoch() + "\"\n",
+		"main.pr":      conversionFallbackMain,
+		"driver.cjs":   conversionFallbackDriver,
+	} {
+		if err := os.WriteFile(filepath.Join(app, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clitest.RunOK(t, bin, nil, "build", "-target", "wasm32-web", "-o", filepath.Join(app, "app.wasm"), app)
+
+	got := runNodeDriver[bindgenGlueResult](t, nodePath, filepath.Join(app, "driver.cjs"), "app.wasm")
+	if !got.OK {
+		t.Fatalf("init() rejected: %q (logs %q, errs %q)", got.Message, got.Logs, got.Errs)
+	}
+	want := []string{"R.from r", "Own.from own", "P#from via-p", "P;C;", "H;", "Own;"}
+	if strings.Join(got.Logs, "\n") != strings.Join(want, "\n") {
+		t.Errorf("logs = %q, want %q", got.Logs, want)
+	}
+	if len(got.Errs) != 0 {
+		t.Errorf("unexpected stderr output %q", got.Errs)
+	}
+}

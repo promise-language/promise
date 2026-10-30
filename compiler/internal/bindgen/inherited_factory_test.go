@@ -118,6 +118,29 @@ func TestWebIdlInheritedMemberMovesFactory(t *testing.T) {
 				borrowFactoryLine("C", "borrow_handle"),
 			},
 		},
+		{
+			// The checked conversion (#766) follows the same rule: a derived
+			// interface's own static `from` moves it, and so does an instance
+			// `from` it inherits, but a parent's static `from` is hidden.
+			name: "conversion",
+			src: `interface R { static undefined from(DOMString s); };
+			interface Own : R { static undefined from(DOMString s); };
+			interface P : R { undefined from(DOMString s); };
+			interface C : P {};
+			interface H : R {};`,
+			want: []string{
+				conversionLine("Own", "from_handle", "R"),
+				conversionLine("P", "from_handle", "R"),
+				conversionLine("C", "from_handle", "R"),
+				conversionLine("H", "from", "R"),
+			},
+			absent: []string{
+				conversionLine("Own", "from", "R"),
+				conversionLine("P", "from", "R"),
+				conversionLine("C", "from", "R"),
+				conversionLine("H", "from_handle", "R"),
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -145,18 +168,24 @@ func TestCodegenFactoryNameAncestorChainEnds(t *testing.T) {
 		want      []string
 	}{
 		{
+			// The conversion's parameter names the unbound parent as the root,
+			// so it fails with `undefined type` too.
 			name:      "unbound parent",
 			resources: []Resource{{Name: "C", Parent: "Missing", Drop: true}},
-			want:      []string{borrowFactoryLine("C", "borrow")},
+			want:      []string{borrowFactoryLine("C", "borrow"), conversionLine("C", "from", "Missing")},
 		},
 		{
 			// A declares borrow itself; B reaches it through the cycle's one edge.
+			// Each one's chain ends at the other, which is its conversion's root.
 			name: "cycle",
 			resources: []Resource{
 				{Name: "A", Parent: "B", Drop: true, Methods: []Func{borrow}},
 				{Name: "B", Parent: "A", Drop: true},
 			},
-			want: []string{borrowFactoryLine("A", "borrow_handle"), borrowFactoryLine("B", "borrow_handle")},
+			want: []string{
+				borrowFactoryLine("A", "borrow_handle"), borrowFactoryLine("B", "borrow_handle"),
+				conversionLine("A", "from", "B"), conversionLine("B", "from", "A"),
+			},
 		},
 	}
 	for _, tc := range cases {

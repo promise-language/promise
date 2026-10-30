@@ -33,7 +33,8 @@ const bindgenGlueIDL = `interface Element {
 // Handle 1 is the ambient globalThis (T1510), so the driver stands in for the
 // DOM by putting these members on the global object. The repeated reads reuse
 // the allocator's free lists, where a host buffer released with the wrong
-// allocator would corrupt the heap.
+// allocator would corrupt the heap — the nullable ones alternating between a
+// present result, whose buffer is released, and an absent one, which has none.
 const bindgenGlueMain = `main() {
     e := Element.borrow(1);
     html := e.inner_html;
@@ -42,14 +43,26 @@ const bindgenGlueMain = `main() {
     print_line("id:[" + (e.get_attribute("id") ?: "none") + "]");
     print_line("missing:[" + (e.get_attribute("missing") ?: "none") + "]");
     print_line("undef:[" + (e.get_attribute("undef") ?: "none") + "]");
+    print_line("empty:[" + (e.get_attribute("empty") ?: "none") + "]");
     first := e.text_content;
     stable := true;
+    present := 0;
     for i in 0..100 {
         if e.text_content != first {
             stable = false;
         }
+        name := "missing";
+        if i % 2 == 0 {
+            name = "id";
+        }
+        if attr := e.get_attribute(name) {
+            if attr == "x1" {
+                present = present + 1;
+            }
+        }
     }
     print_line("text:" + first.len.to_string(base: 10) + " stable:" + stable.to_string());
+    print_line("present:" + present.to_string(base: 10));
 }
 `
 
@@ -70,7 +83,8 @@ if (html === "throw") {
   globalThis.innerHTML = "héllo";
 }
 globalThis.textContent = text === "big" ? "x".repeat(200000) : "";
-globalThis.getAttribute = (name) => (name === "id" ? "x1" : name === "undef" ? undefined : null);
+globalThis.getAttribute = (name) =>
+  name === "id" ? "x1" : name === "undef" ? undefined : name === "empty" ? "" : null;
 
 (async () => {
   const mod = await import(pathToFileURL(path.join(dir, "element.js")).href);
@@ -155,11 +169,13 @@ func TestBindWebIdlGlueRoundTripsStrings(t *testing.T) {
 				continue
 			}
 			want := []string{
-				"html:héllo", // multi-byte UTF-8 result: the length is in bytes
-				"id:[x1]",    // string param in, string result out
-				"missing:[]", // a null DOMString? result is "" at the boundary (T0698)
-				"undef:[]",   // so is undefined, not the string "undefined"
+				"html:héllo",     // multi-byte UTF-8 result: the length is in bytes
+				"id:[x1]",        // string param in, string result out
+				"missing:[none]", // a null DOMString? result is absent (#752)
+				"undef:[none]",   // so is undefined, not the string "undefined"
+				"empty:[]",       // while a present "" stays present
 				c.wantText,
+				"present:50", // every other read of 100 is present
 			}
 			if strings.Join(got.Logs, "\n") != strings.Join(want, "\n") {
 				t.Errorf("%s: logs = %q, want %q", name, got.Logs, want)
@@ -195,19 +211,28 @@ interface Store {
 };
 `
 
-// A missing key's get is not read: a built-in result crosses absent as its
-// zero value (#752).
-const collectionsMain = `main() {
+// A get of a key the map does not hold is absent, and a stored 0 is present
+// (#752): the two were once both 0.
+const collectionsMain = `show(i32? v) string {
+    if x := v {
+        return x.to_string(base: 10);
+    }
+    return "none";
+}
+
+main() {
     store := Store.borrow(1);
     c := store.counts;
     c._set("a", 1);
     c._set("b", -2);
     print_line("size:" + c.size.to_string(base: 10));
-    print_line("get:" + (c._get("a") ?: 0i32).to_string(base: 10) + "," + (c._get("b") ?: 0i32).to_string(base: 10));
+    print_line("get:" + show(c._get("a")) + "," + show(c._get("b")) + "," + show(c._get("z")));
     print_line("has:" + c.has("b").to_string() + "," + c.has("z").to_string());
     print_line("delete:" + c.delete("b").to_string() + "," + c.delete("b").to_string());
     c.clear();
     print_line("cleared:" + c.size.to_string(base: 10));
+    c._set("c", 0);
+    print_line("stored zero:" + show(c._get("c")) + " missing:" + show(c._get("b")));
     c._set("c", 3);
 
     t := store.tags;
@@ -302,10 +327,11 @@ func TestBindWebIdlMaplikeSetlikeRoundTrip(t *testing.T) {
 		}
 		want := []string{
 			"size:2",
-			"get:1,-2",
+			"get:1,-2,none",
 			"has:true,false",
 			"delete:true,false", // a second delete finds nothing
 			"cleared:0",
+			"stored zero:0 missing:none",
 			"tags:2", // adding a value twice holds it once
 			"tags has:true,false",
 			"tags delete:true,false",
@@ -315,6 +341,161 @@ func TestBindWebIdlMaplikeSetlikeRoundTrip(t *testing.T) {
 		}
 		if got.Counts != `[["c",3]]` || got.Tags != `["x"]` {
 			t.Errorf("%s: host collections = %s and %s, want [[\"c\",3]] and [\"x\"]", b.name, got.Counts, got.Tags)
+		}
+		if len(got.Errs) != 0 {
+			t.Errorf("%s: unexpected stderr output %q", b.name, got.Errs)
+		}
+	}
+}
+
+// #752 end to end: a nullable built-in result of each core width reaches the
+// program as the host returned it — null and undefined as none, a zero value
+// as present, and a value at the edge of its type as itself — through the
+// return area the compiler reads and the glue writes from one layout. Each
+// width takes its own conversion on both sides: a bool's non-zero test, a
+// narrower integer's truncation, and the i64, f32 and f64 loads.
+
+const nullableScalarIDL = `interface Probe {
+  boolean? flag(DOMString key);
+  byte? small(DOMString key);
+  octet? level(DOMString key);
+  unsigned long? count(DOMString key);
+  float? scale(DOMString key);
+  double? ratio(DOMString key);
+  long long? stamp(DOMString key);
+};
+`
+
+const nullableScalarMain = `show_bool(bool? v) string {
+    if x := v { return "{x}"; }
+    return "none";
+}
+
+show_i8(i8? v) string {
+    if x := v { return "{x}"; }
+    return "none";
+}
+
+show_u8(u8? v) string {
+    if x := v { return "{x}"; }
+    return "none";
+}
+
+show_u32(u32? v) string {
+    if x := v { return "{x}"; }
+    return "none";
+}
+
+show_f32(f32? v) string {
+    if x := v { return "{x}"; }
+    return "none";
+}
+
+show_f64(f64? v) string {
+    if x := v { return "{x}"; }
+    return "none";
+}
+
+show_i64(i64? v) string {
+    if x := v { return "{x}"; }
+    return "none";
+}
+
+main() {
+    p := Probe.borrow(1);
+    for k in ["null", "undef", "zero", "value"] {
+        print_line(k + ":" + show_bool(p.flag(k)) + " " + show_i8(p.small(k)) + " " + show_u8(p.level(k)) + " " +
+            show_u32(p.count(k)) + " " + show_f32(p.scale(k)) + " " + show_f64(p.ratio(k)) + " " + show_i64(p.stamp(k)));
+    }
+}
+`
+
+// nullableScalarDriver puts each member on the global object, handle 1 (T1510):
+// it returns null, undefined, its type's zero value or an edge value by key.
+// stamp's values are BigInts because a `long long` result the host returns as a
+// Number throws at the boundary today, nullable or not (#773). It loads the
+// generated probe.js the way a page would (nodePageDriver) and runs the .wasm
+// named by its one argument.
+const nullableScalarDriver = nodePageDriver + `
+const [wasmFile] = process.argv.slice(2);
+
+const by = (zero, value) => (key) =>
+  key === "null" ? null : key === "undef" ? undefined : key === "zero" ? zero : value;
+globalThis.flag = by(false, true);
+globalThis.small = by(0, -1);
+globalThis.level = by(0, 255);
+globalThis.count = by(0, 4294967295);
+globalThis.scale = by(0, 1.5);
+globalThis.ratio = by(0, -2.25);
+globalThis.stamp = by(0n, -2n);
+
+(async () => {
+  const mod = await import(pathToFileURL(path.join(dir, "probe.js")).href);
+  const result = { logs, errs };
+  try {
+    await mod.init(wasmFile);
+    result.ok = true;
+  } catch (e) {
+    result.ok = false;
+    result.message = e && e.message;
+  }
+  process.stdout.write("RESULT:" + JSON.stringify(result) + "\n");
+})();
+`
+
+func TestBindWebIdlGlueNullableScalarResults(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+build+node integration test in short mode")
+	}
+	nodePath, err := resolveWasmRuntime("node")
+	if err != nil {
+		// Neither staged on this machine nor fetchable: a fact about the
+		// environment, not the tree.
+		t.Skipf("the pinned node is not obtainable here: %v", err)
+	}
+	bin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+
+	idlPath := filepath.Join(dir, "probe.idl")
+	if err := os.WriteFile(idlPath, []byte(nullableScalarIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	clitest.RunOK(t, bin, nil, "bind", "webidl", "-name", "probe", "-o", outDir, idlPath)
+	if err := os.WriteFile(filepath.Join(outDir, "main.pr"), []byte(nullableScalarMain), 0644); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(outDir, "driver.cjs")
+	if err := os.WriteFile(driver, []byte(nullableScalarDriver), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	builds := []struct {
+		name string
+		args []string
+	}{
+		{"debug", nil},
+		{"release", []string{"--release"}},
+	}
+	for _, b := range builds {
+		wasm := b.name + ".wasm"
+		args := append(append([]string{"build"}, b.args...), "-target", "wasm32-web", "-o", filepath.Join(outDir, wasm), outDir)
+		clitest.RunOK(t, bin, nil, args...)
+
+		got := runNodeDriver[bindgenGlueResult](t, nodePath, driver, wasm)
+		if !got.OK {
+			t.Errorf("%s: init() rejected: %q (logs %q, errs %q)", b.name, got.Message, got.Logs, got.Errs)
+			continue
+		}
+		want := []string{
+			"null:none none none none none none none",
+			"undef:none none none none none none none",
+			"zero:false 0 0 0 0 0 0", // a zero value is present, not none
+			"value:true -1 255 4294967295 1.5 -2.25 -2",
+		}
+		if strings.Join(got.Logs, "\n") != strings.Join(want, "\n") {
+			t.Errorf("%s: logs = %q, want %q", b.name, got.Logs, want)
 		}
 		if len(got.Errs) != 0 {
 			t.Errorf("%s: unexpected stderr output %q", b.name, got.Errs)

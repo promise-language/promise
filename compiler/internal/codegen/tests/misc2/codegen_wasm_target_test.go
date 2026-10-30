@@ -3,6 +3,7 @@ package misc2
 import (
 	"bytes"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -303,19 +304,173 @@ func TestWasmImportStringParamAndResultOrder(t *testing.T) {
 }
 
 // T1506: the result lowering is scoped to a plain `string` result of a
-// wasm_import. A failable or optional result keeps its sret form, and an extern
-// without wasm_import keeps the value-struct bridge the backend writes both
-// sides of.
+// wasm_import. A failable result keeps its sret form, and an extern without
+// wasm_import keeps the value-struct bridge the backend writes both sides of.
+// (A `string?` result has a lowering of its own: TestWasmImportOptionalResultReturnArea.)
 func TestWasmStringResultUnchangedOutsidePlainWasmImport(t *testing.T) {
 	ir := codegentest.GenerateIRForTarget(t, `
 		_open!(i32 fd) string `+"`extern(\"test_open_s\") `wasm_import(\"env\", \"test_open_s\") `target(web)"+`;
-		_opt() string? `+"`extern(\"test_opt_s\") `wasm_import(\"env\", \"test_opt_s\") `target(web)"+`;
 		_native() string `+"`extern(\"native_s\") `target(web)"+`;
 		main() {}
 	`, "wasm32-web")
 	codegentest.AssertContains(t, ir, "declare void @test_open_s(i8* %sret, i32 %fd)")
-	codegentest.AssertContains(t, ir, "declare void @test_opt_s(i8* %sret)")
 	codegentest.AssertContains(t, ir, "declare void @native_s(i8* %sret)")
+	codegentest.AssertNotContains(t, ir, "%retptr")
+}
+
+// #752: a wasm_import `T?` result, T a string or a scalar of one core value,
+// comes back through a trailing return area: zeroed before the call, an i32
+// presence flag at offset 0 and the value at offset 8 (wasmweb.OptionalResult*,
+// docs/wasm-bindings.md §"Helper Symbols and Their ABI"). The host cannot write
+// Promise's internal {i1, T} optional, which the sret form it replaces asked of
+// it, so a null result had no way to arrive as none.
+func TestWasmImportOptionalResultReturnArea(t *testing.T) {
+	for _, tc := range []struct {
+		result string // the extern's result type
+		core   string // the LLVM type of the value at offset 8
+		lift   string // the instruction that converts it, if any
+		opt    string // the LLVM optional the call yields
+	}{
+		{"bool?", "i32", "= icmp ne i32 %V, 0", "{ i1, i1 }"},
+		{"i8?", "i32", "= trunc i32 %V to i8", "{ i1, i8 }"},
+		{"u16?", "i32", "= trunc i32 %V to i16", "{ i1, i16 }"},
+		{"u32?", "i32", "", "{ i1, i32 }"},
+		{"i64?", "i64", "", "{ i1, i64 }"},
+		{"f32?", "float", "", "{ i1, float }"},
+		{"f64?", "double", "", "{ i1, double }"},
+	} {
+		t.Run(tc.result, func(t *testing.T) {
+			ir := codegentest.GenerateIRForTarget(t, `
+				get_v(i32 h) `+tc.result+" `extern(\"get_v\") `wasm_import(\"dbg\", \"get_v\") `target(wasm)"+`;
+				main() { v := get_v(1); }
+			`, "wasm32-web")
+			flag, valuePtr, after := assertOptionalReturnArea(t, ir, tc.core)
+			value := regexp.MustCompile(`(%\d+) = load ` + regexp.QuoteMeta(tc.core) + `, ` + regexp.QuoteMeta(tc.core) + `\* ` + valuePtr + `\n`).FindStringSubmatch(after)
+			if value == nil {
+				t.Fatalf("the value is not loaded from offset 8 as %s:\n%s", tc.core, after)
+			}
+			if tc.lift != "" {
+				codegentest.AssertContains(t, after, strings.ReplaceAll(tc.lift, "%V", value[1]))
+			} else {
+				codegentest.AssertNotContains(t, after, "trunc "+tc.core)
+			}
+			// none unless the flag is set: the value is never read as present on its own.
+			codegentest.AssertContains(t, after, "= select i1 "+flag+", "+tc.opt+" %")
+			codegentest.AssertContains(t, after, ", "+tc.opt+" zeroinitializer")
+		})
+	}
+
+	// The convention belongs to wasm_import, not to the browser, as a string
+	// result's does: a WASI import lowers the same way.
+	for _, target := range []string{"wasm32-web", "wasm32-wasi"} {
+		t.Run("string?/"+target, func(t *testing.T) {
+			ir := codegentest.GenerateIRForTarget(t, `
+				get_v(i32 h) string? `+"`extern(\"get_v\") `wasm_import(\"dbg\", \"get_v\") `target(wasm)"+`;
+				main() { print_line(get_v(1) ?: "none"); }
+			`, target)
+			flag, _, after := assertOptionalReturnArea(t, ir, "{ i8*, i32 }")
+			// Only the present branch copies the host's bytes and releases its
+			// buffer: an absent result has neither, so it allocates nothing.
+			br := regexp.MustCompile(`br i1 ` + regexp.QuoteMeta(flag) + `, label %(wasm\.opt\.present\.\d+), label %(wasm\.opt\.merge\.\d+)`).FindStringSubmatch(after)
+			if br == nil {
+				t.Fatalf("no branch on the presence flag %s:\n%s", flag, after)
+			}
+			beforeBranch, _, _ := strings.Cut(after, br[0])
+			codegentest.AssertNotContains(t, beforeBranch, "@promise_string_new")
+			present := irBlock(t, ir, br[1])
+			data := regexp.MustCompile(`(%\d+) = load i8\*, i8\*\* `).FindStringSubmatch(present)
+			if data == nil {
+				t.Fatalf("the host's data pointer is not loaded in the present branch:\n%s", present)
+			}
+			codegentest.AssertContains(t, present, "@promise_string_new(i8* "+data[1]+", i64 ")
+			codegentest.AssertContains(t, present, "call void @pal_free(i8* "+data[1]+")")
+			codegentest.AssertContains(t, present, "br label %"+br[2])
+			merge := irBlock(t, ir, br[2])
+			if !regexp.MustCompile(`= phi \{ i1, i8\* \} \[ %\d+, %` + regexp.QuoteMeta(br[1]) + ` \], \[ zeroinitializer, %`).MatchString(merge) {
+				t.Errorf("the merge does not take none from the absent edge:\n%s", merge)
+			}
+		})
+	}
+}
+
+// assertOptionalReturnArea checks the call to @get_v(i32 1, …) passes a zeroed
+// [2 x i64] return area last, then loads the i32 presence flag from offset 0 and
+// addresses the value at offset 8 as core. It returns the flag's icmp result,
+// the pointer to the value and the IR from the call on.
+func assertOptionalReturnArea(t *testing.T, ir, core string) (flag, valuePtr, after string) {
+	t.Helper()
+	codegentest.AssertContains(t, ir, `declare void @get_v(i32 %h, i8* %retptr) `)
+	codegentest.AssertNotContains(t, ir, "@get_v(i8* %sret")
+
+	lines := strings.Split(ir, "\n")
+	callIdx := slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, "call void @get_v(i32 1, ") })
+	if callIdx < 0 {
+		t.Fatalf("no call to @get_v in IR:\n%s", ir)
+	}
+	call := regexp.MustCompile(`call void @get_v\(i32 1, i8\* (%\d+)\)`).FindStringSubmatch(lines[callIdx])
+	if call == nil {
+		t.Fatalf("the return area is not the trailing argument: %s", lines[callIdx])
+	}
+	area := call[1]
+	before := strings.Join(lines[max(0, callIdx-2):callIdx], "\n")
+	codegentest.AssertContains(t, before, "store [2 x i64] zeroinitializer, ")
+	codegentest.AssertContains(t, before, area+" = bitcast [2 x i64]* ")
+
+	after = strings.Join(lines[callIdx:min(len(lines), callIdx+16)], "\n")
+	m := regexp.MustCompile(`(%\d+) = getelementptr i8, i8\* ` + area + `, i32 0\n\s*(%\d+) = bitcast i8\* %\d+ to i32\*\n\s*(%\d+) = load i32, i32\* %\d+\n\s*(%\d+) = icmp ne i32 (%\d+), 0`).FindStringSubmatch(after)
+	if m == nil {
+		t.Fatalf("the presence flag is not loaded as an i32 at offset 0:\n%s", after)
+	}
+	if m[5] != m[3] {
+		t.Fatalf("the flag test %s is not of the loaded flag %s:\n%s", m[5], m[3], after)
+	}
+	v := regexp.MustCompile(`(%\d+) = getelementptr i8, i8\* ` + area + `, i32 8\n\s*(%\d+) = bitcast i8\* (%\d+) to ` + regexp.QuoteMeta(core) + `\*`).FindStringSubmatch(after)
+	if v == nil || v[3] != v[1] {
+		t.Fatalf("the value is not addressed at offset 8 as %s:\n%s", core, after)
+	}
+	return m[4], v[2], after
+}
+
+// irBlock returns the body of the basic block labelled label.
+func irBlock(t *testing.T, ir, label string) string {
+	t.Helper()
+	_, body, ok := strings.Cut(ir, "\n"+label+":\n")
+	if !ok {
+		t.Fatalf("no block %s in IR:\n%s", label, ir)
+	}
+	body, _, _ = strings.Cut(body, "\n\n")
+	return body
+}
+
+// #752: a second Promise name on the same C symbol carries the optional result
+// lowering through declareExterns' dedup path, as a string result's does.
+func TestWasmImportOptionalResultAliasSharesLowering(t *testing.T) {
+	ir := codegentest.GenerateIRForTarget(t, `
+		get_a(i32 h) i32? `+"`extern(\"get_v\") `wasm_import(\"dbg\", \"get_v\") `target(web)"+`;
+		get_b(i32 h) i32? `+"`extern(\"get_v\") `wasm_import(\"dbg\", \"get_v\") `target(web)"+`;
+		main() { a := get_a(1); b := get_b(2); }
+	`, "wasm32-web")
+	codegentest.AssertContains(t, ir, `declare void @get_v(i32 %h, i8* %retptr) `)
+	for _, h := range []string{"1", "2"} {
+		if !regexp.MustCompile(`call void @get_v\(i32 ` + h + `, i8\* %\d+\)`).MatchString(ir) {
+			t.Errorf("the call through handle %s does not pass the trailing return area:\n%s", h, ir)
+		}
+	}
+}
+
+// #752: only a non-failable wasm_import `T?` result, T a string or a scalar of
+// one core value, takes the return area. A failable one, one with no
+// wasm_import, and one whose T has no core value keep the sret form.
+func TestWasmOptionalResultUnchangedOutsideItsLowering(t *testing.T) {
+	ir := codegentest.GenerateIRForTarget(t, `
+		_open!(i32 fd) string? `+"`extern(\"test_open_s\") `wasm_import(\"env\", \"test_open_s\") `target(web)"+`;
+		_native() string? `+"`extern(\"native_s\") `target(web)"+`;
+		_wide() i128? `+"`extern(\"test_wide\") `wasm_import(\"env\", \"test_wide\") `target(web)"+`;
+		main() {}
+	`, "wasm32-web")
+	codegentest.AssertContains(t, ir, "declare void @test_open_s(i8* %sret, i32 %fd)")
+	codegentest.AssertContains(t, ir, "declare void @native_s(i8* %sret)")
+	codegentest.AssertContains(t, ir, "declare void @test_wide(i8* %sret)")
 	codegentest.AssertNotContains(t, ir, "%retptr")
 }
 

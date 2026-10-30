@@ -73,18 +73,19 @@ type FieldLayout struct {
 
 // ExternFunc captures an extern function declaration for codegen and header gen.
 type ExternFunc struct {
-	PromiseName      string           // Promise function name
-	CName            string           // C symbol name
-	Sig              *types.Signature // type system signature
-	IRFunc           *ir.Func         // LLVM IR function declaration
-	ParamTypes       []types.Type     // Promise types of each parameter
-	ResultType       types.Type       // Promise return type (nil for void)
-	HasSret          bool             // true if return uses sret pointer (large struct return)
-	RawABI           bool             // true if the symbol crosses in the raw C ABI (see rawABIExternSymbols)
-	WasmStringResult bool             // true if a wasm_import string result crosses as (ptr, len) through a trailing retptr
-	IsFailable       bool             // true if the extern is failable (returns T!)
-	WasmImportMod    string           // WASM import module name (from `wasm_import annotation)
-	WasmImportName   string           // WASM import name (from `wasm_import annotation)
+	PromiseName        string           // Promise function name
+	CName              string           // C symbol name
+	Sig                *types.Signature // type system signature
+	IRFunc             *ir.Func         // LLVM IR function declaration
+	ParamTypes         []types.Type     // Promise types of each parameter
+	ResultType         types.Type       // Promise return type (nil for void)
+	HasSret            bool             // true if return uses sret pointer (large struct return)
+	RawABI             bool             // true if the symbol crosses in the raw C ABI (see rawABIExternSymbols)
+	WasmStringResult   bool             // true if a wasm_import string result crosses as (ptr, len) through a trailing retptr
+	WasmOptionalResult bool             // true if a wasm_import T? result crosses as a presence flag and a value through a trailing retptr
+	IsFailable         bool             // true if the extern is failable (returns T!)
+	WasmImportMod      string           // WASM import module name (from `wasm_import annotation)
+	WasmImportName     string           // WASM import name (from `wasm_import annotation)
 }
 
 // CompileResult bundles the output of compilation for downstream consumers.

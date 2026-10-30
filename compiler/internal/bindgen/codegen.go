@@ -1033,13 +1033,25 @@ func (g *generator) formatExternReturnType(results []TypeRef) string {
 			}
 			return ""
 		}
-		return promiseExternType(ref)
+		return promiseExternResultType(ref)
 	}
 	var parts []string
 	for _, r := range results {
 		parts = append(parts, promiseExternType(r))
 	}
 	return "(" + strings.Join(parts, ", ") + ")"
+}
+
+// promiseExternResultType is the extern type of a result: an optional built-in
+// keeps its `T?`, which the compiler lowers to a presence flag and the value
+// through a trailing return area (docs/wasm-bindings.md §"Helper Symbols and
+// Their ABI"), so the host can return a null result as none (#752). Every other
+// result crosses as promiseExternType says.
+func promiseExternResultType(ref TypeRef) string {
+	if isOptionOfBuiltin(ref) {
+		return promiseType(ref)
+	}
+	return promiseExternType(ref)
 }
 
 func (g *generator) formatReturnSig(results []TypeRef) string {
@@ -1093,7 +1105,9 @@ func promiseType(ref TypeRef) string {
 // Resource types (NamedKind) become i32 (handle), optional resource types become i32
 // (0 = null). Optional built-ins (e.g. `string?`, `u32?`) are unwrapped to the bare
 // built-in — the wrapper supplies a zero-value sentinel at the call site via
-// lowerOptionExternArg. All other types use the normal promiseType conversion.
+// lowerOptionExternArg. That unwrapping is the parameter lowering (#164): a
+// single result keeps its `T?` (promiseExternResultType). All other types use the
+// normal promiseType conversion.
 // Handles are i32 on WASM (32-bit ref table indices), not int (which is i64).
 func promiseExternType(ref TypeRef) string {
 	switch ref.Kind {

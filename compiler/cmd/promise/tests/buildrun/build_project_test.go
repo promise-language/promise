@@ -695,9 +695,10 @@ interface Element {
 // its self-check on, and a program building each variant compiles for
 // wasm32-web, importing the glue's js_value_* conversions. An optional or
 // nullable argument (#750) does too, at each of those sites, passed `none` or a
-// value. The conversions are module-level and target-filtered, never methods of
-// the enum, so the module — the enum, and a dictionary naming it — still checks
-// on the host target.
+// value — and one `JsValue?` local passed twice, since the lowering's elvis must
+// not move the caller's value. The conversions are module-level and
+// target-filtered, never methods of the enum, so the module — the enum, and a
+// dictionary naming it — still checks on the host target.
 func TestBindWebIdlJsValueCompilesClean(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {

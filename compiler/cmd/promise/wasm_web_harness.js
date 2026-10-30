@@ -10,7 +10,13 @@
 //     process.stdout / process.stderr, and `promise_env.exit(code) -> never`
 //     routed to process.exit,
 //   - calls instance.exports._initialize() (the wasm32-web entry point),
-//   - exits 0 if _initialize returns without invoking promise_env.exit.
+//   - exits 3 if _initialize returns without invoking promise_env.exit.
+//
+// A program with no live host registration ends _initialize in exit, and so
+// does every batch-test binary. One that returns is still a reactor
+// (docs/web-apps.md "The liveness rule"): it waits on host events this
+// harness never delivers, and its leak accounting never runs, so it fails
+// rather than passing on whatever it printed during setup.
 //
 // It deliberately does NOT load the auto-generated bootstrap .js next to the
 // .wasm — that file is browser-only (uses fetch) and would also keep the
@@ -182,6 +188,9 @@ const importObject = {
     process.exit(1);
   }
 
-  // _initialize returned without calling promise_env.exit — treat as success.
-  exitWith(0);
+  // _initialize returned without calling promise_env.exit: a reactor idle on
+  // host events (see the header).
+  bufferWrite(2, Buffer.from(
+    "harness: reactor idle — live host registrations remain and the headless harness delivers no host events\n"));
+  exitWith(3);
 })();

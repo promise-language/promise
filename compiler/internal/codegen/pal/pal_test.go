@@ -209,6 +209,26 @@ func TestWasmPALEmitWrite(t *testing.T) {
 	}
 }
 
+// The terminated flag pal_exit sets is the same global the reactor's host
+// entries read: WebTerminatedGlobal after EmitExit returns pal_exit's global,
+// and the module defines it once.
+func TestWasmWebPALExitSharesTerminatedGlobal(t *testing.T) {
+	module := ir.NewModule()
+	(&WasmWebPAL{}).EmitExit(module)
+	g := WebTerminatedGlobal(module)
+	if again := WebTerminatedGlobal(module); again != g {
+		t.Error("WebTerminatedGlobal returned a second global")
+	}
+
+	out := module.String()
+	if n := strings.Count(out, "@"+wasmweb.GlobalTerminated+" = "); n != 1 {
+		t.Errorf("expected one definition of @%s, got %d:\n%s", wasmweb.GlobalTerminated, n, out)
+	}
+	if !strings.Contains(out, "store i8 1, i8* @"+wasmweb.GlobalTerminated) {
+		t.Errorf("expected pal_exit to set @%s:\n%s", wasmweb.GlobalTerminated, out)
+	}
+}
+
 func TestWasmPALEmitExit(t *testing.T) {
 	module := ir.NewModule()
 	p := &WasmPAL{}

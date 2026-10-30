@@ -1190,9 +1190,9 @@ func (c *Compiler) defineTaskFreeAfterDoneBody(fn *ir.Func, elemType types.Type,
 }
 
 // getTaskDeadlockMsgGlobal returns the shared private deadlock-message global
-// used by the WASM Task[T].drop cooperative-step spin pump (T0668). Created
-// once and reused across all Task[T].drop instantiations to avoid emitting one
-// duplicate 45-byte global per element type.
+// used by the WASM Task[T].drop cooperative-step spin pump (T0668) and by the
+// wasm32-web reactor drains (emitWebDrainVerdict). Created once and reused
+// across all of them to avoid emitting one duplicate 45-byte global per user.
 func (c *Compiler) getTaskDeadlockMsgGlobal() *ir.Global {
 	if c.taskDeadlockMsgGlobal != nil {
 		return c.taskDeadlockMsgGlobal

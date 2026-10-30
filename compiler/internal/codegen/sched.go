@@ -2605,7 +2605,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 
 	if c.isWasm {
 		// WASM: create @_start entry point that calls __promise_init_heap then @main
-		c.emitWasmStart(mainFn)
+		c.emitWasmStart(mainFn, true)
 		// Init scheduler with 1 P (single-threaded cooperative)
 		entry.NewCall(c.funcs["promise_sched_init"], constant.NewInt(irtypes.I32, 1))
 	} else {

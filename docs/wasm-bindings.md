@@ -943,8 +943,8 @@ source, so the two cannot differ.
 
 ### Base PAL Imports
 
-Every `wasm32-web` binary imports exactly three functions from `promise_env`, whether
-or not it uses WebIDL bindings. A host that does not supply all three fails to
+Every `wasm32-web` binary imports exactly four functions from `promise_env`, whether
+or not it uses WebIDL bindings. A host that does not supply all four fails to
 instantiate with a `LinkError` before any user code runs.
 
 | Import | Signature | Behavior |
@@ -952,17 +952,27 @@ instantiate with a `LinkError` before any user code runs.
 | `write(fd, ptr, len)` | `(i32, i32, i64) -> i64` | fd 2 routes to `console.error`, any other fd to `console.log` |
 | `exit(code)` | `(i32) -> void` | throws to unwind — see below |
 | `monotonic_nanos()` | `() -> i64` | monotonic clock in nanoseconds |
+| `schedule_pump(kind, delay_ms)` | `(i32, i32) -> void` | calls `promise_web_pump` again later, by the mechanism `kind` names — [web-apps.md](web-apps.md) §"Budget and continuation" |
+
+Every `wasm32-web` binary exports the reactor's `promise_web_pump`
+([web-apps.md](web-apps.md) §"Layer 1 the exported surface"), whether or not it
+ever becomes a reactor, and the pump calls `schedule_pump` when its budget runs out
+with work remaining. The guest picks the
+continuation's kind because it, not the host, knows why it stopped pumping.
 
 `len` and `write`'s return value are `i64`, so they cross the boundary as **BigInt**.
 
 Two behaviors are easy to get wrong when writing a host by hand:
 
 - **`exit` must throw.** Throwing is the only way to abort a synchronous WASM call from
-  a JS import. A normal `main()` return lowers to `pal_exit(0)`, so *every* successful
-  run unwinds through `exit`. The generated code throws an `_ExitSignal` carrying the
-  exit code; `init()` swallows code `0` and rethrows anything else, so a panic or an
-  explicit non-zero exit still surfaces to the caller as a rejection rather than
-  silently returning the exports. Both artifacts export `_ExitSignal`: a caller
+  a JS import. A program with no live registration ends `_initialize` in `pal_exit(0)`,
+  so its successful run unwinds through `exit`. A reactor's `_initialize` returns
+  normally — `init()` resolves with the instance alive — and a later
+  `promise_web_pump` may unwind through `exit` instead. The generated code throws an
+  `_ExitSignal` carrying the exit code; `init()` and every pump the loader makes
+  swallow code `0` and rethrow anything else, so a panic or an explicit non-zero exit
+  still surfaces to the caller rather than passing silently. After any exit the
+  loader makes no further call into the instance. Both artifacts export `_ExitSignal`: a caller
   identifies an exit with `e instanceof _ExitSignal`, then reads the code from
   `e.code`. `.code` alone does not identify an exit — a `DOMException` a host import
   throws has a numeric `.code` too.
@@ -1017,7 +1027,7 @@ function writeString(instance, str) {
 
 const imports = {
     promise_env: {
-        // write / exit / monotonic_nanos also live here — see Base PAL Imports.
+        // write / exit / monotonic_nanos / schedule_pump also live here — see Base PAL Imports.
         document_create_element(tag_ptr, tag_len) {
             const tag = readString(instance.exports.memory, tag_ptr, tag_len);
             return refStore(document.createElement(tag));

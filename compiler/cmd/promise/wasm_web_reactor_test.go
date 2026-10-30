@@ -155,20 +155,32 @@ main() {
 //   - "click N" dispatches N clicks to every listener;
 //   - "script OP..." runs each OP in order: "enq:<ref>:<handle>" enqueues to
 //     <ref> — a name the program printed as "ID <name> <id>", or "#<id>" — and
-//     does not pump; "pump" pumps; "click:<kind>" dispatches one event to the
-//     listeners of that kind, as the page's own event would.
+//     does not pump; "pump" pumps; "pump?" pumps and, if the pump ends the
+//     program, records the exit code in exits and goes on; "click:<kind>"
+//     dispatches one event to the listeners of that kind, as the page's own
+//     event would; "await:<line>" waits until the program has printed line —
+//     what a continuation the loader scheduled prints — and holds nothing
+//     open meanwhile, so the wait ends only if the loader keeps node alive
+//     for that continuation.
 //
 // It reports one RESULT: line. Every enqueue — the driver's own, and those the
 // loader's event listeners make — is recorded as [sub_id, handle, returned] by
 // wrapping the instance's exports, and every event handle Promise code releases
-// is recorded by supplying promise_env's "[resource-drop]event" to init().
+// is recorded by supplying promise_env's "[resource-drop]event" to init(), and
+// so is the number of MessagePorts still holding node open at the end. It
+// also supplies promise_env's "poke": called by Promise code while it runs, it
+// enqueues 7 to the subscription it is given and pumps, as a page's event
+// dispatched synchronously from inside a Promise→JS call would, and records
+// that nested pump's result as nested.
 const webReactorDriver = nodePageDriver + `
 const [name, mode, ...vals] = process.argv.slice(2);
 
 const enqueues = [];
+let raw;
 const instantiateStreaming = WebAssembly.instantiateStreaming;
 WebAssembly.instantiateStreaming = async (source, imports) => {
   const { module, instance } = await instantiateStreaming(source, imports);
+  raw = instance.exports;
   const exports = { ...instance.exports };
   exports.promise_web_enqueue = (sub, handle) => {
     const returned = instance.exports.promise_web_enqueue(sub, handle);
@@ -190,14 +202,35 @@ const idOf = (ref) => {
   return id;
 };
 
+let onLog;
+const pageLog = console.log;
+console.log = (...args) => {
+  pageLog(...args);
+  if (onLog) onLog(args.join(" "));
+};
+const printed = (line) => logs.includes(line) ? Promise.resolve() : new Promise((resolve) => {
+  onLog = (l) => {
+    if (l === line) {
+      onLog = undefined;
+      resolve();
+    }
+  };
+});
+
 (async () => {
-  const result = { pumps: [], listeners: 0 };
+  const result = { pumps: [], exits: [], listeners: 0 };
   const drops = [];
   const listeners = [];
   globalThis.document = { body: { addEventListener(kind, fn) { listeners.push({ kind, fn }); } } };
   const mod = await import(pathToFileURL(path.join(dir, name + ".js")).href);
   try {
-    const exports = await mod.init({ promise_env: { "[resource-drop]event"(handle) { drops.push(handle); } } });
+    const exports = await mod.init({ promise_env: {
+      "[resource-drop]event"(handle) { drops.push(handle); },
+      poke(sub) {
+        raw.promise_web_enqueue(sub, 7);
+        result.nested = raw.promise_web_pump();
+      },
+    } });
     result.ok = true;
     if (mode === "enqueue") {
       for (const v of vals) {
@@ -216,10 +249,19 @@ const idOf = (ref) => {
           exports.promise_web_enqueue(idOf(arg), Number(handle));
         } else if (verb === "pump") {
           result.pumps.push(exports.promise_web_pump());
+        } else if (verb === "pump?") {
+          try {
+            result.pumps.push(exports.promise_web_pump());
+          } catch (e) {
+            if (!(e instanceof mod._ExitSignal)) throw e;
+            result.exits.push(e.code);
+          }
         } else if (verb === "click") {
           for (const l of listeners) {
             if (l.kind === arg) l.fn({ type: arg });
           }
+        } else if (verb === "await") {
+          await printed(arg);
         } else {
           throw new Error("unknown driver op " + op);
         }
@@ -236,7 +278,11 @@ const idOf = (ref) => {
   result.errs = errs;
   result.enqueues = enqueues;
   result.drops = drops;
+  result.openPorts = process.getActiveResourcesInfo().filter((r) => r === "MessagePort").length;
   process.stdout.write("RESULT:" + JSON.stringify(result) + "\n");
+  // A port the loader left holding node open would hang the run; the test
+  // reports openPorts instead.
+  if (result.openPorts) process.exit(0);
 })();
 `
 
@@ -272,14 +318,17 @@ type webReactorResult struct {
 	Logs        []string       `json:"logs"`
 	Errs        []string       `json:"errs"`
 	Pumps       []int          `json:"pumps"`
+	Exits       []int          `json:"exits"`  // exit codes "pump?" recorded
+	Nested      *int           `json:"nested"` // what poke's nested pump returned
 	Listeners   int            `json:"listeners"`
 	OK          bool           `json:"ok"`
 	ExitSignal  bool           `json:"exitSignal"`
 	Code        int            `json:"code"`
 	DriverError string         `json:"driverError"`
 	IDs         map[string]int `json:"ids"`
-	Enqueues    [][3]int       `json:"enqueues"` // [sub_id, handle, returned]
-	Drops       []int          `json:"drops"`    // event handles Promise code released
+	Enqueues    [][3]int       `json:"enqueues"`  // [sub_id, handle, returned]
+	Drops       []int          `json:"drops"`     // event handles Promise code released
+	OpenPorts   int            `json:"openPorts"` // MessagePorts holding node open at the end
 }
 
 // TestWebReactorParksThroughCalls runs real wasm32-web reactor programs under
@@ -319,6 +368,10 @@ func TestWebReactorParksThroughCalls(t *testing.T) {
 			webReactorResult{ExitSignal: true, Code: 2}, "all goroutines are asleep - deadlock!"},
 		{"parked goroutine at a clean exit", []string{"clean_exit", "init"},
 			webReactorResult{Logs: []string{"MAIN DONE"}, OK: true}, ""},
+		// The program ended in _initialize, so the instance is terminated: a
+		// later pump runs nothing.
+		{"pump after a clean exit", []string{"clean_exit", "script", "pump"},
+			webReactorResult{Logs: []string{"MAIN DONE"}, Pumps: []int{wasmweb.PumpTerminated}, OK: true}, ""},
 	}
 	for _, c := range cases {
 		got := runNodeDriver[webReactorResult](t, nodePath, driver, c.args...)
@@ -620,7 +673,7 @@ func TestWebDeliveryQueueSemantics(t *testing.T) {
 	// subscription is drained by its consumer after close(), or by its own
 	// drop. Every event handle the host enqueued — the gate's included — must
 	// be released by Promise code unless enqueue handed it back to the host,
-	// and the program then ends cleanly.
+	// and the program then ends cleanly inside the gate listener's pump.
 	for _, c := range []struct {
 		name string
 		logs []string
@@ -631,8 +684,8 @@ func TestWebDeliveryQueueSemantics(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := runNodeDriver[webReactorResult](t, nodePath, driver,
-				c.name, "script", "click:click", "click:click", "click:click", "click:gate")
-			assertWebCleanExit(t, got)
+				c.name, "script", "click:click", "click:click", "click:click", "click:gate", "pump")
+			assertWebListenerExit(t, got)
 			if strings.Join(got.Logs, "\n") != strings.Join(c.logs, "\n") {
 				t.Errorf("logs = %q, want %q", got.Logs, c.logs)
 			}
@@ -656,6 +709,234 @@ func TestWebDeliveryQueueSemantics(t *testing.T) {
 	}
 }
 
+// webHostEntryPrograms are the programs of TestWebReactorHostEntries.
+var webHostEntryPrograms = map[string]string{
+	// main makes a Promise→JS call that dispatches an event synchronously: the
+	// driver's poke enqueues and pumps while main is still running.
+	"reentrant_init": webReactorExterns + `
+_poke(i32 sub_id) ` + "`extern(\"poke\") `wasm_import(\"promise_env\", \"poke\") `target(web)" + `;
+
+main() {
+  sub_id := _web_subscribe(4, 0);
+  ch := _web_channel(sub_id);
+  go {
+    v := <-ch;
+    if v is present {
+      print_line("GOT {v}");
+    }
+    _web_unsubscribe(sub_id);
+  };
+  _poke(sub_id);
+  print_line("AFTER POKE");
+}
+`,
+	// docs/web-apps.md "It must be usable without bindgen": main's own loop
+	// parks between events, and after three it ends its subscription and
+	// returns, so the pump that runs it ends the program.
+	"main_loop": webReactorExterns + `
+main() {
+  sub_id := _web_subscribe(4, 0);
+  print_line("ID sub {sub_id}");
+  ch := _web_channel(sub_id);
+  print_line("ready");
+  count := 0;
+  for h in ch {
+    print_line("{h}");
+    count = count + 1;
+    if count == 3 {
+      _web_unsubscribe(sub_id);
+      break;
+    }
+  }
+}
+`,
+	// A handler in main panics on its second event.
+	"handler_panics": webReactorExterns + `
+main() {
+  sub_id := _web_subscribe(4, 0);
+  print_line("ID sub {sub_id}");
+  ch := _web_channel(sub_id);
+  for h in ch {
+    print_line("{h}");
+    assert(h != 2, "boom");
+  }
+}
+`,
+	// Through modules/web: main takes one click and returns, which drops its
+	// subscription, so the click's pump ends the program.
+	"listener_exit": `use web;
+
+main() {
+  sub := web.events(web.document.body, ["click"]);
+  e := sub.next();
+  print_line("CLICKED");
+}
+`,
+	// As listener_exit, but the handler panics.
+	"listener_panics": `use web;
+
+main() {
+  sub := web.events(web.document.body, ["click"]);
+  e := sub.next();
+  assert(e is absent, "boom");
+}
+`,
+	// The event's handler starts more goroutine steps than one pump's step
+	// budget (wasmweb.StepBudget), so DONE can only print in a continuation the
+	// loader runs through schedule_pump, and that continuation ends the program.
+	"continuation": webReactorExterns + `
+main() {
+  sub_id := _web_subscribe(4, 0);
+  print_line("ID sub {sub_id}");
+  ch := _web_channel(sub_id);
+  v := <-ch;
+  _web_unsubscribe(sub_id);
+  done := channel[i32](5000);
+  for i in 0..5000 {
+    go { done.send(1); };
+  }
+  count := 0;
+  while count < 5000 {
+    r := <-done;
+    count = count + 1;
+  }
+  print_line("DONE");
+}
+`,
+	// A consumer ends the only registration while main waits on a channel no
+	// one can send to: the pump that runs it finds nothing runnable, nothing
+	// live and main not done — a deadlock.
+	"pump_deadlock": webReactorExterns + `
+main() {
+  sub_id := _web_subscribe(4, 0);
+  print_line("ID sub {sub_id}");
+  ch := _web_channel(sub_id);
+  go {
+    v := <-ch;
+    if v is present {
+      print_line("GOT {v}");
+    }
+    _web_unsubscribe(sub_id);
+  };
+  never := channel[i32](1);
+  w := <-never;
+  print_line("never");
+}
+`,
+}
+
+// TestWebReactorHostEntries drives host entries into a live reactor under the
+// pinned node (docs/web-apps.md "Budget and continuation", "Re entrancy",
+// "Failure inside a handler", "Program lifetime and termination"). A host
+// entry made while _initialize's drain runs must not nest a pump. However the
+// instance exits — a clean drain, a panic or a deadlock — it is terminated: a
+// later enqueue hands its handle back and a later pump returns PumpTerminated
+// without running anything. The loader runs the continuation a pump schedules,
+// swallows a clean exit inside a listener's pump or a continuation, surfaces
+// any other, and after an exit makes no further call into the instance.
+func TestWebReactorHostEntries(t *testing.T) {
+	t.Parallel()
+	nodePath, driver := buildWebReactorPrograms(t, webHostEntryPrograms)
+
+	t.Run("reentrant_init", func(t *testing.T) {
+		got := runNodeDriver[webReactorResult](t, nodePath, driver, "reentrant_init", "init")
+		if got.DriverError != "" || !got.OK || len(got.Errs) != 0 {
+			t.Fatalf("driver error %q, ok=%v, stderr %q; want init() to resolve cleanly", got.DriverError, got.OK, got.Errs)
+		}
+		if got.Nested == nil || *got.Nested != wasmweb.PumpMore {
+			t.Errorf("the pump nested in main returned %v, want %d (an outer pump is running)", got.Nested, wasmweb.PumpMore)
+		}
+		// The consumer runs in _initialize's own drain, after main's call returns.
+		if want := []string{"AFTER POKE", "GOT 7"}; !slices.Equal(got.Logs, want) {
+			t.Errorf("logs = %q, want %q", got.Logs, want)
+		}
+	})
+
+	for _, c := range []struct {
+		name    string
+		ops     []string
+		pumps   []int
+		exits   []int
+		returns []int // what each enqueue returned, in order
+		logs    []string
+		wantErr string
+	}{
+		// The third pump ends the program; the instance then takes nothing more.
+		{"main_loop", []string{"enq:sub:1", "pump", "enq:sub:2", "pump", "enq:sub:3", "pump?", "enq:sub:4", "pump"},
+			[]int{wasmweb.PumpIdle, wasmweb.PumpIdle, wasmweb.PumpTerminated}, []int{0},
+			[]int{0, 0, 0, 4}, []string{"ready", "1", "2", "3"}, ""},
+		// The second pump panics; the instance is terminated, not left pumping.
+		{"handler_panics", []string{"enq:sub:1", "pump", "enq:sub:2", "pump?", "enq:sub:3", "pump"},
+			[]int{wasmweb.PumpIdle, wasmweb.PumpTerminated}, []int{1},
+			[]int{0, 0, 3}, []string{"1", "2"}, "boom"},
+		// The pump spends its budget and returns PumpMore; the continuation the
+		// loader schedules runs without anything else holding node open, and its
+		// clean exit is swallowed — nothing reaches stderr or the event loop —
+		// leaving the instance terminated.
+		{"continuation", []string{"enq:sub:1", "pump", "await:DONE", "pump"},
+			[]int{wasmweb.PumpMore, wasmweb.PumpTerminated}, nil,
+			[]int{0}, []string{"DONE"}, ""},
+		// The pump's drain is a deadlock: it aborts with exit code 2, and the
+		// instance is terminated.
+		{"pump_deadlock", []string{"enq:sub:1", "pump?", "enq:sub:2", "pump"},
+			[]int{wasmweb.PumpTerminated}, []int{2},
+			[]int{0, 2}, []string{"GOT 1"}, "all goroutines are asleep - deadlock!"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := runNodeDriver[webReactorResult](t, nodePath, driver, append([]string{c.name, "script"}, c.ops...)...)
+			if got.DriverError != "" || !got.OK {
+				t.Fatalf("driver error %q, ok=%v, exitSignal=%v code=%d", got.DriverError, got.OK, got.ExitSignal, got.Code)
+			}
+			if !slices.Equal(got.Pumps, c.pumps) || !slices.Equal(got.Exits, c.exits) {
+				t.Errorf("pumps = %v and exits = %v, want %v and %v", got.Pumps, got.Exits, c.pumps, c.exits)
+			}
+			var returns []int
+			for _, e := range got.Enqueues {
+				returns = append(returns, e[2])
+			}
+			if !slices.Equal(returns, c.returns) {
+				t.Errorf("enqueue returned %v, want %v", returns, c.returns)
+			}
+			if !slices.Equal(got.Logs, c.logs) {
+				t.Errorf("logs = %q, want %q", got.Logs, c.logs)
+			}
+			if errs := strings.Join(got.Errs, "\n"); (c.wantErr == "") != (errs == "") || !strings.Contains(errs, c.wantErr) {
+				t.Errorf("stderr = %q, want %q", got.Errs, c.wantErr)
+			}
+			// Nothing is pending, so the loader holds nothing open: a ref'd
+			// port would keep node from exiting at all.
+			if got.OpenPorts != 0 {
+				t.Errorf("%d MessagePorts still hold node open, want none", got.OpenPorts)
+			}
+		})
+	}
+
+	// The first click ends the program inside its listener's pump; the second
+	// reaches a listener the page still holds, which must not call in again.
+	t.Run("listener_exit", func(t *testing.T) {
+		got := runNodeDriver[webReactorResult](t, nodePath, driver, "listener_exit", "script", "click:click", "click:click", "pump")
+		assertWebListenerExit(t, got)
+		if len(got.Enqueues) != 1 {
+			t.Errorf("enqueues = %v, want only the first click's", got.Enqueues)
+		}
+		if want := []string{"CLICKED"}; !slices.Equal(got.Logs, want) {
+			t.Errorf("logs = %q, want %q", got.Logs, want)
+		}
+	})
+
+	// A panic in the handler surfaces to the dispatching page as init() would
+	// surface it.
+	t.Run("listener_panics", func(t *testing.T) {
+		got := runNodeDriver[webReactorResult](t, nodePath, driver, "listener_panics", "script", "click:click")
+		if got.DriverError != "" || !got.ExitSignal || got.Code != 1 {
+			t.Errorf("driver error %q, exitSignal=%v code=%d; want the click to surface exit code 1", got.DriverError, got.ExitSignal, got.Code)
+		}
+		if !strings.Contains(strings.Join(got.Errs, "\n"), "boom") {
+			t.Errorf("stderr %q does not contain the panic message", got.Errs)
+		}
+	})
+}
+
 // assertWebCleanExit requires the driven program to have ended with exit code 0
 // and nothing on stderr.
 func assertWebCleanExit(t *testing.T, got webReactorResult) {
@@ -665,6 +946,25 @@ func assertWebCleanExit(t *testing.T, got webReactorResult) {
 	}
 	if !got.ExitSignal || got.Code != 0 || len(got.Errs) != 0 {
 		t.Errorf("exitSignal=%v code=%d stderr=%q, want a clean exit", got.ExitSignal, got.Code, got.Errs)
+	}
+}
+
+// assertWebListenerExit requires a program the driver ended through a loader
+// listener, then pumped once more, to have ended cleanly: the listener's pump
+// swallowed exit code 0 — nothing reached the dispatching page and nothing
+// went to stderr — and the instance is terminated, so the last pump ran
+// nothing.
+func assertWebListenerExit(t *testing.T, got webReactorResult) {
+	t.Helper()
+	if got.DriverError != "" {
+		t.Fatalf("the driver failed: %s", got.DriverError)
+	}
+	if !got.OK || got.ExitSignal || len(got.Errs) != 0 {
+		t.Errorf("ok=%v exitSignal=%v code=%d stderr=%q, want the listener to end the program cleanly",
+			got.OK, got.ExitSignal, got.Code, got.Errs)
+	}
+	if len(got.Pumps) == 0 || got.Pumps[len(got.Pumps)-1] != wasmweb.PumpTerminated {
+		t.Errorf("pumps = %v, want the last one to return %d (terminated)", got.Pumps, wasmweb.PumpTerminated)
 	}
 }
 

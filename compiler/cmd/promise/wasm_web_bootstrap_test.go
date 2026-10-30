@@ -58,9 +58,45 @@ func TestEmitWebBootstrapJSIncludesWebModuleGlue(t *testing.T) {
 		"web_add_event_listener(", "console_log(", "document_get_body(",
 		`"[resource-drop]event"(`, `"[resource-drop]element"(`,
 		"wasm.exports." + wasmweb.ExportEnqueue + "(", "wasm.exports." + wasmweb.ExportPump + "()",
+		"_deliver(sub_id, event);",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("bootstrap JS missing modules/web glue %q", want)
+		}
+	}
+}
+
+// TestEmitWebBootstrapJSGuardsHostEntries verifies the loader names every
+// reactor symbol from internal/wasmweb (docs/web-apps.md "One name one
+// definition") and enters the instance only through _enter, which stops at the
+// exit latch the exit import sets — so after any exit the loader calls nothing
+// more, and a pump that ends the program never throws _ExitSignal code 0 out of
+// an event dispatch. TestWebDeliveryQueueSemantics and TestWebReactorHostEntries
+// are the behavioral proof.
+func TestEmitWebBootstrapJSGuardsHostEntries(t *testing.T) {
+	dir := t.TempDir()
+	wasmFile := filepath.Join(dir, "frontend.wasm")
+
+	emitWebBootstrapJS(wasmFile)
+
+	data, err := os.ReadFile(filepath.Join(dir, "frontend.js"))
+	if err != nil {
+		t.Fatalf("read bootstrap JS: %v", err)
+	}
+	content := string(data)
+
+	for _, want := range []string{
+		wasmweb.ImportModule + ": { ...basePromiseEnv, ...(importObject." + wasmweb.ImportModule + " || {}) }",
+		"_enter(() => wasm.exports." + wasmweb.ExportInitialize + "());",
+		"_enter(() => wasm.exports." + wasmweb.ExportPump + "());",
+		"wasm.exports." + wasmweb.ExportEnqueue + "(id, _refStore(obj))",
+		wasmweb.SchedulePumpImport + "(kind, delayMs) {",
+		"_exited = true;\n      throw new _ExitSignal(",
+		"function _deliver(id, obj) {\n  if (_exited) return;",
+		"function _enter(entry) {\n  if (_exited) return;",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("bootstrap JS missing %q", want)
 		}
 	}
 }

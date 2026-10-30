@@ -67,7 +67,7 @@ func IsExport(sym string) bool { return slices.Contains(Exports(), sym) }
 // Pump return codes (ExportPump).
 const (
 	PumpIdle       = 0 // nothing runnable; instance is idle and waiting on the host
-	PumpMore       = 1 // work remains; a continuation has been scheduled
+	PumpMore       = 1 // a continuation is in flight: scheduled through schedule_pump, or an outer pump still running
 	PumpTerminated = 2 // the instance has exited; further pumps do nothing
 )
 

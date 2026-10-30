@@ -68,6 +68,17 @@ func TestNamedKinds(t *testing.T) {
 			if kinds.isOptionalHandle(TypeRef{Kind: OptionKind, Elem: &opt}) {
 				t.Errorf("isOptionalHandle(%s??) = true, want false", c.name)
 			}
+			// Only an option of JsValue itself lowers through
+			// _js_value_to_ref with Undefined for none (#750).
+			if j := kinds.isOptionalJsValue(opt); j != (c.want == namedJsValue) {
+				t.Errorf("isOptionalJsValue(%s?) = %v, want %v", c.name, j, c.want == namedJsValue)
+			}
+			if kinds.isOptionalJsValue(ref) {
+				t.Errorf("isOptionalJsValue(%s) = true, want false for a type that is not an option", c.name)
+			}
+			if kinds.isOptionalJsValue(TypeRef{Kind: OptionKind, Elem: &opt}) {
+				t.Errorf("isOptionalJsValue(%s??) = true, want false", c.name)
+			}
 		})
 	}
 
@@ -121,6 +132,39 @@ func TestJsValueConstructorParam(t *testing.T) {
 };`), "web")
 	assertContains(t, out, "handle := _thing_constructor(_js_value_to_ref(init));")
 	assertContains(t, out, "_thing_constructor(i32 init) i32")
+}
+
+// TestOptionalJsValueParamLowersThroughUndefined covers #750: an optional
+// (`optional any`) or nullable (`object?`) argument is a JsValue? that crosses
+// through _js_value_to_ref, `none` as Undefined, at every wrapper site —
+// constructor, method, static and setter. A bare `any` beside them keeps its
+// plain conversion, and the externs still take an i32.
+func TestOptionalJsValueParamLowersThroughUndefined(t *testing.T) {
+	out := GeneratePromise(overloadIR(t, `interface Target {
+	constructor(optional any init);
+	undefined f(optional any x);
+	undefined g(object? y);
+	static undefined s(optional any z);
+	attribute object? a;
+	undefined h(any v);
+};`), "web")
+
+	assertContains(t, out, "handle := _target_constructor(_js_value_to_ref(init ?: JsValue.Undefined));")
+	assertContains(t, out, "_target_f(this._handle, _js_value_to_ref(x ?: JsValue.Undefined));")
+	assertContains(t, out, "_target_g(this._handle, _js_value_to_ref(y ?: JsValue.Undefined));")
+	assertContains(t, out, "_target_s(_js_value_to_ref(z ?: JsValue.Undefined));")
+	assertContains(t, out, "_target_set_a(this._handle, _js_value_to_ref(value ?: JsValue.Undefined));")
+	assertContains(t, out, "_target_h(this._handle, _js_value_to_ref(v));")
+	assertNotContains(t, out, "v ?: JsValue.Undefined")
+	for _, extern := range []string{
+		"_target_constructor(i32 init) i32",
+		"_target_f(i32 handle, i32 x)",
+		"_target_g(i32 handle, i32 y)",
+		"_target_s(i32 z)",
+		"_target_set_a(i32 handle, i32 value)",
+	} {
+		assertContains(t, out, extern)
+	}
 }
 
 // jsValueTag returns the tag of the JsValue variant named name: its index in

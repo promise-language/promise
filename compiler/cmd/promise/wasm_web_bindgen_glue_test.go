@@ -329,11 +329,13 @@ func TestBindWebIdlMaplikeSetlikeRoundTrip(t *testing.T) {
 // from one variant table, and each half's text has tests of its own; this is
 // the test of them agreeing at runtime: each variant lifts as itself, a held
 // object goes back to the host as the same object, and every primitive slot,
-// going out or coming back, is released.
+// going out or coming back, is released. An optional argument passed `none`
+// reaches the host as `undefined` (#750), not as null.
 
 const jsValueGlueIDL = `interface Thing {
   attribute any data;
   any echo(any x);
+  any echoMaybe(optional any x);
   any make(DOMString kind);
   object? find(DOMString key);
 };
@@ -371,6 +373,8 @@ main() {
     }
     print_line("found=" + describe(t.find("yes") ?: JsValue.Str(value: "none")));
     print_line("missing=" + describe(t.find("no") ?: JsValue.Str(value: "none")));
+    print_line("maybe-none=" + describe(t.echo_maybe(none)));
+    print_line("maybe-null=" + describe(t.echo_maybe(JsValue.Null)));
     t.data = JsValue.Str(value: "set");
     for i in 0..` + strconv.Itoa(jsValueGlueRounds) + ` {
         for v in [JsValue.Undefined, JsValue.Null, JsValue.Bool(value: true), JsValue.Bool(value: false), JsValue.Number(value: 1.5), JsValue.Str(value: "héllo")] {
@@ -379,6 +383,7 @@ main() {
                 print_line(got);
             }
         }
+        t.echo_maybe(none);
     }
 }
 `
@@ -399,6 +404,7 @@ globalThis.echo = (x) => {
   if (x === held) echoedHeld = true;
   return x;
 };
+globalThis.echoMaybe = (x) => x;
 globalThis.make = (kind) => made[kind];
 globalThis.find = (key) => (key === "yes" ? {} : null);
 
@@ -484,6 +490,10 @@ func TestBindWebIdlGlueRoundTripsJsValues(t *testing.T) {
 			"bigint=object", // a JS value no other variant takes lifts as Object
 			"found=object",
 			"missing=str:none", // a null object? result is none
+			// An optional argument's none reaches the host as undefined, a
+			// present Null as null.
+			"maybe-none=undefined",
+			"maybe-null=null",
 			// The primitives echoed back: each built in the glue, lifted by tag.
 			"undefined",
 			"null",

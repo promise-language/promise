@@ -1155,3 +1155,126 @@ func TestBindWebIdlConvertsToDerivedInterface(t *testing.T) {
 		}
 	}
 }
+
+// #766 end to end, where the conversion cannot be named `from`
+// (docs/wasm-bindings.md §"Factory names"): Own declares a static `from` and P
+// an instance one, which C inherits, so each of the three converts by
+// `from_handle` — a `global `from` on C would override P's instance member,
+// and bind's self-check would reject the module. H sees only its root's static
+// `from`, which its conversion hides. Each conversion still reaches its
+// `[cast]` import, and each `from` the IDL declares still reaches the host's.
+
+const conversionFallbackIDL = `interface R { static undefined from(DOMString s); };
+interface Own : R { static undefined from(DOMString s); };
+interface P : R { undefined from(DOMString s); };
+interface C : P {};
+interface H : R {};
+interface Document { R make(DOMString kind); };
+`
+
+const conversionFallbackMain = `use web "./web";
+
+// The interfaces r's host object converts to, each followed by a ";".
+convertible(web.R r) string {
+    s := "";
+    own := web.Own.from_handle(r);
+    if own {
+        s = s + "Own;";
+    }
+    p := web.P.from_handle(r);
+    if p {
+        p.from("via-p");
+        s = s + "P;";
+    }
+    c := web.C.from_handle(r);
+    if c {
+        s = s + "C;";
+    }
+    h := web.H.from(r);
+    if h {
+        s = s + "H;";
+    }
+    return s;
+}
+
+main() {
+    web.R.from("r");
+    web.Own.from("own");
+    print_line(convertible(web.document.make("c")));
+    print_line(convertible(web.document.make("h")));
+    print_line(convertible(web.document.make("own")));
+}
+`
+
+// conversionFallbackDriver stands in for the page's host classes, whose `from`
+// members log the call, and for the document that makes an object of the
+// class its kind names, before loading web/web.js the way a page would
+// (nodePageDriver) and running the .wasm named by its one argument.
+const conversionFallbackDriver = nodePageDriver + `
+const [wasmFile] = process.argv.slice(2);
+
+class R { static from(s) { console.log("R.from " + s); } }
+class Own extends R { static from(s) { console.log("Own.from " + s); } }
+class P extends R { from(s) { console.log("P#from " + s); } }
+class C extends P {}
+class H extends R {}
+Object.assign(globalThis, { R, Own, P, C, H });
+globalThis.document = { make(kind) { return new ({ c: C, h: H, own: Own })[kind](); } };
+
+(async () => {
+  const mod = await import(pathToFileURL(path.join(dir, "web", "web.js")).href);
+  const result = { logs, errs };
+  try {
+    await mod.init(wasmFile);
+    result.ok = true;
+  } catch (e) {
+    result.ok = false;
+    result.message = e && e.message;
+  }
+  process.stdout.write("RESULT:" + JSON.stringify(result) + "\n");
+})();
+`
+
+func TestBindWebIdlConversionFallbackName(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+build+node integration test in short mode")
+	}
+	nodePath, err := resolveWasmRuntime("node")
+	if err != nil {
+		// Neither staged on this machine nor fetchable: a fact about the
+		// environment, not the tree.
+		t.Skipf("the pinned node is not obtainable here: %v", err)
+	}
+	bin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+
+	idlPath := filepath.Join(dir, "fallback.idl")
+	if err := os.WriteFile(idlPath, []byte(conversionFallbackIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	app := filepath.Join(dir, "app")
+	clitest.RunOK(t, bin, nil, "bind", "webidl", "-name", "web", "-o", filepath.Join(app, "web"), idlPath)
+	for name, content := range map[string]string{
+		"promise.toml": "[module]\nname = \"app\"\nepoch = \"" + bindEpoch() + "\"\n",
+		"main.pr":      conversionFallbackMain,
+		"driver.cjs":   conversionFallbackDriver,
+	} {
+		if err := os.WriteFile(filepath.Join(app, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clitest.RunOK(t, bin, nil, "build", "-target", "wasm32-web", "-o", filepath.Join(app, "app.wasm"), app)
+
+	got := runNodeDriver[bindgenGlueResult](t, nodePath, filepath.Join(app, "driver.cjs"), "app.wasm")
+	if !got.OK {
+		t.Fatalf("init() rejected: %q (logs %q, errs %q)", got.Message, got.Logs, got.Errs)
+	}
+	want := []string{"R.from r", "Own.from own", "P#from via-p", "P;C;", "H;", "Own;"}
+	if strings.Join(got.Logs, "\n") != strings.Join(want, "\n") {
+		t.Errorf("logs = %q, want %q", got.Logs, want)
+	}
+	if len(got.Errs) != 0 {
+		t.Errorf("unexpected stderr output %q", got.Errs)
+	}
+}

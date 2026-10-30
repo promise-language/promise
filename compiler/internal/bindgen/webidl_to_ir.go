@@ -24,8 +24,8 @@ import (
 // Dictionaries become Records carrying their inherited members as their own
 // fields (flattened). Enums become IR Enums. A
 // typedef names no type: each use of one lowers as its target written in its
-// place (convertWebIdlTypeRef). The file produces a single module named from the
-// first interface, or "web" if no interfaces are present.
+// place (convertWebIdlTypeRef). The file produces a single module, named "web";
+// `promise bind` names the module it writes (runBindWebIdl).
 //
 // It fails when two values of one enum generate the same variant
 // (convertEnum), when a dictionary's inheritance cannot be flattened — an
@@ -924,6 +924,10 @@ func convertWebIdlTypeRef(ref *webidl.TypeRef, typedefs map[string]*webidl.TypeR
 		result = TypeRef{Kind: NamedKind, Name: "JsValue"}
 	case webidl.UnionType:
 		// Union types → Named "JsValue" (most general)
+		result = TypeRef{Kind: NamedKind, Name: "JsValue"}
+	case webidl.AsyncSequenceType:
+		// async_sequence<T> → Named "JsValue": the host's async iterable object,
+		// passed through and not iterated by the binding
 		result = TypeRef{Kind: NamedKind, Name: "JsValue"}
 	default:
 		result = TypeRef{Kind: BuiltinKind, Builtin: "u32"}

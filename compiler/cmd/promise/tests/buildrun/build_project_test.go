@@ -1466,6 +1466,62 @@ interface Callable {
 	}
 }
 
+// TestBindWebIdlAsyncIterableCompilesClean is the end-to-end acceptance for #60's
+// cause 4: webref's fs.idl and streams.idl declare `async_iterable<…>`, streams.idl
+// with an argument list, and an `async_sequence<T>` argument. Before the fix the
+// parser rejected both and `bind` exited 1 for the whole input. An async iterable
+// binds no member; an async sequence binds as JsValue, crossing as a ref.
+func TestBindWebIdlAsyncIterableCompilesClean(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "streams.idl")
+	idl := `[Exposed=Window]
+interface FileSystemHandle {};
+[Exposed=Window]
+interface FileSystemDirectoryHandle : FileSystemHandle {
+  async_iterable<USVString, FileSystemHandle>;
+};
+dictionary ReadableStreamIteratorOptions {
+  boolean preventCancel = false;
+};
+[Exposed=Window]
+interface ReadableStream {
+  static ReadableStream from(async_sequence<any> asyncIterable);
+  async_iterable<any>(optional ReadableStreamIteratorOptions options = {});
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	if out, err := exec.Command(bin, "bind", "webidl", "-name", "streams", "-o", outDir, idlPath).CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	userPath := filepath.Join(outDir, "use_streams.pr")
+	user := `main() ` + "`target(web)" + ` {
+    stream := ReadableStream.from(JsValue.Null);
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	if want := `"wasm-import-name"="ReadableStream.from"`; !strings.Contains(string(out), want) {
+		t.Errorf("generated IR is missing %q", want)
+	}
+}
+
 // TestBindWebIdlDocCommentsCompileClean is the end-to-end acceptance for #659:
 // IDL comments become `doc annotations and every uncommented declaration gets a
 // generated one, so every `public line of the generated module carries a `doc —

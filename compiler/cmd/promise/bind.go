@@ -289,7 +289,7 @@ func runBindWebIdl(args []string) {
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "options:")
 		fmt.Fprintln(os.Stderr, "  -o <dir>        output directory (default: .)")
-		fmt.Fprintln(os.Stderr, "  -name <name>    module name (default: derived from first interface)")
+		fmt.Fprintln(os.Stderr, "  -name <name>    module name (default: the first input file's name)")
 		fmt.Fprintln(os.Stderr, "  -target <t>     target annotation: web, wasi (default: web)")
 		fmt.Fprintln(os.Stderr, "  -keep <path>    generate only the interfaces and members listed in <path>,")
 		fmt.Fprintln(os.Stderr, "                  one Interface or Interface.member per line")
@@ -391,16 +391,12 @@ func runBindWebIdl(args []string) {
 		os.Exit(1)
 	}
 
-	// Determine final module name — use the IR module name (derived via idlToSnake)
-	// to stay consistent with what GeneratePromise emits.
+	// The module is named by -name, or else by the first input file
+	// (docs/wasm-bindings.md §"The bind Subcommand").
 	if moduleName == "" {
-		if len(allModules) > 0 && allModules[0].Name != "web" {
-			moduleName = allModules[0].Name
-		} else {
-			base := filepath.Base(idlFiles[0])
-			moduleName = strings.TrimSuffix(strings.TrimSuffix(base, ".webidl"), ".idl")
-			moduleName = strings.ReplaceAll(moduleName, "-", "_")
-		}
+		base := filepath.Base(idlFiles[0])
+		moduleName = strings.TrimSuffix(strings.TrimSuffix(base, ".webidl"), ".idl")
+		moduleName = strings.ReplaceAll(moduleName, "-", "_")
 	}
 
 	// Generate Promise source

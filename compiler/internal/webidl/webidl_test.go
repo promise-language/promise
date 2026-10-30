@@ -1338,6 +1338,128 @@ func TestParseMemberSpecials(t *testing.T) {
 	if strOp.Special != "stringifier" {
 		t.Errorf("expected special 'stringifier', got %q", strOp.Special)
 	}
+	if it := members[4].(*Iterable); !it.Async {
+		t.Errorf("expected `async iterable` to be async, got %+v", it)
+	}
+}
+
+// TestParseAsyncIterable: `async_iterable<…>` — WebIDL's current spelling of
+// `async iterable<…>`, as webref's fs.idl and streams.idl write it — declares an
+// async iterable, with an optional argument list that only an async one takes.
+// Like legacycaller, the lexer leaves it an identifier, so anywhere else it still
+// names something.
+func TestParseAsyncIterable(t *testing.T) {
+	iterable := func(t *testing.T, src string) *Iterable {
+		t.Helper()
+		file, errs := Parse(src, "test.webidl")
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		return file.Interfaces[0].Members[0].(*Iterable)
+	}
+
+	t.Run("pair, verbatim webref", func(t *testing.T) {
+		it := iterable(t, "interface FileSystemDirectoryHandle : FileSystemHandle { async_iterable<USVString, FileSystemHandle>; };")
+		if !it.Async {
+			t.Error("expected an async iterable")
+		}
+		if it.KeyType == nil || it.KeyType.Builtin != "USVString" {
+			t.Errorf("expected key type USVString, got %+v", it.KeyType)
+		}
+		if it.ValueType.Kind != NamedType || it.ValueType.Name != "FileSystemHandle" {
+			t.Errorf("expected value type FileSystemHandle, got %+v", it.ValueType)
+		}
+	})
+
+	for _, tc := range []struct{ name, member string }{
+		{"argument list, verbatim webref", "async_iterable<any>(optional ReadableStreamIteratorOptions options = {});"},
+		{"empty argument list", "async_iterable<DOMString>();"},
+		{"older spelling with an argument list", "async iterable<any>(optional ReadableStreamIteratorOptions options = {});"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			it := iterable(t, "interface ReadableStream { "+tc.member+" };")
+			if !it.Async || it.KeyType != nil {
+				t.Errorf("expected a single-type async iterable, got %+v", it)
+			}
+		})
+	}
+
+	t.Run("sync", func(t *testing.T) {
+		if it := iterable(t, "interface Foo { iterable<long>; };"); it.Async {
+			t.Errorf("expected a sync iterable, got %+v", it)
+		}
+	})
+
+	// Only an async iterable takes an argument list.
+	t.Run("sync with an argument list", func(t *testing.T) {
+		_, errs := Parse("interface Foo { iterable<long>(long x); };", "test.webidl")
+		if len(errs) == 0 {
+			t.Fatal("expected parse errors")
+		}
+		if want := "expected ;, got ("; !contains(errs[0].Error(), want) {
+			t.Errorf("expected first error to contain %q, got: %v", want, errs)
+		}
+	})
+
+	t.Run("in a namespace", func(t *testing.T) {
+		_, errs := Parse("namespace n { async_iterable<long>; };", "test.webidl")
+		if len(errs) != 1 {
+			t.Fatalf("expected one error, got %v", errs)
+		}
+		if want := "test.webidl:1:15: namespace n: a namespace member is"; !contains(errs[0].Error(), want) {
+			t.Errorf("expected error to contain %q, got: %v", want, errs[0])
+		}
+	})
+
+	t.Run("an identifier elsewhere", func(t *testing.T) {
+		src := "interface Foo { undefined f(long async_iterable, long async_sequence); attribute long async_iterable; };"
+		file, errs := Parse(src, "test.webidl")
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		members := file.Interfaces[0].Members
+		op := members[0].(*Operation)
+		if len(op.Params) != 2 || op.Params[0].Name != "async_iterable" || op.Params[1].Name != "async_sequence" {
+			t.Errorf("expected params async_iterable, async_sequence; got %+v", op.Params)
+		}
+		if attr := members[1].(*Attribute); attr.Name != "async_iterable" {
+			t.Errorf("expected attribute async_iterable, got %q", attr.Name)
+		}
+	})
+}
+
+// TestParseAsyncSequence: `async_sequence<T>` is a type, nullable like any
+// other; the lexer leaves `async_sequence` an identifier, a keyword only before
+// `<`.
+func TestParseAsyncSequence(t *testing.T) {
+	t.Run("argument types", func(t *testing.T) {
+		src := "interface Stream { undefined pipe(async_sequence<DOMString> s, optional async_sequence<any>? t); };"
+		file, errs := Parse(src, "test.webidl")
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		params := file.Interfaces[0].Members[0].(*Operation).Params
+		if len(params) != 2 {
+			t.Fatalf("expected 2 params, got %+v", params)
+		}
+		s, u := params[0].Type, params[1].Type
+		if s.Kind != AsyncSequenceType || s.Elem == nil || s.Elem.Builtin != "DOMString" || s.Nullable {
+			t.Errorf("expected async_sequence<DOMString>, got %+v", s)
+		}
+		if u.Kind != AsyncSequenceType || u.Elem == nil || u.Elem.Builtin != "any" || !u.Nullable || !params[1].Optional {
+			t.Errorf("expected optional async_sequence<any>?, got %+v", params[1])
+		}
+	})
+
+	t.Run("unclosed", func(t *testing.T) {
+		_, errs := Parse("interface Stream { undefined pipe(async_sequence<DOMString s); };", "test.webidl")
+		if len(errs) == 0 {
+			t.Fatal("expected parse errors")
+		}
+		if want := "test.webidl:1:60: expected >, got identifier"; !contains(errs[0].Error(), want) {
+			t.Errorf("expected first error to contain %q, got: %v", want, errs)
+		}
+	})
 }
 
 // TestParseLegacyCaller: `legacycaller` starts a special operation, named or

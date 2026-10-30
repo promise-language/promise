@@ -279,8 +279,9 @@ func TestApplyKeepList(t *testing.T) {
 		{
 			// Fancy is not listed. A member naming it — directly, nullable,
 			// through a sequence, or as an anonymous getter's result — would not
-			// compile, so it is dropped and reported. A union, a Promise and a
-			// record lower to JsValue, so a name inside one is not a reference.
+			// compile, so it is dropped and reported. A union, a Promise, a
+			// record and an async sequence lower to JsValue, so a name inside one
+			// is not a reference.
 			name: "members naming a dropped interface",
 			src: `interface Fancy {};
 			interface Element {
@@ -289,13 +290,14 @@ func TestApplyKeepList(t *testing.T) {
 				undefined either((Fancy or DOMString) value);
 				Promise<Fancy> later();
 				undefined table(record<DOMString, Fancy> entries);
+				undefined pipe(async_sequence<Fancy> chunks);
 				attribute Fancy? maybe;
 				getter Fancy (unsigned long index);
 				readonly attribute DOMString id;
 			};`,
-			list: "Element\nElement.fancy\nElement.many\nElement.either\nElement.later\nElement.table\nElement.maybe\nElement.id\n",
+			list: "Element\nElement.fancy\nElement.many\nElement.either\nElement.later\nElement.table\nElement.pipe\nElement.maybe\nElement.id\n",
 			resources: map[string][]string{
-				"Element": {"Element.either", "Element.later", "Element.table", "Element.id.get"},
+				"Element": {"Element.either", "Element.later", "Element.table", "Element.pipe", "Element.id.get"},
 			},
 			types: map[string][]string{},
 			drops: []KeepDrop{

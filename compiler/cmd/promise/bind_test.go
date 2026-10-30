@@ -110,3 +110,48 @@ func TestRunBindWebIdlScaffoldEpoch(t *testing.T) {
 
 	assertScaffoldEpoch(t, outDir, wantBindEpoch(t))
 }
+
+// TestRunBindWebIdlModuleName: `bind webidl` names the module by -name, or else
+// by its first input file with `-` written `_` — never by an interface, so a
+// first interface named Web changes nothing (#60; docs/wasm-bindings.md §"The
+// bind Subcommand").
+func TestRunBindWebIdlModuleName(t *testing.T) {
+	cases := []struct {
+		name string
+		file string
+		args []string
+		want string
+	}{
+		{name: "the first input file", file: "other.idl", want: "other"},
+		{name: "-name", file: "other.idl", args: []string{"-name", "web"}, want: "web"},
+		{name: "a hyphenated file", file: "css-anchor.idl", want: "css_anchor"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			idlPath := filepath.Join(dir, tc.file)
+			idl := "[Exposed=Window]\ninterface Web { readonly attribute long n; };\n"
+			if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+				t.Fatal(err)
+			}
+			outDir := filepath.Join(dir, "out")
+
+			silenceStdout(t, func() {
+				runBindWebIdl(append(append([]string{"-o", outDir}, tc.args...), idlPath))
+			})
+
+			for _, ext := range []string{".pr", ".js"} {
+				if _, err := os.Stat(filepath.Join(outDir, tc.want+ext)); err != nil {
+					t.Errorf("module file not written under the module name: %v", err)
+				}
+			}
+			toml, err := os.ReadFile(filepath.Join(outDir, "promise.toml"))
+			if err != nil {
+				t.Fatalf("promise.toml not written: %v", err)
+			}
+			if want := fmt.Sprintf("name = %q", tc.want); !strings.Contains(string(toml), want) {
+				t.Errorf("promise.toml missing %s; got:\n%s", want, toml)
+			}
+		})
+	}
+}

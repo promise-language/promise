@@ -525,8 +525,9 @@ and declares none. The conversion's import, `[cast]C`, asks the host whether the
 is an instance of `C`'s interface object (`instanceof`, on the glue's global; an interface the
 host does not define has no instances). If it is not, `from` returns `none` and no handle is
 minted. If it is, the host stores the same object under a new handle, and `from` returns an owning
-wrapper over it. The wrapper passed in is unchanged, owned or borrowed, and keeps its own handle,
-so each of the two releases its own handle exactly once, in either order:
+wrapper over it, which releases that handle exactly once when it drops. The wrapper passed in is
+unchanged: owned or borrowed, it keeps its own handle and its own drop, so the two drop
+independently, in either order:
 
 ```promise
 input := web.HTMLInputElement.from(el);   // el an Element; input an HTMLInputElement?

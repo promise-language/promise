@@ -4801,19 +4801,24 @@ func TestWebIdlAttributeNullableBuiltinSetter(t *testing.T) {
 // #752: a nullable built-in result's extern keeps the `T?` the wrapper returns,
 // which the compiler lowers to a presence flag and the value through a trailing
 // return area, so the host can return null as none. The wrapper returns the
-// extern's result as it is, with no zero-value default, in every member shape.
+// extern's result as it is, with no zero-value default, in every member shape,
+// and the glue writes each one's result through that area: an operation, an
+// attribute getter, a static, and an anonymous getter, whose property access
+// yields undefined for a key the object does not support.
 func TestWebIdlNullableBuiltinResultExternKeepsOptional(t *testing.T) {
 	src := `interface Element {
 		DOMString? getAttribute(DOMString name);
 		long? count(DOMString key);
 		attribute boolean? flag;
 		static double? ratio();
+		getter DOMString? (DOMString name);
 	};`
 	file, errs := webidl.Parse(src, "test.webidl")
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	out := GeneratePromise(mustWebIdlToIR(t, file), "web")
+	modules := mustWebIdlToIR(t, file)
+	out := GeneratePromise(modules, "web")
 	for _, want := range []string{
 		"_element_get_attribute(i32 handle, string name) string?\n",
 		"return _element_get_attribute(this._handle, name);",
@@ -4823,11 +4828,30 @@ func TestWebIdlNullableBuiltinResultExternKeepsOptional(t *testing.T) {
 		"return _element_flag(this._handle);",
 		"_element_ratio() f64?\n",
 		"return _element_ratio();",
+		"_element_getter(i32 handle, string name) string?\n",
+		"return _element_getter(this._handle, name);",
 	} {
 		assertContains(t, out, want)
 	}
 	assertNotContains(t, out, ") string\n")
 	assertNotContains(t, out, ") i32\n")
+
+	glue := GenerateJSGlue(modules)
+	for _, want := range []string{
+		`"Element.getAttribute"($handle, name$ptr, name$len, $retptr) {
+      _writeOptionalResult($retptr, _refLoad($handle).getAttribute(_readString(name$ptr, name$len)), "string");`,
+		`"Element.count"($handle, key$ptr, key$len, $retptr) {
+      _writeOptionalResult($retptr, _refLoad($handle).count(_readString(key$ptr, key$len)), "setInt32");`,
+		`"Element.flag.get"($handle, $retptr) {
+      _writeOptionalResult($retptr, _refLoad($handle).flag, "setInt32");`,
+		`"Element.ratio"($retptr) {
+      _writeOptionalResult($retptr, Element.ratio(), "setFloat64");`,
+		`"Element.getter"($handle, name$ptr, name$len, $retptr) {
+      _writeOptionalResult($retptr, _refLoad($handle)[_readString(name$ptr, name$len)], "string");`,
+	} {
+		assertContains(t, glue, want)
+	}
+	assertNotContains(t, glue, "_writeStringResult($retptr")
 }
 
 // TestCodegenMethodWrapperOptionBuiltinParam exercises the Option<Builtin>

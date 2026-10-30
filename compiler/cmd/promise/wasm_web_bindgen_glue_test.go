@@ -44,6 +44,11 @@ const bindgenGlueMain = `main() {
     print_line("missing:[" + (e.get_attribute("missing") ?: "none") + "]");
     print_line("undef:[" + (e.get_attribute("undef") ?: "none") + "]");
     print_line("empty:[" + (e.get_attribute("empty") ?: "none") + "]");
+    if big := e.get_attribute("big") {
+        print_line("big:" + big.len.to_string(base: 10));
+    } else {
+        print_line("big:none");
+    }
     first := e.text_content;
     stable := true;
     present := 0;
@@ -67,8 +72,9 @@ const bindgenGlueMain = `main() {
 `
 
 // bindgenGlueDriver loads the generated element.js the way a page would
-// (nodePageDriver). Arguments: the .wasm file, the textContent fixture
-// ("empty" or "big"), and the innerHTML fixture ("ok" or "throw"). It reports
+// (nodePageDriver). Arguments: the .wasm file, the string fixture ("empty",
+// "big" for a big textContent, or "bigattr" for a big getAttribute("big"), which
+// is otherwise null), and the innerHTML fixture ("ok" or "throw"). It reports
 // one RESULT: line of JSON.
 const bindgenGlueDriver = nodePageDriver + `
 const [wasmFile, text, html] = process.argv.slice(2);
@@ -84,7 +90,8 @@ if (html === "throw") {
 }
 globalThis.textContent = text === "big" ? "x".repeat(200000) : "";
 globalThis.getAttribute = (name) =>
-  name === "id" ? "x1" : name === "undef" ? undefined : name === "empty" ? "" : null;
+  name === "id" ? "x1" : name === "undef" ? undefined : name === "empty" ? "" :
+  name === "big" && text === "bigattr" ? "y".repeat(200000) : null;
 
 (async () => {
   const mod = await import(pathToFileURL(path.join(dir, "element.js")).href);
@@ -152,14 +159,17 @@ func TestBindWebIdlGlueRoundTripsStrings(t *testing.T) {
 		clitest.RunOK(t, bin, nil, args...)
 
 		cases := []struct {
-			name, text, html string
-			wantText         string
+			name, text, html  string
+			wantBig, wantText string
 		}{
-			{"empty", "empty", "ok", "text:0 stable:true"},
+			{"empty", "empty", "ok", "big:none", "text:0 stable:true"},
 			// Larger than the allocator's biggest size class, so the host's
 			// cabi_realloc grows memory inside the import: the (ptr, len) write
 			// must go through a view taken after the growth.
-			{"big", "big", "ok", "text:200000 stable:true"},
+			{"big", "big", "ok", "big:none", "text:200000 stable:true"},
+			// The same growth inside a nullable result's import, where the
+			// presence flag is written after the (ptr, len) pair (#752).
+			{"bigattr", "bigattr", "ok", "big:200000", "text:0 stable:true"},
 		}
 		for _, c := range cases {
 			got := runNodeDriver[bindgenGlueResult](t, nodePath, driver, wasm, c.text, c.html)
@@ -174,6 +184,7 @@ func TestBindWebIdlGlueRoundTripsStrings(t *testing.T) {
 				"missing:[none]", // a null DOMString? result is absent (#752)
 				"undef:[none]",   // so is undefined, not the string "undefined"
 				"empty:[]",       // while a present "" stays present
+				c.wantBig,
 				c.wantText,
 				"present:50", // every other read of 100 is present
 			}

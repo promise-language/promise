@@ -58,7 +58,7 @@ func TestWebIdlUnboundReference(t *testing.T) {
 		{
 			name: "async iterable value type",
 			src:  `interface A { async_iterable<DOMString, Missing>; };`,
-			want: []string{"dict.webidl:1:15: A.iterable names Missing, which is not defined in the bound IDL files"},
+			want: []string{"dict.webidl:1:15: A.async_iterable names Missing, which is not defined in the bound IDL files"},
 		},
 		{
 			// Each member a maplike declares is checked as a written one is, and

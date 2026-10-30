@@ -112,25 +112,27 @@ func TestRunBindWebIdlScaffoldEpoch(t *testing.T) {
 }
 
 // TestRunBindWebIdlModuleName: `bind webidl` names the module by -name, or else
-// by its first input file with `-` written `_` — never by an interface, so a
-// first interface named Web changes nothing (#60; docs/wasm-bindings.md §"The
+// by its first input file with `-` written `_` — never by an interface, whether
+// the first one is named Web or anything else (#60; docs/wasm-bindings.md §"The
 // bind Subcommand").
 func TestRunBindWebIdlModuleName(t *testing.T) {
 	cases := []struct {
-		name string
-		file string
-		args []string
-		want string
+		name  string
+		file  string
+		iface string
+		args  []string
+		want  string
 	}{
-		{name: "the first input file", file: "other.idl", want: "other"},
-		{name: "-name", file: "other.idl", args: []string{"-name", "web"}, want: "web"},
-		{name: "a hyphenated file", file: "css-anchor.idl", want: "css_anchor"},
+		{name: "the first input file", file: "other.idl", iface: "Document", want: "other"},
+		{name: "a first interface named Web", file: "other.idl", iface: "Web", want: "other"},
+		{name: "-name", file: "other.idl", iface: "Document", args: []string{"-name", "web"}, want: "web"},
+		{name: "a hyphenated file", file: "css-anchor.idl", iface: "Document", want: "css_anchor"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			idlPath := filepath.Join(dir, tc.file)
-			idl := "[Exposed=Window]\ninterface Web { readonly attribute long n; };\n"
+			idl := "[Exposed=Window]\ninterface " + tc.iface + " { readonly attribute long n; };\n"
 			if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
 				t.Fatal(err)
 			}

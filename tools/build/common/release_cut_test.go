@@ -2471,18 +2471,35 @@ func TestShellGitPushAtomic(t *testing.T) {
 	}
 }
 
-// TestShellGitRestoreFile covers how cut stable abandons a bump the commit
-// guard refused: CommitFile has already staged it, so the restore must put back
-// the index as well as the working tree, or the next cut fails its clean-tree
-// gate.
-func TestShellGitRestoreFile(t *testing.T) {
-	g, run, work, _ := newTempOriginRepo(t)
+// TestShellGitRestoreAfterRefusedCommit covers, against real git, how cut stable
+// abandons a bump the commit guard refuses — the epoch-2026.10 failure. A
+// pre-commit hook that refuses stands in for bin/precommit-guard: CommitFile must
+// report the refusal (so the commit runs the hook and its status is read) and
+// leave HEAD where it was, and because its `git add` already staged the bump,
+// RestoreFile must put back the index as well as the working tree, or the next
+// cut fails its clean-tree gate.
+func TestShellGitRestoreAfterRefusedCommit(t *testing.T) {
+	g, run, work, head := newTempOriginRepo(t)
+	hooks := t.TempDir()
+	refuse := "#!/bin/sh\necho 'precommit-guard: staged tree is not the blessed tree' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte(refuse), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Set in the repo itself, so a hooksPath in the host's global config cannot
+	// decide which hook runs.
+	run(work, "config", "core.hooksPath", hooks)
+
 	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("bumped\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	run(work, "add", "a.txt")
-	if clean, err := g.CleanTree(); err != nil || clean {
-		t.Fatalf("CleanTree (staged edit) = %v (%v), want dirty", clean, err)
+	if err := g.CommitFile("a.txt", "bump"); err == nil {
+		t.Fatal("CommitFile succeeded although the pre-commit hook refused — the bump commit must go through the commit guard")
+	}
+	if got := run(work, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("HEAD = %s after a refused commit, want it left at %s", got, head)
+	}
+	if staged := run(work, "diff", "--cached", "--name-only"); staged != "a.txt" {
+		t.Fatalf("staged after the refused commit = %q, want a.txt (CommitFile adds before it commits)", staged)
 	}
 	if err := g.RestoreFile("a.txt"); err != nil {
 		t.Fatalf("RestoreFile: %v", err)

@@ -131,16 +131,6 @@ func TestWebIdlTypedefInlinedAsTarget(t *testing.T) {
 			};`,
 		},
 		{
-			// HTML's EventHandler shape: the typedef resolves to the callback,
-			// whose own lowering is #595's.
-			name: "callback typedef",
-			typedefs: `callback CB = undefined (DOMString s);
-			typedef CB? Handler;
-			interface A { attribute Handler onfoo; };`,
-			inline: `callback CB = undefined (DOMString s);
-			interface A { attribute CB? onfoo; };`,
-		},
-		{
 			name: "typedef declared after its use",
 			typedefs: `interface A { attribute Name label; };
 			typedef DOMString Name;`,

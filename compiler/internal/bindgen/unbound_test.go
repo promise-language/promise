@@ -138,6 +138,49 @@ interface A {
 			},
 		},
 		{
+			// #765: a callback declares no type, and no lowering applies to a
+			// reference that carries its name, so each declaration naming one is
+			// reported as an undefined name is — with why.
+			name: "a callback in every position",
+			src: `callback CB = Promise<undefined> ();
+dictionary D { CB handler; long n; };
+dictionary R { required CB handler; };
+interface A {
+  undefined go(CB cb);
+  attribute CB? onfoo;
+};
+namespace ns { undefined later(CB cb); };`,
+			want: []string{
+				"dict.webidl:2:16: D.handler names CB, which is a callback with no lowering here",
+				"dict.webidl:3:16: R.handler names CB, which is a callback with no lowering here",
+				"dict.webidl:5:3: A.go names CB, which is a callback with no lowering here",
+				"dict.webidl:6:3: A.onfoo names CB, which is a callback with no lowering here",
+				"dict.webidl:8:16: ns.later names CB, which is a callback with no lowering here",
+			},
+		},
+		{
+			// HTML's EventHandler shape: a use of the typedef names the typedef,
+			// which is defined, so only the typedef is reported, at the cause.
+			name: "a typedef naming a callback, not its uses",
+			src: `callback EventHandlerNonNull = any (Event event);
+typedef EventHandlerNonNull? EventHandler;
+interface A { attribute EventHandler onclick; };`,
+			want: []string{"dict.webidl:2:1: typedef EventHandler names EventHandlerNonNull, which is a callback with no lowering here"},
+		},
+		{
+			// Each reference is reported with its own cause.
+			name: "a callback and an undefined name",
+			src: `callback CB = undefined (DOMString s);
+interface A {
+  undefined go(CB cb);
+  Missing find();
+};`,
+			want: []string{
+				"dict.webidl:3:3: A.go names CB, which is a callback with no lowering here",
+				"dict.webidl:4:3: A.find names Missing, which is not defined in the bound IDL files",
+			},
+		},
+		{
 			name: "reported with the other failures",
 			src: `typedef A A;
 dictionary D : Gone {};
@@ -196,17 +239,26 @@ func TestWebIdlUnboundReferenceNotReported(t *testing.T) {
 			src:  outsideIDL,
 		},
 		{
-			// A callback is defined; lowering it is #595's.
-			name: "typedef, enum, callback and dictionary",
+			name: "typedef, enum and dictionary",
 			src: `typedef DOMString Name;
 enum Mode { "a", "b" };
-callback CB = undefined (DOMString s);
 dictionary Opts { Name label; Mode mode; };
 interface A {
   attribute Name n;
   attribute Mode m;
-  attribute CB? cb;
   undefined go(optional Opts o = {});
+};`,
+		},
+		{
+			// A callback that nothing references, or that only a union or a
+			// Promise<T> names, is no reference (#765); nor is a name in a
+			// callback's own signature, which binds nothing.
+			name: "a callback inside a union or Promise",
+			src: `callback CB = undefined (Missing m);
+callback Unused = undefined ();
+interface A {
+  (CB or undefined) get(DOMString name);
+  Promise<CB> whenDefined(DOMString name);
 };`,
 		},
 		{

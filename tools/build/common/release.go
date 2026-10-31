@@ -89,8 +89,9 @@ subcommands:
              [--notes-file <path>|-] [--notes <text>]
         gated release orchestrator (T0943, docs/release-automation.md#cutting-with-enforced-gates).
         cut next refreshes the moving epoch-next pre-release at HEAD; cut stable
-        derives the epoch (no --epoch flag), runs every gate, then tags, pushes,
-        and bumps catalog.toml — all only when every gate is green. --dry-run
+        derives the epoch (no --epoch flag), runs every gate, then bumps
+        catalog.toml, verifies and commits the bump, tags, and pushes the branch
+        and the tag in one atomic push — all only when every gate is green. --dry-run
         prints the checklist and changes nothing. --commit <commit> pins the cut
         to a commit-ish (hash, branch, tag, HEAD~2 — peeled to its commit)
         instead of HEAD. A gate may be bypassed only with

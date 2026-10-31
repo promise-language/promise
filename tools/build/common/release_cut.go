@@ -26,8 +26,9 @@ import (
 //
 //   cut next   — refresh the moving `epoch-next` pre-release at HEAD.
 //   cut stable — derive the epoch (cut stable owns the number — no --epoch flag),
-//                run all gates, tag, push, then bump catalog.toml to the next
-//                same-year epoch on main and push.
+//                run all gates, bump catalog.toml to the next same-year epoch,
+//                verify and commit the bump, tag, then push the branch and the
+//                tag in one atomic push.
 //
 // `git`/`gh` are behind the cutGit/cutGH interfaces (mirroring the existing
 // releaseUploader/blobFetcher stub pattern) so release_cut_test.go is hermetic.
@@ -58,7 +59,8 @@ type cutGit interface {
 	CreateTag(tag, message, sha string, force bool) error // git tag -a [-f] <tag> -m <msg> <sha>
 	PushTag(tag string, force bool) error                 // git push [-f] origin <tag>
 	CommitFile(path, message string) error                // git add <path> && git commit -m <msg>
-	PushBranch(branch string) error                       // git push origin <branch>
+	RestoreFile(path string) error                        // git checkout HEAD -- <path> (index and working tree)
+	PushAtomic(branch, tag string) error                  // git push --atomic origin <branch> refs/tags/<tag>
 	ResolveSHA(ref string) (string, error)                // git rev-parse <ref>^{commit}
 	LogSubjects(fromRef, toSHA string) ([]string, error)  // git log --no-merges --pretty=%s <fromRef>..<toSHA>
 }
@@ -142,8 +144,15 @@ func (g shellGit) CommitFile(path, message string) error {
 	}
 	return RunIn(g.root, "git", "commit", "-m", message)
 }
-func (g shellGit) PushBranch(branch string) error {
-	return RunIn(g.root, "git", "push", "origin", branch)
+func (g shellGit) RestoreFile(path string) error {
+	return RunIn(g.root, "git", "checkout", "HEAD", "--", path)
+}
+
+// PushAtomic pushes the branch and the tag in one `git push --atomic`: origin
+// takes both refs or neither, so a stable tag is never published without the
+// catalog bump that travels with it.
+func (g shellGit) PushAtomic(branch, tag string) error {
+	return RunIn(g.root, "git", "push", "--atomic", "origin", branch, "refs/tags/"+tag)
 }
 func (g shellGit) ResolveSHA(ref string) (string, error) {
 	// `^{commit}` peels annotated tags / branch refs to the underlying commit so
@@ -479,6 +488,10 @@ type cutContext struct {
 	git      cutGit
 	gh       cutGH
 	uploader releaseUploader
+	// verifyTree runs bin/verify's pipeline over the working tree, blessing it
+	// for the commit guard when it passes. cut stable calls it on the bumped
+	// catalog so the bump commit is a verified tree.
+	verifyTree func() error
 
 	interactive bool
 	stdin       io.Reader
@@ -1094,6 +1107,7 @@ func runReleaseCut(root string, args []string) error {
 		stdin:       os.Stdin,
 		stdout:      os.Stdout,
 	}
+	ctx.verifyTree = func() error { return RunVerify(ctx.root, nil, ctx.stdout) }
 	switch channel {
 	case "next":
 		return cutNext(ctx)
@@ -1153,8 +1167,14 @@ func cutNext(ctx *cutContext) error {
 	return nil
 }
 
-// cutStable derives the epoch, runs all gates, then tags → pushes → bumps the
-// catalog epoch on the current branch → pushes.
+// cutStable derives the epoch, runs all gates, then bumps the catalog epoch →
+// verifies the bumped tree → commits it on the current branch → tags → pushes
+// the branch and the tag atomically.
+//
+// Every step that can fail locally runs before anything reaches origin: the
+// stable tag is immutable once pushed, and the bump commit must pass the commit
+// guard, which accepts only a tree verify blessed. The one push is atomic, so
+// origin gets the tag and its bump together or neither.
 func cutStable(ctx *cutContext) error {
 	if err := ctx.git.Fetch(); err != nil {
 		return fmt.Errorf("git fetch: %w", err)
@@ -1212,37 +1232,53 @@ func cutStable(ctx *cutContext) error {
 	tag := "epoch-" + target.String()
 	next := epoch{Year: target.Year, N: target.N + 1}
 	if ctx.dryRun {
-		fmt.Fprintf(ctx.stdout, "\n[dry-run] would: tag %s @ %s → push → bump catalog.toml to %s → commit → push current branch\nRelease notes:\n%s",
-			tag, short(ctx.targetSHA), next, notes)
+		fmt.Fprintf(ctx.stdout, "\n[dry-run] would: bump catalog.toml to %s → verify the bumped tree → commit → tag %s @ %s → push current branch + tag atomically\nRelease notes:\n%s",
+			next, tag, short(ctx.targetSHA), notes)
 		return nil
 	}
 
-	// tag → push → bump catalog → commit → push.
-	msg := tagMessage("Promise "+tag, notes, ctx)
-	if err := ctx.git.CreateTag(tag, msg, ctx.targetSHA, false); err != nil {
-		return err
+	// bump catalog → verify → commit → tag → one atomic push.
+	branch, err := ctx.git.CurrentBranch()
+	if err != nil {
+		return fmt.Errorf("current branch: %w — nothing tagged or pushed", err)
 	}
-	if err := ctx.git.PushTag(tag, false); err != nil {
-		return err
-	}
-	fmt.Fprintf(ctx.stdout, "\nTagged %s @ %s and pushed.\n", tag, short(ctx.targetSHA))
-
 	if err := writeCatalogEpoch(ctx.root, next); err != nil {
-		return err
+		return fmt.Errorf("bump catalog.toml to %s: %w — nothing tagged or pushed", next, err)
+	}
+	if err := ctx.verifyTree(); err != nil {
+		return abandonCatalogBump(ctx, fmt.Errorf("verify the catalog bump to %s: %w", next, err))
 	}
 	bumpMsg := fmt.Sprintf("catalog: bump epoch to %s for ongoing development", next)
 	if err := ctx.git.CommitFile("catalog.toml", bumpMsg); err != nil {
-		return err
+		return abandonCatalogBump(ctx, fmt.Errorf("commit the catalog bump to %s: %w", next, err))
 	}
-	branch, err := ctx.git.CurrentBranch()
-	if err != nil {
-		return err
+	fmt.Fprintf(ctx.stdout, "\nBumped catalog epoch to %s and committed it on %s.\n", next, branch)
+
+	undo := "git reset --keep HEAD~1"
+	msg := tagMessage("Promise "+tag, notes, ctx)
+	if err := ctx.git.CreateTag(tag, msg, ctx.targetSHA, false); err != nil {
+		return fmt.Errorf("create tag %s: %w — nothing was pushed; the catalog bump is committed locally on %s only (undo it with `%s` before re-running cut)",
+			tag, err, branch, undo)
 	}
-	if err := ctx.git.PushBranch(branch); err != nil {
-		return err
+	if err := ctx.git.PushAtomic(branch, tag); err != nil {
+		return fmt.Errorf("push %s and %s atomically: %w — origin has neither; the local tag %s and the catalog bump commit on %s remain: "+
+			"finish the release with `git push --atomic origin %s refs/tags/%s`, or undo with `git tag -d %s && %s` before re-running cut",
+			branch, tag, err, tag, branch, branch, tag, tag, undo)
 	}
-	fmt.Fprintf(ctx.stdout, "Bumped catalog epoch to %s and pushed %s.\n", next, branch)
+	fmt.Fprintf(ctx.stdout, "Tagged %s @ %s and pushed it atomically with the catalog bump on %s.\n", tag, short(ctx.targetSHA), branch)
 	return nil
+}
+
+// abandonCatalogBump puts catalog.toml back (index and working tree) after the
+// bump failed to verify or commit, so nothing of the cut is left behind and a
+// re-run starts from the tree the gates passed. Nothing has been tagged or
+// pushed at this point.
+func abandonCatalogBump(ctx *cutContext, cause error) error {
+	if rerr := ctx.git.RestoreFile("catalog.toml"); rerr != nil {
+		return errors.Join(fmt.Errorf("%w — nothing tagged or pushed", cause),
+			fmt.Errorf("restore catalog.toml: %w", rerr))
+	}
+	return fmt.Errorf("%w — nothing tagged or pushed; catalog.toml restored", cause)
 }
 
 // confirmYearChange returns true when a year rollover is authorized (via

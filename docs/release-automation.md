@@ -391,13 +391,14 @@ The steps below are **what `bin/release cut` enforces** ([Cutting with enforced 
    ```sh
    bin/release cut next --commit <commit>    # gated; refreshes the moving epoch-next pre-release at <commit>
    # …confirm the epoch-next release.yml run is green…
-   bin/release cut stable --commit <commit>  # gated; derives the epoch, tags <commit>, pushes, bumps catalog
+   bin/release cut stable --commit <commit>  # gated; derives the epoch, verifies + commits the catalog bump, tags <commit>, pushes both atomically
 
    # hand-run fallback (what the commands do):
    #   git tag -f epoch-next <commit> && git push -f origin epoch-next   # moving tag; force expected
-   #   git tag epoch-2026.1 <commit>  && git push origin epoch-2026.1     # immutable — never force-move a stable tag
+   #   (set catalog.toml's epoch to "2026.2") && bin/verify && git commit -m "catalog: bump epoch to 2026.2 for ongoing development" catalog.toml
+   #   git tag epoch-2026.1 <commit>  && git push --atomic origin main refs/tags/epoch-2026.1   # immutable — never force-move a stable tag, never push it without its bump
    ```
-6. **Bump for ongoing development.** `cut stable` finishes by advancing `catalog.toml`'s `epoch` to the next epoch (same-year increment) on `main` and pushing, so dev builds and the next `epoch-next` embed the upcoming epoch — not the shipped one (the side-by-side install layout dispatches on the embedded epoch).
+6. **Bump for ongoing development.** `cut stable` advances `catalog.toml`'s `epoch` to the next epoch (same-year increment) on `main`, verifying and committing the bump before it creates the stable tag and pushing both in one atomic push, so dev builds and the next `epoch-next` embed the upcoming epoch — not the shipped one (the side-by-side install layout dispatches on the embedded epoch).
 
 > **Bootstrap exception — `epoch-2026.0`.** The first stable release predates the gates and could not satisfy "promote the exact hash `epoch-next` validated" (nothing preceded it). It was cut by hand after all-platform CI went green and the pipeline was proven via `epoch-next`; it ships slightly stale `os`/`http` module descriptions (corrected on `main` for `2026.1`). From `2026.1` onward every cut goes through [Cutting with enforced gates](#cutting-with-enforced-gates)'s gates.
 
@@ -407,7 +408,7 @@ The steps below are **what `bin/release cut` enforces** ([Cutting with enforced 
 
 ```sh
 bin/release cut next       # refresh the epoch-next pre-release
-bin/release cut stable     # derive epoch, gate, tag, push, bump catalog — all automatic
+bin/release cut stable     # derive epoch, gate, bump + verify + commit catalog, tag, push atomically — all automatic
 ```
 
 Flags (both channels): `--commit <commit>` (pin the cut to this commit-ish instead of HEAD — `origin/main` keeps moving under continuous development, so a cut names the commit it validated; the commit-ish is peeled to its commit and must still be reachable from `origin/main`, gate 2; with `--run-ci` the dispatch goes on the same immutable `ci-pin-<sha>` ref `ci --commit` uses, so a pinned cut can produce CI at the pinned commit), `--dry-run` (run all gates, print the checklist, change nothing), `--reason "<text>"` (override the failed *overridable* gate(s); recorded into the tag/commit message so any bypass is auditable), `--run-ci` (non-interactively dispatch `ci.yml` for platforms with no run at the release SHA), `--no-ci-wait` (with `--run-ci`: dispatch then stop, re-run `cut` once green). `cut stable` additionally takes `--confirm-year` (non-interactively confirm a year-rollover epoch). There is **no `--epoch` flag** — `cut stable` owns the number (see derivation above).
@@ -445,7 +446,7 @@ Invariants: no N skipping within a year; the year is always the device-clock yea
 
 After the gates pass, both channels generate the release notes from `git log epoch-<last>..<sha>` (mechanical, non-merge commit subjects) and embed them in the annotated tag, so `release.yml` can publish them with `--notes-from-tag`. There is no changelog gate: notes are a *product* of the cut, never a precondition — so a moving `origin/main` never forces a CI re-run to re-pin a changelog edit.
 
-`cut stable` then: tag → push → commit the catalog bump (`Y.(N+1)`) on `main` → push.
+`cut stable` then: write the catalog bump (`Y.(N+1)`) → verify the bumped tree (`bin/verify`'s pipeline, which blesses it for the commit guard) → commit the bump on `main` → tag → push `main` and the tag in one `git push --atomic`. Nothing reaches origin until the bump is verified and committed, and the atomic push lands both refs or neither, so a stable tag is never published without its bump. A bump that fails to verify or commit is abandoned — `catalog.toml` is restored and nothing is tagged or pushed; a failure after the commit names the local tag and commit and the commands that finish or undo them.
 
 Gate 7 (all-platform green CI) applies to **both** channels — a pre-release users could install must be fully built+tested first. Gate 8 enforces *validate-via-next-then-promote-the-same-hash*.
 
@@ -456,7 +457,7 @@ Gate 7 (all-platform green CI) applies to **both** channels — a pre-release us
 
 This keeps the happy path (CI already green) instant, turns the common "forgot to run CI" case into a one-keystroke dispatch, and still hard-stops on an actual CI failure.
 
-**Inputs.** Every gate input is reachable from `bin/release`: `git` (tree, reachability, tags, `rev-parse` for `--commit`, `log` for the release notes), `gh` (CI run + per-job conclusions by `headSha`; `deps-*` release assets via the existing `releaseUploader`; the `epoch-next` release run), and a `catalog.toml` parse. The implementation puts `git`/`gh` behind the `cutGit` / `cutGH` interfaces (the same stub pattern as `releaseUploader` / `blobFetcher`), so `release_cut_test.go` is fully hermetic — no `git`/`gh` process is spawned and the CI watch loop's sleep is stubbed.
+**Inputs.** Every gate input is reachable from `bin/release`: `git` (tree, reachability, tags, `rev-parse` for `--commit`, `log` for the release notes), `gh` (CI run + per-job conclusions by `headSha`; `deps-*` release assets via the existing `releaseUploader`; the `epoch-next` release run), and a `catalog.toml` parse. The implementation puts `git`/`gh` behind the `cutGit` / `cutGH` interfaces (the same stub pattern as `releaseUploader` / `blobFetcher`) and injects the bumped-tree verification the same way, so `release_cut_test.go` is fully hermetic — no `git`/`gh` process or verify run is spawned and the CI watch loop's sleep is stubbed.
 
 ### Release preview
 

@@ -26,7 +26,7 @@ type createdTag struct {
 }
 
 // fakeCutGit is an in-memory cutGit. It records every mutating call so tests can
-// assert the tag → push → bump → commit → push ordering and contents.
+// assert the bump → commit → tag → atomic push ordering and contents.
 type fakeCutGit struct {
 	head        string
 	branch      string
@@ -50,20 +50,37 @@ type fakeCutGit struct {
 
 	// Injected tool-failure errors, so tests can cover the "underlying git call
 	// errored → gate hard-fails (non-overridable)" contract.
-	cleanErr     error
-	ancestorErr  error
-	headErr      error
-	listEpochErr error
-	createTagErr error
-	resolveErr   error
-	logErr       error
+	cleanErr      error
+	ancestorErr   error
+	headErr       error
+	listEpochErr  error
+	createTagErr  error
+	resolveErr    error
+	logErr        error
+	commitErr     error
+	restoreErr    error
+	pushAtomicErr error
 
-	createdTags    []createdTag
-	pushedTags     []string
-	committed      []string // commit messages
-	addedFiles     []string
-	pushedBranches []string
+	createdTags  []createdTag
+	pushedTags   []string
+	committed    []string // commit messages
+	addedFiles   []string
+	restored     []string // paths put back via RestoreFile
+	atomicPushes []atomicPush
+
+	// calls is every mutating call in order ("commit catalog.toml", "tag
+	// epoch-2026.1", "push --atomic main epoch-2026.1", …), so a test can assert
+	// what happened before what. stableCtx's verifyTree appends "verify" to it.
+	calls []string
+
+	// Not git: the verifyTree stableCtx installs fails with verifyErr and
+	// records the catalog epoch each run measured. They live here so one log
+	// orders verify against the git calls around it.
+	verifyErr      error
+	verifiedEpochs []string
 }
+
+type atomicPush struct{ branch, tag string }
 
 func newFakeCutGit() *fakeCutGit {
 	return &fakeCutGit{
@@ -96,21 +113,39 @@ func (g *fakeCutGit) CreateTag(tag, message, sha string, force bool) error {
 	if g.createTagErr != nil {
 		return g.createTagErr
 	}
+	g.calls = append(g.calls, "tag "+tag)
 	g.createdTags = append(g.createdTags, createdTag{tag, message, sha, force})
 	g.tags[tag] = sha
 	return nil
 }
 func (g *fakeCutGit) PushTag(tag string, force bool) error {
+	g.calls = append(g.calls, "push tag "+tag)
 	g.pushedTags = append(g.pushedTags, tag)
 	return nil
 }
+
+// CommitFile stages before it commits, like the real one: a commitErr is the
+// commit guard refusing after `git add` already ran.
 func (g *fakeCutGit) CommitFile(path, message string) error {
 	g.addedFiles = append(g.addedFiles, path)
+	if g.commitErr != nil {
+		return g.commitErr
+	}
+	g.calls = append(g.calls, "commit "+path)
 	g.committed = append(g.committed, message)
 	return nil
 }
-func (g *fakeCutGit) PushBranch(branch string) error {
-	g.pushedBranches = append(g.pushedBranches, branch)
+func (g *fakeCutGit) RestoreFile(path string) error {
+	g.calls = append(g.calls, "restore "+path)
+	g.restored = append(g.restored, path)
+	return g.restoreErr
+}
+func (g *fakeCutGit) PushAtomic(branch, tag string) error {
+	if g.pushAtomicErr != nil {
+		return g.pushAtomicErr
+	}
+	g.calls = append(g.calls, "push --atomic "+branch+" "+tag)
+	g.atomicPushes = append(g.atomicPushes, atomicPush{branch, tag})
 	return nil
 }
 func (g *fakeCutGit) ResolveSHA(ref string) (string, error) {
@@ -724,7 +759,21 @@ func TestCutStableHappyPath(t *testing.T) {
 		t.Fatalf("happy-path cut stable failed: %v", err)
 	}
 
-	// Tag created (not forced) at the release SHA, then pushed.
+	// Nothing reaches origin before the bump is verified and committed: the
+	// bumped tree is verified, committed, the tag created, and then the branch
+	// and the tag go out in ONE atomic push — never a tag push of its own.
+	wantCalls := []string{"verify", "commit catalog.toml", "tag epoch-2026.1", "push --atomic main epoch-2026.1"}
+	if strings.Join(g.calls, " | ") != strings.Join(wantCalls, " | ") {
+		t.Fatalf("calls = %q, want %q", g.calls, wantCalls)
+	}
+	if len(g.pushedTags) != 0 {
+		t.Fatalf("a stable tag must only be pushed atomically with its bump; PushTag(%v) was called", g.pushedTags)
+	}
+	// verify measured the BUMPED tree — the one the commit guard then compares.
+	if strings.Join(g.verifiedEpochs, ",") != "2026.2" {
+		t.Fatalf("verify saw catalog epoch %v, want [2026.2]", g.verifiedEpochs)
+	}
+	// Tag created (not forced) at the release SHA.
 	if len(g.createdTags) != 1 || g.createdTags[0].tag != "epoch-2026.1" {
 		t.Fatalf("createdTags = %+v, want one epoch-2026.1", g.createdTags)
 	}
@@ -734,10 +783,7 @@ func TestCutStableHappyPath(t *testing.T) {
 	if g.createdTags[0].sha != sha {
 		t.Fatalf("tagged sha = %s, want release SHA %s", g.createdTags[0].sha, sha)
 	}
-	if len(g.pushedTags) != 1 || g.pushedTags[0] != "epoch-2026.1" {
-		t.Fatalf("pushedTags = %v", g.pushedTags)
-	}
-	// Catalog bumped to next same-year epoch + committed + branch pushed.
+	// Catalog bumped to next same-year epoch + committed.
 	if got, _ := ParseEpoch(root); got != "2026.2" {
 		t.Fatalf("catalog epoch after bump = %s, want 2026.2", got)
 	}
@@ -747,8 +793,176 @@ func TestCutStableHappyPath(t *testing.T) {
 	if len(g.addedFiles) != 1 || g.addedFiles[0] != "catalog.toml" {
 		t.Fatalf("addedFiles = %v, want [catalog.toml]", g.addedFiles)
 	}
-	if len(g.pushedBranches) != 1 || g.pushedBranches[0] != "main" {
-		t.Fatalf("pushedBranches = %v, want [main]", g.pushedBranches)
+	if len(g.restored) != 0 {
+		t.Fatalf("a successful cut must not restore anything, restored %v", g.restored)
+	}
+}
+
+// readyStableCut builds a cut-stable run whose every gate passes (release SHA
+// validated by epoch-next, CI green, deps hosted, catalog at the 2026.1 target),
+// so a test can inject a failure into one post-gate step.
+func readyStableCut(t *testing.T) (root string, g *fakeCutGit, ctx *cutContext) {
+	t.Helper()
+	noOpSleep(t)
+	sha := "abcdef0123456789abcdef0123456789abcdef01"
+	root, _, uploader := depsHostedFixture(t, true)
+	writeCatalogFile(t, root, "2026.1")
+
+	g = newFakeCutGit()
+	g.head = sha
+	g.epochTags = []string{"epoch-2026.0"}
+	g.tags["epoch-2026.0"] = "oldsha"
+	g.tags["epoch-next"] = sha
+
+	gh := greenCI(sha)
+	gh.releaseRuns = []ghRun{{DatabaseID: 7, HeadSHA: sha, HeadBranch: "epoch-next", Conclusion: "success"}}
+	withYear(t, 2026)
+	return root, g, stableCtx(root, g, gh, uploader)
+}
+
+// TestCutStableBumpFailurePublishesNothing: the bump is verified and committed
+// before anything is tagged or pushed, so a bump that cannot land — verify red,
+// or the commit guard refusing the commit (what happened at the epoch-2026.10
+// cut, after the immutable tag was already on origin) — leaves no tag, pushes
+// nothing, and puts catalog.toml back.
+func TestCutStableBumpFailurePublishesNothing(t *testing.T) {
+	cases := []struct {
+		name        string
+		inject      func(g *fakeCutGit)
+		wantErr     string
+		wantRestore bool
+	}{
+		{
+			name:        "verify of the bumped tree fails",
+			inject:      func(g *fakeCutGit) { g.verifyErr = errors.New("integration: 3 tests failed") },
+			wantErr:     "verify the catalog bump to 2026.2: integration: 3 tests failed",
+			wantRestore: true,
+		},
+		{
+			name: "commit guard refuses the bump commit",
+			inject: func(g *fakeCutGit) {
+				g.commitErr = errors.New("precommit-guard: staged tree is not the blessed tree")
+			},
+			wantErr:     "commit the catalog bump to 2026.2: precommit-guard: staged tree is not the blessed tree",
+			wantRestore: true,
+		},
+		{
+			name:    "current branch unreadable",
+			inject:  func(g *fakeCutGit) { g.branchErr = errors.New("not a git repository") },
+			wantErr: "current branch: not a git repository",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root, g, ctx := readyStableCut(t)
+			tc.inject(g)
+			err := cutStable(ctx)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing tagged or pushed") {
+				t.Fatalf("err = %v, want %q and \"nothing tagged or pushed\"", err, tc.wantErr)
+			}
+			if len(g.createdTags) != 0 || len(g.pushedTags) != 0 || len(g.atomicPushes) != 0 {
+				t.Fatalf("a bump that did not land must publish nothing: tags=%v pushedTags=%v atomic=%v",
+					g.createdTags, g.pushedTags, g.atomicPushes)
+			}
+			if len(g.committed) != 0 {
+				t.Fatalf("committed = %v, want nothing", g.committed)
+			}
+			wantRestored := ""
+			if tc.wantRestore {
+				wantRestored = "catalog.toml"
+			}
+			if got := strings.Join(g.restored, ","); got != wantRestored {
+				t.Fatalf("restored = %v, want %q", g.restored, wantRestored)
+			}
+			// A failure that is not restored must come before the bump is
+			// written: the catalog is still the one the gates passed, unverified.
+			if !tc.wantRestore {
+				if got, _ := ParseEpoch(root); got != "2026.1" {
+					t.Fatalf("catalog epoch = %s, want 2026.1 untouched — the failure must precede the bump", got)
+				}
+				if len(g.verifiedEpochs) != 0 {
+					t.Fatalf("verify ran (%v) although the cut failed before the bump", g.verifiedEpochs)
+				}
+			}
+		})
+	}
+}
+
+// TestCutStableRestoreFailureReportsBoth: when catalog.toml cannot be put back
+// after a failed bump, both failures are reported — the cause and the restore.
+func TestCutStableRestoreFailureReportsBoth(t *testing.T) {
+	_, g, ctx := readyStableCut(t)
+	g.verifyErr = errors.New("integration: red")
+	g.restoreErr = errors.New("checkout: index.lock exists")
+	err := cutStable(ctx)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	for _, want := range []string{"verify the catalog bump to 2026.2: integration: red", "nothing tagged or pushed", "restore catalog.toml: checkout: index.lock exists"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "catalog.toml restored") {
+		t.Errorf("err = %v must not claim catalog.toml was restored", err)
+	}
+	if len(g.createdTags) != 0 || len(g.atomicPushes) != 0 {
+		t.Fatalf("nothing may be tagged or pushed: tags=%v atomic=%v", g.createdTags, g.atomicPushes)
+	}
+}
+
+// TestCutStableTagOrPushFailureAfterCommit: once the bump is committed, a failed
+// tag or a failed atomic push leaves origin untouched — the atomic push lands
+// both refs or neither — and the error names the local state and the commands
+// that finish or undo it. Nothing is restored: the bump is a commit by then.
+func TestCutStableTagOrPushFailureAfterCommit(t *testing.T) {
+	cases := []struct {
+		name     string
+		inject   func(g *fakeCutGit)
+		wantTags int
+		wantErr  []string
+	}{
+		{
+			name:     "tag creation fails",
+			inject:   func(g *fakeCutGit) { g.createTagErr = errors.New("tag: cannot lock ref") },
+			wantTags: 0,
+			wantErr: []string{"create tag epoch-2026.1: tag: cannot lock ref", "nothing was pushed",
+				"committed locally on main only", "git reset --keep HEAD~1"},
+		},
+		{
+			name:     "atomic push rejected",
+			inject:   func(g *fakeCutGit) { g.pushAtomicErr = errors.New("! [rejected] main -> main (fetch first)") },
+			wantTags: 1,
+			wantErr: []string{"push main and epoch-2026.1 atomically: ! [rejected]", "origin has neither",
+				"git push --atomic origin main refs/tags/epoch-2026.1", "git tag -d epoch-2026.1 && git reset --keep HEAD~1"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, g, ctx := readyStableCut(t)
+			tc.inject(g)
+			err := cutStable(ctx)
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			for _, want := range tc.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %v, want it to contain %q", err, want)
+				}
+			}
+			if len(g.committed) != 1 {
+				t.Fatalf("committed = %v, want the one bump commit", g.committed)
+			}
+			if len(g.createdTags) != tc.wantTags {
+				t.Fatalf("createdTags = %+v, want %d", g.createdTags, tc.wantTags)
+			}
+			if len(g.pushedTags) != 0 || len(g.atomicPushes) != 0 {
+				t.Fatalf("nothing may reach origin: pushedTags=%v atomic=%v", g.pushedTags, g.atomicPushes)
+			}
+			if len(g.restored) != 0 {
+				t.Fatalf("restored = %v, want nothing once the bump is committed", g.restored)
+			}
+		})
 	}
 }
 
@@ -771,9 +985,12 @@ func TestCutStableDryRunNoMutations(t *testing.T) {
 	if err := cutStable(ctx); err != nil {
 		t.Fatalf("dry-run cut stable should pass gates and report: %v", err)
 	}
-	if len(g.createdTags) != 0 || len(g.pushedTags) != 0 || len(g.committed) != 0 || len(g.pushedBranches) != 0 {
-		t.Fatalf("--dry-run made mutations: tags=%v pushed=%v commits=%v branches=%v",
-			g.createdTags, g.pushedTags, g.committed, g.pushedBranches)
+	if len(g.calls) != 0 || len(g.createdTags) != 0 || len(g.pushedTags) != 0 || len(g.committed) != 0 || len(g.atomicPushes) != 0 {
+		t.Fatalf("--dry-run made mutations or verified: calls=%v tags=%v pushed=%v commits=%v atomic=%v",
+			g.calls, g.createdTags, g.pushedTags, g.committed, g.atomicPushes)
+	}
+	if len(g.verifiedEpochs) != 0 || len(g.restored) != 0 {
+		t.Fatalf("--dry-run must not verify or restore: verified=%v restored=%v", g.verifiedEpochs, g.restored)
 	}
 	if got, _ := ParseEpoch(root); got != "2026.1" {
 		t.Fatalf("--dry-run rewrote catalog (epoch=%s, want 2026.1)", got)
@@ -978,11 +1195,22 @@ func TestWriteCatalogEpoch(t *testing.T) {
 
 // ── test fixtures ─────────────────────────────────────────────────────────────
 
-// stableCtx builds a cut-stable context wired to the given fakes.
-func stableCtx(root string, g cutGit, gh cutGH, up releaseUploader) *cutContext {
+// stableCtx builds a cut-stable context wired to the given fakes. Its verifyTree
+// logs "verify" into g.calls, records the catalog epoch the tree held when it
+// ran, and fails with g.verifyErr.
+func stableCtx(root string, g *fakeCutGit, gh cutGH, up releaseUploader) *cutContext {
 	return &cutContext{
 		root: root, channel: "stable",
 		git: g, gh: gh, uploader: up,
+		verifyTree: func() error {
+			g.calls = append(g.calls, "verify")
+			e, err := ParseEpoch(root)
+			if err != nil {
+				e = "unreadable: " + err.Error()
+			}
+			g.verifiedEpochs = append(g.verifiedEpochs, e)
+			return g.verifyErr
+		},
 		stdout: &strings.Builder{},
 	}
 }
@@ -2091,8 +2319,8 @@ func TestShellGitSeam(t *testing.T) {
 	if err := g.PushTag("epoch-next", true); err != nil {
 		t.Fatalf("PushTag (force): %v", err)
 	}
-	if err := g.PushBranch("main"); err != nil {
-		t.Fatalf("PushBranch: %v", err)
+	if err := g.PushAtomic("main", "epoch-2099.0"); err != nil {
+		t.Fatalf("PushAtomic: %v", err)
 	}
 	if err := g.Fetch(); err != nil {
 		t.Fatalf("Fetch: %v", err)
@@ -2177,6 +2405,111 @@ func newTempOriginRepo(t *testing.T) (g shellGit, run func(dir string, args ...s
 	run(work, "branch", "-M", "main")
 	run(work, "push", "-u", "origin", "main")
 	return shellGit{root: work}, run, work, run(work, "rev-parse", "HEAD")
+}
+
+// TestShellGitPushAtomic covers the push cut stable publishes a release with:
+// the branch carrying the catalog bump and the stable tag land on origin
+// together, and when origin refuses the branch it does not get the tag either —
+// the immutable tag is never published without its bump.
+func TestShellGitPushAtomic(t *testing.T) {
+	g, run, work, _ := newTempOriginRepo(t)
+	remote := run(work, "remote", "get-url", "origin")
+	remoteRef := func(ref string) string {
+		t.Helper()
+		out := run(work, "ls-remote", "origin", ref)
+		if out == "" {
+			return ""
+		}
+		return strings.Fields(out)[0]
+	}
+	commit := func(dir, file, msg string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, file), []byte(msg+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run(dir, "add", file)
+		run(dir, "commit", "-m", msg)
+		return run(dir, "rev-parse", "HEAD")
+	}
+
+	// Both refs land.
+	bump := commit(work, "catalog.toml", "bump 2099.1")
+	if err := g.CreateTag("epoch-2099.0", "Promise epoch-2099.0", bump, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.PushAtomic("main", "epoch-2099.0"); err != nil {
+		t.Fatalf("PushAtomic: %v", err)
+	}
+	if got := remoteRef("refs/heads/main"); got != bump {
+		t.Fatalf("origin main = %q, want %s", got, bump)
+	}
+	if got := remoteRef("refs/tags/epoch-2099.0"); got == "" {
+		t.Fatal("origin is missing refs/tags/epoch-2099.0 after PushAtomic")
+	}
+
+	// origin/main moves on from another clone, so the next branch push is not a
+	// fast-forward: origin refuses it, and must not take the tag either.
+	other := t.TempDir()
+	run(other, "clone", "--branch", "main", remote, ".")
+	run(other, "config", "user.name", "t")
+	run(other, "config", "user.email", "t@t")
+	moved := commit(other, "other.txt", "landed meanwhile")
+	run(other, "push", "origin", "main")
+
+	commit(work, "catalog.toml", "bump 2099.2")
+	if err := g.CreateTag("epoch-2099.1", "Promise epoch-2099.1", bump, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.PushAtomic("main", "epoch-2099.1"); err == nil {
+		t.Fatal("PushAtomic of a non-fast-forward branch must fail")
+	}
+	if got := remoteRef("refs/tags/epoch-2099.1"); got != "" {
+		t.Fatalf("origin took the tag (%s) although it refused the branch — the push is not atomic", got)
+	}
+	if got := remoteRef("refs/heads/main"); got != moved {
+		t.Fatalf("origin main = %q, want it left at %s", got, moved)
+	}
+}
+
+// TestShellGitRestoreAfterRefusedCommit covers, against real git, how cut stable
+// abandons a bump the commit guard refuses — the epoch-2026.10 failure. A
+// pre-commit hook that refuses stands in for bin/precommit-guard: CommitFile must
+// report the refusal (so the commit runs the hook and its status is read) and
+// leave HEAD where it was, and because its `git add` already staged the bump,
+// RestoreFile must put back the index as well as the working tree, or the next
+// cut fails its clean-tree gate.
+func TestShellGitRestoreAfterRefusedCommit(t *testing.T) {
+	g, run, work, head := newTempOriginRepo(t)
+	hooks := t.TempDir()
+	refuse := "#!/bin/sh\necho 'precommit-guard: staged tree is not the blessed tree' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte(refuse), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Set in the repo itself, so a hooksPath in the host's global config cannot
+	// decide which hook runs.
+	run(work, "config", "core.hooksPath", hooks)
+
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("bumped\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.CommitFile("a.txt", "bump"); err == nil {
+		t.Fatal("CommitFile succeeded although the pre-commit hook refused — the bump commit must go through the commit guard")
+	}
+	if got := run(work, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("HEAD = %s after a refused commit, want it left at %s", got, head)
+	}
+	if staged := run(work, "diff", "--cached", "--name-only"); staged != "a.txt" {
+		t.Fatalf("staged after the refused commit = %q, want a.txt (CommitFile adds before it commits)", staged)
+	}
+	if err := g.RestoreFile("a.txt"); err != nil {
+		t.Fatalf("RestoreFile: %v", err)
+	}
+	if clean, err := g.CleanTree(); err != nil || !clean {
+		t.Fatalf("CleanTree after RestoreFile = %v (%v), want clean", clean, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(work, "a.txt")); err != nil || string(b) != "a\n" {
+		t.Fatalf("a.txt after RestoreFile = %q (%v), want the HEAD content", b, err)
+	}
 }
 
 // TestShellGitRemoteBranchSHA covers the query behind `ci`'s HEAD-is-remote-tip

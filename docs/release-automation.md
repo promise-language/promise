@@ -395,7 +395,8 @@ The steps below are **what `bin/release cut` enforces** ([Cutting with enforced 
 
    # hand-run fallback (what the commands do):
    #   git tag -f epoch-next <commit> && git push -f origin epoch-next   # moving tag; force expected
-   #   git tag epoch-2026.1 <commit>  && git push origin epoch-2026.1     # immutable — never force-move a stable tag
+   #   (set catalog.toml's epoch to "2026.2") && bin/verify && git commit -m "catalog: bump epoch to 2026.2 for ongoing development" catalog.toml
+   #   git tag epoch-2026.1 <commit>  && git push --atomic origin main refs/tags/epoch-2026.1   # immutable — never force-move a stable tag, never push it without its bump
    ```
 6. **Bump for ongoing development.** `cut stable` advances `catalog.toml`'s `epoch` to the next epoch (same-year increment) on `main`, verifying and committing the bump before it creates the stable tag and pushing both in one atomic push, so dev builds and the next `epoch-next` embed the upcoming epoch — not the shipped one (the side-by-side install layout dispatches on the embedded epoch).
 

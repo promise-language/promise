@@ -854,7 +854,7 @@ func TestCutStableBumpFailurePublishesNothing(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, g, ctx := readyStableCut(t)
+			root, g, ctx := readyStableCut(t)
 			tc.inject(g)
 			err := cutStable(ctx)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "nothing tagged or pushed") {
@@ -873,6 +873,16 @@ func TestCutStableBumpFailurePublishesNothing(t *testing.T) {
 			}
 			if got := strings.Join(g.restored, ","); got != wantRestored {
 				t.Fatalf("restored = %v, want %q", g.restored, wantRestored)
+			}
+			// A failure that is not restored must come before the bump is
+			// written: the catalog is still the one the gates passed, unverified.
+			if !tc.wantRestore {
+				if got, _ := ParseEpoch(root); got != "2026.1" {
+					t.Fatalf("catalog epoch = %s, want 2026.1 untouched — the failure must precede the bump", got)
+				}
+				if len(g.verifiedEpochs) != 0 {
+					t.Fatalf("verify ran (%v) although the cut failed before the bump", g.verifiedEpochs)
+				}
 			}
 		})
 	}

@@ -376,11 +376,7 @@ func runBindWebIdl(args []string) {
 	// under the interfaces that include it.
 	if keep != nil {
 		for _, d := range bindgen.ApplyKeepList(mergedFile, keep) {
-			why := "which the keep list drops"
-			if d.Unbound {
-				why = "which is not defined in the bound IDL files"
-			}
-			fmt.Fprintf(os.Stderr, "keep: dropped %s: it names %s, %s\n", d.What, d.Ref, why)
+			fmt.Fprintf(os.Stderr, "keep: dropped %s: it names %s, %s\n", d.What, d.Ref, d.Cause.Why())
 		}
 	}
 

@@ -31,11 +31,11 @@ import (
 // (convertEnum), when a dictionary's inheritance cannot be flattened — an
 // ancestor that is not a dictionary in the file, or a cycle — when a typedef
 // refers to itself (typedefTargets), when a type names a definition no bound
-// IDL file defines (unboundRefs), when a namespace's type name is already
-// another type's (namespaceTypeErrors), or when an anonymous getter, setter or
-// deleter cannot be reached by property access (anonymousSpecialError),
-// reporting every such value, dictionary, typedef, declaration, namespace and
-// operation.
+// IDL file defines or a callback no lowering applies to (unboundRefs), when a
+// namespace's type name is already another type's (namespaceTypeErrors), or
+// when an anonymous getter, setter or deleter cannot be reached by property
+// access (anonymousSpecialError), reporting every such value, dictionary,
+// typedef, declaration, namespace and operation.
 //
 // Call webidl.Merge(file) before this function to apply partials, mixins, and
 // includes statements, and to record the members a derived interface
@@ -331,10 +331,9 @@ func typedefTargets(file *webidl.File) (map[string]*webidl.TypeRef, []error) {
 }
 
 // definedTypes returns every name a reference (firstRef) may carry that resolves
-// in the generated module: each interface (mixins excluded), dictionary, enum,
-// typedef and callback the merged file defines, and JsValue, which the lowering
-// itself produces. Any other name is defined in none of the bound IDL files
-// (docs/wasm-bindings.md, "Supported subset").
+// in the generated module: each interface (mixins excluded), dictionary, enum
+// and typedef the merged file defines, and JsValue, which the lowering itself
+// produces. A callback is defined too, but declares no type (unresolvedRef).
 func definedTypes(file *webidl.File) map[string]bool {
 	defined := map[string]bool{"JsValue": true}
 	for name := range interfacesByName(file) {
@@ -349,10 +348,32 @@ func definedTypes(file *webidl.File) map[string]bool {
 	for _, td := range file.Typedefs {
 		defined[td.Name] = true
 	}
-	for _, cb := range file.Callbacks {
-		defined[cb.Name] = true
-	}
 	return defined
+}
+
+// unresolvedRef returns a classifier of the names a reference (firstRef) may
+// carry: for one that resolves to no type in the generated module it gives why,
+// and false for one that resolves (definedTypes). A callback declares no type,
+// so a reference to one binds only as the function type the `callback` row of
+// "Type Mapping" lowers it to, written in its place, and no lowering applies to
+// a reference that still carries its name: CauseCallback. Any other name is
+// defined in none of the bound IDL files: CauseUndefined (docs/wasm-bindings.md,
+// "Supported subset").
+func unresolvedRef(file *webidl.File) func(name string) (DropCause, bool) {
+	defined := definedTypes(file)
+	callbacks := make(map[string]bool, len(file.Callbacks))
+	for _, cb := range file.Callbacks {
+		callbacks[cb.Name] = true
+	}
+	return func(name string) (DropCause, bool) {
+		switch {
+		case defined[name]:
+			return 0, false
+		case callbacks[name]:
+			return CauseCallback, true
+		}
+		return CauseUndefined, true
+	}
 }
 
 // firstRef returns the first name the types reference for which match reports
@@ -377,19 +398,25 @@ func firstRef(aliases map[string]string, match func(name string) bool, types ...
 	return ""
 }
 
-// unboundRefs reports each declaration whose type references a definition no
-// bound IDL file defines (definedTypes) — the typedefs, then the dictionary
-// members, then the interface members, then the namespace members, each in file
-// order — at its position, naming the first such reference (firstRef). The
-// generated module would name a type that does not exist. A mixin's members are
-// reported on the interfaces that include it. A namespace is not a type, so its
-// name used as one is reported too.
+// unboundRefs reports each declaration whose type references a name that
+// resolves to no type in the generated module (unresolvedRef) — one no bound
+// IDL file defines, or a callback — the typedefs, then the dictionary members,
+// then the interface members, then the namespace members, each in file order,
+// at its position, naming the first such reference (firstRef) and why it does
+// not resolve. The generated module would name a type that does not exist. A
+// mixin's members are reported on the interfaces that include it. A namespace
+// is not a type, so its name used as one is reported too.
 func unboundRefs(file *webidl.File) []error {
-	defined := definedTypes(file)
+	unresolved := unresolvedRef(file)
 	var errs []error
 	report := func(pos webidl.Pos, what string, types ...*webidl.TypeRef) {
-		if name := firstRef(file.WindowAliases, func(name string) bool { return !defined[name] }, types...); name != "" {
-			errs = append(errs, &webidl.ParseError{Pos: pos, Msg: fmt.Sprintf("%s names %s, which is not defined in the bound IDL files", what, name)})
+		name := firstRef(file.WindowAliases, func(name string) bool {
+			_, unres := unresolved(name)
+			return unres
+		}, types...)
+		if name != "" {
+			cause, _ := unresolved(name)
+			errs = append(errs, &webidl.ParseError{Pos: pos, Msg: fmt.Sprintf("%s names %s, %s", what, name, cause.Why())})
 		}
 	}
 	for _, td := range file.Typedefs {

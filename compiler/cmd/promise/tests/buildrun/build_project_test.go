@@ -2861,6 +2861,241 @@ func TestBindWebIdlKeepListDropsUnboundReference(t *testing.T) {
 	}
 }
 
+// callbackMemberIDL is #765's repro, with a required member beside the
+// optional one: a callback declares no type, and no lowering applies to a
+// dictionary member typed by one.
+const callbackMemberIDL = `callback Handler = Promise<undefined> ();
+dictionary D {
+  Handler handler;
+  long n;
+};
+dictionary R {
+  required Handler handler;
+};
+[Exposed=Window]
+interface A {
+  undefined use(optional D d = {});
+};
+`
+
+// TestBindWebIdlCallbackMemberFailsLoudly: without a keep list, a declaration
+// whose type names a callback no lowering applies to is a bind error naming
+// the declaration, its position and the callback — every one, before anything
+// is written, with or without the self-check (docs/wasm-bindings.md,
+// "Supported subset"). Before #765 the module named the callback as a type and
+// failed the self-check with `undefined type: Handler`.
+func TestBindWebIdlCallbackMemberFailsLoudly(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "in.idl")
+	if err := os.WriteFile(idlPath, []byte(callbackMemberIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		idlPath + ":3:3: D.handler names Handler, which is a callback with no lowering here",
+		idlPath + ":7:3: R.handler names Handler, which is a callback with no lowering here",
+	}
+
+	for _, check := range [][]string{nil, {"-no-check"}} {
+		outDir := filepath.Join(dir, "out"+strings.Join(check, ""))
+		args := append(append([]string{"bind", "webidl"}, check...), "-name", "probe", "-o", outDir, idlPath)
+		out, err := exec.Command(bin, args...).CombinedOutput()
+		if err == nil {
+			t.Fatalf("bind %v succeeded on IDL with callback-typed members (want an error)\n%s", check, out)
+		}
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+			t.Errorf("bind %v: want exit code 1, got %v", check, err)
+		}
+		if got := strings.Split(strings.TrimRight(string(out), "\n"), "\n"); !slices.Equal(got, want) {
+			t.Errorf("bind %v: output lines\n%q\nwant\n%q", check, got, want)
+		}
+		if _, err := os.Stat(outDir); !os.IsNotExist(err) {
+			t.Errorf("bind %v created %s despite the error (stat: %v)", check, outDir, err)
+		}
+	}
+}
+
+// TestBindWebIdlKeepListDropsCallbackMember: with a keep list, a callback no
+// lowering applies to counts as a dropped definition — the dictionary with a
+// required member typed by one is dropped, the optional member is removed, each
+// is reported, and the rest binds, passes the self-check and compiles for
+// wasm32-web, so a keep list that never reaches the dictionary still generates
+// (#765).
+func TestBindWebIdlKeepListDropsCallbackMember(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "in.idl")
+	if err := os.WriteFile(idlPath, []byte(callbackMemberIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	keepPath := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(keepPath, []byte("A\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	var stderr bytes.Buffer
+	bindCmd := exec.Command(bin, "bind", "webidl", "-keep", keepPath, "-name", "probe", "-o", outDir, idlPath)
+	bindCmd.Stderr = &stderr
+	if out, err := bindCmd.Output(); err != nil {
+		t.Fatalf("bind webidl -keep failed (want the callback-typed members dropped and exit 0): %v\n%s%s", err, out, stderr.String())
+	}
+	want := []string{
+		"keep: dropped dictionary R: it names Handler, which is a callback with no lowering here",
+		"keep: dropped D.handler: it names Handler, which is a callback with no lowering here",
+	}
+	if got := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n"); !slices.Equal(got, want) {
+		t.Errorf("bind stderr lines\n%q\nwant\n%q", got, want)
+	}
+
+	pr, err := os.ReadFile(filepath.Join(outDir, "probe.pr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(pr)
+	for _, want := range []string{"type D", "type A", "i32? n;"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("generated module is missing %q", want)
+		}
+	}
+	for _, absent := range []string{"Handler", "handler", "type R"} {
+		if strings.Contains(src, absent) {
+			t.Errorf("generated module contains %q, which the keep list drops", absent)
+		}
+	}
+
+	userPath := filepath.Join(outDir, "use_d.pr")
+	user := `main() {
+    d := D(n: 1i32);
+    print_line(d.n!.to_string());
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput(); err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+}
+
+// navigationCallbacksIDL is html.idl's NavigationInterceptOptions with what it
+// names, and the EventHandler typedef, verbatim from @webref/idl@3.83.0 — the
+// declarations that failed every keep-list generation of promise-language/web
+// with `undefined type` (#765).
+const navigationCallbacksIDL = `dictionary NavigationInterceptOptions {
+  NavigationPrecommitHandler precommitHandler;
+  NavigationInterceptHandler handler;
+  NavigationFocusReset focusReset;
+  NavigationScrollBehavior scroll;
+};
+
+enum NavigationFocusReset {
+  "after-transition",
+  "manual"
+};
+
+enum NavigationScrollBehavior {
+  "after-transition",
+  "manual"
+};
+
+callback NavigationInterceptHandler = Promise<undefined> ();
+
+[Exposed=Window]
+interface NavigationPrecommitController {
+  undefined redirect(USVString url, optional NavigationNavigateOptions options = {});
+  undefined addHandler(NavigationInterceptHandler handler);
+};
+
+callback NavigationPrecommitHandler = Promise<undefined> (NavigationPrecommitController controller);
+
+[LegacyTreatNonObjectAsNull]
+callback EventHandlerNonNull = any (Event event);
+typedef EventHandlerNonNull? EventHandler;
+`
+
+// TestBindWebIdlKeepListDropsHTMLCallbackReferences is the in-repo stand-in
+// for binding promise-language/web's pinned specs with its keep list: each
+// reference to a callback — the EventHandler typedef, both
+// NavigationInterceptOptions members, a listed operation's parameter — is
+// dropped and reported, and the rest passes the self-check and compiles for
+// wasm32-web.
+func TestBindWebIdlKeepListDropsHTMLCallbackReferences(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "html.idl")
+	if err := os.WriteFile(idlPath, []byte(navigationCallbacksIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	keepPath := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(keepPath, []byte("NavigationPrecommitController\nNavigationPrecommitController.addHandler\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	var stderr bytes.Buffer
+	bindCmd := exec.Command(bin, "bind", "webidl", "-keep", keepPath, "-name", "web", "-o", outDir, idlPath)
+	bindCmd.Stderr = &stderr
+	if out, err := bindCmd.Output(); err != nil {
+		t.Fatalf("bind webidl -keep failed (want the callback references dropped and exit 0): %v\n%s%s", err, out, stderr.String())
+	}
+	want := []string{
+		"keep: dropped typedef EventHandler: it names EventHandlerNonNull, which is a callback with no lowering here",
+		"keep: dropped NavigationInterceptOptions.precommitHandler: it names NavigationPrecommitHandler, which is a callback with no lowering here",
+		"keep: dropped NavigationInterceptOptions.handler: it names NavigationInterceptHandler, which is a callback with no lowering here",
+		"keep: dropped NavigationPrecommitController.addHandler: it names NavigationInterceptHandler, which is a callback with no lowering here",
+	}
+	if got := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n"); !slices.Equal(got, want) {
+		t.Errorf("bind stderr lines\n%q\nwant\n%q", got, want)
+	}
+
+	pr, err := os.ReadFile(filepath.Join(outDir, "web.pr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(pr)
+	for _, want := range []string{"type NavigationInterceptOptions", "type NavigationPrecommitController", "NavigationFocusReset? focus_reset;", "NavigationScrollBehavior? scroll;"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("generated module is missing %q", want)
+		}
+	}
+	for _, absent := range []string{"NavigationInterceptHandler", "NavigationPrecommitHandler", "EventHandler", "precommit_handler", "add_handler", "redirect"} {
+		if strings.Contains(src, absent) {
+			t.Errorf("generated module contains %q, which the keep list drops", absent)
+		}
+	}
+
+	userPath := filepath.Join(outDir, "use_navigation.pr")
+	user := `main() {
+    opts := NavigationInterceptOptions(scroll: NavigationScrollBehavior.Manual);
+    if opts.focus_reset is absent {
+        print_line("no focus reset");
+    }
+}
+`
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput(); err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+}
+
 // irFunctionBody returns the text of the first `define` whose signature contains
 // marker, up to the closing brace at column 0.
 func irFunctionBody(ir, marker string) (string, bool) {

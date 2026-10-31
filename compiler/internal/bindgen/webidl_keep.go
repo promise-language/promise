@@ -56,13 +56,41 @@ func ParseKeepList(path, src string) (*KeepList, error) {
 }
 
 // KeepDrop is a declaration ApplyKeepList removed because it named a definition
-// the list dropped: What names the declaration, Ref the definition it named.
+// the list dropped: What names the declaration, Ref the definition it named,
+// and Cause why Ref resolves to no type in the generated module.
 type KeepDrop struct {
-	What string
-	Ref  string
-	// Unbound reports that Ref is defined in none of the bound IDL files, rather
-	// than dropped by the list.
-	Unbound bool
+	What  string
+	Ref   string
+	Cause DropCause
+}
+
+// DropCause is why a name a reference carries resolves to no type in the
+// generated module (docs/wasm-bindings.md, "Supported subset" and "Generating a
+// subset").
+type DropCause int
+
+const (
+	// CauseDropped: the keep list drops the definition of the name.
+	CauseDropped DropCause = iota
+	// CauseUndefined: no bound IDL file defines the name.
+	CauseUndefined
+	// CauseCallback: the name is a callback, which declares no type, and the
+	// `callback` row of "Type Mapping" does not lower the reference to it.
+	CauseCallback
+)
+
+// Why returns the clause a report names the cause by, after the name:
+// "it names Handler, which is a callback with no lowering here".
+func (c DropCause) Why() string {
+	switch c {
+	case CauseDropped:
+		return "which the keep list drops"
+	case CauseUndefined:
+		return "which is not defined in the bound IDL files"
+	case CauseCallback:
+		return "which is a callback with no lowering here"
+	}
+	panic(fmt.Sprintf("bindgen: unknown DropCause %d", int(c)))
 }
 
 // ApplyKeepList reduces a merged file (webidl.Merge has run, so a mixin's
@@ -101,11 +129,13 @@ type KeepDrop struct {
 // lowered to JsValue — is not one, and a use of a typedef names the typedef,
 // which the closure drops when its target names a dropped definition. A name
 // defined outside IDL references what it names: WindowProxy is Window, and a
-// [LegacyWindowAlias] identifier its interface. A name no bound IDL file defines
-// (definedTypes) counts as a dropped definition, and its KeepDrop is Unbound.
+// [LegacyWindowAlias] identifier its interface. A name that resolves to no type
+// in the generated module counts as a dropped definition, and its KeepDrop
+// carries the cause unresolvedRef gives: a name no bound IDL file defines, or a
+// callback, whose reference no lowering applies to.
 func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 	ifaces := interfacesByName(file)
-	defined := definedTypes(file)
+	unresolved := unresolvedRef(file)
 
 	kept := make(map[string]bool)
 	for _, iface := range file.Interfaces {
@@ -125,7 +155,10 @@ func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 	}
 	// droppedRef returns the first dropped definition the types name, or "".
 	droppedRef := func(types ...*webidl.TypeRef) string {
-		return firstRef(file.WindowAliases, func(name string) bool { return dropped[name] || !defined[name] }, types...)
+		return firstRef(file.WindowAliases, func(name string) bool {
+			_, unres := unresolved(name)
+			return dropped[name] || unres
+		}, types...)
 	}
 
 	var drops []KeepDrop
@@ -233,7 +266,9 @@ func ApplyKeepList(file *webidl.File, keep *KeepList) []KeepDrop {
 	file.Namespaces = namespaces
 
 	for i := range drops {
-		drops[i].Unbound = !defined[drops[i].Ref]
+		if cause, unres := unresolved(drops[i].Ref); unres {
+			drops[i].Cause = cause
+		}
 	}
 	return drops
 }

@@ -446,7 +446,7 @@ func TestApplyKeepList(t *testing.T) {
 			},
 			types: map[string][]string{},
 			drops: []KeepDrop{
-				{What: "Element.find", Ref: "Missing", Unbound: true},
+				{What: "Element.find", Ref: "Missing", Cause: CauseUndefined},
 			},
 		},
 		{
@@ -461,7 +461,7 @@ func TestApplyKeepList(t *testing.T) {
 			},
 			types: map[string][]string{"D": {"n"}},
 			drops: []KeepDrop{
-				{What: "D.m", Ref: "Missing", Unbound: true},
+				{What: "D.m", Ref: "Missing", Cause: CauseUndefined},
 			},
 		},
 		{
@@ -476,7 +476,7 @@ func TestApplyKeepList(t *testing.T) {
 			},
 			types: map[string][]string{},
 			drops: []KeepDrop{
-				{What: "dictionary D", Ref: "Missing", Unbound: true},
+				{What: "dictionary D", Ref: "Missing", Cause: CauseUndefined},
 				{What: "A.use", Ref: "D"},
 			},
 		},
@@ -490,7 +490,7 @@ func TestApplyKeepList(t *testing.T) {
 			},
 			types: map[string][]string{},
 			drops: []KeepDrop{
-				{What: "typedef M", Ref: "Missing", Unbound: true},
+				{What: "typedef M", Ref: "Missing", Cause: CauseUndefined},
 				{What: "A.m", Ref: "M"},
 			},
 		},
@@ -507,8 +507,8 @@ func TestApplyKeepList(t *testing.T) {
 			},
 			types: map[string][]string{},
 			drops: []KeepDrop{
-				{What: "A.take", Ref: "Missing", Unbound: true},
-				{What: "A.give", Ref: "Other", Unbound: true},
+				{What: "A.take", Ref: "Missing", Cause: CauseUndefined},
+				{What: "A.give", Ref: "Other", Cause: CauseUndefined},
 			},
 		},
 		{
@@ -536,7 +536,7 @@ func TestApplyKeepList(t *testing.T) {
 			},
 			types: map[string][]string{},
 			drops: []KeepDrop{
-				{What: "A.opener", Ref: "Window", Unbound: true},
+				{What: "A.opener", Ref: "Window", Cause: CauseUndefined},
 			},
 		},
 		{
@@ -553,8 +553,8 @@ func TestApplyKeepList(t *testing.T) {
 			},
 			types: map[string][]string{},
 			drops: []KeepDrop{
-				{What: "P.m", Ref: "Missing", Unbound: true},
-				{What: "D.m", Ref: "Missing", Unbound: true},
+				{What: "P.m", Ref: "Missing", Cause: CauseUndefined},
+				{What: "D.m", Ref: "Missing", Cause: CauseUndefined},
 			},
 		},
 		{
@@ -1028,8 +1028,92 @@ func TestApplyKeepList(t *testing.T) {
 			drops: []KeepDrop{
 				{What: "ns.make", Ref: "Fancy"},
 				{What: "ns.put", Ref: "Fancy"},
-				{What: "ns.find", Ref: "Missing", Unbound: true},
+				{What: "ns.find", Ref: "Missing", Cause: CauseUndefined},
 			},
+		},
+		{
+			// #765's repro: a callback declares no type, so the optional field
+			// naming it is removed, as one naming an absent name is; the
+			// dictionary and the member taking it stay.
+			name: "an optional field typed by a callback is removed",
+			src: `callback Handler = Promise<undefined> ();
+			dictionary D { Handler handler; long n; };
+			[Exposed=Window] interface A { undefined use(optional D d = {}); };`,
+			list: "A\nA.use\n",
+			resources: map[string][]string{
+				"A": {"A.use"},
+			},
+			types: map[string][]string{"D": {"n"}},
+			drops: []KeepDrop{
+				{What: "D.handler", Ref: "Handler", Cause: CauseCallback},
+			},
+		},
+		{
+			name: "a required field typed by a callback drops its dictionary",
+			src: `callback Handler = Promise<undefined> ();
+			dictionary R { required Handler handler; };
+			interface A { undefined use(R r); undefined other(); };`,
+			list: "A\nA.use\nA.other\n",
+			resources: map[string][]string{
+				"A": {"A.other"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "dictionary R", Ref: "Handler", Cause: CauseCallback},
+				{What: "A.use", Ref: "R"},
+			},
+		},
+		{
+			// HTML's EventHandler shape: the typedef is dropped for the callback
+			// it names, and the attribute for the typedef.
+			name: "a typedef naming a callback is dropped with its uses",
+			src: `[LegacyTreatNonObjectAsNull]
+			callback EventHandlerNonNull = any (Event event);
+			typedef EventHandlerNonNull? EventHandler;
+			interface A { attribute EventHandler onclick; undefined other(); };`,
+			list: "A\nA.onclick\nA.other\n",
+			resources: map[string][]string{
+				"A": {"A.other"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "typedef EventHandler", Ref: "EventHandlerNonNull", Cause: CauseCallback},
+				{What: "A.onclick", Ref: "EventHandler"},
+			},
+		},
+		{
+			// requestAnimationFrame's shape: the operation taking a callback is
+			// dropped with every member of its unit.
+			name: "an operation taking a callback is dropped with its unit",
+			src: `callback FrameRequestCallback = undefined (double time);
+			interface A {
+				unsigned long requestAnimationFrame(FrameRequestCallback callback);
+				unsigned long requestAnimationFrame(DOMString name);
+				readonly attribute long ok;
+			};`,
+			list: "A\nA.requestAnimationFrame\nA.ok\n",
+			resources: map[string][]string{
+				"A": {"A.ok.get"},
+			},
+			types: map[string][]string{},
+			drops: []KeepDrop{
+				{What: "A.requestAnimationFrame", Ref: "FrameRequestCallback", Cause: CauseCallback},
+			},
+		},
+		{
+			// A callback inside a union or a Promise<T> is no reference: each
+			// lowers to JsValue.
+			name: "a callback inside a union or Promise is kept",
+			src: `callback CB = undefined (DOMString s);
+			interface A {
+				(CB or undefined) get(DOMString name);
+				Promise<CB> whenDefined(DOMString name);
+			};`,
+			list: "A\nA.get\nA.whenDefined\n",
+			resources: map[string][]string{
+				"A": {"A.get", "A.whenDefined"},
+			},
+			types: map[string][]string{},
 		},
 	}
 	for _, tc := range cases {

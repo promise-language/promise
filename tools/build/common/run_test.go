@@ -33,13 +33,20 @@ func runFixtureRoot(t *testing.T, commands ...string) string {
 // build — and its own argv is left alone rather than parsed as run's flags.
 func TestRunRun_ACommandWithNoBinaryRefusesUnbuilt(t *testing.T) {
 	root := runFixtureRoot(t, "format")
+	// The recovery is this platform's bootstrap spelling (.\make.cmd on
+	// Windows), and the piped form carries it JSON-encoded (#780).
+	_, makeCmd := MakeCommands(root)
+	recovery, err := json.Marshal(makeCmd)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name     string
 		terminal bool
 		want     string
 	}{
-		{"piped", false, `{"condition":"unbuilt","recovery":"./make"}` + "\n"},
-		{"at a terminal", true, "run: this project builds format, but bin/format" + ExeSuffix() + " is not there — run ./make\n"},
+		{"piped", false, `{"condition":"unbuilt","recovery":` + string(recovery) + "}\n"},
+		{"at a terminal", true, "run: this project builds format, but bin/format" + ExeSuffix() + " is not there — run " + makeCmd + "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cliTerminals(t, tc.terminal, false)
@@ -48,7 +55,7 @@ func TestRunRun_ACommandWithNoBinaryRefusesUnbuilt(t *testing.T) {
 			if code := ExitCode(err); code != ExitRefused {
 				t.Errorf("exit = %d (%v), want %d", code, err, ExitRefused)
 			}
-			if got := strings.ReplaceAll(out.String(), `.\make.cmd`, "./make"); got != tc.want {
+			if got := out.String(); got != tc.want {
 				t.Errorf("stdout = %q, want %q", got, tc.want)
 			}
 		})

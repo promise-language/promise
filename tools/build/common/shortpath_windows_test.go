@@ -38,7 +38,14 @@ func shortNameDir(t *testing.T) (long, short string) {
 	t.Helper()
 	// Longer than 8 characters and not itself 8.3-shaped, so the filesystem has
 	// to generate an alias rather than reusing the name.
-	long = filepath.Join(t.TempDir(), "promise-short-name-fixture")
+	// The temp root is resolved to its long spelling first: %TEMP% is itself
+	// often 8.3-spelled (C:\Users\GKREME~1\...), and a "long" side that already
+	// carries an alias in its parent is not the long form canonPath produces (#780).
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	long = filepath.Join(tmp, "promise-short-name-fixture")
 	if err := os.MkdirAll(long, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", long, err)
 	}

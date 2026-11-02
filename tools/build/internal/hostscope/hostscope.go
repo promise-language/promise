@@ -202,13 +202,21 @@ func acquireAt(ctx context.Context, s Scope, path string, holder ArenaIdentity) 
 	if err != nil {
 		// waitLockExclusive owns f from here: the blocking lock may still be
 		// outstanding and only it can know when to close.
-		return nil, time.Since(started), err
+		return nil, queuedFor(started), err
 	}
 	release, err = held(f, holder)
 	if err != nil {
-		return nil, time.Since(started), err
+		return nil, queuedFor(started), err
 	}
-	return release, time.Since(started), nil
+	return release, queuedFor(started), nil
+}
+
+// queuedFor is how long a run that really queued waited — never zero, since
+// zero is reserved for "uncontended". Windows advances the monotonic clock only
+// once per timer tick (up to ~15.6ms), so a short real queue would otherwise
+// measure exactly 0 and be reported as no contention at all (#780).
+func queuedFor(started time.Time) time.Duration {
+	return max(time.Since(started), time.Nanosecond)
 }
 
 // tryAt is the half of an acquisition that never waits, shared by acquireAt and

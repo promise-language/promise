@@ -600,7 +600,12 @@ func TestCLINarration(t *testing.T) {
 	}
 	saved := os.Stderr
 	os.Stderr = stderr
-	t.Cleanup(func() { os.Stderr = saved })
+	// Closed before TempDir's removal (cleanups run last-in, first-out): Windows
+	// will not delete a file that is still open (#780).
+	t.Cleanup(func() {
+		os.Stderr = saved
+		stderr.Close()
+	})
 
 	if Narration() != stderr {
 		t.Error("Narration() is not os.Stderr, as it stands now, when observed")

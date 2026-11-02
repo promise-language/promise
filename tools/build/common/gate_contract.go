@@ -260,8 +260,13 @@ func newMember(name, outcome, detail string) Member {
 }
 
 // relToRoot names a path under root as a person addresses it from there, and
-// leaves any other path as it is.
+// leaves any other path as it is. A relative path is already root-relative
+// (gofmt -l, run from root, reports them so) and is only respelled with
+// forward slashes, so a member's name is the same on every platform (#780).
 func relToRoot(root, path string) string {
+	if !filepath.IsAbs(path) {
+		return filepath.ToSlash(path)
+	}
 	if rel, err := filepath.Rel(root, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return filepath.ToSlash(rel)
 	}

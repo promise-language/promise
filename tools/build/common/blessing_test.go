@@ -71,12 +71,6 @@ func TestRunVerifyRedRunLeavesNothingBlessed(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, ".workspace/verified-tree", "stale-blessing\n")
 
-	// The run points the cache at its own root (there is no --shared any more),
-	// and does it with os.Setenv — process-global, so the values are declared
-	// here to be restored for the rest of this package's tests.
-	t.Setenv("PROMISE_HOME", filepath.Join(dir, ".promise-home"))
-	t.Setenv("TMPDIR", filepath.Join(dir, ".promise-home", "tmp"))
-
 	res, err := runVerifyJSON(t, dir)
 	if err == nil || res.OK {
 		t.Fatal("verify over an empty root should fail")
@@ -114,8 +108,15 @@ func TestRunVerifyRefusesWhenTheStaleBlessingCannotBeCleared(t *testing.T) {
 
 // runVerifyJSON runs bin/verify in-process in JSON mode and reads the one
 // result it writes on stdout, whatever the run's outcome.
+//
+// The run points the cache at its own root with os.Setenv — process-global —
+// so every variable SetupLocalCache sets is declared for restoration here, for
+// every caller. Declaring only TMPDIR left TMP/TEMP, which os.TempDir reads on
+// Windows, pointing into this test's removed TempDir, failing every later
+// t.TempDir in the package (#780).
 func runVerifyJSON(t *testing.T, dir string) (verifyResult, error) {
 	t.Helper()
+	isolateLocalCacheEnv(t)
 	cliObserved(t, Observed()) // RunVerify records whether anyone watches
 	var out bytes.Buffer
 	runErr := RunVerify(dir, []string{"-json"}, &out)

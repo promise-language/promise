@@ -22,3 +22,8 @@ compiler/cmd/promise/crt/wasm32/*.o binary
 # line endings, but pinning eol keeps the working tree canonical).
 *.g4 text eol=lf
 .grammar.hash text eol=lf
+
+# The wasm32-web harness is //go:embed'd verbatim: its bytes (and the sha256
+# that names its materialized copy) must not depend on the checkout's
+# core.autocrlf, or a CRLF Windows checkout embeds a different file (#778).
+compiler/cmd/promise/wasm_web_harness.js text eol=lf

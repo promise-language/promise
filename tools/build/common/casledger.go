@@ -249,19 +249,27 @@ func foreignHomes(root string, homes []string) []string {
 // outside, and so is a relative path, which no compiler records. Windows
 // compares case-insensitively, since one directory answers to several
 // spellings there.
+//
+// Containment is a plain prefix test on cleaned paths rather than filepath.Rel,
+// because Rel folds case on a Windows host whatever goos says — goos alone
+// decides case sensitivity here (#780).
 func foreignHomesOn(goos, root string, homes []string) []string {
-	base := filepath.Clean(root)
-	if goos == "windows" {
-		base = strings.ToLower(base)
+	fold := func(p string) string {
+		p = filepath.Clean(p)
+		if goos == "windows" {
+			p = strings.ToLower(p)
+		}
+		return p
+	}
+	base := fold(root)
+	prefix := base
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
 	}
 	var foreign []string
 	for _, home := range homes {
-		path := filepath.Clean(home)
-		if goos == "windows" {
-			path = strings.ToLower(path)
-		}
-		rel, err := filepath.Rel(base, path)
-		if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		path := fold(home)
+		if path != base && !strings.HasPrefix(path, prefix) {
 			foreign = append(foreign, home)
 		}
 	}

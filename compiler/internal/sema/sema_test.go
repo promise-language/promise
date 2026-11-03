@@ -10486,6 +10486,54 @@ func TestOptionalNarrowingNonIdent(t *testing.T) {
 	expectError(t, errs, "if condition must be bool")
 }
 
+// TestOptionalNarrowingSkipsGetter: only a variable narrows (#574). A bare
+// module-level getter read is a call, not a variable — narrowing its name made
+// codegen look it up as a local and crash. As a condition it is a presence check
+// that narrows nothing, so the body still sees `T?`; the bool? ambiguity rule
+// still applies to it; and a local that shadows the getter's name narrows as any
+// variable does. The negative and post-divergence forms narrow a getter no more
+// than the positive ones (language-design.md, "Only a variable narrows") — a
+// getter narrowed there would hit the same nil-local crash in
+// genNegatedNarrowStmt. Accepting the condition does not excuse a failable
+// getter from being handled.
+func TestOptionalNarrowingSkipsGetter(t *testing.T) {
+	const getters = `
+		get g string? { return "a"; }
+		get gb bool? { return true; }
+		get gf! string? { return "a"; }
+	`
+	cases := []struct {
+		name       string
+		body       string
+		wantErr    string // "" → must check OK
+		narrowings int    // OptionalNarrowings entries when wantErr == ""
+	}{
+		{"truthiness is a presence check", `if g {}`, "", 0},
+		{"is present is a presence check", `if g is present {}`, "", 0},
+		{"truthiness does not narrow the body", `if g { string s = g; }`, "cannot assign string? to variable of type string", 0},
+		{"is present does not narrow the body", `if g is present { string s = g; }`, "cannot assign string? to variable of type string", 0},
+		{"bool? getter truthiness is still ambiguous", `if gb {}`, "bool? in if condition is ambiguous", 0},
+		{"bool? getter is present", `if gb is present {}`, "", 0},
+		{"local shadowing the getter narrows", `string? g = "x"; if g { string s = g; }`, "", 1},
+		{"is absent does not narrow the else branch", `if g is absent {} else { string s = g; }`, "cannot assign string? to variable of type string", 0},
+		{"is absent then return does not narrow what follows", `if g is absent { return; } string s = g;`, "cannot assign string? to variable of type string", 0},
+		{"failable getter condition must still be handled", `if gf {}`, "failable call must be handled", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := getters + "test() { " + tc.body + " }"
+			if tc.wantErr != "" {
+				expectError(t, checkErrs(t, src), tc.wantErr)
+				return
+			}
+			info := checkOK(t, src)
+			if got := len(info.OptionalNarrowings); got != tc.narrowings {
+				t.Errorf("OptionalNarrowings: got %d entries, want %d", got, tc.narrowings)
+			}
+		})
+	}
+}
+
 // --- Uninitialized optional var decls ---
 
 func TestUninitOptionalVar(t *testing.T) {

@@ -1344,7 +1344,7 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 		return
 	}
 
-	cond := c.genExprAutoPropagate(s.Cond) // T1873
+	cond := c.genIfCond(s.Cond)
 
 	thenBlock := c.newBlock("if.then")
 	mergeBlock := c.newBlock("if.end")
@@ -1424,6 +1424,20 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 	c.cleanupEnvTempsFrom(c.blockTempFloorEnv) // T0100
 }
 
+// genIfCond lowers a non-narrowing if-statement condition to an i1. A condition
+// sema typed `T?` is a presence check (language-design.md, "Truthiness
+// narrowing"): sema admits one only when it narrows nothing — a getter read such
+// as `if g { }` (#574) — so it is lowered to its presence flag through the same
+// optionalPresenceFlag that `x is present` uses, which also drops a fresh
+// temporary's inner. Every other condition is the bool it was type-checked as.
+func (c *Compiler) genIfCond(cond ast.Expr) value.Value {
+	val := c.genExprAutoPropagate(cond) // T1873
+	if _, isOpt := c.info.Types[cond].(*types.Optional); isOpt {
+		return c.optionalPresenceFlag(cond, val)
+	}
+	return val
+}
+
 // genIfStmtValue generates an if/else statement in value-producing position
 // (e.g., as the last statement in a block body of a match arm). Returns the
 // phi of both branch values, or nil if the if/else cannot produce a value
@@ -1439,7 +1453,7 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 		return nil
 	}
 
-	cond := c.genExprAutoPropagate(s.Cond) // T1873
+	cond := c.genIfCond(s.Cond)
 
 	thenBlock := c.newBlock("if.then")
 	elseBlock := c.newBlock("if.else")

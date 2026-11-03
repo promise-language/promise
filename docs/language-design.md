@@ -3713,6 +3713,8 @@ int y = x;           // x is T — guaranteed present
 
 Post-divergence narrowing requires: (1) the condition is `is absent` or `!cc`, (2) the then-body diverges on all paths, and (3) there is no `else` clause.
 
+**Only a variable narrows.** Narrowing — positive, negative, and post-divergence — applies to a local variable or a parameter. A getter (`g`, `mod.g`, `obj.prop`; see *Module Level Getters and Setters*) is a call that runs on every read, not a variable: as a condition — `if g`, `g is present`, `g is absent` — it is a presence test of that one read, and `g` keeps type `T?` inside the block and after it. To use the value, unwrap it into a new name with `if v := g { ... }` (see *Unwrap binding*).
+
 `is present` and `is absent` extend the existing `is` pattern matching keyword (see Section 10.3 for the full `is` keyword disambiguation table). They cannot collide with type names — `present` and `absent` are contextual keywords recognized only after `is` in pattern position.
 
 #### Unwrap binding

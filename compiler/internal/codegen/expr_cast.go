@@ -67,20 +67,7 @@ func (c *Compiler) genStructuralIs(e *ast.IsExpr, info *sema.StructuralIsInfo) v
 func (c *Compiler) genIsIdentPattern(expr ast.Expr, p *ast.IdentIsPattern) value.Value {
 	// Optional: x is present / x is absent
 	if p.Name == "present" || p.Name == "absent" {
-		optVal := c.genExpr(expr)
-		flag := c.block.NewExtractValue(optVal, 0) // i1 flag field
-
-		// B0288: Drop temporary optional data for call-like expressions.
-		// When a method/function call returns T? with droppable inner T
-		// (enum, string, vector), the data portion leaks unless dropped.
-		// Only drop for expressions that produce fresh temporaries (calls,
-		// optional chains). Field/index/ident expressions share ownership
-		// with the parent variable — dropping would double-free.
-		switch expr.(type) {
-		case *ast.CallExpr, *ast.OptionalChainExpr, *ast.ErrorHandlerExpr:
-			c.dropTempOptionalInner(expr, optVal, flag)
-		}
-
+		flag := c.optionalPresenceFlag(expr, c.genExpr(expr))
 		if p.Name == "absent" {
 			return c.block.NewXor(flag, constant.NewInt(irtypes.I1, 1))
 		}
@@ -112,6 +99,35 @@ func (c *Compiler) genIsIdentPattern(expr ast.Expr, p *ast.IdentIsPattern) value
 
 	// Named type check via RTTI
 	return c.genIsNamedType(expr, p.Name)
+}
+
+// optionalPresenceFlag returns the i1 presence flag of optVal, the already-generated
+// `{i1, T}` value of the optional expression expr — the one lowering of a presence
+// test, shared by `x is present` / `x is absent` and an optional `if` condition
+// (genIfCond, #574).
+//
+// B0288: a test that reads only the flag abandons the data portion, so when expr
+// produces a FRESH temporary nothing else owns, its droppable inner is dropped
+// here (only when present). Fresh: a call, an optional chain, an error handler, or
+// a getter read — a getter is a call handing back a fresh owned value, in both its
+// qualified/instance spelling (isGetterCallExpr) and its bare module-level one
+// (isBareModuleGetterIdent), the same two predicates T2049 uses for "a getter read
+// is not a place" (#574). Parentheses are peeled first: they do not change who
+// owns the value. A local, field or index read shares ownership with its storage —
+// dropping it would double-free.
+func (c *Compiler) optionalPresenceFlag(expr ast.Expr, optVal value.Value) value.Value {
+	flag := c.block.NewExtractValue(optVal, 0)
+	fresh := false
+	switch e := unwrapDestructureParens(expr); e.(type) {
+	case *ast.CallExpr, *ast.OptionalChainExpr, *ast.ErrorHandlerExpr:
+		fresh = true
+	default:
+		fresh = c.isGetterCallExpr(e) || c.isBareModuleGetterIdent(e)
+	}
+	if fresh {
+		c.dropTempOptionalInner(expr, optVal, flag)
+	}
+	return flag
 }
 
 // dropTempOptionalInner drops the inner value of a temporary optional struct.

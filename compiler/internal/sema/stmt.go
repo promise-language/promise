@@ -1453,14 +1453,13 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 			c.closeScope()
 		} else {
 			if cond != nil && !types.Identical(cond, types.TypBool) {
-				// Suppress for bool? identifiers (ambiguity error already reported above)
-				isBoolOptIdent := false
-				if _, isIdent := s.Cond.(*ast.IdentExpr); isIdent {
-					if opt, isOpt := cond.(*types.Optional); isOpt {
-						isBoolOptIdent = types.Identical(opt.Elem(), types.TypBool)
-					}
-				}
-				if !isBoolOptIdent {
+				// An optional identifier condition is not an error here: a bool? one
+				// already reported its ambiguity in detectOptionalNarrowing, and any
+				// other one that did not narrow is a getter read — a presence check
+				// that narrows nothing (#574; codegen lowers it in genIfCond).
+				_, isIdent := s.Cond.(*ast.IdentExpr)
+				_, isOpt := cond.(*types.Optional)
+				if !isIdent || !isOpt {
 					c.errorf(s.Cond.Pos(), "if condition must be bool, got %s", cond)
 				}
 			}
@@ -1479,32 +1478,28 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 // detectOptionalNarrowing checks if an if-condition implies optional narrowing.
 // Handles simple cases (single ident, `is present`) after the condition has been type-checked.
 // Compound (!cc, a && b) patterns are handled by preDetectIfNarrowing instead.
+//
+// Which identifier narrows is detectNarrowableExpr's decision — the same one the
+// negated and compound forms use — so it is made in one place: only a VARIABLE
+// (a local or a parameter) narrows. A module-level getter read is a call that runs
+// on every read, not a variable; recording its name as a narrowed variable made
+// codegen look it up as a local and crash (#574). Such a condition is still a
+// presence check (checkIfStmt accepts it), it just narrows nothing.
 func (c *Checker) detectOptionalNarrowing(cond ast.Expr, condType types.Type) *OptionalNarrowing {
-	// Case 1: `if cc { ... }` where cc is T? (truthiness narrowing)
-	if ident, ok := cond.(*ast.IdentExpr); ok {
-		if opt, ok := condType.(*types.Optional); ok {
-			inner := opt.Elem()
-			// bool? is ambiguous for truthiness — require `is present` instead
-			if types.Identical(inner, types.TypBool) {
-				c.errorf(cond.Pos(), "bool? in if condition is ambiguous; use 'is present' instead")
-				return nil
-			}
-			return &OptionalNarrowing{Vars: []NarrowedVar{{VarName: ident.Name, InnerType: inner}}}
+	// bool? is ambiguous for truthiness — require `is present` instead. This holds
+	// for any optional identifier condition, a getter read included.
+	if _, ok := cond.(*ast.IdentExpr); ok {
+		if opt, ok := condType.(*types.Optional); ok && types.Identical(opt.Elem(), types.TypBool) {
+			c.errorf(cond.Pos(), "bool? in if condition is ambiguous; use 'is present' instead")
+			return nil
 		}
 	}
 
-	// Case 2: `if cc is present { ... }` — works for any T? including bool?
-	if isExpr, ok := cond.(*ast.IsExpr); ok {
-		if pat, ok := isExpr.Pattern.(*ast.IdentIsPattern); ok && pat.Name == "present" {
-			if ident, ok := isExpr.Expr.(*ast.IdentExpr); ok {
-				exprType := c.info.Types[isExpr.Expr]
-				if opt, ok := exprType.(*types.Optional); ok {
-					return &OptionalNarrowing{Vars: []NarrowedVar{{VarName: ident.Name, InnerType: opt.Elem()}}}
-				}
-			}
-		}
+	// `if cc { ... }` (truthiness) and `if cc is present { ... }` (any T?, bool?
+	// included) where cc is a variable of optional type.
+	if vars := c.detectNarrowableExpr(cond); vars != nil {
+		return &OptionalNarrowing{Vars: vars}
 	}
-
 	return nil
 }
 

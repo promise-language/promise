@@ -1,0 +1,428 @@
+// #574: a getter read used as an `if` condition — `if g { }`, `g is present` — is
+// a presence test of that one read, never a narrowed variable. Sema used to record
+// a bare module-level getter's NAME as a narrowed variable, and codegen looked it
+// up as a local and crashed (SIGSEGV in genIfNarrowStmt). Separately, the presence
+// test dropped the abandoned optional temp only for a call / optional chain /
+// error handler, so a getter read under `is present` / `is absent` leaked its
+// payload on every evaluation.
+//
+// Every test loops 50 times so a per-iteration leak is unambiguous in the count.
+get probe string? `doc("Optional heap string from a module-level getter — present.") {
+  return "probe" + "-payload";
+}
+
+get probe_none string? `doc("Optional heap string from a module-level getter — absent.") {
+  return none;
+}
+
+get probe_vec int[]? `doc("Optional heap vector from a module-level getter.") {
+  int[] v = [];
+  v.push(1);
+  v.push(2);
+  return v;
+}
+
+type Row `doc("Droppable heap user type, to exercise the Optional[user] inner.") {
+  string label;
+  drop(~this) {
+  }
+}
+
+get probe_row Row? `doc("Optional droppable heap user type from a getter.") {
+  return Row(label: "row" + "-payload");
+}
+
+enum Parcel `doc("Enum with a heap payload, to exercise the enum inner.") {
+  Text(string s),
+  Num(int n),
+}
+
+get probe_enum Parcel? `doc("Optional droppable enum from a getter.") {
+  return Parcel.Text(s: "par" + "cel-payload");
+}
+
+get probe_flag bool? `doc("Optional bool from a getter — nothing to drop.") {
+  return true;
+}
+
+get probe_fail! string? `doc("Failable optional heap string from a getter.") {
+  return "probe" + "-fail-payload";
+}
+
+probe_fn() string? `doc("Optional heap string from a plain call, not a getter.") {
+  return "probe" + "-fn-payload";
+}
+
+type Holder `doc("Holds an optional string field and exposes it through a getter.") {
+  string? name;
+  get name_prop string? {
+    return this.name;
+  }
+}
+
+type Slot[T] `doc("Generic holder: the inner of its getter's optional is only droppable once T is substituted.") {
+  T? item;
+  get item_prop T? {
+    return this.item;
+  }
+}
+
+_slot_present[T](Slot[T] s) bool `doc("Presence test of a getter read inside a generic body.") {
+  return s.item_prop is present;
+}
+
+// --- the item's crash repros: truthiness and `is present` on a bare getter ------
+
+test_if_getter_truthiness() `test {
+  int hits = 0;
+  int i = 0;
+  while i < 50 {
+    if probe {
+      hits = hits + 1;
+    }
+    i = i + 1;
+  }
+  assert(hits == 50, "a present getter must take the then-branch");
+}
+
+test_if_getter_is_present() `test {
+  int hits = 0;
+  int i = 0;
+  while i < 50 {
+    if probe is present {
+      hits = hits + 1;
+    }
+    i = i + 1;
+  }
+  assert(hits == 50, "a present getter must take the then-branch");
+}
+
+test_if_getter_truthiness_else() `test {
+  int then_hits = 0;
+  int else_hits = 0;
+  int i = 0;
+  while i < 50 {
+    if probe {
+      then_hits = then_hits + 1;
+    } else {
+      else_hits = else_hits + 1;
+    }
+    i = i + 1;
+  }
+  assert(then_hits == 50 && else_hits == 0, "a present getter must take the then-branch");
+}
+
+// An absent getter must take the else-branch, and the presence test must not
+// drop the garbage inner of a `none`.
+test_if_absent_getter_truthiness() `test {
+  int then_hits = 0;
+  int else_hits = 0;
+  int i = 0;
+  while i < 50 {
+    if probe_none {
+      then_hits = then_hits + 1;
+    } else {
+      else_hits = else_hits + 1;
+    }
+    i = i + 1;
+  }
+  assert(then_hits == 0 && else_hits == 50, "an absent getter must take the else-branch");
+}
+
+test_if_absent_getter_is_present() `test {
+  int then_hits = 0;
+  int else_hits = 0;
+  int i = 0;
+  while i < 50 {
+    if probe_none is present {
+      then_hits = then_hits + 1;
+    } else {
+      else_hits = else_hits + 1;
+    }
+    i = i + 1;
+  }
+  assert(then_hits == 0 && else_hits == 50, "an absent getter must take the else-branch");
+}
+
+// The if-statement in value position (the last statement of a block value) is
+// lowered by genIfStmtValue, a second condition site.
+test_if_getter_value_position() `test {
+  int total = 0;
+  int i = 0;
+  while i < 50 {
+    int v = match i {
+      _ => {
+        if probe {
+          1
+        } else {
+          2
+        }
+      },
+    };
+    total = total + v;
+    i = i + 1;
+  }
+  assert(total == 50, "the value-position if must select the then-arm");
+}
+
+// The getter is not narrowed: inside the block it is still `string?`, and the
+// documented way to use the value is to unwrap it into a new name.
+test_if_getter_unwrap_inside() `test {
+  int total = 0;
+  int i = 0;
+  while i < 50 {
+    if probe {
+      if v := probe {
+        total = total + v.len;
+      }
+    }
+    i = i + 1;
+  }
+  assert(total == 50 * "probe-payload".len, "the unwrapped value must be the getter's");
+}
+
+// --- the leak half: every presence-test spelling over a getter read ------------
+
+// The item's member-getter repro.
+test_member_getter_is_present() `test {
+  int i = 0;
+  while i < 50 {
+    Holder h = Holder(name: "a" + "bc");
+    assert(h.name_prop is present, "the member getter must be present");
+    i = i + 1;
+  }
+}
+
+test_getter_is_absent() `test {
+  int hits = 0;
+  int i = 0;
+  while i < 50 {
+    if probe is absent {
+      hits = hits + 1;
+    }
+    i = i + 1;
+  }
+  assert(hits == 0, "a present getter is not absent");
+}
+
+test_getter_not_is_present() `test {
+  int hits = 0;
+  int i = 0;
+  while i < 50 {
+    if !(probe is present) {
+      hits = hits + 1;
+    }
+    i = i + 1;
+  }
+  assert(hits == 0, "a present getter is present");
+}
+
+test_getter_is_present_compound() `test {
+  bool t = true;
+  int hits = 0;
+  int i = 0;
+  while i < 50 {
+    if probe is present && t {
+      hits = hits + 1;
+    }
+    i = i + 1;
+  }
+  assert(hits == 50, "both operands hold");
+}
+
+test_getter_while_is_present() `test {
+  int total = 0;
+  int i = 0;
+  while i < 50 {
+    int n = 0;
+    while probe is present && n < 3 {
+      n = n + 1;
+    }
+    total = total + n;
+    i = i + 1;
+  }
+  assert(total == 150, "the loop condition is evaluated on every iteration");
+}
+
+test_paren_getter_is_present() `test {
+  int i = 0;
+  while i < 50 {
+    assert((probe) is present, "a parenthesized getter read");
+    i = i + 1;
+  }
+}
+
+test_paren_member_getter_is_present() `test {
+  int i = 0;
+  while i < 50 {
+    Holder h = Holder(name: "a" + "bc");
+    assert((h.name_prop) is present, "a parenthesized member getter read");
+    i = i + 1;
+  }
+}
+
+// Deliberate passenger: the parenthesis peel reaches a call subject too.
+test_paren_call_is_present() `test {
+  int i = 0;
+  while i < 50 {
+    assert((probe_fn()) is present, "a parenthesized call");
+    i = i + 1;
+  }
+}
+
+// --- inner kinds the presence-test drop dispatches -----------------------------
+
+test_vector_getter_presence() `test {
+  int hits = 0;
+  int i = 0;
+  while i < 50 {
+    if probe_vec {
+      hits = hits + 1;
+    }
+    assert(probe_vec is present, "the vector getter must be present");
+    i = i + 1;
+  }
+  assert(hits == 50, "a present vector getter must take the then-branch");
+}
+
+test_row_getter_presence() `test {
+  int hits = 0;
+  int i = 0;
+  while i < 50 {
+    if probe_row {
+      hits = hits + 1;
+    }
+    assert(probe_row is present, "the heap user getter must be present");
+    i = i + 1;
+  }
+  assert(hits == 50, "a present heap user getter must take the then-branch");
+}
+
+test_enum_getter_presence() `test {
+  int hits = 0;
+  int i = 0;
+  while i < 50 {
+    if probe_enum {
+      hits = hits + 1;
+    }
+    assert(probe_enum is present, "the enum getter must be present");
+    i = i + 1;
+  }
+  assert(hits == 50, "a present enum getter must take the then-branch");
+}
+
+// Inside a generic body the subject is typed `T?`: the drop must substitute T to
+// find the string inner, or every instantiation leaks.
+test_generic_body_getter_is_present() `test {
+  int i = 0;
+  while i < 50 {
+    Slot[string] s = Slot[string](item: "sl" + "ot");
+    assert(_slot_present(s), "the generic getter must be present");
+    i = i + 1;
+  }
+}
+
+test_bool_getter_is_present() `test {
+  int i = 0;
+  while i < 50 {
+    assert(probe_flag is present, "the bool? getter must be present");
+    i = i + 1;
+  }
+}
+
+// A failable getter as the whole condition auto-propagates like any failable
+// condition (T1873). (`probe_fail is absent` — a failable SUBJECT under `is` — is
+// a separate pre-existing defect, #793, and is not exercised here.)
+_count_failable!() int `doc("Tests a failable getter's presence 50 times.") {
+  int hits = 0;
+  int i = 0;
+  while i < 50 {
+    if probe_fail {
+      hits = hits + 1;
+    }
+    i = i + 1;
+  }
+  return hits;
+}
+
+test_failable_getter_truthiness() `test {
+  int hits = _count_failable()?!;
+  assert(hits == 50, "a present failable getter must take the then-branch");
+}
+
+// --- controls: variables still narrow, places are never dropped ----------------
+
+// A local holding the getter's value is a variable: it narrows, and is dropped
+// exactly once, by its own binding.
+test_control_local_narrows() `test {
+  int total = 0;
+  int i = 0;
+  while i < 50 {
+    string? v = probe;
+    if v {
+      string s = v;
+      total = total + s.len;
+    }
+    i = i + 1;
+  }
+  assert(total == 50 * "probe-payload".len, "the narrowed local holds the getter's value");
+}
+
+// A local shadowing the getter's name is a variable, not a call.
+test_control_local_shadows_getter_name() `test {
+  int total = 0;
+  int i = 0;
+  while i < 50 {
+    string? probe = "sha" + "dow";
+    if probe {
+      string s = probe;
+      total = total + s.len;
+    }
+    i = i + 1;
+  }
+  assert(total == 50 * "shadow".len, "the shadowing local narrows");
+}
+
+// A field read is a place its owner frees: the presence test must not drop it.
+test_control_field_is_present() `test {
+  int i = 0;
+  while i < 50 {
+    Holder h = Holder(name: "a" + "bc");
+    assert(h.name is present, "the field is present");
+    string after = h.name!;
+    assert(after == "abc", "the field must survive the presence test");
+    i = i + 1;
+  }
+}
+
+// A local shadowing the getter's name, in presence tests that do not narrow (an
+// expression, not an `if` condition): it is still the local, which its binding
+// frees — the presence test must not drop it as a getter read.
+test_control_shadowing_local_presence_not_dropped() `test {
+  int i = 0;
+  while i < 50 {
+    string? probe = "sha" + "dow";
+    assert(probe is present, "the shadowing local is present");
+    assert((probe) is present, "the parenthesized shadowing local is present");
+    assert(!(probe is absent), "the shadowing local is not absent");
+    string after = probe!;
+    assert(after == "shadow", "the local must survive the presence tests");
+    i = i + 1;
+  }
+}
+
+// Peeling parentheses must not turn a place into a fresh temporary: a
+// parenthesized local or field read is still owned by its storage.
+test_control_paren_places_not_dropped() `test {
+  int i = 0;
+  while i < 50 {
+    string? local = "lo" + "cal";
+    Holder h = Holder(name: "a" + "bc");
+    assert((local) is present, "the parenthesized local is present");
+    assert((h.name) is present, "the parenthesized field is present");
+    string l = local!;
+    string f = h.name!;
+    assert(l == "local" && f == "abc", "both places must survive the presence test");
+    i = i + 1;
+  }
+}

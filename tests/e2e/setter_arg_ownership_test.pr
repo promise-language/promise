@@ -381,3 +381,199 @@ generic_failable() `test {
   };
   assert(g._v is present, "the raise kept the stored value");
 }
+
+// --- Virtual dispatch: an overridden setter reached through its base type ---
+// The call goes through the vtable (genVirtualSetterCall), which hands the
+// value over exactly as a direct call does.
+
+type VBase {
+  int seen;
+  get item Res => Res(name: "");
+  set item!(Res value) {
+    this.seen = value.name.len;
+  }
+}
+
+type VKeeper is VBase {
+  Res? _kept;
+  get item Res => Res(name: "");
+  set item!(Res value) {
+    if value.name.len > 2 {
+      raise error("too long");
+    }
+    this.seen = 10 + value.name.len;
+    this._kept = value;
+  }
+}
+
+v_set_temp!(VBase ~b, string s) {
+  b.item = Res(name: s + "");
+}
+
+v_set_local!(VBase ~b, string s) {
+  r := Res(name: s + "");
+  b.item = r;
+}
+
+virtual_base_setter() `test {
+  b := VBase(seen: 0);
+  v_set_temp(b, "ab")? e {
+    assert(false, "must not raise");
+  };
+  assert(b.seen == 2, "the base setter ran");
+  v_set_local(b, "abc")? e {
+    assert(false, "must not raise");
+  };
+  assert(b.seen == 3, "the base setter saw the local");
+}
+
+virtual_override_stores() `test {
+  k := VKeeper(seen: 0, _kept: none);
+  v_set_temp(k, "ab")? e {
+    assert(false, "must not raise");
+  };
+  assert(k.seen == 12, "the override ran");
+  v_set_local(k, "cd")? e {
+    assert(false, "must not raise");
+  };
+  assert(k._kept is present, "the override stored the local");
+}
+
+virtual_override_raises() `test {
+  k := VKeeper(seen: 0, _kept: none);
+  v_set_temp(k, "abc")? e {
+    assert(e.message == "too long", "raised");
+  };
+  v_set_local(k, "abcd")? e {
+    assert(e.message == "too long", "raised");
+  };
+  assert(k.seen == 0, "the raise left the holder untouched");
+}
+
+// --- A `global setter: no receiver, the value is still handed over ---
+
+type Registry {
+  int n;
+  get last Res `global => Res(name: "");
+  set last(Res value) `global {
+    assert(value.name.len == 2, "the global setter saw its argument");
+  }
+  get checked Res `global => Res(name: "");
+  set checked!(Res value) `global {
+    if value.name.len > 1 {
+      raise error("too long");
+    }
+  }
+}
+
+g_set_checked!(string s) {
+  Registry.checked = Res(name: s + "");
+}
+
+global_setter_arg() `test {
+  Registry.last = Res(name: "a" + "b");
+  r := Res(name: "c" + "d");
+  Registry.last = r;
+}
+
+global_setter_raises() `test {
+  g_set_checked("ab")? e {
+    assert(e.message == "too long", "raised");
+  };
+  g_set_checked("a")? e {
+    assert(false, "must not raise");
+  };
+}
+
+// --- An implicit structural view: the adapter forwards the value it owns ---
+
+type Slot `structural {
+  get raw Res `abstract;
+  set raw(Res v) `abstract;
+}
+
+type SlotCell {
+  Res stored;
+  get raw Res => Res(name: this.stored.name + "");
+  set raw(Res v) {
+    this.stored = v;
+  }
+}
+
+type SlotPeek {
+  int n;
+  get raw Res => Res(name: "");
+  set raw(Res v) {
+    this.n = v.name.len;
+  }
+}
+
+through_slot(Slot ~s) {
+  s.raw = Res(name: "x" + "y");
+  r := Res(name: "z" + "wv");
+  s.raw = r;
+}
+
+implicit_view_stores() `test {
+  c := SlotCell(stored: Res(name: "q" + "r"));
+  through_slot(c);
+  assert(c.stored.name == "zwv", "stored through the view");
+}
+
+implicit_view_not_stored() `test {
+  p := SlotPeek(n: 0);
+  through_slot(p);
+  assert(p.n == 3, "the setter saw the local through the view");
+}
+
+// --- Sources the assignment moves out of: `opt!` and a downcast ---
+
+force_unwrapped_optional() `test {
+  Res? o = Res(name: "a" + "b");
+  h := Plain(seen: 0);
+  h.item = o!;
+  assert(h.seen == 2, "the setter saw the unwrapped value");
+  Res? p = Res(name: "c" + "d");
+  s := Store(_r: Res(name: "q" + "r"));
+  s.r = p!;
+  assert(s._r.name == "cd", "stored the unwrapped value");
+}
+
+type Animal {
+  string name;
+}
+
+type Dog is Animal {
+  int legs;
+}
+
+type Kennel {
+  int n;
+  Dog? _kept;
+  get dog Dog => Dog(name: "", legs: 0);
+  set dog(Dog value) {
+    this.n = value.legs;
+  }
+  get keep Dog? => none;
+  set keep(Dog? value) {
+    this._kept = value;
+  }
+}
+
+force_downcast() `test {
+  Animal a = Dog(name: "a" + "b", legs: 4);
+  k := Kennel(n: 0, _kept: none);
+  k.dog = a as! Dog;
+  assert(k.n == 4, "the setter saw the downcast value");
+}
+
+conditional_downcast() `test {
+  Animal hit = Dog(name: "a" + "b", legs: 3);
+  k := Kennel(n: 0, _kept: none);
+  k.keep = hit as Dog;
+  assert(k._kept is present, "a downcast that succeeds moves the subject");
+  Animal miss = Animal(name: "c" + "d");
+  j := Kennel(n: 0, _kept: none);
+  j.keep = miss as Dog;
+  assert(j._kept is absent, "a downcast that fails leaves the subject to its scope");
+}

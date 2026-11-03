@@ -6657,7 +6657,7 @@ func compileProjectFrontend(projectDir string, files []string, triple string) (*
 	tSema := time.Now()
 
 	tomlPath := filepath.Join(projectDir, "promise.toml")
-	moduleScopes, modInfos, depOrder, modTiming, ml := loadModuleScopes(tomlPath, merged, target)
+	moduleScopes, identities, modInfos, depOrder, modTiming, ml := loadModuleScopes(tomlPath, merged, target)
 
 	// T1732: protocol trigger table + on-demand loader for unimported modules.
 	triggers := parseProtocolTriggers()
@@ -6667,7 +6667,7 @@ func compileProjectFrontend(projectDir string, files []string, triple string) (*
 	}
 
 	tUserSema := time.Now()
-	info, errs := sema.CheckWithProtocols(merged, moduleScopes, target, triggers, protoLoader)
+	info, errs := sema.CheckWithIdentities(merged, moduleScopes, target, triggers, protoLoader, identities)
 	userSemaDur := time.Since(tUserSema)
 	if modInfos != nil {
 		info.ModuleInfos = modInfos
@@ -6763,7 +6763,7 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	tSema := time.Now()
 
 	// Load local modules from use declarations
-	moduleScopes, modInfos, depOrder, modTiming, ml := loadModuleScopes(filename, file, target)
+	moduleScopes, identities, modInfos, depOrder, modTiming, ml := loadModuleScopes(filename, file, target)
 
 	// T1732: protocol trigger table + on-demand loader for unimported modules.
 	triggers := parseProtocolTriggers()
@@ -6773,7 +6773,7 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	}
 
 	tUserSema := time.Now()
-	info, errs := sema.CheckWithProtocols(file, moduleScopes, target, triggers, protoLoader)
+	info, errs := sema.CheckWithIdentities(file, moduleScopes, target, triggers, protoLoader, identities)
 	userSemaDur := time.Since(tUserSema)
 	if modInfos != nil {
 		info.ModuleInfos = modInfos
@@ -7402,9 +7402,9 @@ func compileModuleTestFrontend(modDir, triple string) (*ast.File, *sema.Info) {
 	merged = injectGzipImportIfNeeded(merged)
 
 	// Load module dependencies (the module's own `use` declarations)
-	moduleScopes, modInfos, depOrder, _, _ := loadModuleScopes(filepath.Join(modDir, "promise.toml"), merged, target)
+	moduleScopes, identities, modInfos, depOrder, _, _ := loadModuleScopes(filepath.Join(modDir, "promise.toml"), merged, target)
 
-	info, errs := sema.CheckWithTarget(merged, moduleScopes, target)
+	info, errs := sema.CheckWithIdentities(merged, moduleScopes, target, nil, nil, identities)
 	if modInfos != nil {
 		info.ModuleInfos = modInfos
 		info.ModuleOrder = depOrder
@@ -7553,9 +7553,17 @@ type moduleLoader struct {
 // Modules are loaded recursively: if module A imports module B, B is loaded first.
 // The returned *moduleLoader can be used to create a ProtocolModuleLoader for
 // on-demand loading of unimported embedded modules (T1732).
-func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (map[string]*types.Scope, map[string]*sema.ModuleInfo, []string, *moduleTimings, *moduleLoader) {
+//
+// The identities result is the root file's counterpart of loadDeps' map: each
+// sourced `use` spelling → the global identity of the module it loaded, for
+// sema.CheckWithIdentities. The root needs it as much as a module does: a
+// spelling that is not the module's identity (`"../m"`, whose identity is an
+// absolute path outside the project root, or a `[replace]`d URL) otherwise
+// leaves the module object carrying the spelling, codegen finds no IR prefix
+// for it, and every `m.getter` / `m.func()` panics (#785).
+func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (map[string]*types.Scope, map[string]string, map[string]*sema.ModuleInfo, []string, *moduleTimings, *moduleLoader) {
 	if len(file.Uses) == 0 {
-		return nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil
 	}
 
 	// Find project root (directory containing promise.toml).
@@ -7621,6 +7629,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 	}
 
 	scopes := make(map[string]*types.Scope)
+	identities := make(map[string]string)
 	for _, u := range file.Uses {
 		if u.Path == "" {
 			// Check named require entries before catalog lookup.
@@ -7666,9 +7675,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 		if u.Alias != "_" {
 			modInfo.Name = u.Alias
 		}
-		exportedScope := sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
-		modInfo.InterfaceHash = module.HashModuleInterface(exportedScope)
-		scopes[u.Path] = exportedScope
+		registerSourcedUse(u, modInfo, scopes, identities)
 	}
 
 	// Emit warnings collected during loading
@@ -7677,7 +7684,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 	}
 
 	if len(scopes) == 0 {
-		return nil, nil, nil, nil, loader
+		return nil, nil, nil, nil, nil, loader
 	}
 	mt := &moduleTimings{
 		parseTime:   loader.modParseTime,
@@ -7686,7 +7693,7 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 		timings:     loader.modTimings,
 		parseCached: loader.modParseCached,
 	}
-	return scopes, loader.allModInfos, loader.depOrder, mt, loader
+	return scopes, identities, loader.allModInfos, loader.depOrder, mt, loader
 }
 
 // localModuleIdentity is a local module's globally unique name: its resolved
@@ -8279,6 +8286,18 @@ func (ml *moduleLoader) isTopLevelPin(normalizedURL string) bool {
 	return false
 }
 
+// registerSourcedUse records a loaded sourced import (`use alias "location"`)
+// under the spelling the importing file wrote: its exported scope for sema's
+// scope lookup, and the module's identity for the module object sema creates.
+// Both the root project's imports (loadModuleScopes) and a module's own imports
+// (loadDeps) go through it, so neither can register a scope without its identity.
+func registerSourcedUse(u *ast.UseDecl, mi *sema.ModuleInfo, scopes map[string]*types.Scope, identities map[string]string) {
+	exportedScope := sema.ExportedScope(mi.SemaInfo, mi.File)
+	mi.InterfaceHash = module.HashModuleInterface(exportedScope)
+	scopes[u.Path] = exportedScope
+	identities[u.Path] = mi.Path
+}
+
 // loadDeps scans a module's use declarations and recursively loads its dependencies.
 // Returns module scopes for sema.CheckWithModules.
 func (ml *moduleLoader) loadDeps(file *ast.File, parentPath, baseDir string) (map[string]*types.Scope, map[string]string, error) {
@@ -8320,10 +8339,7 @@ func (ml *moduleLoader) loadDeps(file *ast.File, parentPath, baseDir string) (ma
 		if err != nil {
 			return nil, nil, fmt.Errorf("in module '%s': %w", parentPath, err)
 		}
-		exportedScope := sema.ExportedScope(depInfo.SemaInfo, depInfo.File)
-		depInfo.InterfaceHash = module.HashModuleInterface(exportedScope)
-		scopes[u.Path] = exportedScope
-		identities[u.Path] = depInfo.Path
+		registerSourcedUse(u, depInfo, scopes, identities)
 	}
 
 	if len(scopes) == 0 {
@@ -8736,7 +8752,7 @@ func runExec(args []string) {
 		filterTriple = codegen.HostTargetTriple()
 	}
 	targetInfo := sema.ParseTargetInfo(filterTriple)
-	moduleScopes, modInfos, depOrder, modTiming, ml := loadModuleScopes("<exec>", file, targetInfo)
+	moduleScopes, identities, modInfos, depOrder, modTiming, ml := loadModuleScopes("<exec>", file, targetInfo)
 
 	// T1732: protocol trigger table + on-demand loader for unimported modules.
 	triggers := parseProtocolTriggers()
@@ -8747,7 +8763,7 @@ func runExec(args []string) {
 
 	// Semantic analysis
 	tUserSema := time.Now()
-	info, errs := sema.CheckWithProtocols(file, moduleScopes, targetInfo, triggers, protoLoader)
+	info, errs := sema.CheckWithIdentities(file, moduleScopes, targetInfo, triggers, protoLoader, identities)
 	userSemaDur := time.Since(tUserSema)
 	if modInfos != nil {
 		info.ModuleInfos = modInfos

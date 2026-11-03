@@ -85,7 +85,7 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 				result := c.emitUnaryOpResult(op, targetType, current, false)
 				// Drop-old is handled inside the setter (it assigns the backing
 				// field via genMemberAssign, which drops the old value).
-				c.genSetterCall(t, recvType, recvNamed, setter, result)
+				c.genSetterCall(t, recvType, recvNamed, setter, result, nil) // the setter owns the fresh result (#786)
 				return
 			}
 		}

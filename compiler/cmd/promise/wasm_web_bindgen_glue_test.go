@@ -1148,6 +1148,154 @@ func TestBindWebIdlGlueOptionalHandleParams(t *testing.T) {
 	}
 }
 
+// #786 end to end: assigning an owned wrapper to an attribute releases its
+// handle. A setter owns its value parameter, so the generated setter frees the
+// wrapper — releasing its reference-table slot — once the host has the object.
+// Each round reads `me`, which takes a fresh slot for an owning wrapper, and
+// assigns it to a nullable attribute (the shape of Document.body) and to a
+// non-nullable one. Before #786 no slot was ever released.
+
+const setterOwnershipIDL = `interface Peer {
+  readonly attribute Peer me;
+  attribute Peer? spare;
+  attribute Peer keep;
+};
+`
+
+// setterOwnershipRounds is how many times setterOwnershipMain assigns each of
+// the two attributes an owned wrapper.
+const setterOwnershipRounds = 50
+
+var setterOwnershipMain = `main() {
+    host := Peer.borrow(1);
+    for _ in 0..` + strconv.Itoa(setterOwnershipRounds) + ` {
+        host.spare = host.me;
+        host.keep = host.me;
+    }
+    host.spare = none;
+}
+`
+
+// setterOwnershipDriver puts the attributes on the global object, handle 1
+// (T1510): me returns the global object, and spare and keep store what they are
+// given, counting the global objects they receive. Once the program is done it
+// counts the reference-table slots still live above the three the glue seeds
+// (1 the global object, 2 document, 3 console) — over a bound covering every
+// slot the program could take — and then takes fresh handles, which a slot
+// released twice would hand out twice.
+const setterOwnershipDriver = nodePageDriver + `
+const [wasmFile, rounds] = process.argv.slice(2);
+
+let received = 0;
+for (const name of ["spare", "keep"]) {
+  let value = null;
+  Object.defineProperty(globalThis, name, {
+    get() { return value; },
+    set(v) { if (v === globalThis) received++; value = v; },
+    configurable: true,
+  });
+}
+Object.defineProperty(globalThis, "me", {
+  get() { return globalThis; },
+  configurable: true,
+});
+
+(async () => {
+  const mod = await import(pathToFileURL(path.join(dir, "peer.js")).href);
+  const result = { logs, errs };
+  try {
+    await mod.init(wasmFile);
+    result.ok = true;
+  } catch (e) {
+    result.ok = false;
+    result.message = e && e.message;
+  }
+  result.received = received;
+  result.live = 0;
+  for (let h = 4; h < 4 + 2 * Number(rounds) + 8; h++) {
+    if (mod._refLoad(h) !== undefined) result.live++;
+  }
+  result.handles = [];
+  for (let i = 0; i < 2 * Number(rounds); i++) result.handles.push(mod._refStore({ probe: i }));
+  process.stdout.write("RESULT:" + JSON.stringify(result) + "\n");
+})();
+`
+
+type setterOwnershipResult struct {
+	OK       bool     `json:"ok"`
+	Message  string   `json:"message"`
+	Logs     []string `json:"logs"`
+	Errs     []string `json:"errs"`
+	Received int      `json:"received"`
+	Live     int      `json:"live"`
+	Handles  []int    `json:"handles"`
+}
+
+func TestBindWebIdlSetterReleasesOwnedWrapper(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+build+node integration test in short mode")
+	}
+	nodePath, err := resolveWasmRuntime("node")
+	if err != nil {
+		// Neither staged on this machine nor fetchable: a fact about the
+		// environment, not the tree.
+		t.Skipf("the pinned node is not obtainable here: %v", err)
+	}
+	bin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+
+	idlPath := filepath.Join(dir, "peer.idl")
+	if err := os.WriteFile(idlPath, []byte(setterOwnershipIDL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	clitest.RunOK(t, bin, nil, "bind", "webidl", "-name", "peer", "-o", outDir, idlPath)
+	if err := os.WriteFile(filepath.Join(outDir, "main.pr"), []byte(setterOwnershipMain), 0644); err != nil {
+		t.Fatal(err)
+	}
+	driver := filepath.Join(outDir, "driver.cjs")
+	if err := os.WriteFile(driver, []byte(setterOwnershipDriver), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	builds := []struct {
+		name string
+		args []string
+	}{
+		{"debug", nil},
+		{"release", []string{"--release"}},
+	}
+	for _, b := range builds {
+		wasm := b.name + ".wasm"
+		args := append(append([]string{"build"}, b.args...), "-target", "wasm32-web", "-o", filepath.Join(outDir, wasm), outDir)
+		clitest.RunOK(t, bin, nil, args...)
+
+		got := runNodeDriver[setterOwnershipResult](t, nodePath, driver, wasm, strconv.Itoa(setterOwnershipRounds))
+		if !got.OK {
+			t.Errorf("%s: init() rejected: %q (logs %q, errs %q)", b.name, got.Message, got.Logs, got.Errs)
+			continue
+		}
+		if want := 2 * setterOwnershipRounds; got.Received != want {
+			t.Errorf("%s: the attributes received the global object %d times, want %d", b.name, got.Received, want)
+		}
+		if got.Live != 0 {
+			t.Errorf("%s: %d reference-table slots are still live after %d rounds of owned wrappers assigned to attributes; the setters are not releasing them", b.name, got.Live, setterOwnershipRounds)
+		}
+		seen := map[int]bool{}
+		for _, h := range got.Handles {
+			if seen[h] {
+				t.Errorf("%s: a fresh _refStore returned handle %d twice — a slot was released twice", b.name, h)
+				break
+			}
+			seen[h] = true
+		}
+		if len(got.Errs) != 0 {
+			t.Errorf("%s: unexpected stderr output %q", b.name, got.Errs)
+		}
+	}
+}
+
 // #766 end to end: a module consuming the bindings converts the Element
 // createElement returns to the HTMLInputElement its host object is, through the
 // generated checked conversion, and reads the input's value back; a div does

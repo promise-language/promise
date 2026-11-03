@@ -1030,7 +1030,9 @@ func formatFuncSig(name string, sig *types.Signature, fn *types.Func, info *sema
 			b.WriteString(typeString(p.Type()))
 		}
 		b.WriteByte(' ')
-		if p.Ref() != types.RefNone {
+		// A setter's value parameter is consumed without a marker — its
+		// declaration has no place for one (#786) — so it renders as declared.
+		if p.Ref() != types.RefNone && !fn.IsSetter() {
 			b.WriteString(p.Ref().String())
 		}
 		b.WriteString(p.Name())

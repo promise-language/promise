@@ -1,6 +1,8 @@
 // T1901: Assigning a heap string through a user-defined property setter must
-// not leak.  The setter borrows the incoming value and dups it internally when
-// storing to its field — the caller's copy must be freed by normal cleanup.
+// not leak. The setter owns its value parameter (#786): the caller hands the
+// string over — a temp, a local, or a compound `+=` result — and the setter
+// moves it into its field. A caller that still freed it would double-free; a
+// setter that neither stored nor freed it would leak.
 heap_string(int n) string {
   string s = "";
   for i in 0..n {

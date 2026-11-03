@@ -324,6 +324,20 @@ func resolveRefMod(rm ast.RefModifier) types.RefMod {
 	}
 }
 
+// paramRefMod is the ownership mode of a declared parameter. A property
+// setter's value parameter is consumed (`move`) although it carries no marker —
+// its declaration has no place for one: the assignment that calls the setter
+// (`h.item = r`) is a plain assignment, which moves its right-hand side, so the
+// setter owns the value as a function owns a `move` parameter
+// (language-design.md "Borrowing and Moving"). This is the one place that rule
+// lives; ownership analysis and codegen read it off the signature.
+func paramRefMod(p *ast.Param, isSetter bool) types.RefMod {
+	if isSetter {
+		return types.RefMut
+	}
+	return resolveRefMod(p.RefMod)
+}
+
 // reborrowAssignable reports whether an already-borrowed reference value
 // (`T&`/`T~`) may bind to a non-reference borrow parameter of type paramType
 // (T0998). A bare parameter borrows its argument, so passing an existing

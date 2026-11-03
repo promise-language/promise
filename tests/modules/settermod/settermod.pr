@@ -1,0 +1,25 @@
+// settermod — test module for module-level setters that own their argument
+// (#786): `settermod.sink = v` moves v into the setter, which frees it.
+type Res `public `doc("A heap value: the instance and its string are two allocations.") {
+  string name `public `doc("A heap string.");
+}
+
+get sink Res `public `doc("Returns a fresh value.") => Res(name: "");
+
+set sink(Res value) `public `doc("Reads the value and drops it.") {
+  n := value.name.len;
+}
+
+get ssink string `public `doc("Returns an empty string.") => "";
+
+set ssink(string value) `public `doc("Reads the string and drops it.") {
+  n := value.len;
+}
+
+get checked Res `public `doc("Returns a fresh value.") => Res(name: "");
+
+set checked!(Res value) `public `doc("Raises on a name longer than one character; otherwise drops it.") {
+  if value.name.len > 1 {
+    raise error("too long");
+  }
+}

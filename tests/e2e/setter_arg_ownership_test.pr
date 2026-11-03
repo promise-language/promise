@@ -1,0 +1,383 @@
+// #786: a setter owns its value parameter. `h.item = v` is a plain assignment,
+// which moves `v` into the setter (language-design.md "Borrowing and Moving"):
+// the setter may store it, change it or move it on, and whatever it has not
+// moved out is freed when it returns or raises. The caller hands the value over
+// before the call, so neither side frees it twice. Every test here is
+// leak-checked: a value nobody frees reports LEAK, one freed twice aborts.
+// --- The item's two repros, verbatim ---
+type Res `public {
+  string name;
+}
+
+type Plain `public {
+  int seen;
+  get item Res `public {
+    return Res(name: "x");
+  }
+  set item(Res value) `public {
+    this.seen = this.seen + value.name.len;
+  }
+}
+
+type Holder `public {
+  int seen;
+  get item Res? `public {
+    return none;
+  }
+  set item(Res? value) `public {
+    if value is present {
+      this.seen = this.seen + 1;
+    }
+  }
+}
+
+plain_setter_arg() `test {
+  h := Plain(seen: 0);
+  h.item = Res(name: "a" + "b");
+  assert(h.seen == 2, "the setter saw its argument");
+}
+
+optional_setter_arg() `test {
+  h := Holder(seen: 0);
+  h.item = Res(name: "a" + "b");
+  assert(h.seen == 1, "the setter saw its argument");
+}
+
+// A named local moves in with no marker: an assignment carries none.
+plain_setter_named_local() `test {
+  h := Plain(seen: 0);
+  r := Res(name: "a" + "b");
+  h.item = r;
+  assert(h.seen == 2, "the setter saw the local");
+}
+
+optional_setter_named_local() `test {
+  h := Holder(seen: 0);
+  r := Res(name: "a" + "b");
+  h.item = r;
+  assert(h.seen == 1, "the setter saw the local");
+}
+
+optional_setter_none() `test {
+  h := Holder(seen: 0);
+  h.item = none;
+  assert(h.seen == 0, "none is not present");
+}
+
+// --- A setter that stores its argument: freed once, by the holder ---
+
+type Store {
+  Res _r;
+  get r Res => Res(name: this._r.name);
+  set r(Res value) {
+    this._r = value;
+  }
+}
+
+type StoreOpt {
+  Res? _r;
+  get r Res? => none;
+  set r(Res? value) {
+    this._r = value;
+  }
+}
+
+store_temp() `test {
+  s := Store(_r: Res(name: "q" + "r"));
+  s.r = Res(name: "a" + "b");
+  assert(s._r.name == "ab", "stored the temp");
+}
+
+store_named_local() `test {
+  s := Store(_r: Res(name: "q" + "r"));
+  r := Res(name: "a" + "b");
+  s.r = r;
+  assert(s._r.name == "ab", "stored the local");
+}
+
+store_optional_field() `test {
+  s := StoreOpt(_r: none);
+  s.r = Res(name: "a" + "b");
+  assert(s._r is present, "stored into the optional field");
+  s.r = none;
+  assert(s._r is absent, "overwritten with none");
+}
+
+// The first stored value is dropped once, when the setter overwrites it.
+store_twice() `test {
+  s := Store(_r: Res(name: "q" + "r"));
+  a := Res(name: "a" + "b");
+  b := Res(name: "c" + "d" + "e");
+  s.r = a;
+  s.r = b;
+  assert(s._r.name == "cde", "second store wins");
+}
+
+store_then_holder_drops() `test {
+  total := 0;
+  for i in 0..3 {
+    s := Store(_r: Res(name: "q" + "r"));
+    s.r = Res(name: "a" + "b");
+    total = total + s._r.name.len;
+  }
+  assert(total == 6, "each holder dropped its stored value");
+}
+
+// --- A failable setter frees its argument on its raise path too ---
+
+type Fail {
+  int seen;
+  Res? _kept;
+  get item Res => Res(name: "x");
+  set item!(Res value) {
+    if value.name.len > 1 {
+      raise error("too long");
+    }
+    this.seen = 1;
+  }
+  get kept Res? => none;
+  set kept!(Res? value) {
+    if value is present {
+      if value.name.len > 1 {
+        raise error("too long");
+      }
+    }
+    this._kept = value;
+  }
+}
+
+set_temp!(Fail ~f, string s) {
+  f.item = Res(name: s + "");
+}
+
+set_local!(Fail ~f, string s) {
+  r := Res(name: s + "");
+  f.item = r;
+}
+
+keep_temp!(Fail ~f, string s) {
+  f.kept = Res(name: s + "");
+}
+
+failable_raise_temp() `test {
+  f := Fail(seen: 0, _kept: none);
+  set_temp(f, "ab")? e {
+    assert(e.message == "too long", "raised");
+  };
+  assert(f.seen == 0, "the raise left the holder untouched");
+}
+
+failable_raise_named_local() `test {
+  f := Fail(seen: 0, _kept: none);
+  set_local(f, "ab")? e {
+    assert(e.message == "too long", "raised");
+  };
+  assert(f.seen == 0, "the raise left the holder untouched");
+}
+
+failable_ok_not_stored() `test {
+  f := Fail(seen: 0, _kept: none);
+  set_temp(f, "a")? e {
+    assert(false, "must not raise");
+  };
+  set_local(f, "a")? e {
+    assert(false, "must not raise");
+  };
+  assert(f.seen == 1, "the setter ran");
+}
+
+failable_ok_stored() `test {
+  f := Fail(seen: 0, _kept: none);
+  keep_temp(f, "a")? e {
+    assert(false, "must not raise");
+  };
+  assert(f._kept is present, "stored");
+  keep_temp(f, "ab")? e {
+    assert(e.message == "too long", "raised");
+  };
+  assert(f._kept is present, "the raise kept the earlier value");
+}
+
+// --- Strings, including the shape a generated WebIDL setter has ---
+
+heap_string(int n) string {
+  string s = "";
+  for i in 0..n {
+    s += "a";
+  }
+  return s;
+}
+
+type Counted {
+  int n;
+  get text string => "";
+  set text(string value) {
+    this.n = value.len;
+  }
+  get maybe string? => none;
+  set maybe(string? value) {
+    this.n = take_len(value ?: "");
+  }
+}
+
+take_len(string s) int {
+  return s.len;
+}
+
+string_not_stored() `test {
+  p := Counted(n: 0);
+  p.text = heap_string(3);
+  assert(p.n == 3, "temp");
+  s := heap_string(4);
+  p.text = s;
+  assert(p.n == 4, "local");
+}
+
+optional_string_elvis() `test {
+  p := Counted(n: 0);
+  p.maybe = heap_string(3);
+  assert(p.n == 3, "present");
+  p.maybe = none;
+  assert(p.n == 0, "absent");
+}
+
+// --- Closures: the environment is the setter's to free ---
+
+type Runner {
+  int n;
+  () -> int _slot;
+  get cb() -> int => || -> 0;
+  set cb(() -> int f) {
+    this.n = f();
+  }
+  get kept() -> int => || -> 0;
+  set kept(() -> int f) {
+    this._slot = f;
+  }
+}
+
+zero() int {
+  return 0;
+}
+
+make_adder(int x)() -> int {
+  return || -> x + 1;
+}
+
+closure_not_stored() `test {
+  r := Runner(n: 0, _slot: zero);
+  r.cb = make_adder(4);
+  assert(r.n == 5, "called once");
+}
+
+closure_stored() `test {
+  r := Runner(n: 0, _slot: zero);
+  r.kept = make_adder(6);
+  assert(r._slot() == 7, "stored env still alive");
+}
+
+// --- The setter may change the value it owns ---
+
+type Tagger {
+  Res _r;
+  get r Res => Res(name: this._r.name);
+  set r(Res value) {
+    value.name = value.name + "!";
+    this._r = value;
+  }
+}
+
+setter_changes_its_argument() `test {
+  t := Tagger(_r: Res(name: "q"));
+  t.r = Res(name: "a" + "b");
+  assert(t._r.name == "ab!", "changed then stored");
+}
+
+// --- Compound assignment and ++ hand the setter a fresh value ---
+
+type Big {
+  string digits;
+  ++ () Big => Big(digits: this.digits + "1");
+  +(Big o) Big => Big(digits: this.digits + o.digits);
+}
+
+type BigSeen {
+  int seen;
+  get item Big => Big(digits: "x" + "");
+  set item(Big value) {
+    this.seen = value.digits.len;
+  }
+}
+
+type BigKept {
+  Big _b;
+  get item Big => Big(digits: this._b.digits + "");
+  set item(Big value) {
+    this._b = value;
+  }
+}
+
+compound_not_stored() `test {
+  h := BigSeen(seen: 0);
+  h.item += Big(digits: "a" + "b");
+  assert(h.seen == 3, "x + ab");
+}
+
+increment_not_stored() `test {
+  h := BigSeen(seen: 0);
+  h.item++;
+  assert(h.seen == 2, "x1");
+}
+
+compound_stored() `test {
+  h := BigKept(_b: Big(digits: "x" + ""));
+  h.item += Big(digits: "y" + "");
+  assert(h._b.digits == "xy", "stored the sum");
+}
+
+increment_stored() `test {
+  h := BigKept(_b: Big(digits: "x" + ""));
+  h.item++;
+  assert(h._b.digits == "x1", "stored the increment");
+}
+
+// --- A generic setter, plain and failable ---
+
+type GS[T] {
+  T? _v;
+  int seen;
+  get val T? => none;
+  set val(T? value) {
+    this.seen = this.seen + 1;
+  }
+  get kept T? => none;
+  set kept!(T? value) {
+    if this.seen > 0 {
+      raise error("closed");
+    }
+    this._v = value;
+  }
+}
+
+generic_set_kept!(GS[Res] ~g) {
+  g.kept = Res(name: "c" + "d");
+}
+
+generic_not_stored() `test {
+  g := GS[Res](_v: none, seen: 0);
+  g.val = Res(name: "a" + "b");
+  assert(g.seen == 1, "the setter ran");
+}
+
+generic_failable() `test {
+  g := GS[Res](_v: none, seen: 0);
+  generic_set_kept(g)? e {
+    assert(false, "must not raise");
+  };
+  assert(g._v is present, "stored");
+  g.seen = 1;
+  generic_set_kept(g)? e {
+    assert(e.message == "closed", "raised");
+  };
+  assert(g._v is present, "the raise kept the stored value");
+}

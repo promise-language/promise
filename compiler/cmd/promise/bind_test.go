@@ -225,6 +225,23 @@ interface Shadow {
 };
 `
 
+// formattedResultsIDL generates the result branches no other fixture reaches:
+// a JsValue returned by a namespace operation, which binds as a static, and a
+// nullable JsValue returned by a static and by an attribute, and a nullable
+// handle returned by a method, whose wrappers return `none` from a one-line
+// `if`.
+const formattedResultsIDL = `[Exposed=Window]
+interface Node {
+  Node? find(DOMString selector);
+  static (DOMString or long)? lookup(DOMString key);
+  readonly attribute (DOMString or long)? value;
+};
+[Exposed=Window]
+namespace Tools {
+  (DOMString or long) get(DOMString key);
+};
+`
+
 // TestRunBindWebIdlWritesFormattedModule: every module `bind webidl` writes
 // passes `promise format -check` as written, whatever constructs it generates
 // (JsValue's match helpers, nullable handles, namespaces, overloads, the from
@@ -252,6 +269,7 @@ func TestRunBindWebIdlWritesFormattedModule(t *testing.T) {
 		{name: "document root", idl: documentRootIDL},
 		{name: "dictionaries, enums, overloads, constants and statics", idl: formattedConstructsIDL},
 		{name: "a keep list", idl: formattedConstructsIDL, keep: "Shadow\nShadow.constructor\nShadow.setAttribute\n"},
+		{name: "JsValue and nullable results on statics, attributes and methods", idl: formattedResultsIDL},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -338,11 +356,48 @@ world api {
 }
 `
 
+// formattedUncheckedWIT is what formattedConstructsWIT and formattedCanonicalWIT
+// leave out because the self-check rejects it, short of a keyword name (#794),
+// whose module does not parse: a documented `type` alias, which generates a
+// comment (#726), `own` and `borrow` parameters (#413), a free function
+// returning a resource (#421), `result<...>` results, whose canonical lift
+// raises from a one-line `if` (#419, #543), and option and tuple results
+// through the retarea (#542). Bound with -no-check, the module is written all
+// the same, so it is formatted all the same.
+const formattedUncheckedWIT = `package example:unchecked@0.1.0;
+
+interface api {
+    /// A byte count.
+    type size = u64;
+
+    enum errno {
+        access,
+        busy,
+    }
+
+    resource node {
+        constructor(name: string);
+        adopt: func(child: own<node>);
+        peek: func(other: borrow<node>) -> u32;
+    }
+
+    open: func(path: string) -> node;
+    stat: func(path: string) -> result<size, errno>;
+    remove: func(path: string) -> result<_, errno>;
+    pair: func() -> tuple<u32, string>;
+    maybe: func() -> option<string>;
+}
+
+world unchecked {
+  import api;
+}
+`
+
 // TestRunBindWitWritesFormattedModule: every module `bind wit` writes passes
-// `promise format -check` as written, with or without the canonical ABI (#783;
-// docs/wasm-bindings.md §"The bind Subcommand"). Each case runs the
-// self-check, so each one also proves that the formatted module still
-// type-checks.
+// `promise format -check` as written, with or without the canonical ABI, and
+// with the self-check skipped (#783; docs/wasm-bindings.md §"The bind
+// Subcommand"). Every case that runs the self-check also proves that the
+// formatted module still type-checks.
 func TestRunBindWitWritesFormattedModule(t *testing.T) {
 	cases := []struct {
 		name string
@@ -352,6 +407,8 @@ func TestRunBindWitWritesFormattedModule(t *testing.T) {
 		{name: "one free function", wit: "package example:thing@0.1.0;\n\ninterface api {\n    hello: func(name: string) -> string;\n}\n"},
 		{name: "types, a resource and free functions", wit: formattedConstructsWIT},
 		{name: "the canonical ABI", wit: formattedCanonicalWIT, args: []string{"-canonical-abi"}},
+		{name: "a module the self-check rejects, bound without it", wit: formattedUncheckedWIT, args: []string{"-no-check"}},
+		{name: "a module the self-check rejects, bound without it, with the canonical ABI", wit: formattedUncheckedWIT, args: []string{"-no-check", "-canonical-abi"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -222,6 +222,8 @@ modules/wasi/
     wasi_test.pr           # tests for the bindings
 ```
 
+Every `.pr` file `bind` writes is in [`promise format`](formatting.md)'s canonical form, with or without `-no-check`: `promise format -check` exits 0 on it. So a module can commit its generated bindings unedited under a gate that checks formatting, and regenerating reproduces the committed file.
+
 #### Generating a subset
 
 `promise bind webidl -keep <path>` generates only what a keep list names. The list holds one entry per line; surrounding whitespace is trimmed and blank lines are skipped:

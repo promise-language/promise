@@ -1,0 +1,88 @@
+// #786: a module-level setter declared in the file that assigns through it
+// (`sink = v`, no module prefix) owns its argument, as an imported one does
+// (tests/modules/module_setter_ownership_test.pr). Its body is compiled as the
+// root file's function: before the fix that looked the setter up by its bare
+// name, which is its getter, so the setter's parameter was never bound — a body
+// reading it crashed the compiler (#243), and one that did not leaked what the
+// caller handed over. Leak-checked: a value nobody frees reports LEAK, one freed
+// twice aborts.
+type Res {
+  string name;
+}
+
+get sink Res => Res(name: "");
+
+// Drops its argument without reading it.
+set sink(Res value) {
+}
+
+get seen Res => Res(name: "");
+
+set seen(Res value) {
+  assert(value.name == "ab", "the setter reads its argument");
+}
+
+get text string => "";
+
+set text(string value) {
+  assert(value.len == 2, "the setter reads its string");
+}
+
+get checked Res => Res(name: "");
+
+set checked!(Res value) {
+  if value.name.len > 1 {
+    raise error("too long");
+  }
+}
+
+unread_temp() `test {
+  sink = Res(name: "a" + "b");
+}
+
+unread_named_local() `test {
+  r := Res(name: "a" + "b");
+  sink = r;
+}
+
+read_temp() `test {
+  seen = Res(name: "a" + "b");
+}
+
+read_named_local() `test {
+  r := Res(name: "a" + "b");
+  seen = r;
+}
+
+string_arg() `test {
+  text = "a" + "b";
+  s := "c" + "d";
+  text = s;
+}
+
+set_checked_temp!(string s) {
+  checked = Res(name: s + "");
+}
+
+set_checked_local!(string s) {
+  r := Res(name: s + "");
+  checked = r;
+}
+
+failable_setter_ok() `test {
+  set_checked_temp("a")? e {
+    assert(false, "must not raise");
+  };
+  set_checked_local("a")? e {
+    assert(false, "must not raise");
+  };
+}
+
+failable_setter_raises() `test {
+  set_checked_temp("ab")? e {
+    assert(e.message == "too long", "raised");
+  };
+  set_checked_local("ab")? e {
+    assert(e.message == "too long", "raised");
+  };
+}

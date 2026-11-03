@@ -1,0 +1,51 @@
+use settermod "./settermod";
+
+// #786: an imported module-level setter owns its argument. `settermod.sink = v`
+// moves v into the setter, which frees it whether it returns or raises; the
+// caller frees nothing of it. Leak-checked: a value nobody frees reports LEAK,
+// one freed twice aborts.
+
+temp_into_setter() `test {
+  settermod.sink = settermod.Res(name: "a" + "b");
+}
+
+named_local_into_setter() `test {
+  r := settermod.Res(name: "a" + "b");
+  settermod.sink = r;
+}
+
+string_temp_into_setter() `test {
+  settermod.ssink = "a" + "b";
+}
+
+string_local_into_setter() `test {
+  s := "a" + "b";
+  settermod.ssink = s;
+}
+
+set_checked_temp!(string s) {
+  settermod.checked = settermod.Res(name: s + "");
+}
+
+set_checked_local!(string s) {
+  r := settermod.Res(name: s + "");
+  settermod.checked = r;
+}
+
+failable_setter_ok() `test {
+  set_checked_temp("a")? e {
+    assert(false, "must not raise");
+  };
+  set_checked_local("a")? e {
+    assert(false, "must not raise");
+  };
+}
+
+failable_setter_raises() `test {
+  set_checked_temp("ab")? e {
+    assert(e.message == "too long", "raised");
+  };
+  set_checked_local("ab")? e {
+    assert(e.message == "too long", "raised");
+  };
+}

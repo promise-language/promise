@@ -1112,7 +1112,7 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 			params[i].SetVariadic(true)
 		} else {
 			c.rejectSharedRefParam(p.Pos(), p.Name, pt)
-			params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
+			params[i] = types.NewParam(p.Name, pt, paramRefMod(p, md.IsSetter))
 		}
 		if p.Default != nil {
 			c.recordParamDefault(params[i], p.Default)
@@ -1685,7 +1685,7 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 			if !isExtern {
 				c.rejectSharedRefParam(p.Pos(), p.Name, pt)
 			}
-			params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
+			params[i] = types.NewParam(p.Name, pt, paramRefMod(p, d.IsSetter))
 		}
 		if p.Default != nil {
 			c.recordParamDefault(params[i], p.Default)

@@ -217,10 +217,9 @@ type wrapCoercedHandle struct{ source, kind string }
 // the call site for `~` arguments, so a callee-side move on a borrowed
 // parameter would create a double-free (T0338).
 //
-// Setters consume their value parameter implicitly (codegen clears the
-// caller's drop flag at the property assignment site), so setter params
-// are treated as `Owned`.
-func paramInitialState(p *types.Param, consuming bool) VarState {
+// A setter's value parameter is a `move` parameter in its signature (sema's
+// paramRefMod), so it lands in the RefMut branch below.
+func paramInitialState(p *types.Param) VarState {
 	if isCopyType(p.Type()) {
 		return Owned
 	}
@@ -234,11 +233,6 @@ func paramInitialState(p *types.Param, consuming bool) VarState {
 		// Variadic params receive a synthesized vector that the callee owns
 		// (the caller-side T[] is consumed at the call site, or a fresh one
 		// is built from the variadic args). The callee may consume it.
-		return Owned
-	}
-	if consuming {
-		// Setter value parameter: caller's drop flag is cleared at the
-		// property assignment site, so the callee owns the value.
 		return Owned
 	}
 	return Borrowed
@@ -361,10 +355,9 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.curFuncObj = fn
 	c.curMethodObj = nil
 
-	consuming := d.IsSetter
 	for _, p := range sig.Params() {
 		if p.Name() != "" && p.Name() != "_" {
-			c.state[p.Name()] = paramInitialState(p, consuming)
+			c.state[p.Name()] = paramInitialState(p)
 			c.params[p.Name()] = true
 			c.trackDeclOrder(p.Name(), p.Type())
 			c.recordClosureOwnedParam(p) // T1640
@@ -512,16 +505,15 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.curMethodObj = m
 
 	if m.Sig().Recv() != nil {
-		c.state["this"] = paramInitialState(m.Sig().Recv(), false)
+		c.state["this"] = paramInitialState(m.Sig().Recv())
 		c.params["this"] = true
 		if m.Sig().Recv().Type() != nil {
 			c.trackDeclOrder("this", m.Sig().Recv().Type())
 		}
 	}
-	consuming := md.IsSetter
 	for _, p := range m.Sig().Params() {
 		if p.Name() != "" && p.Name() != "_" {
-			c.state[p.Name()] = paramInitialState(p, consuming)
+			c.state[p.Name()] = paramInitialState(p)
 			c.params[p.Name()] = true
 			c.trackDeclOrder(p.Name(), p.Type())
 			c.recordClosureOwnedParam(p) // T1640

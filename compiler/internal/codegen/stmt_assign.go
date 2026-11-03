@@ -391,17 +391,13 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					var current value.Value = c.block.NewCall(getterFn)
 					current = c.unwrapFailableCompoundRead(current, c.info.Types[target]) // T0709
 					val = c.genCompoundOp(s.Op, c.info.Types[target], current, val)
+				} else {
+					// The setter owns its argument (#786): hand it over before the
+					// call, so a raising setter is its only owner on the raise path.
+					c.transferAssignedValue(s.Value, val)
 				}
 				setterCall := c.block.NewCall(setterFn, val)
 				c.propagateIfFailable(setterCall) // T0708
-				if s.Op == ast.OpAssign {
-					if rhsIdent, ok := s.Value.(*ast.IdentExpr); ok {
-						c.clearDropFlag(rhsIdent.Name)
-					}
-					// B0312: When RHS is opt!, neutralize the source optional so its
-					// drop doesn't double-free the inner value now owned by the setter.
-					c.neutralizeForceUnwrapSource(s.Value)
-				}
 				return
 			}
 		}
@@ -781,18 +777,11 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 		c.block.NewStore(result, alloca)
 
 	case *ast.MemberExpr:
-		// Module-level setter: mod.property = value
+		// Module-level setter: mod.property = value. The setter owns the value;
+		// genModuleSetterAssign hands it over before the call (#786).
 		if ident, ok := target.Target.(*ast.IdentExpr); ok {
 			if modName := c.resolveModuleName(ident); modName != "" {
-				c.genModuleSetterAssign(target, modName, s.Op, val)
-				if s.Op == ast.OpAssign {
-					if rhsIdent, ok := s.Value.(*ast.IdentExpr); ok {
-						c.clearDropFlag(rhsIdent.Name)
-					}
-					// B0312: When RHS is opt!, neutralize the source optional so its
-					// drop doesn't double-free the inner value now owned by this setter.
-					c.neutralizeForceUnwrapSource(s.Value)
-				}
+				c.genModuleSetterAssign(target, modName, s.Op, val, s.Value)
 				break
 			}
 		}
@@ -845,6 +834,24 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				}
 			}
 		}
+		// A setter property owns the assigned value (#786): genSetterCall hands it
+		// over right before the call, so a raising setter is its only owner on the
+		// raise path. Native MutexGuard.borrow is not dispatched through
+		// genSetterCall (genMemberAssign intercepts it), so it keeps the
+		// hand-over after the store below.
+		if s.Op == ast.OpAssign {
+			ownerType := c.info.Types[target.Target]
+			if c.typeSubst != nil {
+				ownerType = types.Substitute(ownerType, c.typeSubst)
+			}
+			ownerNamed := extractNamed(ownerType)
+			_, isMutexGuard := types.AsMutexGuard(ownerType)
+			isMutexGuardBorrow := target.Field == "borrow" && (ownerNamed == types.TypMutexGuard || isMutexGuard)
+			if ownerNamed != nil && !isMutexGuardBorrow && ownerNamed.LookupSetter(target.Field) != nil {
+				c.genMemberAssign(target, s.Op, val, s.Value)
+				break
+			}
+		}
 		// T0095: Dup string values stored in fields of droppable types when the
 		// source is a borrowed variable (no drop flag). This handles custom new()
 		// methods like `this.src = s` where s is a non-~ parameter.
@@ -859,19 +866,6 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 			ownerNamed := extractNamed(ownerType)
 			if extractNamed(memberType) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
-				// T1901: user-defined setter properties borrow the value — the
-				// setter body dups the string when storing to its own field.
-				// The caller's copy is freed by normal cleanup (drop binding
-				// for named vars, stmtTemp for expression results), so skip
-				// the ownership-transfer logic (dup / claim / clearDropFlag).
-				// Exclude MutexGuard.borrow: its native setter takes ownership,
-				// so the existing claim/clearDropFlag path is correct for it.
-				_, isMutexGuard := types.AsMutexGuard(ownerType)
-				isMutexGuardBorrow := target.Field == "borrow" && (ownerNamed == types.TypMutexGuard || isMutexGuard)
-				if !isMutexGuardBorrow && ownerNamed.LookupSetter(target.Field) != nil {
-					c.genMemberAssign(target, s.Op, val, s.Value)
-					break
-				}
 				if ident, ok := s.Value.(*ast.IdentExpr); ok {
 					if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
 						// Has drop flag: move ownership
@@ -895,42 +889,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 		}
 		c.genMemberAssign(target, s.Op, val, s.Value)
-		// Clear drop flag on RHS if it's being moved via simple assign
 		if s.Op == ast.OpAssign {
-			if ident, ok := s.Value.(*ast.IdentExpr); ok {
-				c.clearDropFlag(ident.Name)
-			}
-			// T0754: clear cast subject's drop flag — ownership moves it at
-			// the owning-slot store, so the subject's scope-exit drop must
-			// not fire on the same allocation the field now owns. T0849: for
-			// the conditional `as` form, drop iff the downcast failed.
-			if ident := c.castSubjectMovableIdent(s.Value); ident != nil {
-				c.consumeCastSubjectDropFlag(s.Value, ident.Name)
-			}
-			// B0168: Claim string temp — ownership transferred to field.
-			c.claimStringTemp(val)
-			// B0233: Claim heap temp — ownership transferred to field.
-			c.claimHeapTemp(val)
-			// T1226: Claim closure env temp — ownership transferred to the field
-			// (directly, or through a setter property that stores it). Without this,
-			// a capturing-closure RHS's env is freed at statement end
-			// (cleanupEnvTemps) while the field still references it →
-			// use-after-free at the owner's scope-exit drop. T1160 widened the
-			// trigger to closure-returning call results. No-op for non-closure values.
-			c.claimEnvTemp(val)
-			// B0312: When RHS is opt!, neutralize the source optional so its
-			// drop doesn't double-free the inner value now owned by this field.
-			c.neutralizeForceUnwrapSource(s.Value)
-			// T0899: an operator/method RHS whose body is `return this` returns the
-			// borrowed receiver as an owned result, aliasing the operand local. The
-			// field now owns that instance, so clear the operand's drop flag —
-			// otherwise both the operand local and the field owner free it
-			// (double-free). Mirrors the IdentExpr branch (T0892) and the two
-			// var-decl paths. The self-alias case (`h.f = h.f + b`) is handled by
-			// genMemberAssign's same-pointer drop-old guard (its non-Ident origin
-			// skips the clear); see clearOperandAliasForOwnedStore. T1084: no-op
-			// given T0893's clone in wrapThisReturnValue.
-			c.clearOperandAliasForOwnedStore(s.Value, val)
+			c.transferAssignedValue(s.Value, val) // the field now owns the value
 		}
 
 	case *ast.IndexExpr:
@@ -1307,13 +1267,10 @@ func (c *Compiler) genMemberCompoundAssign(target *ast.MemberExpr, op ast.Assign
 					current := c.genGetterCall(target, targetType, named, getter)         // read
 					current = c.unwrapFailableCompoundRead(current, c.info.Types[target]) // T0709
 					result := c.genCompoundOp(op, c.info.Types[target], current, val)     // op
-					// T1901: the setter borrows result; track the concat buffer
-					// so cleanupStmtTemps drops it after the setter returns.
-					if extractNamed(c.info.Types[target]) == types.TypString {
-						c.trackStringTemp(result)
-					}
-					c.stagedMemberReceiverAddr = addr                          // reuse the single address
-					c.genSetterCall(target, targetType, named, setter, result) // write
+					// The setter owns result (#786); it is a fresh value, so there
+					// is nothing of the statement's to hand over (nil srcExpr).
+					c.stagedMemberReceiverAddr = addr                               // reuse the single address
+					c.genSetterCall(target, targetType, named, setter, result, nil) // write
 					c.stagedMemberReceiver = nil
 					c.stagedMemberReceiverAddr = nil
 					return
@@ -1328,13 +1285,9 @@ func (c *Compiler) genMemberCompoundAssign(target *ast.MemberExpr, op ast.Assign
 			current := c.genGetterCall(target, targetType, named, getter)         // read
 			current = c.unwrapFailableCompoundRead(current, c.info.Types[target]) // T0709
 			result := c.genCompoundOp(op, c.info.Types[target], current, val)     // op
-			// T1901: the setter borrows result; track the concat buffer
-			// so cleanupStmtTemps drops it after the setter returns.
-			if extractNamed(c.info.Types[target]) == types.TypString {
-				c.trackStringTemp(result)
-			}
+			// The setter owns result (#786), a fresh value (nil srcExpr).
 			c.stagedMemberReceiver = recv
-			c.genSetterCall(target, targetType, named, setter, result) // write
+			c.genSetterCall(target, targetType, named, setter, result, nil) // write
 			c.stagedMemberReceiver = nil
 			return
 		}
@@ -1361,12 +1314,58 @@ func (c *Compiler) genMemberCompoundAssign(target *ast.MemberExpr, op ast.Assign
 	c.genMemberAssign(target, op, val, valueExpr)
 }
 
+// transferAssignedValue hands an assigned value over to the slot that now owns
+// it — a field, or a setter's value parameter (#786) — so the assigning
+// statement no longer frees it: the source local's drop flag is cleared and the
+// statement temps holding it are claimed. valueExpr is the assignment's RHS and
+// val the value it produced. The field-store path calls it after the store; a
+// setter call calls it immediately before the call, so a raising setter is the
+// value's only owner on the raise path.
+func (c *Compiler) transferAssignedValue(valueExpr ast.Expr, val value.Value) {
+	if ident, ok := valueExpr.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
+	// T0754: clear cast subject's drop flag — ownership moves it at
+	// the owning-slot store, so the subject's scope-exit drop must
+	// not fire on the same allocation the field now owns. T0849: for
+	// the conditional `as` form, drop iff the downcast failed.
+	if ident := c.castSubjectMovableIdent(valueExpr); ident != nil {
+		c.consumeCastSubjectDropFlag(valueExpr, ident.Name)
+	}
+	// B0168: Claim string temp — ownership transferred to field.
+	c.claimStringTemp(val)
+	// B0233: Claim heap temp — ownership transferred to field.
+	c.claimHeapTemp(val)
+	// T1226: Claim closure env temp — ownership transferred to the field
+	// (directly, or through a setter property that stores it). Without this,
+	// a capturing-closure RHS's env is freed at statement end
+	// (cleanupEnvTemps) while the field still references it →
+	// use-after-free at the owner's scope-exit drop. T1160 widened the
+	// trigger to closure-returning call results. No-op for non-closure values.
+	c.claimEnvTemp(val)
+	// B0312: When RHS is opt!, neutralize the source optional so its
+	// drop doesn't double-free the inner value now owned by this field.
+	c.neutralizeForceUnwrapSource(valueExpr)
+	// T0899: an operator/method RHS whose body is `return this` returns the
+	// borrowed receiver as an owned result, aliasing the operand local. The
+	// field now owns that instance, so clear the operand's drop flag —
+	// otherwise both the operand local and the field owner free it
+	// (double-free). Mirrors the IdentExpr branch (T0892) and the two
+	// var-decl paths. The self-alias case (`h.f = h.f + b`) is handled by
+	// genMemberAssign's same-pointer drop-old guard (its non-Ident origin
+	// skips the clear); see clearOperandAliasForOwnedStore. T1084: no-op
+	// given T0893's clone in wrapThisReturnValue.
+	c.clearOperandAliasForOwnedStore(valueExpr, val)
+}
+
 // genMemberAssign handles assignment to a field on a user type instance.
 // If the member is a setter property, emits a setter call instead.
 // Uses lookupTypeLayout for layout-driven field types that work for both
 // regular and monomorphic types.
 // srcExpr (may be nil) is the RHS source AST; used by the T0351 defensive
-// dup path in genMutexGuardBorrowSet to detect a borrow-param string.
+// dup path in genMutexGuardBorrowSet to detect a borrow-param string, and by a
+// plain assignment through a setter, which hands the value over before the
+// call (genSetterCall).
 func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val value.Value, srcExpr ast.Expr) {
 	// Check for setter property
 	targetType := c.info.Types[target.Target]
@@ -1406,8 +1405,11 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 				current := c.genGetterCall(target, targetType, named, getter)
 				current = c.unwrapFailableCompoundRead(current, c.info.Types[target]) // T0709
 				val = c.genCompoundOp(op, c.info.Types[target], current, val)
+				// The setter takes the fresh operator result; srcExpr is only the
+				// operand, so nothing of the caller's is handed over.
+				srcExpr = nil
 			}
-			c.genSetterCall(target, targetType, named, setter, val)
+			c.genSetterCall(target, targetType, named, setter, val, srcExpr)
 			return
 		}
 	}
@@ -1705,12 +1707,18 @@ func (c *Compiler) emitFieldCompoundReadModifyWrite(target *ast.MemberExpr, targ
 
 // genSetterCall emits a call to a setter method.
 // Uses virtual dispatch through the vtable when the static type needs it.
-func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, named *types.Named, setter *types.Method, val value.Value) {
+// srcExpr is the RHS of a plain assignment, or nil when val is a fresh value the
+// statement does not otherwise own (a compound or ++/-- result). The setter owns
+// its value parameter (#786), so a non-nil srcExpr is handed over
+// (transferAssignedValue) after the receiver is evaluated and immediately before
+// the call: a raise in the receiver still leaves the value with the caller's
+// cleanup, and a raising setter is the value's only owner on its raise path.
+func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, named *types.Named, setter *types.Method, val value.Value, srcExpr ast.Expr) {
 	// Virtual dispatch for setter when static type needs vtable. A `global setter
 	// (T0703) has no receiver — a static call on the type name — so it always
 	// dispatches directly (T1749).
 	if c.needsVtable(named) && !setter.IsNative() && setter.Sig().Recv() != nil {
-		c.genVirtualSetterCall(target, named, setter, val)
+		c.genVirtualSetterCall(target, named, setter, val, srcExpr)
 		return
 	}
 
@@ -1728,6 +1736,9 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 
 	if setter.Sig().Recv() == nil {
 		// `global setter: no receiver argument (T0703/T1749).
+		if srcExpr != nil {
+			c.transferAssignedValue(srcExpr, val)
+		}
 		call := c.block.NewCall(fn, val)
 		c.propagateIfFailable(call) // T0708
 		return
@@ -1766,12 +1777,16 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 		args = append(args, c.extractInstancePtr(c.memberReceiver(func() value.Value { return c.genExpr(target.Target) })))
 	}
 	args = append(args, val)
+	if srcExpr != nil {
+		c.transferAssignedValue(srcExpr, val)
+	}
 	call := c.block.NewCall(fn, args...)
 	c.propagateIfFailable(call) // T0708
 }
 
-// genVirtualSetterCall emits an indirect setter call through the vtable.
-func (c *Compiler) genVirtualSetterCall(target *ast.MemberExpr, named *types.Named, setter *types.Method, val value.Value) {
+// genVirtualSetterCall emits an indirect setter call through the vtable. srcExpr
+// is handed over before the call exactly as in genSetterCall.
+func (c *Compiler) genVirtualSetterCall(target *ast.MemberExpr, named *types.Named, setter *types.Method, val value.Value, srcExpr ast.Expr) {
 	receiverVal := c.memberReceiver(func() value.Value { return c.genExpr(target.Target) }) // T1353
 
 	var vtableRaw, instance value.Value
@@ -1807,13 +1822,18 @@ func (c *Compiler) genVirtualSetterCall(target *ast.MemberExpr, named *types.Nam
 	funcType := irtypes.NewFunc(retType, paramTypes...)
 	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 
+	if srcExpr != nil {
+		c.transferAssignedValue(srcExpr, val)
+	}
 	call := c.block.NewCall(fnTyped, instance, val)
 	c.propagateIfFailable(call) // T0708
 }
 
 // genModuleSetterAssign handles assignment to a module-level setter property.
 // For compound assignment (+=, -=, etc.), calls getter first, applies op, then calls setter.
-func (c *Compiler) genModuleSetterAssign(target *ast.MemberExpr, moduleName string, op ast.AssignOp, val value.Value) {
+// The setter owns its value parameter (#786): a plain assignment hands srcExpr's
+// value over before the call, as genSetterCall does.
+func (c *Compiler) genModuleSetterAssign(target *ast.MemberExpr, moduleName string, op ast.AssignOp, val value.Value, srcExpr ast.Expr) {
 	setterKey := moduleName + "." + target.Field + "$set"
 	setterFn, ok := c.moduleFuncs[setterKey]
 	if !ok {
@@ -1830,6 +1850,8 @@ func (c *Compiler) genModuleSetterAssign(target *ast.MemberExpr, moduleName stri
 		var current value.Value = c.block.NewCall(getterFn)
 		current = c.unwrapFailableCompoundRead(current, c.info.Types[target]) // T0709
 		val = c.genCompoundOp(op, c.info.Types[target], current, val)
+	} else {
+		c.transferAssignedValue(srcExpr, val)
 	}
 
 	call := c.block.NewCall(setterFn, val)

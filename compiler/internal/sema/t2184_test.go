@@ -119,7 +119,9 @@ func TestConcreteOverrideKeepsSlotKindsApart(t *testing.T) {
 		type P { int n; get label string { return "p"; } set label(string v) { } }
 		type R is P { set label(int v) { } }`)
 	expectError(t, errs, "type R cannot override inherited method 'label' from P")
-	expectError(t, errs, "expected label(string) -> void, found label(int) -> void")
+	// A setter's value parameter is consumed (#786), which the signature
+	// notation prints as `~`, as it does for any `move` parameter.
+	expectError(t, errs, "expected label(string~) -> void, found label(int~) -> void")
 	// The getter slot is untouched and must not be dragged in.
 	expectNoErrorContaining(t, errs, "label() -> string")
 

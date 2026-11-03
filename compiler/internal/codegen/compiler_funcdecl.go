@@ -203,8 +203,15 @@ func (c *Compiler) defineFuncBody(fd *ast.FuncDecl, fn, variant *ir.Func) {
 	entry := c.entryBlock
 	params := c.fn.Params
 
-	// Allocate parameters and store incoming values
-	obj := c.lookupFunc(fd.Name)
+	// Allocate parameters and store incoming values. A module-level setter is
+	// scoped as "name$set" — fd.Name alone is its getter, whose signature has
+	// no parameter, which would leave the setter's value unbound and unfreed
+	// (#243, #786).
+	scopeName := fd.Name
+	if fd.IsSetter {
+		scopeName = fd.Name + "$set"
+	}
+	obj := c.lookupFunc(scopeName)
 	if obj == nil {
 		return
 	}

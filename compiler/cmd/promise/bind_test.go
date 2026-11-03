@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/promise-language/promise/compiler/internal/formatter"
 	"github.com/promise-language/promise/compiler/internal/module"
 )
 
@@ -164,6 +166,264 @@ func TestRunBindWebIdlModuleName(t *testing.T) {
 			if want := fmt.Sprintf("name = %q", tc.want); !strings.Contains(string(toml), want) {
 				t.Errorf("promise.toml missing %s; got:\n%s", want, toml)
 			}
+		})
+	}
+}
+
+// assertFormattedModule fails unless the module bind wrote to outDir/name.pr
+// is already in `promise format`'s canonical form, which is the comparison
+// `promise format -check` makes (runFmt). Such a file passes that check
+// unedited (#783; docs/wasm-bindings.md §"The bind Subcommand").
+func assertFormattedModule(t *testing.T, outDir, name string) {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join(outDir, name+".pr"))
+	if err != nil {
+		t.Fatalf("module not written: %v", err)
+	}
+	formatted := formatter.Format(src)
+	if bytes.Equal(formatted, src) {
+		return
+	}
+	written := strings.Split(string(src), "\n")
+	want := strings.Split(string(formatted), "\n")
+	for i := range min(len(written), len(want)) {
+		if written[i] != want[i] {
+			t.Fatalf("%s.pr is not formatted: promise format -check rejects it. First difference, at line %d:\n  written:   %q\n  formatted: %q", name, i+1, written[i], want[i])
+		}
+	}
+	t.Fatalf("%s.pr is not formatted: promise format -check rejects it. It has %d lines, and formatted it has %d", name, len(written), len(want))
+}
+
+// formattedReproIDL is #783's repro: the smallest module bind generates.
+const formattedReproIDL = `[Exposed=Window]
+interface A {
+  attribute DOMString label;
+};
+`
+
+// formattedConstructsIDL generates what the glue fixtures do not: a string
+// enum, a dictionary with an enum-typed member and one inheriting from it, an
+// overloaded operation, a constant, a constructor and a static operation. It
+// leaves out an enum-typed attribute and a dictionary-typed argument: neither
+// lowers yet (#175, #177), so the self-check would reject the module for that
+// rather than for its layout.
+const formattedConstructsIDL = `enum Mode { "open", "closed" };
+dictionary Opts {
+  Mode mode;
+  boolean bubbles = false;
+  long detail = 0;
+};
+dictionary MoreOpts : Opts { DOMString label; };
+[Exposed=Window]
+interface Shadow {
+  constructor(DOMString name);
+  undefined setAttribute(DOMString name, DOMString value);
+  undefined setAttribute(DOMString name, long value);
+  const unsigned short ELEMENT_NODE = 1;
+  static Shadow make(DOMString kind);
+  readonly attribute unsigned long length;
+};
+`
+
+// formattedResultsIDL generates the result branches no other fixture reaches:
+// a JsValue returned by a namespace operation, which binds as a static, and a
+// nullable JsValue returned by a static and by an attribute, and a nullable
+// handle returned by a method, whose wrappers return `none` from a one-line
+// `if`.
+const formattedResultsIDL = `[Exposed=Window]
+interface Node {
+  Node? find(DOMString selector);
+  static (DOMString or long)? lookup(DOMString key);
+  readonly attribute (DOMString or long)? value;
+};
+[Exposed=Window]
+namespace Tools {
+  (DOMString or long) get(DOMString key);
+};
+`
+
+// TestRunBindWebIdlWritesFormattedModule: every module `bind webidl` writes
+// passes `promise format -check` as written, whatever constructs it generates
+// (JsValue's match helpers, nullable handles, namespaces, overloads, the from
+// conversion, dictionaries, enums), with a keep list, and with the self-check
+// skipped (#783; docs/wasm-bindings.md §"The bind Subcommand"). Every other
+// case runs the self-check, so each one also proves that the formatted module
+// still type-checks.
+func TestRunBindWebIdlWritesFormattedModule(t *testing.T) {
+	cases := []struct {
+		name string
+		idl  string
+		keep string // a keep list, when the case binds a subset
+		args []string
+	}{
+		{name: "the #783 repro", idl: formattedReproIDL},
+		{name: "the #783 repro without the self-check", idl: formattedReproIDL, args: []string{"-no-check"}},
+		{name: "string attributes and a nullable result", idl: bindgenGlueIDL},
+		{name: "JsValue", idl: jsValueGlueIDL},
+		{name: "namespaces and overloads", idl: namespaceIDL},
+		{name: "the from conversion", idl: conversionIDL},
+		{name: "the from conversion beside a from member", idl: conversionFallbackIDL},
+		{name: "optional handles", idl: optionalHandleIDL},
+		{name: "nullable scalars", idl: nullableScalarIDL},
+		{name: "maplike and setlike", idl: collectionsIDL},
+		{name: "document root", idl: documentRootIDL},
+		{name: "dictionaries, enums, overloads, constants and statics", idl: formattedConstructsIDL},
+		{name: "a keep list", idl: formattedConstructsIDL, keep: "Shadow\nShadow.constructor\nShadow.setAttribute\n"},
+		{name: "JsValue and nullable results on statics, attributes and methods", idl: formattedResultsIDL},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			idlPath := filepath.Join(dir, "dom.idl")
+			if err := os.WriteFile(idlPath, []byte(tc.idl), 0644); err != nil {
+				t.Fatal(err)
+			}
+			outDir := filepath.Join(dir, "out")
+			args := append([]string{"-name", "dom", "-o", outDir}, tc.args...)
+			if tc.keep != "" {
+				keepPath := filepath.Join(dir, "dom.keep")
+				if err := os.WriteFile(keepPath, []byte(tc.keep), 0644); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, "-keep", keepPath)
+			}
+
+			silenceStdout(t, func() {
+				runBindWebIdl(append(args, idlPath))
+			})
+
+			assertFormattedModule(t, outDir, "dom")
+		})
+	}
+}
+
+// formattedConstructsWIT generates the WIT types (enum, record, variant,
+// flags), a resource with a constructor, a method and an optional result, and
+// free functions taking a string and a list. It leaves out what does not yet
+// generate a module that parses or type-checks: `result<...>` (#419, #543), a
+// keyword name such as a `type` field (#794), a free function returning a
+// resource (#421), a `type` alias (#726) and `own`/`borrow` parameters
+// (#413).
+const formattedConstructsWIT = `package example:constructs@0.1.0;
+
+interface types {
+    enum color {
+        red,
+        dark-green,
+    }
+
+    record point {
+        x: s32,
+        y: s32,
+        tint: color,
+    }
+
+    variant shape {
+        circle(f64),
+        empty,
+    }
+
+    flags open-flags {
+        create,
+        truncate,
+    }
+
+    resource node {
+        constructor(name: string);
+        rename: func(name: string);
+        label: func() -> option<string>;
+    }
+
+    checksum: func(data: list<u8>) -> u32;
+    greet: func(name: string) -> string;
+}
+`
+
+// formattedCanonicalWIT is the free-function shape the canonical ABI lowers
+// today: string and list arguments and results, through the retarea. Its
+// resource members and its option and tuple results do not lower yet (#541,
+// #542).
+const formattedCanonicalWIT = `package example:api;
+
+interface greet {
+  hello: func(name: string) -> string;
+  checksum: func(data: list<u8>) -> u32;
+  payload: func() -> list<u8>;
+}
+
+world api {
+  import greet;
+}
+`
+
+// formattedUncheckedWIT is what formattedConstructsWIT and formattedCanonicalWIT
+// leave out because the self-check rejects it, short of a keyword name (#794),
+// whose module does not parse: a documented `type` alias, which generates a
+// comment (#726), `own` and `borrow` parameters (#413), a free function
+// returning a resource (#421), `result<...>` results, whose canonical lift
+// raises from a one-line `if` (#419, #543), and option and tuple results
+// through the retarea (#542). Bound with -no-check, the module is written all
+// the same, so it is formatted all the same.
+const formattedUncheckedWIT = `package example:unchecked@0.1.0;
+
+interface api {
+    /// A byte count.
+    type size = u64;
+
+    enum errno {
+        access,
+        busy,
+    }
+
+    resource node {
+        constructor(name: string);
+        adopt: func(child: own<node>);
+        peek: func(other: borrow<node>) -> u32;
+    }
+
+    open: func(path: string) -> node;
+    stat: func(path: string) -> result<size, errno>;
+    remove: func(path: string) -> result<_, errno>;
+    pair: func() -> tuple<u32, string>;
+    maybe: func() -> option<string>;
+}
+
+world unchecked {
+  import api;
+}
+`
+
+// TestRunBindWitWritesFormattedModule: every module `bind wit` writes passes
+// `promise format -check` as written, with or without the canonical ABI, and
+// with the self-check skipped (#783; docs/wasm-bindings.md §"The bind
+// Subcommand"). Every case that runs the self-check also proves that the
+// formatted module still type-checks.
+func TestRunBindWitWritesFormattedModule(t *testing.T) {
+	cases := []struct {
+		name string
+		wit  string
+		args []string
+	}{
+		{name: "one free function", wit: "package example:thing@0.1.0;\n\ninterface api {\n    hello: func(name: string) -> string;\n}\n"},
+		{name: "types, a resource and free functions", wit: formattedConstructsWIT},
+		{name: "the canonical ABI", wit: formattedCanonicalWIT, args: []string{"-canonical-abi"}},
+		{name: "a module the self-check rejects, bound without it", wit: formattedUncheckedWIT, args: []string{"-no-check"}},
+		{name: "a module the self-check rejects, bound without it, with the canonical ABI", wit: formattedUncheckedWIT, args: []string{"-no-check", "-canonical-abi"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			witPath := filepath.Join(dir, "api.wit")
+			if err := os.WriteFile(witPath, []byte(tc.wit), 0644); err != nil {
+				t.Fatal(err)
+			}
+			outDir := filepath.Join(dir, "out")
+
+			silenceStdout(t, func() {
+				runBindWit(append(append([]string{"-name", "api", "-o", outDir}, tc.args...), witPath))
+			})
+
+			assertFormattedModule(t, outDir, "api")
 		})
 	}
 }

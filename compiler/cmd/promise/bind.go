@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/promise-language/promise/compiler/internal/bindgen"
+	"github.com/promise-language/promise/compiler/internal/formatter"
 	"github.com/promise-language/promise/compiler/internal/module"
 	"github.com/promise-language/promise/compiler/internal/webidl"
 	"github.com/promise-language/promise/compiler/internal/wit"
@@ -202,8 +203,9 @@ func runBindWit(args []string) {
 		}
 	}
 
-	// Generate Promise source
-	prSource := bindgen.GeneratePromiseWithOptions(allModules, target, canonicalABI)
+	// Generate Promise source, in `promise format`'s canonical form
+	// (docs/wasm-bindings.md §"The bind Subcommand").
+	prSource := formatter.Format([]byte(bindgen.GeneratePromiseWithOptions(allModules, target, canonicalABI)))
 
 	// Create output directory
 	if err := os.MkdirAll(outDir, 0755); err != nil {
@@ -213,7 +215,7 @@ func runBindWit(args []string) {
 
 	// Write .pr file
 	prPath := filepath.Join(outDir, moduleName+".pr")
-	if err := os.WriteFile(prPath, []byte(prSource), 0644); err != nil {
+	if err := os.WriteFile(prPath, prSource, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing %s: %v\n", prPath, err)
 		os.Exit(1)
 	}
@@ -395,8 +397,9 @@ func runBindWebIdl(args []string) {
 		moduleName = strings.ReplaceAll(moduleName, "-", "_")
 	}
 
-	// Generate Promise source
-	prSource := bindgen.GeneratePromise(allModules, target)
+	// Generate Promise source, in `promise format`'s canonical form
+	// (docs/wasm-bindings.md §"The bind Subcommand").
+	prSource := formatter.Format([]byte(bindgen.GeneratePromise(allModules, target)))
 
 	// Generate JS glue
 	jsSource := bindgen.GenerateJSGlue(allModules)
@@ -409,7 +412,7 @@ func runBindWebIdl(args []string) {
 
 	// Write .pr file
 	prPath := filepath.Join(outDir, moduleName+".pr")
-	if err := os.WriteFile(prPath, []byte(prSource), 0644); err != nil {
+	if err := os.WriteFile(prPath, prSource, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing %s: %v\n", prPath, err)
 		os.Exit(1)
 	}

@@ -36,6 +36,10 @@ func (c *Checker) declare(file *ast.File) {
 			mod.SetCatalogName(u.CatalogName)
 		}
 		mod.SetGlob(isGlob)
+		if c.moduleUses == nil {
+			c.moduleUses = make(map[*types.Module]*ast.UseDecl)
+		}
+		c.moduleUses[mod] = u
 		c.validateMetas(u.Annotations, TargetImport)
 		mod.SetLinkOnly(c.hasAnnotation(u.Annotations, "link"))
 
@@ -97,7 +101,7 @@ func (c *Checker) declare(file *ast.File) {
 func (c *Checker) insertNamedImport(u *ast.UseDecl, mod *types.Module, target *types.Scope) bool {
 	if existing := target.Insert(mod); existing != nil {
 		c.errorf(u.Pos(), "duplicate import alias '%s'", mod.Name())
-		c.hintf(u.Pos(), "use `as` to rename one: `%s as %s2;`", useSpec(mod), mod.Name())
+		c.hintf(u.Pos(), "use `as` to rename one: `%s as %s2;`", useSpec(u), mod.Name())
 		return false
 	}
 	return true
@@ -105,11 +109,14 @@ func (c *Checker) insertNamedImport(u *ast.UseDecl, mod *types.Module, target *t
 
 // useSpec renders the `use` prefix that introduces a module, for diagnostics:
 // `use json` for a catalog import, `use alias "./path"` for a sourced import.
-func useSpec(mod *types.Module) string {
-	if mod.CatalogName() != "" {
-		return "use " + mod.CatalogName()
+// It renders the declaration, not the module object: the object carries the
+// module's identity, which for `use m "../m"` is an absolute path the user
+// never wrote (and for a `[replace]`d URL, the replacement's directory).
+func useSpec(u *ast.UseDecl) string {
+	if u.CatalogName != "" {
+		return "use " + u.CatalogName
 	}
-	return "use " + mod.Name() + " \"" + mod.Path() + "\""
+	return "use " + u.Alias + " \"" + u.Path + "\""
 }
 
 // checkImportDeclCollisions reports a named file-local import whose alias collides
@@ -130,7 +137,7 @@ func (c *Checker) checkImportDeclCollisions() {
 			"import alias '%s' conflicts with %s declared at %s",
 			mod.Name(), describeObjectKind(decl), decl.Pos())
 		c.hintf(ast.Pos{File: p.File, Line: p.Line, Column: p.Column},
-			"alias the import — `%s as %s2;`", useSpec(mod), mod.Name())
+			"alias the import — `%s as %s2;`", useSpec(c.moduleUses[mod]), mod.Name())
 	}
 }
 

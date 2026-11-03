@@ -87,6 +87,13 @@ func checkUnit(t *testing.T, files []unitFile, mods map[string]*types.Scope) []e
 // the zero TargetInfo filters nothing.
 func checkUnitForTarget(t *testing.T, files []unitFile, mods map[string]*types.Scope, target TargetInfo) []error {
 	t.Helper()
+	return checkUnitWithIdentities(t, files, mods, target, nil)
+}
+
+// checkUnitWithIdentities is checkUnitForTarget with the spelling → identity
+// map the driver passes for sourced imports (CheckWithIdentities).
+func checkUnitWithIdentities(t *testing.T, files []unitFile, mods map[string]*types.Scope, target TargetInfo, identities map[string]string) []error {
+	t.Helper()
 	var merged *ast.File
 	for _, f := range files {
 		file := parseNamed(t, f.name, f.src)
@@ -99,7 +106,7 @@ func checkUnitForTarget(t *testing.T, files []unitFile, mods map[string]*types.S
 	}
 	// injectStdImport: prepend a Pos-less `use std as _;` (module-wide).
 	merged.Uses = append([]*ast.UseDecl{{Alias: "_", CatalogName: "std"}}, merged.Uses...)
-	_, errs := CheckWithTarget(merged, mods, target)
+	_, errs := CheckWithIdentities(merged, mods, target, nil, nil, identities)
 	return errs
 }
 
@@ -186,7 +193,7 @@ func TestImportScope_DuplicateAliasWithinFile(t *testing.T) {
 		{"a.pr", "use path;\nuse path;\npa() string `public { return path.join(\"/a\", \"b\"); }\n"},
 	}, testModuleScopes(t))
 	expectError(t, errs, "duplicate import alias 'path'")
-	expectError(t, errs, "use `as` to rename one")
+	expectError(t, errs, "use `as` to rename one: `use path as path2;`")
 }
 
 // module-system.md#import-scope rule 3: an import alias may not collide with a module-wide declaration.
@@ -196,7 +203,39 @@ func TestImportScope_ImportVersusDeclarationCollision(t *testing.T) {
 		{"b.pr", "type wire { int x; }\n"},
 	}, testModuleScopes(t))
 	expectError(t, errs, "import alias 'wire' conflicts with type 'wire'")
-	expectError(t, errs, "alias the import")
+	// A renamed catalog import is echoed by its catalog name, not its alias:
+	// `use wire as wire2;` would name a module that does not exist.
+	expectError(t, errs, "alias the import — `use path as wire2;`")
+}
+
+// The hints that echo a sourced import render it as its file wrote it. The
+// module object carries the module's identity instead (#785), which for a root
+// `use m "../m"` is an absolute path the user never wrote — and for a
+// `[replace]`d URL the replacement's directory, which the hint must not tell
+// the user to depend on.
+func TestImportScope_HintEchoesSpellingNotIdentity(t *testing.T) {
+	mods := testModuleScopes(t)
+	mods["../m"] = mods["path"]
+	identities := map[string]string{"../m": "/elsewhere/m"}
+	for _, tc := range []struct {
+		name  string
+		files []unitFile
+		hint  string
+	}{
+		{"duplicate alias", []unitFile{
+			{"a.pr", "use m \"../m\";\nuse m \"../m\";\npa() string `public { return m.join(\"/a\", \"b\"); }\n"},
+		}, "use `as` to rename one: `use m \"../m\" as m2;`"},
+		{"declaration collision", []unitFile{
+			{"a.pr", "use m \"../m\";\npa() string `public { return m.join(\"/a\", \"b\"); }\n"},
+			{"b.pr", "type m { int x; }\n"},
+		}, "alias the import — `use m \"../m\" as m2;`"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := checkUnitWithIdentities(t, tc.files, mods, TargetInfo{}, identities)
+			expectError(t, errs, tc.hint)
+			expectNoErrorContaining(t, errs, "/elsewhere/m")
+		})
+	}
 }
 
 // module-system.md#import-scope rule 4: a named import its own file never references warns (non-fatally).

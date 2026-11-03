@@ -51,6 +51,7 @@ type Checker struct {
 	generatorElemType   types.Type                       // T from stream[T] or Iterator[T] return type
 	yieldFound          bool                             // true if at least one yield seen in current generator func
 	modules             []*types.Module                  // all modules from use declarations
+	moduleUses          map[*types.Module]*ast.UseDecl   // the `use` each module object came from: its spelling, which diagnostics echo (a module object carries the identity)
 	moduleScopes        map[string]*types.Scope          // pre-loaded module scopes (catalog name or path → scope)
 	moduleIdentities    map[string]string                // import spelling → module's global identity (see NewModule below)
 	target              TargetInfo                       // compile target for `target(cond)` filtering (zero = no filtering)

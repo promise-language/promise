@@ -25,17 +25,26 @@ func bindEpoch() string {
 }
 
 // runBindSelfCheck type-checks the project bind just wrote to outDir, for the
-// target it generated for, and exits non-zero if it doesn't resolve
-// (docs/web-apps.md §16). Frontend only — no subprocess, no LLVM,
-// no linker: parse → merge std → sema → embeds → ownership, the same pipeline
-// `promise build` runs, reusing the exact discovery (discoverProject) and
-// frontend (compileProjectFrontend) entry points build already uses, so a
-// project that fails here would have failed identically one command later at
-// `promise build` — the #25 review's "undefined type: EventListener" gap this
-// closes. compileProjectFrontend itself os.Exit(1)s with the sema/ownership
-// errors printed, so success here just means "returned" — the target passed
-// in is bind's own `-target` (default web / wasi — see runBindWebIdl/
-// runBindWit), always web/wasi-flavored, so the triple is always "wasm32-<target>".
+// target it generated for and then for the host target, and exits non-zero if
+// it doesn't resolve for either (docs/web-apps.md §16). Frontend only — no
+// subprocess, no LLVM, no linker: parse → merge std → sema → embeds →
+// ownership, the same pipeline `promise build` runs, reusing the exact
+// discovery (discoverProject) and frontend (compileProjectFrontend) entry
+// points build already uses, so a project that fails here would have failed
+// identically one command later — the #25 review's "undefined type:
+// EventListener" gap this closes. compileProjectFrontend itself os.Exit(1)s
+// with the sema/ownership errors printed, so success here just means
+// "returned".
+//
+// The first check's triple is "wasm32-<target>": target is bind's own
+// `-target` (default web / wasi — see runBindWebIdl/runBindWit), always
+// web/wasi-flavored. The second passes the empty triple, which is the host
+// target, as `promise check` does without -target. The module must check for
+// every target (docs/wasm-bindings.md §"Generated Module Contents"): a
+// declaration naming a type filtered to the bind target without carrying that
+// target itself resolves on the bind target and fails only where the type is
+// filtered out, so the host check catches it here rather than in a consumer
+// that checks or builds the module for any other target (#810).
 func runBindSelfCheck(outDir, target string) {
 	cfg, files, err := discoverProject(outDir, false)
 	if err != nil {
@@ -47,6 +56,7 @@ func runBindSelfCheck(outDir, target string) {
 		dir = cfg.Dir
 	}
 	compileProjectFrontend(dir, files, "wasm32-"+target)
+	compileProjectFrontend(dir, files, "")
 }
 
 func runBind(args []string) {

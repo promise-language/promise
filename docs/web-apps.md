@@ -644,7 +644,11 @@ Two scoping decisions:
   build and not the other means broken output is caught locally and waved
   through in CI, or the reverse. `-no-check` is the escape hatch for anyone who
   wants the raw output; `bind` already takes `-target`, so it checks for the
-  target it generated for.
+  target it generated for, and then for the host target. The module must
+  check for every target ([wasm-bindings.md](wasm-bindings.md) §"Generated
+  Module Contents"), and a declaration missing its `target` fails only where
+  the type it names is filtered out, so checking the bind target alone would
+  pass it on to every consumer that checks or builds for another target.
 - **`promise check` resolves its input the way `build` does** — both go through
   the one `resolveTarget` policy, so a project is analysed as a project and a
   standalone file as a file. The bind self-check is the same shared entry point

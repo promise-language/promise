@@ -790,6 +790,64 @@ interface Other {
 	}
 }
 
+// TestBindWebIdlDictionaryNamingInterfaceChecksOnHost is #810's acceptance: a
+// dictionary naming an interface — directly, or through another dictionary —
+// carries `target(web) as the interface's wrapper does, so the bound module
+// checks on the host, where neither exists, and a program using both still
+// compiles for wasm32-web. A dictionary naming no interface carries no target.
+func TestBindWebIdlDictionaryNamingInterfaceChecksOnHost(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := clitest.Bin(t)
+
+	dir := clitest.TempDir(t)
+	idlPath := filepath.Join(dir, "dom.idl")
+	idl := `[Exposed=Window] interface Node {};
+dictionary D { Node n; };
+dictionary E { D d; long x; };
+dictionary P { long x; };
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	if out, err := exec.Command(bin, "bind", "webidl", "-name", "dom", "-o", outDir, idlPath).CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed its self-check (want exit 0): %v\n%s", err, out)
+	}
+
+	// The host check runs before the web-only user file exists: it is the
+	// generated module alone that must check there.
+	if out, err := exec.Command(bin, "check", outDir).CombinedOutput(); err != nil {
+		t.Fatalf("host check of the generated module failed (want ok): %v\n%s", err, out)
+	}
+
+	pr, err := os.ReadFile(filepath.Join(outDir, "dom.pr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"type D `structural(protocol: false) `public `target(web) `doc(",
+		"type E `structural(protocol: false) `public `target(web) `doc(",
+		"type P `structural(protocol: false) `public `doc(",
+	} {
+		if !strings.Contains(string(pr), want) {
+			t.Errorf("generated module is missing %q:\n%s", want, pr)
+		}
+	}
+
+	userPath := filepath.Join(outDir, "use_dom.pr")
+	user := "main() `target(web) {\n    e := E(d: D(n: Node.borrow(1)), x: 1);\n    p := P(x: e.x);\n}\n"
+	if err := os.WriteFile(userPath, []byte(user), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(bin, "emit-ir", "-target", "wasm32-web", outDir).CombinedOutput(); err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+}
+
 // TestGCRemovedPrintsNotice verifies the `gc` verb no longer runs a sweep but
 // stays routable, exiting non-zero with a redirect to the mechanisms that
 // replaced it (T1009): `remove` for exclusive-blob reclamation and

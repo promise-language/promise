@@ -18,10 +18,12 @@ func GeneratePromise(modules []*Module, target string) string {
 // When canonicalABI is true, extern declarations use flattened canonical ABI types
 // (i32/i64/f32/f64) and wrapper functions include marshalling code.
 func GeneratePromiseWithOptions(modules []*Module, target string, canonicalABI bool) string {
+	kinds := namedKinds(modules)
 	g := &generator{
 		target:       target,
 		canonicalABI: canonicalABI,
-		kinds:        namedKinds(modules),
+		kinds:        kinds,
+		targeted:     targetedTypes(kinds, modules),
 	}
 	if canonicalABI {
 		listElemTypes := collectListElemTypes(modules)
@@ -44,6 +46,19 @@ type generator struct {
 	// kinds classifies every name the modules define (namedKinds), which
 	// decides how a wrapper lowers and lifts a value of that type.
 	kinds kindRegistry
+	// targeted holds every type the modules declare that exists only on the
+	// module's target (targetedTypes); targetAnnot reads it.
+	targeted map[string]bool
+}
+
+// targetAnnot returns the `target annotation the declaration of the type named
+// name carries: the module's target when the type exists only there
+// (targetedTypes), or nothing, so the type compiles on every target.
+func (g *generator) targetAnnot(name string) string {
+	if g.targeted[name] {
+		return " `target(" + g.target + ")"
+	}
+	return ""
 }
 
 func (g *generator) line(format string, args ...interface{}) {
@@ -262,8 +277,10 @@ func (g *generator) emitType(t Type, importModule string) {
 // non-copy string). `value is also never valid on a type declaration, and a mixed
 // value/instance type is unsupported by codegen. A plain heap type is the only
 // representation that compiles for arbitrary dictionary field types (T0724).
+// It carries the module's target when a member names a type that exists only
+// there (targetedTypes; docs/wasm-bindings.md §"Generated Module Contents").
 func (g *generator) emitRecord(t Type) {
-	g.line("type %s `structural(protocol: false) `public%s {", t.Name, docAnnot(t.Doc))
+	g.line("type %s `structural(protocol: false) `public%s%s {", t.Name, g.targetAnnot(t.Name), docAnnot(t.Doc))
 	g.indent++
 	for _, f := range t.Fields {
 		g.line("%s %s;", promiseType(f.Type), f.Name)
@@ -283,7 +300,7 @@ func (g *generator) emitEnum(t Type) {
 }
 
 func (g *generator) emitVariant(t Type) {
-	g.line("enum %s `public%s {", t.Name, docAnnot(t.Doc))
+	g.line("enum %s `public%s%s {", t.Name, g.targetAnnot(t.Name), docAnnot(t.Doc))
 	g.indent++
 	for _, c := range t.Cases {
 		if c.Type != nil {
@@ -477,7 +494,7 @@ func (g *generator) emitResource(r Resource, importModule string) {
 	if r.Parent != "" {
 		inherits = " is " + r.Parent
 	}
-	g.line("type %s%s `structural(protocol: false) `public `target(%s)%s {", r.Name, inherits, g.target, docAnnot(r.Doc))
+	g.line("type %s%s `structural(protocol: false) `public%s%s {", r.Name, inherits, g.targetAnnot(r.Name), docAnnot(r.Doc))
 	g.indent++
 	// The handle and its ownership flag live on the root of an inheritance chain
 	// only; a derived wrapper inherits both.
@@ -1353,6 +1370,46 @@ func namedKinds(modules []*Module) kindRegistry {
 		}
 	}
 	return kinds
+}
+
+// targetedTypes returns the name of every type the modules declare that exists
+// only on the module's target, so its declaration carries that `target: each
+// resource (namedResource in kinds), whose wrapper calls the host, and, to a
+// fixed point, each type with a field or case payload that names one
+// (eachName) — on any other target the named type is filtered out, so a
+// declaration naming it without the target itself would not resolve there
+// (docs/wasm-bindings.md §"Generated Module Contents"). Iterating to a fixed
+// point covers nested and mutually referring dictionaries in any declaration
+// order; a derived dictionary already declares its ancestors' members
+// (convertDictionary). Every other type — an enum, a flags type, JsValue, and
+// a record or variant naming none of these — carries no target and compiles
+// on every target.
+func targetedTypes(kinds kindRegistry, modules []*Module) map[string]bool {
+	targeted := map[string]bool{}
+	for name, kind := range kinds {
+		if kind == namedResource {
+			targeted[name] = true
+		}
+	}
+	namesTargeted := func(ref TypeRef) bool {
+		return eachName(ref, func(name string) bool { return targeted[name] })
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, m := range modules {
+			for _, t := range m.Types {
+				if targeted[t.Name] {
+					continue
+				}
+				if slices.ContainsFunc(t.Fields, func(f Field) bool { return namesTargeted(f.Type) }) ||
+					slices.ContainsFunc(t.Cases, func(c Case) bool { return c.Type != nil && namesTargeted(*c.Type) }) {
+					targeted[t.Name] = true
+					changed = true
+				}
+			}
+		}
+	}
+	return targeted
 }
 
 // kindOf returns what ref names, or false when ref is not a NamedKind. A name

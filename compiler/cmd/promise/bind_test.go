@@ -427,3 +427,179 @@ func TestRunBindWitWritesFormattedModule(t *testing.T) {
 		})
 	}
 }
+
+// selfCheckDirEnv hands the child of TestRunBindSelfCheckChecksTheHost the
+// project it self-checks: the self-check leaves through os.Exit when the
+// project does not resolve, so the failing case runs it in a child.
+const selfCheckDirEnv = "TEST_BIND_SELF_CHECK_DIR"
+
+// writeSelfCheckProject writes a project in the shape bind generates: a
+// `target(web) wrapper Node and a type D naming it, whose declaration carries
+// dTarget (empty, or " `target(web)").
+func writeSelfCheckProject(t *testing.T, dTarget string) string {
+	t.Helper()
+	dir := t.TempDir()
+	src := "type Node `structural(protocol: false) `public `target(web) `doc(\"A wrapper.\") {\n" +
+		"    i32 _handle;\n" +
+		"}\n\n" +
+		"type D `structural(protocol: false) `public" + dTarget + " `doc(\"A dictionary.\") {\n" +
+		"    Node n;\n" +
+		"}\n"
+	if err := os.WriteFile(filepath.Join(dir, "dom.pr"), []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	toml := fmt.Sprintf("[module]\nname = \"dom\"\nepoch = %q\n", bindEpoch())
+	if err := os.WriteFile(filepath.Join(dir, "promise.toml"), []byte(toml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestRunBindSelfCheckChecksTheHost: bind's self-check checks the module for
+// the host target as well as for the target it generated for, so a declaration
+// naming a `target(web) type without carrying the target itself — which
+// resolves on wasm32-web — fails bind rather than a consumer checking the
+// module on any other target (#810; docs/web-apps.md §"Bind time self check").
+func TestRunBindSelfCheckChecksTheHost(t *testing.T) {
+	if dir := os.Getenv(selfCheckDirEnv); dir != "" {
+		runBindSelfCheck(dir, "web")
+		return
+	}
+
+	t.Run("a declaration missing its target fails", func(t *testing.T) {
+		dir := writeSelfCheckProject(t, "")
+
+		// It resolves on the bind target, so only the host check can reject it.
+		cfg, files, err := discoverProject(dir, false)
+		if err != nil || cfg == nil {
+			t.Fatalf("discoverProject: cfg %v, err %v", cfg, err)
+		}
+		compileProjectFrontend(cfg.Dir, files, "wasm32-web")
+
+		out, err := runSubprocess(t, "TestRunBindSelfCheckChecksTheHost", selfCheckDirEnv+"="+dir)
+		if err == nil {
+			t.Fatalf("the self-check passed a type naming a `target(web) type without the target (want it to fail on the host)\noutput:\n%s", out)
+		}
+		if !strings.Contains(out, "undefined type: Node") {
+			t.Errorf("want an `undefined type: Node` error from the host check\noutput:\n%s", out)
+		}
+	})
+
+	t.Run("a declaration carrying its target passes", func(t *testing.T) {
+		runBindSelfCheck(writeSelfCheckProject(t, " `target(web)"), "web")
+	})
+}
+
+// TestRunBindTypeNamingWrapperChecksOnHost drives bind end-to-end, self-check
+// on, over a type naming a wrapper: a WebIDL dictionary naming an interface,
+// directly and through another dictionary, and a WIT record and variant naming
+// a resource. Each carries the module's target, so the module checks for both
+// targets and bind returns; a type naming no wrapper carries none (#810). Under
+// a keep list — how promise-language/web binds its spec set — the rule holds
+// for what the list leaves: a dictionary whose only interface member names a
+// dropped interface loses that member and carries no target.
+func TestRunBindTypeNamingWrapperChecksOnHost(t *testing.T) {
+	cases := []struct {
+		name  string
+		file  string
+		src   string
+		keep  string // keep list passed as -keep, when not empty
+		run   func(args []string)
+		lines []string // declaration lines the module must hold
+	}{
+		{
+			name: "webidl",
+			file: "dom.idl",
+			src: `[Exposed=Window] interface Node {};
+dictionary D { Node n; };
+dictionary E { D d; long x; };
+dictionary P { long x; };
+`,
+			run: runBindWebIdl,
+			lines: []string{
+				"type D `structural(protocol: false) `public `target(web) `doc(\"`D` (WebIDL dictionary)\") {",
+				"type E `structural(protocol: false) `public `target(web) `doc(\"`E` (WebIDL dictionary)\") {",
+				"type P `structural(protocol: false) `public `doc(\"`P` (WebIDL dictionary)\") {",
+			},
+		},
+		{
+			name: "webidl with a keep list",
+			file: "dom.idl",
+			src: `[Exposed=Window] interface Node { attribute DOMString text; };
+[Exposed=Window] interface Other {};
+dictionary D { Node n; Other o; };
+dictionary E { Other o; long x; };
+`,
+			keep: "Node\n",
+			run:  runBindWebIdl,
+			lines: []string{
+				"type D `structural(protocol: false) `public `target(web) `doc(\"`D` (WebIDL dictionary)\") {",
+				"type E `structural(protocol: false) `public `doc(\"`E` (WebIDL dictionary)\") {",
+			},
+		},
+		{
+			name: "wit",
+			file: "api.wit",
+			src: `package example:things@0.1.0;
+
+interface api {
+    resource descriptor {
+        size: func() -> u64;
+    }
+
+    record holder {
+        d: descriptor,
+        n: u32,
+    }
+
+    variant pick {
+        one(descriptor),
+        empty,
+    }
+
+    record plain {
+        x: u32,
+    }
+}
+`,
+			run: runBindWit,
+			lines: []string{
+				"type Holder `structural(protocol: false) `public `target(wasi) {",
+				"enum Pick `public `target(wasi) {",
+				"type Plain `structural(protocol: false) `public {",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			srcPath := filepath.Join(dir, tc.file)
+			if err := os.WriteFile(srcPath, []byte(tc.src), 0644); err != nil {
+				t.Fatal(err)
+			}
+			outDir := filepath.Join(dir, "out")
+			args := []string{"-name", "mod", "-o", outDir}
+			if tc.keep != "" {
+				keepPath := filepath.Join(dir, "mod.keep")
+				if err := os.WriteFile(keepPath, []byte(tc.keep), 0644); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, "-keep", keepPath)
+			}
+
+			silenceStdout(t, func() {
+				tc.run(append(args, srcPath))
+			})
+
+			pr, err := os.ReadFile(filepath.Join(outDir, "mod.pr"))
+			if err != nil {
+				t.Fatalf("module not written: %v", err)
+			}
+			for _, line := range tc.lines {
+				if !strings.Contains(string(pr), line) {
+					t.Errorf("module is missing %q; got:\n%s", line, pr)
+				}
+			}
+		})
+	}
+}

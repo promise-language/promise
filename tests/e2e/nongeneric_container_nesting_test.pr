@@ -1,0 +1,76 @@
+// #404: the container-element nesting rule covers a single-owner handle that an
+// element type holds in a by-value buffer through its FIELDS, so a non-generic
+// container (`TaskBag { Task[int][] items; }`) can no longer be nested inside
+// another container. The compile FAILURES are Go sema tests
+// (TestNongenericContainerNesting_*); this file is the leak-checked runtime side —
+// the shapes that are correctly ALLOWED must still work, so the rule cannot have
+// widened to ordinary containers, to the type itself, or to a handle held behind a
+// Ref. Type names are suffixed so the shapes stay distinguishable from the
+// neighbouring regression files sharing a build.
+type PlainBagI404 {
+  int[] items;
+}
+type MutexBagI404 {
+  Mutex[int][] items;
+}
+type HolderI404 {
+  Ref[Mutex[int]] r;
+  string[] names;
+}
+type BagHolderI404 {
+  Ref[MutexBagI404] r;
+  string[] names;
+}
+
+// A non-generic bag over a plain element is an ordinary container element: it
+// round-trips through a Vector and a Map.
+plain_bag_round_trips_i404() `test {
+  Vector[PlainBagI404] v = [];
+  v.push(PlainBagI404(items: [1, 2, 3]));
+  PlainBagI404[] w = [PlainBagI404(items: [4])];
+  b := v[0];
+  assert(b.items.len == 3, "vector read");
+  assert(w[0].items[0] == 4, "sugar-spelled vector read");
+  map[string, PlainBagI404] m = {:};
+  m["k"] = PlainBagI404(items: [5, 6]);
+  assert(m.len == 1, "map len");
+  assert(m["k"]!.items.len == 2, "map read");
+}
+
+// The rule refuses the nesting, not the type: a bag of mutexes still works as a
+// direct move-only value, and drops each mutex exactly once.
+mutex_bag_direct_value_i404() `test {
+  b := MutexBagI404(items: [Mutex[int](7), Mutex[int](8)]);
+  assert(b.items.len == 2, "len");
+  assert(b.items[1].lock().borrow == 8, "lock through the buffer");
+}
+
+// A handle held behind a Ref field is not held by value
+// (memory-model.md#by-value-versus-behind-a-handle): the indexed read duplicates
+// the Ref (a refcount bump) and the names buffer, never the mutex, so the mutex
+// is dropped exactly once.
+ref_held_handle_survives_read_i404() `test {
+  Vector[HolderI404] v = [];
+  v.push(HolderI404(r: Ref[Mutex[int]](Mutex[int](7)), names: ["a", "b"]));
+  h := v[0];
+  assert(h.names.len == 2, "names duplicated");
+  assert(h.r.borrow.lock().borrow == 7, "mutex reached through the copied Ref");
+  assert(v[0].r.borrow.lock().borrow == 7, "original still holds the same mutex");
+}
+
+// A whole bag behind a Ref, which sema accepts as an element however it is
+// spelled: the read bumps the Ref and copies the names, never the bag's buffer, so
+// each mutex in it is dropped exactly once.
+ref_held_bag_survives_read_i404() `test {
+  Vector[Ref[MutexBagI404]] v = [];
+  v.push(Ref[MutexBagI404](MutexBagI404(items: [Mutex[int](7), Mutex[int](8)])));
+  r := v[0];
+  assert(r.borrow.items.len == 2, "bag reached through the copied Ref");
+  assert(r.borrow.items[1].lock().borrow == 8, "lock through the shared bag");
+  Vector[BagHolderI404] w = [];
+  w.push(BagHolderI404(r: Ref[MutexBagI404](MutexBagI404(items: [Mutex[int](9)])), names: ["a"]));
+  h := w[0];
+  assert(h.names.len == 1, "names duplicated");
+  assert(h.r.borrow.items[0].lock().borrow == 9, "bag reached through the holder's Ref");
+  assert(w[0].r.borrow.items.len == 1, "original holder still holds the same bag");
+}

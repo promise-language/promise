@@ -371,9 +371,9 @@ func (c *Checker) rejectStreamTypeArg(pos ast.Pos, typeArgs []types.Type) {
 // correctly does not own its elements by value.
 //
 // This is the yes/no form of the one walk collectByValueBuffers implements;
-// duplicatingContainerElemTypes asks the same walk WHICH buffers it found, so
-// the base case is stated once. Passing a nil sink makes the walk stop at the
-// first buffer.
+// duplicatingContainerElemTypes and bufferedSingleOwnerHandle ask the same walk
+// WHICH buffers it found, so the base case is stated once. Passing a nil sink
+// makes the walk stop at the first buffer.
 func ownsElementsByValue(typ types.Type) bool {
 	return collectByValueBuffersIn(typ, newByValueWalk(nil))
 }
@@ -865,9 +865,11 @@ func firstFieldNestedClosure(typ types.Type, seen map[types.Type]bool, topLevel 
 
 // nestedContainerSingleOwnerHandle returns the single-owner handle that makes
 // typ an unsound container element, or nil. typ qualifies when it is itself a
-// *container* — a fixed-size Array, or an instance that holds one of its type
-// arguments in a by-value buffer (duplicatingContainerElemTypes) — and the
-// handle sits in an element the container would DUPLICATE. Such a container,
+// *container* — a fixed-size Array, an instance that holds one of its type
+// arguments in a by-value buffer (duplicatingContainerElemTypes), or a user
+// type, generic or not, whose fields reach a by-value buffer holding a handle
+// (bufferedSingleOwnerHandle, #404) — and the handle sits in an element the
+// container would DUPLICATE. Such a container,
 // used as another container's element/key/value, forces the outer container's
 // literal-lowering / push-dup / clone / realloc paths to duplicate the inner
 // handle — unsound (double-free at drop). A *direct* handle element
@@ -892,6 +894,39 @@ func nestedContainerSingleOwnerHandle(typ types.Type) types.Type {
 			if off := firstSingleOwnerHandle(et); off != nil {
 				return off
 			}
+		}
+		// A handle no type argument names: concrete inside a field, or bound at
+		// a parent reference (`DerFixed[U] is BaseV[Mutex[int]]`). (#404)
+		return bufferedSingleOwnerHandle(t)
+	case *types.Named, *types.Enum:
+		// A non-generic user container has no type arguments to blame, so its
+		// buffers are the whole answer. (#404)
+		return bufferedSingleOwnerHandle(t)
+	}
+	return nil
+}
+
+// bufferedSingleOwnerHandle returns the single-owner handle a duplicate of typ
+// would copy out of a by-value buffer, or nil. It is the fused form of the
+// nesting rule: collectByValueBuffersIn finds the by-value buffers through typ's
+// FIELDS — the walk ownsElementsByValue and duplicatingContainerElemTypes rest
+// on — and firstSingleOwnerHandle asks each buffer whether it holds a handle.
+//
+// Fusing them is what covers a handle that is CONCRETE inside the element type
+// rather than one of its type arguments. `TaskBag { Task[int][] items; }` has no
+// type arguments at all, and `Mixed[U] { Task[int][] items; U other; }` has one,
+// but not the one in the buffer. (#404)
+//
+// Asking the buffers rather than the fields is what keeps the behind-a-handle
+// cases accepted without naming Ref/Weak/Channel: those origins declare no
+// Promise-level fields, so the walk stops at them and
+// `Holder { Ref[Task[int]] r; string[] names; }` yields only Vector[string].
+func bufferedSingleOwnerHandle(typ types.Type) types.Type {
+	var buffers []types.Type
+	collectByValueBuffersIn(typ, newByValueWalk(&buffers))
+	for _, buf := range buffers {
+		if off := firstSingleOwnerHandle(buf); off != nil {
+			return off
 		}
 	}
 	return nil
@@ -1421,11 +1456,21 @@ func typeOccursIn(needle, hay types.Type) bool {
 // T = Task[int]) doesn't slip past the direct nesting gate.
 func (c *Checker) validateSingleOwnerContainerInstance(pos ast.Pos, origin types.Type, typeArgs []types.Type) {
 	for _, et := range duplicatingContainerElemTypes(origin, typeArgs) {
-		c.reportContainerSingleOwnerNesting(pos, et)
-		if (c.curFuncObj != nil || c.curMethodObj != nil) &&
-			isContainerWithTypeParam(et) {
-			c.recordCloneReq(et, pos, "nested container element")
-		}
+		c.validateSingleOwnerContainerElem(pos, et)
+	}
+}
+
+// validateSingleOwnerContainerElem enforces the nesting rule for one type an
+// outer container duplicates: reported now when it is concrete, deferred to the
+// call site (T0616) when a type parameter could put a handle there. The `T[]`
+// and `T[N]` sugar, which never reaches validateSingleOwnerContainerInstance,
+// calls this directly so `T[][]` in a generic body is held to the same rule as
+// `Vector[Vector[T]]`. (#404)
+func (c *Checker) validateSingleOwnerContainerElem(pos ast.Pos, et types.Type) {
+	c.reportContainerSingleOwnerNesting(pos, et)
+	if (c.curFuncObj != nil || c.curMethodObj != nil) &&
+		isContainerWithTypeParam(et) {
+		c.recordCloneReq(et, pos, "nested container element")
 	}
 }
 

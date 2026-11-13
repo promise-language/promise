@@ -72,31 +72,23 @@ func TestT1970_TwoLevelInheritedBufferRejected(t *testing.T) {
 	expectError(t, errs, "cannot be a container element")
 }
 
-// The BOUNDARY between this item and T1950, pinned so the line stays visible.
-//
-// When the handle is bound at the PARENT REFERENCE rather than supplied as the
-// child's type argument, resolving the inherited field is not enough: the rule is
-// phrased as "which of the outer container's TYPE ARGUMENTS does a by-value buffer
-// hold", and here the buffer holds a handle that is no argument of anything —
-// `int` is the only argument, and the buffer does not hold it. Reporting it needs
-// T1950's fused walk (find a by-value path, then look for a handle at its leaf),
-// which is a different defect from this item's substitution gap. The inherited
-// field DOES now resolve to Vector[Mutex[int]] (TestT1970_AllFieldTypes* in the
-// types package pins that), so T1970's half of the work is what lands here.
-//
-// !! This shape SEGFAULTS at run time — measured, `fatal: segmentation fault at
-// 0x0` on the duplicating read. checkOK here asserts what the compiler does today,
-// NOT that the program is acceptable. It is pinned so the boundary between the two
-// items cannot move unnoticed: when T1950 lands, this test must flip to
-// expectError, and its failure is the reminder to do so.
-func TestT1970_ParentBoundHandleStillAcceptedPendingT1950(t *testing.T) {
-	checkOK(t, `
+// The handle is bound at the PARENT REFERENCE rather than supplied as the child's
+// type argument. Resolving the inherited field is not enough on its own here: the
+// buffer holds a handle that is no argument of anything — `int` is the only
+// argument, and the buffer does not hold it. T1970 resolves the inherited field to
+// Vector[Mutex[int]] (TestT1970_AllFieldTypes* in the types package pins that), and
+// the fused walk of #404 (find the by-value buffers, then look for a handle in
+// each) reports it. Accepted before both landed, this shape segfaulted on the
+// duplicating read.
+func TestT1970_ParentBoundHandleRejected(t *testing.T) {
+	errs := checkErrs(t, `
 		type BaseV5[T] { T[] items; }
 		type DerFixed[U] is BaseV5[Mutex[int]] { U other; }
 		test() {
 			Vector[DerFixed[int]] v = [];
 		}
 	`)
+	expectError(t, errs, "it transitively contains Mutex[int], a single-owner handle")
 }
 
 // The substitution has to be exact, not positional-by-accident. `E[A, B] is

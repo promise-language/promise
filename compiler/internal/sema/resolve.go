@@ -98,6 +98,11 @@ func (c *Checker) resolveTypeWalk(ref ast.TypeRef) types.Type {
 		// T1315: `stream[int][]` — the vector sugar bypasses resolveInstance, so
 		// reject a non-storable generator Stream element here.
 		c.rejectStreamTypeArg(r.Pos(), []types.Type{elem})
+		// #404: the same bypass skips the container-element nesting rule, so
+		// `TaskBag[]` and `Task[int][][]` would escape the rule `Vector[TaskBag]`
+		// and `Vector[Vector[Task[int]]]` are subject to — and, in a generic body,
+		// `T[][]` would escape the call-site deferral `Vector[Vector[T]]` gets.
+		c.validateSingleOwnerContainerElem(r.Pos(), elem)
 		inst := types.NewVector(elem)
 		c.recordInstance(inst)
 		return inst
@@ -109,6 +114,7 @@ func (c *Checker) resolveTypeWalk(ref ast.TypeRef) types.Type {
 		}
 		// T1315: `stream[int][N]` — reject a non-storable generator Stream element.
 		c.rejectStreamTypeArg(r.Pos(), []types.Type{elem})
+		c.validateSingleOwnerContainerElem(r.Pos(), elem) // #404, as for `T[]`
 		size, err := strconv.ParseInt(r.Size, 10, 64)
 		if err != nil {
 			c.errorf(r.Pos(), "invalid array size: %s", r.Size)

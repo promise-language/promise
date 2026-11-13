@@ -262,7 +262,8 @@ them, and the same check holds the two copies equal.
   nothing; orthogonal to `` `single_owner ``, which the elements may still be — that is precisely
   what the nesting rule polices.
 - **Read by** `Named.DuplicatesElements()`, consulted by `collectByValueBuffers` (`sema/clone.go`)
-  — the single walk behind `ownsElementsByValue` and `duplicatingContainerElemTypes` — and the
+  — the single walk behind `ownsElementsByValue`, `duplicatingContainerElemTypes` and
+  `bufferedSingleOwnerHandle` — and the
   container-element, `clone()`/`filled()` and closure dup-safety checks they drive.
 
 ## Transfer and aliasing across goroutines

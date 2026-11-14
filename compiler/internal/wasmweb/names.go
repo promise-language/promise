@@ -127,6 +127,15 @@ const (
 	//
 	//	promise_web_subscription_dropped(sub_id: i32) -> i32
 	SubscriptionDroppedFunc = "promise_web_subscription_dropped"
+
+	// ParkTimerFunc parks the calling goroutine on a timer for ns nanoseconds:
+	// std's sleep on wasm32-web. An armed timer is a live registration
+	// (docs/web-apps.md "The liveness rule"). Codegen never defines it as a
+	// function — every call is lowered inline, because the park must suspend
+	// the caller's own coroutine frame.
+	//
+	//	promise_web_park_timer(ns: int) -> void
+	ParkTimerFunc = "promise_web_park_timer"
 )
 
 // Param is one parameter of a registered signature. Type is the Promise source
@@ -168,15 +177,16 @@ func (s Signature) String() string {
 }
 
 // signatures is every symbol Promise code binds with `extern: the delivery
-// primitives above. Codegen defines each one, on wasm32-web only, in the shape
-// a plain `extern of exactly this signature calls, so a declaration with any
-// other signature would call it with the wrong shape. The exports are not
-// listed: no declaration binds one (Exports).
+// primitives above. Codegen defines each one, or lowers each call to it inline,
+// on wasm32-web only, in the shape a plain `extern of exactly this signature
+// calls, so a declaration with any other signature would call it with the wrong
+// shape. The exports are not listed: no declaration binds one (Exports).
 var signatures = []Signature{
 	{Sym: SubscribeFunc, Params: []Param{{"i32", "capacity"}, {"i32", "policy"}}, Result: "i32", WebOnly: true},
 	{Sym: ChannelFunc, Params: []Param{{"i32", "sub_id"}}, Result: "Channel[i32]", WebOnly: true},
 	{Sym: UnsubscribeFunc, Params: []Param{{"i32", "sub_id"}}, WebOnly: true},
 	{Sym: SubscriptionDroppedFunc, Params: []Param{{"i32", "sub_id"}}, Result: "i32", WebOnly: true},
+	{Sym: ParkTimerFunc, Params: []Param{{"int", "ns"}}, WebOnly: true},
 }
 
 // Signatures returns every registered signature. The result is a copy;

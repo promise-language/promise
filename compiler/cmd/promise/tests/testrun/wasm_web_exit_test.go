@@ -86,6 +86,35 @@ main() `+"`test(expected: \"ready\\n\")"+` {
 	}
 }
 
+// The harness runs the continuations a program schedules for itself — here the
+// timer that wakes main's sleep — and fails the program as an idle reactor only
+// once none is pending while a registration, the subscription, stays live.
+func TestWasmWebReactorIdleAfterLastContinuation(t *testing.T) {
+	t.Parallel()
+	bin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+
+	file := writeWebTestFile(t, dir, "sleeping_reactor_test.pr", `_web_subscribe(i32 capacity, i32 policy) i32 `+"`extern(\"promise_web_subscribe\") `target(web)"+`;
+_web_channel(i32 sub_id) Channel[i32] `+"`extern(\"promise_web_channel\") `target(web)"+`;
+
+main() `+"`test(expected: \"ready\\nwoke\\n\")"+` {
+  sub_id := _web_subscribe(4, 0);
+  ch := _web_channel(sub_id);
+  print_line("ready");
+  sleep(Duration.from_millis(20)); // sleep-ok: the continuation that wakes it is the subject
+  print_line("woke");
+  for h in ch {
+    print_line("{h}");
+  }
+}
+`)
+	r := clitest.Run(t, bin, nil, "test", "-target", "wasm32-web", file)
+	skipIfRuntimeUnobtainable(t, r.Combined())
+	if out := r.Combined(); r.ExitCode == 0 || !strings.Contains(out, "harness: reactor idle") || !strings.Contains(out, "woke") {
+		t.Errorf("exit %d, want the woken program to fail as an idle reactor\n%s", r.ExitCode, out)
+	}
+}
+
 // A batch binary is never a reactor, so a test body parked on a live
 // subscription — which no host will ever feed — fails rather than passing.
 func TestWasmWebBatchTestParkedOnLiveSubscriptionFails(t *testing.T) {
@@ -107,5 +136,57 @@ test_parks() `+"`test"+` {
 	// The result line names the test, so it was built and run.
 	if out := r.Combined(); r.ExitCode == 0 || !strings.Contains(out, "test_parks [wasm32-web]") || strings.Contains(out, "PASS") {
 		t.Errorf("exit %d, want the parked test to run and fail\n%s", r.ExitCode, out)
+	}
+}
+
+// A wait in a plain function body (a closure's, #717) that nothing will ever
+// satisfy is a deadlock — but on wasm32-web only once no armed timer could still
+// make a goroutine runnable (docs/web-apps.md "The liveness rule"). An unrelated
+// goroutine sleeps first: the wait must wait for its timer and let it run, and
+// only then, with nothing runnable and no timer armed, abort with the deadlock
+// message and exit 2 — not abort while the timer is armed, and not wait forever
+// once it has expired. One case per wait site: the shared wait pump (a channel
+// receive), a task receive, and the join of a task dropped un-awaited.
+func TestWasmWebPlainWaitDeadlocksOnceNoTimerIsArmed(t *testing.T) {
+	t.Parallel()
+	bin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+
+	const prelude = "main() {\n" +
+		"  never := channel[int](1);\n" +
+		"  s := go {\n" +
+		"    sleep(Duration.from_millis(10)); // sleep-ok: the armed timer is the subject\n" +
+		"    print_line(\"slept\");\n" +
+		"  };\n"
+	const epilogue = "  f(never);\n  <-s;\n}\n"
+	for _, c := range []struct{ name, closure string }{
+		{"channel_receive", "  f := |Channel[int] c| {\n" +
+			"    v := <-c;\n" +
+			"    print_line(\"received\");\n" +
+			"  };\n"},
+		{"task_receive", "  f := |Channel[int] c| {\n" +
+			"    t := go {\n      v := <-c;\n    };\n" +
+			"    <-t;\n" +
+			"    print_line(\"received\");\n" +
+			"  };\n"},
+		{"task_drop", "  f := |Channel[int] c| {\n" +
+			"    t := go {\n      v := <-c;\n    };\n" +
+			"  };\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			file := writeWebTestFile(t, dir, c.name+".pr", prelude+c.closure+epilogue)
+			r := clitest.Run(t, bin, nil, "run", "-target", "wasm32-web", file)
+			skipIfRuntimeUnobtainable(t, r.Combined())
+			if !strings.Contains(r.Stdout, "slept") {
+				t.Errorf("the wait must let the sleeper wake and run before it decides there is a deadlock:%s", r.Detail())
+			}
+			if r.ExitCode != 2 || !strings.Contains(r.Stderr, "fatal: all goroutines are asleep - deadlock!") {
+				t.Errorf("with nothing runnable and no timer armed, the wait must abort as a deadlock (exit 2):%s", r.Detail())
+			}
+			if strings.Contains(r.Stdout, "received") {
+				t.Errorf("nothing was sent, so the wait cannot have completed:%s", r.Detail())
+			}
+		})
 	}
 }

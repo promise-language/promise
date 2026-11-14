@@ -437,7 +437,7 @@ WASM (wasm32-wasi) has significant limitations that affect module design:
 | Subprocess execution | Not available |
 | Real threading | Not available (cooperative scheduling only) |
 | Signal handling | Not available |
-| `sleep()` | No-op |
+| `sleep()` | No-op on wasm32-wasi (on wasm32-web the goroutine parks on a timer — [platform-modules.md](platform-modules.md#example-the-sleep-function)) |
 | Terminal / TTY | Not available |
 | Environment variables | Limited (runtime-dependent) |
 

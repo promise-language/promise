@@ -363,3 +363,128 @@ func TestT1220_WasmSelectLivelockReportsTimeoutInBinary(t *testing.T) {
 
 	assertInBinaryTimeout(t, combined, "test_sel", "T1220 select-livelock enforcement regressed")
 }
+
+// TestWasmWebSleepPastTimeoutReportsTimeoutInBinary — on wasm32-web a batch test
+// that sleeps past its deadline (promise-language/promise#74) waits on the
+// timer, not on a goroutine, so no resumed G reaches coop_step's deadline check.
+// The timer wait itself must stop at the per-test deadline: coop_run's wait for
+// a parked sleeper (direct), and the stepping sleep of code that cannot suspend
+// (through a closure). Either way the binary reports its own ~1s TIMEOUT rather
+// than sleeping for the hour. A sleep so long its deadline saturates is a timer
+// like any other, not the absence of one: neither a deadlock abort nor a wait
+// past the test's deadline.
+func TestWasmWebSleepPastTimeoutReportsTimeoutInBinary(t *testing.T) {
+	t.Parallel()
+	promiseBin := clitest.Bin(t)
+
+	for _, c := range []struct{ name, body string }{
+		{"direct", "  sleep(Duration.from_secs(3600)); // sleep-ok: the timeout of a sleep is the subject\n"},
+		{"closure", "  nap := |int s| {\n" +
+			"    sleep(Duration.from_secs(s)); // sleep-ok: the timeout of a sleep is the subject\n" +
+			"  };\n" +
+			"  nap(3600);\n"},
+		{"saturated_direct", "  sleep(Duration.from_nanos(9223372036854775807)); // sleep-ok: the timeout of a sleep is the subject\n"},
+		{"saturated_closure", "  nap := |int ns| {\n" +
+			"    sleep(Duration.from_nanos(ns)); // sleep-ok: the timeout of a sleep is the subject\n" +
+			"  };\n" +
+			"  nap(9223372036854775807);\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir := clitest.TempDir(t)
+			unique := fmt.Sprintf("web-sleep-timeout-%s-%d-%d", c.name, os.Getpid(), time.Now().UnixNano())
+			src := "// " + unique + "\n" +
+				"test_sleeps_too_long() `test(timeout: \"1s\") {\n" + c.body + "}\n"
+			file := filepath.Join(dir, "sleep_timeout_test.pr")
+			if err := os.WriteFile(file, []byte(src), 0644); err != nil {
+				t.Fatal(err)
+			}
+			output, runErr := exec.Command(promiseBin, "test", "--target", "wasm32-web", file).CombinedOutput()
+			combined := string(output)
+			skipIfRuntimeUnobtainable(t, combined)
+			if runErr == nil {
+				t.Fatalf("expected non-zero exit on timeout, got success.\nOutput:\n%s", combined)
+			}
+			assertInBinaryTimeout(t, combined, "test_sleeps_too_long", "the timer wait ignores the per-test deadline")
+		})
+	}
+}
+
+// TestWasmWebPlainWaitOnSleeperPastTimeoutReportsTimeoutInBinary — on
+// wasm32-web a wait in a plain function body (a closure's, #717) whose partner
+// sleeps past the test's deadline waits for that timer, and must stop at the
+// per-test deadline and take its site's timeout exit: never a deadlock abort
+// (the wait found an armed timer) and never a wait for the hour. One case per
+// wait site — the shared wait pump (a channel receive), a task receive, and the
+// join of a task dropped un-awaited.
+func TestWasmWebPlainWaitOnSleeperPastTimeoutReportsTimeoutInBinary(t *testing.T) {
+	t.Parallel()
+	promiseBin := clitest.Bin(t)
+
+	const sleepLine = "      sleep(Duration.from_secs(3600)); // sleep-ok: the timeout of a wait on a sleeper is the subject\n"
+	for _, c := range []struct{ name, body string }{
+		{"channel_receive", "  ch := channel[int](1);\n" +
+			"  s := go {\n" + sleepLine + "      ch.send(1);\n  };\n" +
+			"  f := |Channel[int] c| {\n    v := <-c;\n  };\n" +
+			"  f(ch);\n"},
+		{"task_receive", "  f := || {\n" +
+			"    t := go {\n" + sleepLine + "    };\n" +
+			"    <-t;\n  };\n" +
+			"  f();\n"},
+		{"task_drop", "  f := || {\n" +
+			"    t := go {\n" + sleepLine + "    };\n" +
+			"  };\n" +
+			"  f();\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir := clitest.TempDir(t)
+			unique := fmt.Sprintf("web-wait-sleeper-timeout-%s-%d-%d", c.name, os.Getpid(), time.Now().UnixNano())
+			src := "// " + unique + "\n" +
+				"test_waits_too_long() `test(timeout: \"1s\") {\n" + c.body + "}\n"
+			file := filepath.Join(dir, "wait_sleeper_timeout_test.pr")
+			if err := os.WriteFile(file, []byte(src), 0644); err != nil {
+				t.Fatal(err)
+			}
+			output, runErr := exec.Command(promiseBin, "test", "--target", "wasm32-web", file).CombinedOutput()
+			combined := string(output)
+			skipIfRuntimeUnobtainable(t, combined)
+			if runErr == nil {
+				t.Fatalf("expected non-zero exit on timeout, got success.\nOutput:\n%s", combined)
+			}
+			if strings.Contains(combined, "deadlock") {
+				t.Errorf("a wait on a sleeper must wait for its timer, not report a deadlock; got:\n%s", combined)
+			}
+			assertInBinaryTimeout(t, combined, "test_waits_too_long", "a plain-body wait on a sleeper ignores the per-test deadline")
+		})
+	}
+}
+
+// TestWasmWebTimedOutSleeperDoesNotStallNextTest — the goroutine a timed-out
+// wasm32-web test leaves parked in sleep is abandoned, as a timed-out test's
+// goroutines are natively: the next test in the batch does not wait out a
+// sleep it never started, and passes.
+func TestWasmWebTimedOutSleeperDoesNotStallNextTest(t *testing.T) {
+	t.Parallel()
+	promiseBin := clitest.Bin(t)
+	dir := clitest.TempDir(t)
+	unique := fmt.Sprintf("web-sleep-abandon-%d-%d", os.Getpid(), time.Now().UnixNano())
+	src := "// " + unique + "\n" +
+		"test_a_sleeps_too_long() `test(timeout: \"1s\") {\n" +
+		"  sleep(Duration.from_secs(3600)); // sleep-ok: the abandoned sleeper is the subject\n" +
+		"}\n\n" +
+		"test_b_runs_after() `test(timeout: \"5s\") {\n" +
+		"  assert(1 + 1 == 2, \"ran\");\n" +
+		"}\n"
+	file := filepath.Join(dir, "sleep_abandon_test.pr")
+	if err := os.WriteFile(file, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	output, _ := exec.Command(promiseBin, "test", "--target", "wasm32-web", file).CombinedOutput()
+	combined := string(output)
+	skipIfRuntimeUnobtainable(t, combined)
+	assertInBinaryTimeout(t, combined, "test_a_sleeps_too_long", "the timer wait ignores the per-test deadline")
+	if !strings.Contains(combined, "1 passed, 0 failed, 1 timed out") || strings.Contains(combined, "test_b_runs_after") {
+		t.Errorf("the test after a timed-out sleeper must pass, not wait on the abandoned timer; got:\n%s", combined)
+	}
+}

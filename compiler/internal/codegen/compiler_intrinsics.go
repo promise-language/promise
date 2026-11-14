@@ -205,6 +205,12 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineSchedRunUntilMainFunc()
 	if c.isWasm {
 		c.defineSchedCoopStepFunc() // T0668: must precede coop_run (and Task[T].drop)
+		if c.isWasmWeb {
+			// Timers (sched_timer.go) count in the reactor's live registrations,
+			// and coop_run waits on them, so both precede coop_run.
+			c.defineWebReactorGlobals()
+			c.defineSchedTimerFuncs()
+		}
 		c.defineSchedCoopRunFunc()
 	}
 	if c.isWasmWeb {
@@ -212,7 +218,6 @@ func (c *Compiler) declareIntrinsics() {
 		// promise_sched_coop_run above stays the run-to-completion driver for
 		// GenerateTestMain's per-test batches; these are only reachable from
 		// wrapMainWithScheduler's wasm32-web branch (ordinary program mains).
-		c.defineWebReactorGlobals()
 		c.defineWebReactorDrainFunc()
 		c.defineWebPumpFunc()
 	}

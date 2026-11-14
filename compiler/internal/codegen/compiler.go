@@ -1711,6 +1711,11 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			counterField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGoroutineCounter)))
 			entry.NewStore(constant.NewInt(irtypes.I64, 0), counterField)
+			if c.isWasmWeb {
+				// Drop the sleepers a timed-out earlier test abandoned, so
+				// coop_run waits only on this test's own timers.
+				entry.NewCall(c.funcs["promise_sched_timer_abandon"])
+			}
 
 			// Clear test panic msg/type from previous test
 			entry.NewStore(constant.NewNull(irtypes.I8Ptr), c.testPanicMsgGlobal)

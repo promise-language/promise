@@ -167,7 +167,8 @@ main() {
 
 // On wasm32-web a function that can block gets a coroutine variant taking its
 // parameters plus the caller's result slot; the plain function stays, with its
-// nested wait, for non-coroutine callers.
+// nested wait (a wait step: run a goroutine, else wait for a timer), for
+// non-coroutine callers.
 func TestCoroVariantEmittedForBlockingHelper(t *testing.T) {
 	ir := generateIRForTarget(t, coroVariantProgram, "wasm32-web")
 	assertContains(t, ir, "define i8* @__user.recv_from$coro(i8* %ch, { i1, i64 }* %result.slot) presplitcoroutine")
@@ -175,11 +176,11 @@ func TestCoroVariantEmittedForBlockingHelper(t *testing.T) {
 	if plain == "" {
 		t.Fatalf("the plain @__user.recv_from is gone\n%s", ir)
 	}
-	if !strings.Contains(plain, "call i8 @promise_sched_coop_step()") {
+	if !strings.Contains(plain, "call i8 @promise_sched_wait_step(") {
 		t.Errorf("the plain @__user.recv_from should keep its nested wait for non-coroutine callers\n%s", plain)
 	}
 	variant := extractDefine(ir, "__user.recv_from$coro")
-	if strings.Contains(variant, "@promise_sched_coop_step") {
+	if strings.Contains(variant, "@promise_sched_coop_step") || strings.Contains(variant, "@promise_sched_wait_step") {
 		t.Errorf("the variant must park, not step the scheduler\n%s", variant)
 	}
 	if !strings.Contains(variant, "call i8 @llvm.coro.suspend(token none, i1 false)") {

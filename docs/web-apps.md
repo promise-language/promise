@@ -222,6 +222,19 @@ Default is kind 0. `requestAnimationFrame` is not the default: it ties progress
 to paint, so a background computation would be throttled to 60 Hz and stop
 entirely in a hidden tab.
 
+**Timers.** std's `sleep` parks the calling goroutine on an armed timer, a live
+registration until it expires. A drain that finds nothing runnable first makes
+runnable every sleeper whose deadline has passed, and goes on stepping. If a
+timer is still armed, it asks for kind 1 with `delay_ms` the time to the
+earliest deadline, rounded up to a whole millisecond and capped at 2³¹−1, and
+the pump returns 1. No drain waits on the clock: the host keeps the thread for
+as long as every goroutine sleeps. The monotonic clock, not the host timer,
+decides when a sleeper is due, so a host timer that fires early, late or twice
+costs a pump that finds nothing due, never a lost or early wake-up. Every drain
+that leaves a goroutine asleep asks again, an event's pump included, so the host
+keeps one kind 1 continuation pending: a request no earlier than the pending one
+is already covered by it, and an earlier one replaces it.
+
 ### Idle is not deadlock
 
 When the pump drains to nothing-runnable and live registrations exist, it
@@ -1062,14 +1075,18 @@ covers none of DOM behaviour, real events, or the JS→WASM direction: those nee
 a browser, which is [Testing the execution model](#testing-the-execution-model)'s third layer and lives with the `web` module rather
 than in this repository.
 
-**A program still a reactor when `_initialize` returns fails under the
-harness**, reported as `reactor idle` with exit status 3. The harness delivers
-no host events, so such a program would wait forever, and because it never
-terminates its leak accounting would never run
-([Program lifetime and termination](#program-lifetime-and-termination)). A test
-of a program that registers anything therefore ends every registration before
-`main` returns. A batch-test binary is never a reactor: it exits once its tests
-have run, with their verdict as its status.
+The harness runs every continuation a program schedules through
+`schedule_pump`, the one that wakes a sleeping goroutine among them
+([Budget and continuation](#budget-and-continuation)), so a program whose
+goroutines sleep runs to its end under it as it would in a page. **A program
+still a reactor with no continuation pending fails under the harness**, after
+`_initialize` or after a continuation's pump, reported as `reactor idle` with
+exit status 3. The harness delivers no host events, so such a program would
+wait forever, and because it never terminates its leak accounting would never
+run ([Program lifetime and termination](#program-lifetime-and-termination)). A
+test of a program that registers anything other than a sleeper therefore ends
+that registration before `main` returns. A batch-test binary is never a
+reactor: it exits once its tests have run, with their verdict as its status.
 
 ## Non goals
 

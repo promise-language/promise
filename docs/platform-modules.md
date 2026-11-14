@@ -157,7 +157,9 @@ Target identifiers:
 | `windows` | x86_64-pc-windows-msvc |
 | `linux` | x86_64-unknown-linux-musl (and other Linux triples) |
 | `macos` | x86_64/aarch64-apple-darwin |
-| `wasm` | wasm32-wasi |
+| `wasm` | wasm32-wasi or wasm32-web |
+| `wasi` | wasm32-wasi |
+| `web` | wasm32-web |
 | `posix` | linux or macos (convenience alias for `linux \|\| macos`) |
 | `x86_64` | any x86_64 target |
 | `aarch64` | any AArch64 target |
@@ -196,7 +198,7 @@ Concrete inventory across std and modules:
 | `Platform.line_separator` | `windows` / `!windows` | `std/platform.pr` global getter |
 | `Platform.is_path_separator(char)` | `windows` / `!windows` | `std/platform.pr` global method |
 | `is_absolute(string) bool` | Windows drive letters vs POSIX `/` | `modules/path/path.pr` using `Platform.is_path_separator` |
-| `sleep(Duration)` | WASM no-op vs `nanosleep` | Go codegen `if c.isWasm` |
+| `sleep(Duration)` | `nanosleep` (`!wasm`) / parks the goroutine on a timer (`web`) / no-op (`wasi`) | `std/time.pr` `target` variants |
 | `File` type | `!wasm` only (no filesystem on WASM) | `modules/io/io.pr` — 4 factory constructors, handle methods, one-shot helpers |
 | `read_line/read_stdin` | `!wasm` only | `modules/io/io.pr` — free functions, `read_line` returns `string?!` (optional+failable) |
 | `execute(...)`, `Process` | `!wasm` only (no subprocess on WASM) | `modules/os/os.pr` — one-shot `execute`, streaming `Process`/`ProcessInput`/`ProcessOutput` |
@@ -221,34 +223,30 @@ failure. That is strictly better.
 
 ### Example the sleep function
 
-Currently `defineNanotimeSleepFunc` in `io.go` has:
-
-```go
-if c.isWasm {
-    // emit empty function body
-    return
-}
-// emit nanosleep(2) wrapper
-```
-
-With `\`target`:
+`sleep` differs by target in a way its caller should see, so each behaviour is a `` `target ``
+variant in `modules/std/time.pr`:
 
 ```promise
 // modules/std/time.pr
 _sleep_nanos(int ns) `extern("promise_sleep_nanos") `target(!wasm);
+_park_timer_nanos(int ns) `extern("promise_web_park_timer") `target(web);
 
 sleep(Duration d) `public `target(!wasm) {
-    _sleep_nanos(d.as_nanos);
+  _sleep_nanos(d.nanos);
 }
 
-sleep(Duration d) `public `target(wasm) {
-    // WASM: sleep is a no-op — no blocking syscall available
+sleep(Duration d) `public `target(web) {
+  _park_timer_nanos(d.nanos);
+}
+
+sleep(Duration d) `public `target(wasi) {
 }
 ```
 
-The WASM no-op is now explicit and visible in source. The Go codegen `if c.isWasm` branch
-for `promise_sleep_nanos` is removed. The information lives where it belongs: in the Promise
-std source, not in Go internals.
+Natively the thread sleeps in `nanosleep`. On wasm32-web the calling goroutine parks on a timer
+while the others run and the browser keeps its thread ([web-apps.md](web-apps.md)
+[The liveness rule](web-apps.md#the-liveness-rule)). On wasm32-wasi `sleep` returns at once. The
+three cases are visible in the Promise std source, not hidden in Go internals.
 
 ### Exhaustiveness
 
@@ -311,8 +309,10 @@ they should move to `modules/time`.
 2. `promise_nanotime` is already emitted in every binary (used by the test runner infrastructure).
    `Instant.now()` calling it costs nothing additional.
 
-`sleep(Duration)` stays in `modules/std/time.pr` with a `\`target` pair — the WASM no-op variant is
-explicit in source (see [Compile Time Platform Filtering](#compile-time-platform-filtering) example). The `promise_sleep_nanos` Go codegen branch is removed.
+`sleep(Duration)` stays in `modules/std/time.pr` with one `\`target` variant per behaviour — the
+native sleep, the wasm32-web timer park ([web-apps.md](web-apps.md)
+[The liveness rule](web-apps.md#the-liveness-rule)) and the wasm32-wasi no-op are each explicit in
+source (see [Example the sleep function](#example-the-sleep-function)).
 
 **`modules/time`** then becomes the home for *higher-level* time operations that build on top of
 `modules/std/time.pr`: calendar date/time representation, time zone handling, formatted parsing and

@@ -254,9 +254,11 @@ func TestWebUnsubscribeClearsSlotAndDecrementsLiveness(t *testing.T) {
 // declaration of exactly the registered signature calls codegen's definition in
 // the definition's own shape: declare and call every registered symbol on
 // wasm32-web, then require each call's return and argument types to equal the
-// definition's.
+// definition's. A symbol codegen lowers at the call site instead (the sleep
+// park) is never defined and never called.
 func TestWasmWebRegisteredSignaturesMatchDefinitions(t *testing.T) {
-	args := map[string]string{"i32": "0i32"}
+	args := map[string]string{"i32": "0i32", "int": "0"}
+	inline := map[string]bool{wasmweb.ParkTimerFunc: true}
 	var decls, calls strings.Builder
 	for i, s := range wasmweb.Signatures() {
 		fmt.Fprintf(&decls, "_w%d%s `extern(%q);\n", i, s, s.Sym)
@@ -285,6 +287,12 @@ func TestWasmWebRegisteredSignaturesMatchDefinitions(t *testing.T) {
 	for _, s := range wasmweb.Signatures() {
 		sym := regexp.QuoteMeta(s.Sym)
 		def := regexp.MustCompile(`(?m)^define (?:\w+ )*?(\S+) @` + sym + `\(([^)]*)\)`).FindStringSubmatch(ir)
+		if inline[s.Sym] {
+			if def != nil || regexp.MustCompile(`call \S+ @`+sym+`\(`).MatchString(ir) {
+				t.Errorf("%s is lowered inline, but is defined or called", s.Sym)
+			}
+			continue
+		}
 		if def == nil {
 			t.Errorf("%s is registered but not defined on wasm32-web", s.Sym)
 			continue

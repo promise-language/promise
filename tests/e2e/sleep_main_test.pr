@@ -1,0 +1,21 @@
+// promise-language/promise#74: a program whose main and goroutine sleep. On
+// wasm32-web a sleeper is a live registration, so _initialize returns with
+// main parked, and the host timers the drains schedule wake the sleepers until
+// the program ends — under the headless harness as in a page. A snapshot test
+// because only a program's own main reaches the reactor drains; a batch test
+// runs under the run-to-completion driver.
+//
+// exclude: wasi — sleep returns at once on wasm32-wasi (#548).
+main() `test(expected: "worker slept: true\nmain slept: true\n", exclude: wasi) {
+  start := Instant.now();
+  done := channel[bool](1);
+  go {
+    Instant began = Instant.now();
+    sleep(Duration.from_millis(10)); // sleep-ok: the sleep is the subject under test
+    done.send(began.elapsed().as_millis >= 10);
+  };
+  sleep(Duration.from_millis(30)); // sleep-ok: the sleep is the subject under test
+  worker := <-done;
+  print_line("worker slept: {worker is present && worker!}");
+  print_line("main slept: {start.elapsed().as_millis >= 30}");
+}

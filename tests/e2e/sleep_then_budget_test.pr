@@ -1,0 +1,30 @@
+// promise-language/promise#74: on wasm32-web the pump that wakes a sleeping
+// main is bounded (docs/web-apps.md "Budget and continuation"). Work that
+// outlasts the budget asks the host for a continuation as soon as possible,
+// and the headless harness runs it, so the program finishes rather than
+// failing as an idle reactor. Each round of the ping-pong takes two scheduler
+// steps, so the rounds after the wake run well past one pump's step budget.
+// Elsewhere it is an ordinary ping-pong.
+main() `test(expected: "rounds: 5000\n") {
+  sleep(Duration.from_millis(1)); // sleep-ok: waking in a bounded pump is the subject under test
+  req := channel[int](capacity: 1);
+  resp := channel[int](capacity: 1);
+  t := go {
+    for i in 0..5000 {
+      v := <-req;
+      if v is present {
+        resp.send(v + 1);
+      }
+    }
+  };
+  rounds := 0;
+  for i in 0..5000 {
+    req.send(i);
+    r := <-resp;
+    if r is present && r! == i + 1 {
+      rounds = rounds + 1;
+    }
+  }
+  <-t;
+  print_line("rounds: {rounds}");
+}

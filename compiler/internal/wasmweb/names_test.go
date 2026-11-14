@@ -250,6 +250,7 @@ func TestSignatureString(t *testing.T) {
 		ChannelFunc:             "(i32 sub_id) Channel[i32]",
 		UnsubscribeFunc:         "(i32 sub_id)",
 		SubscriptionDroppedFunc: "(i32 sub_id) i32",
+		ParkTimerFunc:           "(int ns)",
 	}
 	for sym, want := range cases {
 		s, ok := Lookup(sym)

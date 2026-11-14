@@ -1,7 +1,9 @@
 // std/time.pr — Duration and Instant for time measurement
-// Native externs — bodies defined in codegen/io.go definePALBodies()
+// Native externs — bodies defined in codegen/io.go definePALBodies(). The
+// wasm32-web timer park is lowered at its call site instead (codegen/sched_timer.go).
 _nanotime() int `extern("promise_nanotime");
-_sleep_nanos(int ns) `extern("promise_sleep_nanos");
+_sleep_nanos(int ns) `extern("promise_sleep_nanos") `target(!wasm);
+_park_timer_nanos(int ns) `extern("promise_web_park_timer") `target(web);
 
 type Duration is Ordered, Format `public `doc("A span of time measured in nanoseconds. Pure value type with arithmetic, comparison, and human-readable formatting.") {
   int nanos `value;
@@ -102,6 +104,13 @@ type Instant is Ordered `public `doc("A point in monotonic time. Use `now()` to 
   >= (Instant other) bool => this.nanos >= other.nanos;
 }
 
-sleep(Duration d) `public `doc("Pauses the current thread or goroutine for the given duration.") {
+sleep(Duration d) `public `target(!wasm) `doc("Pauses the current thread or goroutine for the given duration.") {
   _sleep_nanos(d.nanos);
+}
+
+sleep(Duration d) `public `target(web) `doc("Pauses the current goroutine for the given duration. Other goroutines keep running, and the host regains the thread while this one is parked.") {
+  _park_timer_nanos(d.nanos);
+}
+
+sleep(Duration d) `public `target(wasi) `doc("Returns at once: wasm32-wasi has no timer wait yet.") {
 }

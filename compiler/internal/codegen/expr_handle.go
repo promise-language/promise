@@ -696,23 +696,25 @@ func (c *Compiler) genMutexGuardBorrowSet(target *ast.MemberExpr, op ast.AssignO
 // promise_sched_coop_step's ran_g) never fires because coop_step is never
 // re-entered.
 //
-// Fix: pump one cooperative step instead of the no-op wait, exactly mirroring the
-// Task-receive (genReceiveTask) and Task-drop (defineTaskDropBody) WASM spins
-// (T0668/T0687). promise_sched_coop_step returns i8:
+// Fix: take one wait step (emitWasmWaitStep) instead of the no-op wait, exactly
+// mirroring the Task-receive (genReceiveTask) and Task-drop (defineTaskDropBody)
+// WASM spins (T0668/T0687). The step returns i8:
 //
 //	2 = per-test deadline reached → clean early-return from this (non-coroutine)
 //	    function, unwinding so the outer coop_step/coop_run regains control and
 //	    renders TIMEOUT. The op is abandoned (result discarded, drops skipped —
 //	    the test is being torn down; a timed-out test result==2 skips the leak
 //	    check, matching the Task-spin "G intentionally not freed" precedent).
-//	non-zero = a G ran (progress possible) → re-evaluate the wait condition.
-//	0 = no runnable G and the condition is still unmet → nothing can ever change
-//	    it → genuine deadlock → terminal message + exit(2) (same as coop_run).
+//	non-zero = a G ran or a sleeper woke (progress possible) → re-evaluate the
+//	    wait condition.
+//	0 = no runnable G, no armed timer, and the condition is still unmet →
+//	    nothing can ever change it → genuine deadlock → terminal message +
+//	    exit(2) (same as coop_run).
 //
 // Must be called with c.block == the wait-body block. On progress it branches to
 // recheck; the caller resumes building at recheck (which re-tests the condition).
 func (c *Compiler) emitWasmCoopWaitPump(recheck *ir.Block) {
-	stepR := c.block.NewCall(c.funcs["promise_sched_coop_step"])
+	stepR := c.emitWasmWaitStep(c.block)
 	isTimeout := c.block.NewICmp(enum.IPredEQ, stepR, constant.NewInt(irtypes.I8, 2))
 	timeoutBlk := c.newBlock("chwait.timeout")
 	progressBlk := c.newBlock("chwait.progress")

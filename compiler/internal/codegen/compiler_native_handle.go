@@ -900,9 +900,9 @@ func (c *Compiler) getOrCreateTaskDrop(elemType types.Type, failable bool) *ir.F
 // null-check → spin-wait on G.done → Task[T].free_after_done(this).
 //
 // T0668: On the single-threaded WASM cooperative scheduler a busy usleep spin
-// never lets the pending goroutine run (livelock). WASM therefore pumps one
-// promise_sched_coop_step() per spin iteration; if a step makes no progress and
-// G is still not done the program is genuinely deadlocked → terminal message +
+// never lets the pending goroutine run (livelock). WASM therefore takes one
+// wait step (emitWasmWaitStep) per spin iteration; if a step makes no progress
+// and G is still not done the program is genuinely deadlocked → terminal message +
 // exit(2), matching promise_sched_coop_run's deadlock block. The host path is
 // unchanged (usleep; another M runs the awaited G).
 func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type, failable bool) {
@@ -934,11 +934,10 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type, failable
 	checkBlk.NewCondBr(isDone, readyBlk, spinBlk)
 
 	if c.isWasm {
-		// T0668: pump the cooperative scheduler one step instead of a no-op
-		// usleep. promise_sched_coop_step() returns i8: non-zero = ran/advanced
-		// a G (progress possible), 0 = no runnable G.
-		stepFn := c.funcs["promise_sched_coop_step"]
-		stepR := spinBlk.NewCall(stepFn)
+		// T0668: take one wait step (emitWasmWaitStep) instead of a no-op
+		// usleep. Returns i8: non-zero = ran/advanced a G or woke a sleeper
+		// (progress possible), 0 = no runnable G and no armed timer.
+		stepR := c.emitWasmWaitStep(spinBlk)
 		coopRecheckBlk := fn.NewBlock("task.drop.coop_recheck")
 		deadlockBlk := fn.NewBlock("task.drop.deadlock")
 		spinProgressBlk := fn.NewBlock("task.drop.progress")
@@ -953,8 +952,8 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type, failable
 		madeProgress := spinProgressBlk.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
 		spinProgressBlk.NewCondBr(madeProgress, checkBlk, coopRecheckBlk)
 
-		// No runnable G — re-check G.done. If the awaited G is still not done it
-		// can never complete (nothing left to run) → genuine deadlock.
+		// Nothing runnable and no timer armed — re-check G.done. If the awaited
+		// G is still not done it can never complete → genuine deadlock.
 		rdLoad := coopRecheckBlk.NewLoad(irtypes.I8, doneField)
 		rdLoad.Atomic = true
 		rdLoad.Ordering = enum.AtomicOrderingAcquire

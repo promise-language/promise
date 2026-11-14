@@ -10,13 +10,20 @@
 //     process.stdout / process.stderr, and `promise_env.exit(code) -> never`
 //     routed to process.exit,
 //   - calls instance.exports._initialize() (the wasm32-web entry point),
-//   - exits 3 if _initialize returns without invoking promise_env.exit.
+//   - runs every continuation the program schedules through
+//     `promise_env.schedule_pump(kind, delay_ms)` — a later
+//     instance.exports.promise_web_pump(), after delay_ms for kind 1 (a timer)
+//     and as soon as possible otherwise,
+//   - exits 3 if the instance is still alive with no continuation pending,
+//     after _initialize or after a continuation's pump.
 //
 // A program with no live host registration ends _initialize in exit, and so
-// does every batch-test binary. One that returns is still a reactor
-// (docs/web-apps.md "The liveness rule"): it waits on host events this
-// harness never delivers, and its leak accounting never runs, so it fails
-// rather than passing on whatever it printed during setup.
+// does every batch-test binary. A program whose goroutines sleep is a reactor
+// until they wake (docs/web-apps.md "The liveness rule"); its drains schedule
+// the pumps that wake them, which this harness runs. A program still alive with
+// nothing scheduled waits on host events this harness never delivers, and its
+// leak accounting never runs, so it fails rather than passing on whatever it
+// printed during setup.
 //
 // It deliberately does NOT load the auto-generated bootstrap .js next to the
 // .wasm — that file is browser-only (uses fetch) and would also keep the
@@ -111,6 +118,35 @@ const _promiseEnvImpl = {
   // counter. Without this the IR import would fall through the Proxy stub to
   // () => 0, freezing all WASM time at 0.
   monotonic_nanos: () => process.hrtime.bigint(),
+  // The reactor's continuation (docs/web-apps.md "Budget and continuation"):
+  // pump again after delayMs for kind 1 (a timer), as soon as possible for
+  // kind 0 (ASAP) and kind 2 (an animation frame — Node has none). One timer
+  // is kept: a request no earlier than the pending one is already covered by
+  // it, and an earlier one replaces it. Defined here so it can never fall
+  // through to the no-op stub below.
+  schedule_pump: (kind, delayMs) => {
+    const pump = () => enter("promise_web_pump", () => instance.exports.promise_web_pump());
+    if (kind !== 1) {
+      pendingAsap++;
+      setImmediate(() => {
+        pendingAsap--;
+        pump();
+      });
+      return;
+    }
+    const at = performance.now() + delayMs;
+    if (timerPump !== null) {
+      if (timerPump.at <= at) return;
+      clearTimeout(timerPump.handle);
+    }
+    timerPump = {
+      at,
+      handle: setTimeout(() => {
+        timerPump = null;
+        pump();
+      }, delayMs),
+    };
+  },
   // T1571: CSPRNG random bytes for the crypto module. Fills buf with len bytes
   // of cryptographically-secure randomness using Node's crypto.getRandomValues.
   // getRandomValues throws QuotaExceededError above 65536 bytes, so loop in
@@ -128,6 +164,32 @@ const _promiseEnvImpl = {
     return 0;
   },
 };
+
+// Continuations scheduled through schedule_pump that have not run yet: the
+// as-soon-as-possible ones, and the one timer ({at, handle}, or null).
+let pendingAsap = 0;
+let timerPump = null;
+
+// enter makes one host entry into the instance (_initialize, or a scheduled
+// pump). An entry that ends the program exits through promise_env.exit; one
+// that traps fails the run. Once an entry returns with no continuation
+// pending, the instance is a reactor idle on host events (see the header).
+function enter(name, entry) {
+  try {
+    entry();
+  } catch (e) {
+    // The WASM "exit" import throws to unwind; ignore that specific case.
+    if (e && e.message === "promise_env.exit") return;
+    flushBuffers();
+    console.error(`harness: ${name} trapped: ${e && e.stack ? e.stack : e}`);
+    process.exit(1);
+  }
+  if (pendingAsap === 0 && timerPump === null) {
+    bufferWrite(2, Buffer.from(
+      "harness: reactor idle — live host registrations remain and the headless harness delivers no host events\n"));
+    exitWith(3);
+  }
+}
 
 const importObject = {
   promise_env: new Proxy(_promiseEnvImpl, {
@@ -178,19 +240,5 @@ const importObject = {
     process.exit(2);
   }
 
-  try {
-    instance.exports._initialize();
-  } catch (e) {
-    // The WASM "exit" import throws to unwind; ignore that specific case.
-    if (e && e.message === "promise_env.exit") return;
-    flushBuffers();
-    console.error(`harness: _initialize trapped: ${e && e.stack ? e.stack : e}`);
-    process.exit(1);
-  }
-
-  // _initialize returned without calling promise_env.exit: a reactor idle on
-  // host events (see the header).
-  bufferWrite(2, Buffer.from(
-    "harness: reactor idle — live host registrations remain and the headless harness delivers no host events\n"));
-  exitWith(3);
+  enter("_initialize", () => instance.exports._initialize());
 })();

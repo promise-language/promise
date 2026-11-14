@@ -159,6 +159,11 @@ const (
 	schedFieldSpareMHead = 24 // i8*  stack of parked P-less Ms (reused by startm)
 	schedFieldAllMHead   = 25 // i8*  head of the all-M list (linked via mFieldAllNext)
 	schedFieldMCount     = 26 // i32  total live Ms (init count + on-demand growth)
+	// Timers (sched_timer.go): goroutines parked in sleep, as a list of
+	// frame-resident nodes sorted by deadline. Only wasm32-web arms them;
+	// elsewhere both stay null.
+	schedFieldTimerHead = 27 // i8*  earliest timer node (null if none is armed)
+	schedFieldTimerLock = 28 // i8*  mutex protecting the timer list
 )
 
 // schedMaxM bounds on-demand M growth (T1685). Matches Go's default thread cap.
@@ -196,6 +201,8 @@ func schedStructType() *irtypes.StructType {
 		irtypes.I8Ptr, // spare_m_head (T1685)
 		irtypes.I8Ptr, // all_m_head (T1685)
 		irtypes.I32,   // m_count (T1685)
+		irtypes.I8Ptr, // timer_head
+		irtypes.I8Ptr, // timer_lock
 	)
 }
 
@@ -491,6 +498,16 @@ func (c *Compiler) defineSchedInitFunc() {
 	doneLockField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldDoneLock)))
 	entry.NewStore(doneLock, doneLockField)
+
+	// Init timer_lock (protects the timer list; sched_timer.go). Only wasm32-web
+	// arms timers, and WASM never runs promise_sched_shutdown, so nothing
+	// destroys it.
+	if c.isWasmWeb {
+		timerLock := entry.NewCall(c.palMutexInit)
+		timerLockField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldTimerLock)))
+		entry.NewStore(timerLock, timerLockField)
+	}
 
 	// Init reactor_fd = -1 (no reactor by default, T0070)
 	reactorFdField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
@@ -3130,12 +3147,27 @@ func (c *Compiler) defineSchedCoopRunFunc() {
 	ranG := loopContinueBlk.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
 	loopContinueBlk.NewCondBr(ranG, loop, noG)
 
-	// noG: no runnable G — exit if main completed, else deadlock.
-	mdField := noG.NewGetElementPtr(schedTy, c.schedGlobal,
+	// noG: no runnable G. On wasm32-web a parked sleeper may still be due: this
+	// driver owns the thread, so it waits for the earliest timer (bounded by the
+	// per-test deadline) before deciding — 1 = a sleeper woke, 2 = the test
+	// deadline passed first, 0 = no timer is armed.
+	checkMainBlk := noG
+	if c.isWasmWeb {
+		checkMainBlk = fn.NewBlock("check_main_done")
+		afterIdle := fn.NewBlock("after_timer_idle")
+		idleR := noG.NewCall(c.funcs["promise_sched_timer_idle"], constant.NewInt(irtypes.I64, timerNoLimit))
+		woke := noG.NewICmp(enum.IPredEQ, idleR, constant.NewInt(irtypes.I8, 1))
+		noG.NewCondBr(woke, loop, afterIdle)
+		idleTimedOut := afterIdle.NewICmp(enum.IPredEQ, idleR, constant.NewInt(irtypes.I8, 2))
+		afterIdle.NewCondBr(idleTimedOut, doneBlk, checkMainBlk)
+	}
+
+	// Exit if main completed, else deadlock.
+	mdField := checkMainBlk.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMainDone)))
-	mainDone := noG.NewLoad(irtypes.I8, mdField)
-	mainIsDone := noG.NewICmp(enum.IPredNE, mainDone, constant.NewInt(irtypes.I8, 0))
-	noG.NewCondBr(mainIsDone, doneBlk, deadlockBlk)
+	mainDone := checkMainBlk.NewLoad(irtypes.I8, mdField)
+	mainIsDone := checkMainBlk.NewICmp(enum.IPredNE, mainDone, constant.NewInt(irtypes.I8, 0))
+	checkMainBlk.NewCondBr(mainIsDone, doneBlk, deadlockBlk)
 
 	// done: main completed
 	doneBlk.NewRet(nil)

@@ -194,11 +194,54 @@ test_instant_comparison() `test {
 
 // --- sleep ---
 
-test_sleep() `test(exclude: wasm) {
+// exclude: wasi — sleep returns at once on wasm32-wasi (#548).
+test_sleep() `test(exclude: wasi) {
   Instant start = Instant.now();
   sleep(Duration.from_millis(15)); // sleep-ok: sleep() is the subject under test, measured by the assert below
   Duration elapsed = start.elapsed();
   assert(elapsed.as_millis >= 10, "sleep at least 10ms");
+}
+
+// Each of several concurrent sleepers waits at least its own duration.
+test_sleep_concurrent_sleepers_each_wait_their_duration() `test(exclude: wasi) {
+  results := channel[bool](3);
+  for ms in[30, 10, 20] {
+    go {
+      Instant start = Instant.now();
+      sleep(Duration.from_millis(ms)); // sleep-ok: sleep() is the subject under test, measured below
+      results.send(start.elapsed().as_millis >= ms);
+    };
+  }
+  for i in 0..3 {
+    r := <-results;
+    assert(r is present && r!, "a sleeper woke before its duration");
+  }
+}
+
+// A duration of zero or less returns at once rather than arming a timer.
+test_sleep_zero_and_negative_return() `test {
+  sleep(Duration.zero()); // sleep-ok: sleep() is the subject under test
+  sleep(Duration.from_millis(-5)); // sleep-ok: sleep() is the subject under test
+  sleep(Duration.from_nanos(-9223372036854775807)); // sleep-ok: sleep() is the subject under test
+}
+
+// Many goroutines sleeping at once all wake, and leave nothing behind.
+test_sleep_many_sleepers_all_wake() `test(exclude: wasi, timeout: "30s") {
+  done := channel[int](200);
+  for i in 0..200 {
+    go {
+      sleep(Duration.from_millis(i % 7)); // sleep-ok: sleep() is the subject under test
+      done.send(i);
+    };
+  }
+  sum := 0;
+  for i in 0..200 {
+    v := <-done;
+    if v is present {
+      sum = sum + v;
+    }
+  }
+  assert(sum == 19900, "every sleeper woke exactly once");
 }
 
 // --- Instant raw readings and Duration arithmetic (T1563) ---

@@ -1,0 +1,89 @@
+// promise-language/promise#74: a wait in a plain function body — here a
+// closure's, which cannot suspend (#717) — on a goroutine that sleeps. On
+// wasm32-web the sleeper parks on a timer, so for a while nothing is runnable;
+// the wait must then wait for the timer rather than report a deadlock. Each
+// test covers one kind of wait, and each holds on every target.
+// `<-task` on a goroutine that sleeps.
+plain_wait_receives_a_sleeping_task() `test {
+  f := || {
+    t := go {
+      sleep(Duration.from_millis(5)); // sleep-ok: a wait on a sleeper is the subject under test
+      7
+    };
+    v := <-t;
+    assert(v == 7, "the awaited goroutine woke and returned");
+  };
+  f();
+}
+
+// A channel receive whose only sender sleeps first.
+plain_wait_receives_from_a_sleeping_sender() `test {
+  ch := channel[int](1);
+  s := go {
+    sleep(Duration.from_millis(5)); // sleep-ok: a wait on a sleeper is the subject under test
+    ch.send(1);
+  };
+  f := |Channel[int] c| {
+    v := <-c;
+    assert(v is present && v! == 1, "the sender woke and sent");
+  };
+  f(ch);
+  <-s;
+}
+
+// A select whose only ready case comes from a sender that sleeps first.
+plain_wait_selects_from_a_sleeping_sender() `test {
+  ch := channel[int](1);
+  never := channel[int](1);
+  s := go {
+    sleep(Duration.from_millis(5)); // sleep-ok: a wait on a sleeper is the subject under test
+    ch.send(2);
+  };
+  f := |Channel[int] c, Channel[int] n| {
+    select {
+      v := <-c:
+        assert(v is present && v! == 2, "the sender woke and sent");
+      v := <-n:
+        assert(false, "nothing is sent on the other channel");
+    }
+  };
+  f(ch, never);
+  <-s;
+}
+
+// A Mutex lock held by a goroutine that sleeps before it unlocks.
+plain_wait_locks_a_mutex_held_by_a_sleeper() `test {
+  m := Ref[Mutex[int]](Mutex[int](0));
+  holder_m := m.clone();
+  ready := channel[bool](1);
+  holder := go {
+    use guard := holder_m.borrow.lock();
+    ready.send(true);
+    sleep(Duration.from_millis(5)); // sleep-ok: a wait on a sleeper is the subject under test
+    guard.borrow = 40;
+  };
+  // The holder has the lock once it reports ready, so the closure's lock is
+  // contended.
+  <-ready;
+  f := |Ref[Mutex[int]] r| {
+    use guard := r.borrow.lock();
+    assert(guard.borrow == 40, "the holder wrote before it unlocked");
+  };
+  f(m);
+  <-holder;
+}
+
+// An un-awaited Task, dropped at the end of the closure, joins a goroutine
+// that sleeps.
+plain_wait_drops_a_sleeping_task() `test {
+  done := channel[bool](1);
+  f := |Channel[bool] d| {
+    t := go {
+      sleep(Duration.from_millis(5)); // sleep-ok: a wait on a sleeper is the subject under test
+      d.send(true);
+    };
+  };
+  f(done);
+  v := <-done;
+  assert(v is present && v!, "the dropped task's goroutine woke and ran");
+}

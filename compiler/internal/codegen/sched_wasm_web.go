@@ -1,6 +1,8 @@
 package codegen
 
 import (
+	"math"
+
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
@@ -51,24 +53,60 @@ func (c *Compiler) defineWebReactorGlobals() {
 	c.webTerminatedGlobal = pal.WebTerminatedGlobal(c.module)
 }
 
-// emitWebDrainVerdict ends a reactor drain that found nothing runnable (blk):
-// it releases the re-entrancy guard (§5) and applies the liveness rule (§4.1).
-// Live registrations gate the decision before main_done is consulted, so a
-// reactor whose main() already returned while its consumers park on a live
-// subscription is idle, not terminated. It returns the block reached when the
-// instance is idle and the one reached when main is done with nothing live;
-// the caller terminates both. With neither, the program is deadlocked and
-// aborts with promise_sched_coop_run's message and exit code.
-func (c *Compiler) emitWebDrainVerdict(fn *ir.Func, blk *ir.Block) (idle, done *ir.Block) {
+// emitWebDrainVerdict ends a reactor drain that found nothing runnable (blk).
+//
+// First the timers (sched_timer.go): a sleeper already due is made runnable and
+// the drain continues at resume, still holding the re-entrancy guard (§5). A
+// sleeper not yet due means the drain asks the host for a pump at the earliest
+// deadline — schedule_pump with kind Timer and a delay in whole milliseconds,
+// rounded up so it is never early and capped at the largest delay a host timer
+// takes — releases the guard, and ends at the returned scheduled block. A drain
+// never waits on the clock: the host regains the thread while a goroutine
+// sleeps.
+//
+// With no timer armed it releases the guard and applies the liveness rule
+// (§4.1). Live registrations gate the decision before main_done is consulted,
+// so a reactor whose main() already returned while its consumers park on a
+// live subscription is idle, not terminated. It returns the block reached when
+// the instance is idle and the one reached when main is done with nothing live;
+// the caller terminates idle, scheduled and done. With none of them, the
+// program is deadlocked and aborts with promise_sched_coop_run's message and
+// exit code.
+func (c *Compiler) emitWebDrainVerdict(fn *ir.Func, blk, resume *ir.Block) (idle, scheduled, done *ir.Block) {
+	notWoken := fn.NewBlock("timer_not_woken")
+	timerArmed := fn.NewBlock("timer_armed")
+	noTimer := fn.NewBlock("no_timer")
+	scheduled = fn.NewBlock("timer_scheduled")
 	idle = fn.NewBlock("idle")
 	checkMainDone := fn.NewBlock("check_main_done")
 	done = fn.NewBlock("main_done")
 	deadlock := fn.NewBlock("deadlock")
 
-	blk.NewStore(constant.NewInt(irtypes.I8, 0), c.webInPumpGlobal)
-	live := blk.NewLoad(irtypes.I32, c.webLiveRegsGlobal)
-	isLive := blk.NewICmp(enum.IPredNE, live, constant.NewInt(irtypes.I32, 0))
-	blk.NewCondBr(isLive, idle, checkMainDone)
+	// w: 0 = woke a sleeper, > 0 = ns until the earliest deadline, -1 = none.
+	w := blk.NewCall(c.funcs["promise_sched_timer_expire"])
+	woke := blk.NewICmp(enum.IPredEQ, w, constant.NewInt(irtypes.I64, 0))
+	blk.NewCondBr(woke, resume, notWoken)
+
+	armed := notWoken.NewICmp(enum.IPredSGT, w, constant.NewInt(irtypes.I64, 0))
+	notWoken.NewCondBr(armed, timerArmed, noTimer)
+
+	// timer_armed: delay_ms = min(ceil(w / 1e6), MaxInt32).
+	nsPerMs := constant.NewInt(irtypes.I64, 1_000_000)
+	whole := timerArmed.NewSDiv(w, nsPerMs)
+	part := timerArmed.NewSRem(w, nsPerMs)
+	hasPart := timerArmed.NewICmp(enum.IPredNE, part, constant.NewInt(irtypes.I64, 0))
+	ceilMs := timerArmed.NewAdd(whole, timerArmed.NewZExt(hasPart, irtypes.I64))
+	maxMs := constant.NewInt(irtypes.I64, math.MaxInt32)
+	tooLong := timerArmed.NewICmp(enum.IPredSGT, ceilMs, maxMs)
+	delayMs := timerArmed.NewTrunc(timerArmed.NewSelect(tooLong, maxMs, ceilMs), irtypes.I32)
+	timerArmed.NewCall(c.webSchedulePumpFunc(), constant.NewInt(irtypes.I32, wasmweb.SchedulePumpTimer), delayMs)
+	timerArmed.NewStore(constant.NewInt(irtypes.I8, 0), c.webInPumpGlobal)
+	timerArmed.NewBr(scheduled)
+
+	noTimer.NewStore(constant.NewInt(irtypes.I8, 0), c.webInPumpGlobal)
+	live := noTimer.NewLoad(irtypes.I32, c.webLiveRegsGlobal)
+	isLive := noTimer.NewICmp(enum.IPredNE, live, constant.NewInt(irtypes.I32, 0))
+	noTimer.NewCondBr(isLive, idle, checkMainDone)
 
 	mdField := checkMainDone.NewGetElementPtr(schedStructType(), c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMainDone)))
@@ -82,7 +120,15 @@ func (c *Compiler) emitWebDrainVerdict(fn *ir.Func, blk *ir.Block) (idle, done *
 	deadlock.NewCall(c.palWrite, constant.NewInt(irtypes.I32, 2), msgPtr, constant.NewInt(irtypes.I64, 45))
 	deadlock.NewCall(c.palExit, constant.NewInt(irtypes.I32, 2))
 	deadlock.NewUnreachable()
-	return idle, done
+	return idle, scheduled, done
+}
+
+// webSchedulePumpFunc returns the promise_env.schedule_pump import (§4.2), by
+// which a drain asks the host for its continuation.
+func (c *Compiler) webSchedulePumpFunc() *ir.Func {
+	return c.getOrDeclareWasmImport(wasmweb.SchedulePumpSymbol,
+		wasmweb.ImportModule, wasmweb.SchedulePumpImport, irtypes.Void,
+		ir.NewParam("kind", irtypes.I32), ir.NewParam("delay_ms", irtypes.I32))
 }
 
 // defineWebReactorDrainFunc emits @promise_web_reactor_drain() → i8.
@@ -100,8 +146,8 @@ func (c *Compiler) emitWebDrainVerdict(fn *ir.Func, blk *ir.Block) (idle, done *
 //   - 0 — drained with zero live registrations and main done: the caller
 //     (_initialize, via emitWasmStart) must pal_exit(0). Identical outcome to
 //     today's unconditional exit.
-//   - 1 — the instance is a reactor (live registrations exist) and stays
-//     alive: the caller must return instead of exiting.
+//   - 1 — the instance is a reactor (live registrations exist, a parked sleeper
+//     among them) and stays alive: the caller must return instead of exiting.
 //
 // Deadlock (nothing runnable, zero live registrations, main not done) still
 // aborts internally exactly as promise_sched_coop_run does today — it never
@@ -135,8 +181,9 @@ func (c *Compiler) defineWebReactorDrainFunc() {
 	// reactor stays alive, so the caller (_initialize) must return, not exit;
 	// main done with nothing live — the caller must pal_exit(0), same outcome
 	// as today's unconditional exit.
-	idle, done := c.emitWebDrainVerdict(fn, stoppedBlk)
+	idle, scheduled, done := c.emitWebDrainVerdict(fn, stoppedBlk, loop)
 	idle.NewRet(constant.NewInt(irtypes.I8, 1))
+	scheduled.NewRet(constant.NewInt(irtypes.I8, 1))
 	done.NewRet(constant.NewInt(irtypes.I8, 0))
 
 	c.funcs["promise_web_reactor_drain"] = fn
@@ -222,21 +269,22 @@ func (c *Compiler) defineWebPumpFunc() {
 
 	// budget_exhausted: work remains — ask the host to schedule a
 	// continuation and return (§4.2, default kind: ASAP).
-	scheduleFn := c.getOrDeclareWasmImport(wasmweb.SchedulePumpSymbol,
-		wasmweb.ImportModule, wasmweb.SchedulePumpImport, irtypes.Void,
-		ir.NewParam("kind", irtypes.I32), ir.NewParam("delay_ms", irtypes.I32))
-	budgetExhaustedBlk.NewCall(scheduleFn,
+	budgetExhaustedBlk.NewCall(c.webSchedulePumpFunc(),
 		constant.NewInt(irtypes.I32, wasmweb.SchedulePumpASAP), constant.NewInt(irtypes.I32, 0))
 	budgetExhaustedBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.webInPumpGlobal)
 	budgetExhaustedBlk.NewRet(constant.NewInt(irtypes.I32, wasmweb.PumpMore))
 
-	// drained: nothing runnable. Idle — the reactor stays alive, nothing to
+	// drained: nothing runnable. A sleeper that woke is stepped like any other
+	// goroutine, against the same budget. One still parked is a continuation in
+	// flight: the drain scheduled it. Idle — the reactor stays alive, nothing to
 	// do until the next host entry. Main done with nothing live — the reactor
 	// has drained with nothing left that could ever wake it (§13 — "a program
 	// with no live registrations terminates on drain, exactly as today"), so
 	// exit(0); pal_exit marks the instance terminated.
-	idle, done := c.emitWebDrainVerdict(fn, drainedBlk)
+	idle, scheduled, done := c.emitWebDrainVerdict(fn, drainedBlk, loop)
+	stepPhi.Incs = append(stepPhi.Incs, ir.NewIncoming(stepPhi, drainedBlk))
 	idle.NewRet(constant.NewInt(irtypes.I32, wasmweb.PumpIdle))
+	scheduled.NewRet(constant.NewInt(irtypes.I32, wasmweb.PumpMore))
 	done.NewCall(c.palExit, constant.NewInt(irtypes.I32, 0))
 	done.NewUnreachable()
 

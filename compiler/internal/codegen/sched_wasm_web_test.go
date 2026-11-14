@@ -1,6 +1,8 @@
 package codegen
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -257,5 +259,254 @@ func TestPalExitMarksTerminated(t *testing.T) {
 	wasi := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-wasi")
 	if exitFn := extractDefine(wasi, "pal_exit"); strings.Contains(exitFn, "store") {
 		t.Errorf("wasm32-wasi's pal_exit must stay a bare proc_exit\ngot:\n%s", exitFn)
+	}
+}
+
+// parkTimerProgram reaches std's wasm32-web sleep primitive through a helper,
+// from main and from a goroutine. The cached std here is checked for the host,
+// so the program declares the extern itself.
+const parkTimerProgram = "_park(int ns) `extern(\"" + wasmweb.ParkTimerFunc + "\") `target(web);\n" + `
+nap(int ns) {
+  _park(ns);
+}
+
+main() {
+  t := go { nap(5000000); };
+  nap(1000);
+  <-t;
+}
+`
+
+// A call to the park extern is lowered inline, never called: in the helper's
+// coroutine variant — the one main and the goroutine run — the goroutine links
+// a frame-resident node into the timer list, hands sched.timer_lock to the
+// scheduler as its park mutex and suspends; the plain helper, which cannot
+// suspend, steps the scheduler until its deadline. A duration of zero or less
+// arms nothing, and a deadline past the clock's range saturates.
+func TestWebParkTimerLowering(t *testing.T) {
+	ir := generateIRForTarget(t, parkTimerProgram, "wasm32-web")
+	if strings.Contains(ir, "call void @"+wasmweb.ParkTimerFunc) {
+		t.Errorf("expected every call to @%s to be lowered inline\ngot:\n%s", wasmweb.ParkTimerFunc, ir)
+	}
+
+	plain := extractDefine(ir, "__user.nap")
+	if !strings.Contains(plain, "call void @promise_sched_timer_sleep(i64") || strings.Contains(plain, "llvm.coro.suspend") {
+		t.Errorf("expected the plain helper to sleep through promise_sched_timer_sleep\ngot:\n%s", plain)
+	}
+
+	variant := extractDefine(ir, "__user.nap$coro")
+	if variant == "" {
+		t.Fatalf("expected the helper to get a coroutine variant: a sleep blocks\ngot:\n%s", ir)
+	}
+	for _, want := range []string{
+		"alloca { i64, i8*, i8* }",                  // the frame-resident timer node
+		"call void @pal_mutex_lock(",                // sched.timer_lock, held across the suspend
+		"call void @promise_sched_timer_insert(i8*", // linked into the list
+		"store i8 3, i8*",                           // G.status = waiting
+		"call i8 @llvm.coro.suspend(token none, i1 false)",
+		"i8 0, label %sleep.resume",
+		"i8 1, label %coro.cleanup",
+	} {
+		if !strings.Contains(variant, want) {
+			t.Errorf("expected the coroutine variant to contain %q\ngot:\n%s", want, variant)
+		}
+	}
+	// The lock that was locked is the one handed over as the park mutex.
+	lockRe := regexp.MustCompile(`(%\d+) = load i8\*, i8\*\* %\d+\n\tcall void @pal_mutex_lock\(i8\* (%\d+)\)`)
+	m := lockRe.FindStringSubmatch(variant)
+	if m == nil || m[1] != m[2] || !strings.Contains(variant, "store i8* "+m[1]+", i8** ") ||
+		!strings.Contains(variant, "@__promise_sched, i32 0, i32 28") {
+		t.Errorf("expected sched.timer_lock to be locked and stored as G.park_mutex\ngot:\n%s", variant)
+	}
+
+	for _, fn := range []string{plain, variant} {
+		if !regexp.MustCompile(`icmp sgt i64 %\d+, 0\n\tbr i1 %\d+, label %sleep\.arm`).MatchString(fn) {
+			t.Errorf("expected a duration of zero or less to arm nothing\ngot:\n%s", fn)
+		}
+		// One below math.MaxInt64, promise_sched_timer_idle's "no limit": a
+		// sleep that never ends is still an armed timer to wait on.
+		if !regexp.MustCompile(`select i1 %\d+, i64 u0x7FFFFFFFFFFFFFFE, i64 %\d+`).MatchString(fn) ||
+			strings.Contains(fn, "u0x7FFFFFFFFFFFFFFF") {
+			t.Errorf("expected the deadline to saturate one below the idle wait's no-limit sentinel\ngot:\n%s", fn)
+		}
+	}
+}
+
+// The timer runtime: an armed timer is a live registration (§4.1) — insert
+// counts it, expire releases it as it makes the sleeper runnable — and the
+// thread-owning wait honours the per-test deadline (T0680). The lock that
+// guards the list is created at scheduler init on wasm32-web only.
+func TestSchedTimerRuntime(t *testing.T) {
+	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
+	insert := extractDefine(ir, "promise_sched_timer_insert")
+	if !regexp.MustCompile(`add i32 %\d+, 1\n\tstore i32 %\d+, i32\* @` + wasmweb.GlobalLiveRegistrations).MatchString(insert) {
+		t.Errorf("expected arming a timer to count a live registration\ngot:\n%s", insert)
+	}
+	if !strings.Contains(insert, "icmp sgt i64") {
+		t.Errorf("expected insertion after every equal or earlier deadline\ngot:\n%s", insert)
+	}
+	expire := extractDefine(ir, "promise_sched_timer_expire")
+	for _, want := range []string{"icmp sle i64", "call void @promise_sched_enqueue(i8*", "ret i64", "i64 -1"} {
+		if !strings.Contains(expire, want) {
+			t.Errorf("expected expire to contain %q\ngot:\n%s", want, expire)
+		}
+	}
+	if !regexp.MustCompile(`add i32 %\d+, -1\n\tstore i32 %\d+, i32\* @` + wasmweb.GlobalLiveRegistrations).MatchString(expire) {
+		t.Errorf("expected waking a sleeper to release its live registration\ngot:\n%s", expire)
+	}
+	idle := extractDefine(ir, "promise_sched_timer_idle")
+	if !strings.Contains(idle, "load i64, i64* @__promise_test_deadline") ||
+		!strings.Contains(idle, "store i8 1, i8* @__promise_test_timed_out") || !strings.Contains(idle, "ret i8 2") {
+		t.Errorf("expected the timer wait to stop at the per-test deadline\ngot:\n%s", idle)
+	}
+	sleep := extractDefine(ir, "promise_sched_timer_sleep")
+	if !strings.Contains(sleep, "call i8 @promise_sched_wait_step(i64 %deadline)") || strings.Contains(sleep, "promise_sched_coop_step") {
+		t.Errorf("expected the non-coroutine sleep to take wait steps bounded by its own deadline\ngot:\n%s", sleep)
+	}
+	// The wait step runs a goroutine, and only when none ran waits for a timer.
+	step := extractDefine(ir, "promise_sched_wait_step")
+	coop := strings.Index(step, "call i8 @promise_sched_coop_step()")
+	wait := strings.Index(step, "call i8 @promise_sched_timer_idle(i64 %limit)")
+	if coop < 0 || wait < coop || !regexp.MustCompile(`icmp ne i8 %\d+, 0\n\tbr i1 %\d+, label %stepped, label %idle`).MatchString(step) {
+		t.Errorf("expected the wait step to step the scheduler, then wait for a timer only when nothing ran\ngot:\n%s", step)
+	}
+	if init := extractDefine(ir, "promise_sched_init"); !strings.Contains(init, "@__promise_sched, i32 0, i32 28") {
+		t.Errorf("expected scheduler init to create sched.timer_lock on wasm32-web\ngot:\n%s", init)
+	}
+	abandon := extractDefine(ir, "promise_sched_timer_abandon")
+	if !regexp.MustCompile(`add i32 %\d+, -1\n\tstore i32 %\d+, i32\* @`+wasmweb.GlobalLiveRegistrations).MatchString(abandon) ||
+		!strings.Contains(abandon, "@__promise_sched, i32 0, i32 27") || strings.Contains(abandon, "promise_sched_enqueue") {
+		t.Errorf("expected abandon to unlink every node without waking its goroutine, releasing its live registration\ngot:\n%s", abandon)
+	}
+
+	wasi := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-wasi")
+	if strings.Contains(wasi, "promise_sched_timer") {
+		t.Error("wasm32-wasi must not carry the timer runtime")
+	}
+	if init := extractDefine(wasi, "promise_sched_init"); strings.Contains(init, "i32 0, i32 28") {
+		t.Errorf("wasm32-wasi must not create sched.timer_lock\ngot:\n%s", init)
+	}
+}
+
+// A drain that finds nothing runnable consults the timers before the liveness
+// rule (§4.1, §4.2): a sleeper already due is stepped like any goroutine, and
+// one still parked is a continuation the drain asks the host for — kind Timer,
+// the delay rounded up to whole milliseconds and capped at a host timer's
+// range — so the pump returns PumpMore and the initial drain stays alive.
+func TestWebDrainsScheduleTimerContinuation(t *testing.T) {
+	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
+	for _, name := range []string{wasmweb.ExportPump, "promise_web_reactor_drain"} {
+		fn := extractDefine(ir, name)
+		expire := strings.Index(fn, "call i64 @promise_sched_timer_expire()")
+		live := strings.Index(fn, "load i32, i32* @"+wasmweb.GlobalLiveRegistrations)
+		if expire < 0 || live < 0 || expire > live {
+			t.Errorf("%s: expected the timers to be consulted before the liveness rule\ngot:\n%s", name, fn)
+		}
+		sched := fmt.Sprintf("call void @promise_env_schedule_pump(i32 %d, i32 %%", wasmweb.SchedulePumpTimer)
+		if !strings.Contains(fn, sched) {
+			t.Errorf("%s: expected a Timer continuation to be scheduled\ngot:\n%s", name, fn)
+		}
+		// u0x7FFFFFFF is math.MaxInt32, the longest delay a host timer takes.
+		for _, want := range []string{"sdiv i64 %", "srem i64 %", "i64 u0x7FFFFFFF", "trunc i64"} {
+			if !strings.Contains(fn, want) {
+				t.Errorf("%s: expected the delay computation to contain %q\ngot:\n%s", name, want, fn)
+			}
+		}
+	}
+	pump := extractDefine(ir, wasmweb.ExportPump)
+	scheduled := pump[strings.Index(pump, "timer_scheduled:"):]
+	if !strings.HasPrefix(strings.SplitN(scheduled, "\n", 3)[1], fmt.Sprintf("\tret i32 %d", wasmweb.PumpMore)) {
+		t.Errorf("expected the pump to return PumpMore once it scheduled a timer\ngot:\n%s", pump)
+	}
+	// A sleeper woken in the drain is stepped against the same budget.
+	if !regexp.MustCompile(`phi i64 \[[^\n]*%drained \]`).MatchString(pump) {
+		t.Errorf("expected the pump's step counter to carry over a wake in the drain\ngot:\n%s", pump)
+	}
+}
+
+// The run-to-completion driver every batch test runs under owns the thread: on
+// wasm32-web it waits for a parked sleeper before deciding the program is done
+// or deadlocked. wasm32-wasi's driver is unchanged.
+func TestCoopRunWaitsOnTimersOnWasmWeb(t *testing.T) {
+	ir := generateIRForTarget(t, trivialWasmWebProgram, "wasm32-web")
+	run := extractDefine(ir, "promise_sched_coop_run")
+	idle := strings.Index(run, "call i8 @promise_sched_timer_idle(i64 u0x7FFFFFFFFFFFFFFF)") // math.MaxInt64: no limit
+	check := strings.Index(run, "check_main_done:")
+	if idle < 0 || check < 0 || idle > check {
+		t.Errorf("expected coop_run to wait on the timers before checking main_done\ngot:\n%s", run)
+	}
+	wasi := extractDefine(generateIRForTarget(t, trivialWasmWebProgram, "wasm32-wasi"), "promise_sched_coop_run")
+	if strings.Contains(wasi, "timer") {
+		t.Errorf("wasm32-wasi's coop_run must not wait on timers\ngot:\n%s", wasi)
+	}
+}
+
+// Before each test a batch binary drops the sleepers a timed-out earlier test
+// abandoned, so coop_run waits only on the test's own timers.
+func TestWasmWebTestMainAbandonsEarlierSleepers(t *testing.T) {
+	const src = "test_one() `test {\n}\n\ntest_two() `test {\n}\n"
+	main := extractDefine(generateTestMainIRForTarget(t, src, "wasm32-web"), "main")
+	abandon := "call void @promise_sched_timer_abandon()"
+	if strings.Count(main, abandon) != 2 {
+		t.Fatalf("expected one %q per test\ngot:\n%s", abandon, main)
+	}
+	if strings.Index(main, abandon) > strings.Index(main, "call void @promise_sched_coop_run()") {
+		t.Errorf("expected the abandon before the test's coop_run\ngot:\n%s", main)
+	}
+	if wasi := generateTestMainIRForTarget(t, src, "wasm32-wasi"); strings.Contains(wasi, "promise_sched_timer") {
+		t.Error("wasm32-wasi's test main must not touch timers")
+	}
+}
+
+// plainWaitProgram waits, in plain function bodies, in each of the three ways
+// whose WASM wait steps the scheduler from the waiting function's own stack: a
+// channel receive (the shared wait pump — send, select, for-in and Mutex.lock
+// take it too), a task receive, and the join of a task dropped un-awaited
+// (Task[int].drop).
+const plainWaitProgram = `
+recv_one(Channel[int] ch) int? {
+  return <-ch;
+}
+
+await_one() int {
+  t := go { 7 };
+  return <-t;
+}
+
+drop_one() {
+  t := go { 7 };
+}
+
+main() {
+  ch := channel[int](1);
+  ch.send(1);
+  v := recv_one(ch);
+  w := await_one();
+  drop_one();
+}
+`
+
+// On wasm32-web a goroutine a plain-body wait depends on may be parked in
+// sleep, with nothing runnable until its timer is due, so every such wait
+// steps through promise_sched_wait_step, which waits for the earliest timer
+// before its "nothing runnable" can mean deadlock. wasm32-wasi arms no timers,
+// and its waits step the scheduler directly.
+func TestWasmWebPlainWaitsConsultTimers(t *testing.T) {
+	web := generateIRForTarget(t, plainWaitProgram, "wasm32-web")
+	wasi := generateIRForTarget(t, plainWaitProgram, "wasm32-wasi")
+	waitStep := "call i8 @promise_sched_wait_step(i64 u0x7FFFFFFFFFFFFFFF)" // timerNoLimit
+	coopStep := "call i8 @promise_sched_coop_step()"
+	for _, fn := range []string{"__user.recv_one", "__user.await_one", "Task[int].drop"} {
+		w := extractDefine(web, fn)
+		if !strings.Contains(w, waitStep) || strings.Contains(w, coopStep) {
+			t.Errorf("wasm32-web %s: expected its wait to step through the timers, never the bare scheduler\ngot:\n%s", fn, w)
+		}
+		if !strings.Contains(w, "call void @pal_exit(i32 2)") {
+			t.Errorf("wasm32-web %s: expected a genuine deadlock still to abort\ngot:\n%s", fn, w)
+		}
+		x := extractDefine(wasi, fn)
+		if !strings.Contains(x, coopStep) || strings.Contains(x, "promise_sched_wait_step") {
+			t.Errorf("wasm32-wasi %s: expected its wait to step the scheduler directly\ngot:\n%s", fn, x)
+		}
 	}
 }

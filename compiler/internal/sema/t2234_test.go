@@ -189,6 +189,25 @@ func TestWasmWebExternIsWebOnly(t *testing.T) {
 	expectError(t, errs, mismatch(wasmweb.SubscribeFunc))
 }
 
+// std's sleep binds the timer park (docs/web-apps.md "Budget and
+// continuation"), which codegen lowers at the call site: it takes the duration
+// as an int and exists only on wasm32-web, like every registered symbol.
+func TestWasmWebParkTimerExternContract(t *testing.T) {
+	sym := wasmweb.ParkTimerFunc
+	ok := fmt.Sprintf("main() {}\n_park(int ns) `extern(%q) `target(web);\n", sym)
+	_, errs := checkSourceWithTarget(t, ok, "wasm32-web")
+	expectNoErrors(t, errs)
+	_, errs = checkSourceWithTarget(t, ok, linuxTriple)
+	expectNoErrors(t, errs)
+
+	_, errs = checkSourceWithTarget(t, fmt.Sprintf("main() {}\n_park(i32 ns) `extern(%q);\n", sym), "wasm32-web")
+	expectError(t, errs, mismatch(sym))
+	_, errs = checkSourceWithTarget(t, fmt.Sprintf("main() {}\n_park(int ns) int `extern(%q);\n", sym), "wasm32-web")
+	expectError(t, errs, mismatch(sym))
+	_, errs = checkSourceWithTarget(t, fmt.Sprintf("main() {}\n_park(int ns) `extern(%q);\n", sym), linuxTriple)
+	expectError(t, errs, webOnly(sym))
+}
+
 func exportBound(sym string) string {
 	return "`" + sym + "` is a wasm32-web export the host calls; Promise code cannot bind it with `extern"
 }

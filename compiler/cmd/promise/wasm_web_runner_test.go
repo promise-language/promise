@@ -45,12 +45,21 @@ func TestEmbeddedWasmWebHarnessNonEmpty(t *testing.T) {
 			t.Errorf("harness does not reference %q — wasm32-web binaries will not run", needle)
 		}
 	}
-	// A program still a reactor when _initialize returns fails as "reactor
+	// The harness runs the continuations a program schedules — a sleeping
+	// goroutine's wake among them — with the reactor's own names, defined so
+	// they cannot fall through to the no-op stub.
+	for _, needle := range []string{"  " + wasmweb.SchedulePumpImport + ": (kind, delayMs) => {", "instance.exports." + wasmweb.ExportPump + "()"} {
+		if !strings.Contains(string(embeddedWasmWebHarness), needle) {
+			t.Errorf("harness does not reference %q — a scheduled continuation would never run", needle)
+		}
+	}
+	// A program still a reactor with no continuation pending fails as "reactor
 	// idle" rather than passing (docs/web-apps.md "Testing a web application");
 	// the testrun tests prove it end to end.
 	if !strings.Contains(string(embeddedWasmWebHarness), "harness: reactor idle") ||
-		!strings.Contains(string(embeddedWasmWebHarness), "exitWith(3);\n})();") {
-		t.Error("harness does not fail a reactor idle after _initialize with exit 3")
+		!strings.Contains(string(embeddedWasmWebHarness), "if (pendingAsap === 0 && timerPump === null) {") ||
+		!strings.Contains(string(embeddedWasmWebHarness), "exitWith(3);") {
+		t.Error("harness does not fail a reactor idle with no continuation pending with exit 3")
 	}
 }
 

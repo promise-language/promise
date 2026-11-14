@@ -808,14 +808,10 @@ func (c *Compiler) buildNanotimeExternBody(fn *ir.Func) {
 }
 
 // buildSleepNanosExternBody adds a body to extern promise_sleep_nanos(i8* %ns).
-// Extracts raw i64 from Promise int param, calls nanosleep(2). No-op on WASM.
+// Extracts raw i64 from Promise int param, calls nanosleep(2). std declares it
+// only for native targets; WASM's sleep variants do not call it.
 func (c *Compiler) buildSleepNanosExternBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
-
-	if c.isWasm {
-		entry.NewRet(nil)
-		return
-	}
 
 	// Extract raw i64 from the int value struct parameter
 	intLayout := c.layouts[types.TypInt]

@@ -3041,8 +3041,9 @@ func (c *Compiler) emitTaskAwaitLoadFree(gRaw value.Value, innerType types.Type,
 		// T0687: On WASM (single-threaded cooperative scheduler), pal_usleep is a
 		// no-op — the pending `go {…}` G sits in P0's run queue and never runs,
 		// causing a permanent deadlock. Mirror the T0668 fix to Task[T].drop:
-		// pump promise_sched_coop_step() instead, and terminate genuine deadlocks
-		// (no runnable G AND target G still not done) with the shared message.
+		// take one wait step (emitWasmWaitStep) instead, and terminate genuine
+		// deadlocks (nothing runnable, no armed timer, AND target G still not
+		// done) with the shared message.
 		checkBlk := c.newBlock("task.check")
 		spinBlk := c.newBlock("task.spin")
 		doneBlk := c.newBlock("task.threaddone")
@@ -3064,10 +3065,10 @@ func (c *Compiler) emitTaskAwaitLoadFree(gRaw value.Value, innerType types.Type,
 
 		c.block = spinBlk
 		if c.isWasm {
-			// T0687: pump the cooperative scheduler one step. Returns i8:
-			// non-zero = ran/advanced a G (progress possible), 0 = no runnable G.
-			stepFn := c.funcs["promise_sched_coop_step"]
-			stepR := c.block.NewCall(stepFn)
+			// T0687: take one wait step (emitWasmWaitStep). Returns i8:
+			// non-zero = ran/advanced a G or woke a sleeper (progress possible),
+			// 0 = no runnable G and no armed timer.
+			stepR := c.emitWasmWaitStep(c.block)
 			coopRecheckBlk := c.newBlock("task.coop_recheck")
 			deadlockBlk := c.newBlock("task.deadlock")
 			spinProgressBlk := c.newBlock("task.progress")
@@ -3084,8 +3085,8 @@ func (c *Compiler) emitTaskAwaitLoadFree(gRaw value.Value, innerType types.Type,
 			madeProgress := c.block.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
 			c.block.NewCondBr(madeProgress, checkBlk, coopRecheckBlk)
 
-			// No runnable G — re-check G.done. If the awaited G is still not
-			// done it can never complete (nothing left to run) → genuine deadlock.
+			// Nothing runnable and no timer armed — re-check G.done. If the
+			// awaited G is still not done it can never complete → genuine deadlock.
 			rdLoad := coopRecheckBlk.NewLoad(irtypes.I8, doneField)
 			rdLoad.Atomic = true
 			rdLoad.Ordering = enum.AtomicOrderingAcquire

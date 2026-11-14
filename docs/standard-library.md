@@ -793,7 +793,7 @@ type Random {
 
 - `Duration` — pure value type (`int nanos `value`). Factory constructors: `from_nanos`, `from_micros`, `from_millis`, `from_secs`, `zero`. Getters: `as_nanos`, `as_micros`, `as_millis`, `as_secs`. Arithmetic: `+`, `-`, `*`. Full comparison operators. `to_string()` with adaptive units (ns/us/ms/s). `format!(Writer ~w) `.
 - `Instant` — pure value type. `now()` factory (calls `_nanotime` extern). `elapsed()`, `duration_since()`. Comparison operators.
-- `sleep(Duration d)` — free function, calls `_sleep_nanos` extern. WASM: no-op.
+- `sleep(Duration d)` — free function. Natively it calls the `_sleep_nanos` extern; on wasm32-web it parks the calling goroutine on a timer ([web-apps.md](web-apps.md) [The liveness rule](web-apps.md#the-liveness-rule)); on wasm32-wasi it returns at once.
 - Native codegen: `promise_nanotime` (clock_gettime CLOCK_MONOTONIC), `promise_sleep_nanos` (nanosleep(2)). Bodies in `io.go:definePALBodies`. Test runner uses separate `.promise_nanotime_raw` to avoid ABI conflict.
 - **File**: `modules/std/time.pr`
 - **Test**: `tests/std/time_test.pr` (24 tests)

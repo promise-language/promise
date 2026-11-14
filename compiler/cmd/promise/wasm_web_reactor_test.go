@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -161,13 +162,16 @@ main() {
 //     event would; "await:<line>" waits until the program has printed line —
 //     what a continuation the loader scheduled prints — and holds nothing
 //     open meanwhile, so the wait ends only if the loader keeps node alive
-//     for that continuation.
+//     for that continuation; "quit" stops the script and has node exit once
+//     the result is reported, whatever the loader still holds open.
 //
 // It reports one RESULT: line. Every enqueue — the driver's own, and those the
 // loader's event listeners make — is recorded as [sub_id, handle, returned] by
 // wrapping the instance's exports, and every event handle Promise code releases
 // is recorded by supplying promise_env's "[resource-drop]event" to init(), and
-// so is the number of MessagePorts still holding node open at the end. It
+// so are the number of MessagePorts and of timers still holding node open at
+// the end, the delay of every host timer the loader asked for, and what the
+// program had printed when init() resolved. It
 // also supplies promise_env's "poke": called by Promise code while it runs, it
 // enqueues 7 to the subscription it is given and pumps, as a page's event
 // dispatched synchronously from inside a Promise→JS call would, and records
@@ -176,6 +180,13 @@ const webReactorDriver = nodePageDriver + `
 const [name, mode, ...vals] = process.argv.slice(2);
 
 const enqueues = [];
+// Every host timer the loader asks for, by its delay in milliseconds.
+const timerDelays = [];
+const realSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (fn, ms, ...rest) => {
+  timerDelays.push(ms);
+  return realSetTimeout(fn, ms, ...rest);
+};
 let raw;
 const instantiateStreaming = WebAssembly.instantiateStreaming;
 WebAssembly.instantiateStreaming = async (source, imports) => {
@@ -232,6 +243,7 @@ const printed = (line) => logs.includes(line) ? Promise.resolve() : new Promise(
       },
     } });
     result.ok = true;
+    result.initLogs = logs.filter((l) => !idLine.test(l));
     if (mode === "enqueue") {
       for (const v of vals) {
         exports.promise_web_enqueue(idOf("sub"), Number(v));
@@ -262,6 +274,9 @@ const printed = (line) => logs.includes(line) ? Promise.resolve() : new Promise(
           }
         } else if (verb === "await") {
           await printed(arg);
+        } else if (verb === "quit") {
+          result.quit = true;
+          break;
         } else {
           throw new Error("unknown driver op " + op);
         }
@@ -279,10 +294,12 @@ const printed = (line) => logs.includes(line) ? Promise.resolve() : new Promise(
   result.enqueues = enqueues;
   result.drops = drops;
   result.openPorts = process.getActiveResourcesInfo().filter((r) => r === "MessagePort").length;
+  result.openTimers = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+  result.timerDelays = timerDelays;
   process.stdout.write("RESULT:" + JSON.stringify(result) + "\n");
   // A port the loader left holding node open would hang the run; the test
   // reports openPorts instead.
-  if (result.openPorts) process.exit(0);
+  if (result.openPorts || result.quit) process.exit(0);
 })();
 `
 
@@ -326,9 +343,12 @@ type webReactorResult struct {
 	Code        int            `json:"code"`
 	DriverError string         `json:"driverError"`
 	IDs         map[string]int `json:"ids"`
-	Enqueues    [][3]int       `json:"enqueues"`  // [sub_id, handle, returned]
-	Drops       []int          `json:"drops"`     // event handles Promise code released
-	OpenPorts   int            `json:"openPorts"` // MessagePorts holding node open at the end
+	Enqueues    [][3]int       `json:"enqueues"`    // [sub_id, handle, returned]
+	Drops       []int          `json:"drops"`       // event handles Promise code released
+	OpenPorts   int            `json:"openPorts"`   // MessagePorts holding node open at the end
+	OpenTimers  int            `json:"openTimers"`  // timers holding node open at the end
+	InitLogs    []string       `json:"initLogs"`    // what the program printed before init() resolved
+	TimerDelays []int          `json:"timerDelays"` // the delay (ms) of every host timer the loader asked for
 }
 
 // TestWebReactorParksThroughCalls runs real wasm32-web reactor programs under
@@ -935,6 +955,180 @@ func TestWebReactorHostEntries(t *testing.T) {
 			t.Errorf("stderr %q does not contain the panic message", got.Errs)
 		}
 	})
+}
+
+// webTimerPrograms are the programs of TestWebReactorTimers.
+var webTimerPrograms = map[string]string{
+	// main sleeps: _initialize returns with main parked on its timer.
+	"timer": `
+main() {
+  print_line("BEFORE");
+  sleep(Duration.from_millis(20)); // sleep-ok: the park is the subject under test
+  print_line("AFTER");
+}
+`,
+	// The sleep is one call down, on a goroutine: the helper's coroutine
+	// variant parks.
+	"timer_through_call": `
+nap(int ms) {
+  sleep(Duration.from_millis(ms)); // sleep-ok: the park is the subject under test
+}
+
+main() {
+  done := channel[int](1);
+  go {
+    nap(20);
+    print_line("WOKE");
+    done.send(1);
+  };
+  print_line("BEFORE");
+  v := <-done;
+  print_line("AFTER");
+}
+`,
+	// A sleeper and a subscription are both live registrations; waking
+	// releases the sleeper's, so once main ends the subscription the program
+	// is complete.
+	"timer_and_subscription": webReactorExterns + `
+main() {
+  sub_id := _web_subscribe(4, 0);
+  print_line("ID sub {sub_id}");
+  ch := _web_channel(sub_id);
+  sleep(Duration.from_millis(20)); // sleep-ok: the park is the subject under test
+  print_line("WOKE");
+  v := <-ch;
+  _web_unsubscribe(sub_id);
+  if v is present {
+    print_line("GOT {v}");
+  }
+}
+`,
+	// An armed timer alone keeps the instance alive.
+	"armed_timer": `
+main() {
+  print_line("SLEEPING");
+  sleep(Duration.from_secs(3600)); // sleep-ok: the armed timer is the subject under test
+  print_line("never");
+}
+`,
+	// main returns while a fire-and-forget goroutine sleeps: its armed timer
+	// keeps the instance alive past main, until it wakes.
+	"timer_after_main": `
+main() {
+  go {
+    sleep(Duration.from_millis(20)); // sleep-ok: the armed timer is the subject under test
+    print_line("LATE");
+  };
+  print_line("MAIN DONE");
+}
+`,
+	// A goroutine sleeps for an hour; an event then has main sleep far less,
+	// so the drain asks for a timer earlier than the one the loader holds.
+	"timer_replaced": webReactorExterns + `
+main() {
+  sub_id := _web_subscribe(4, 0);
+  print_line("ID sub {sub_id}");
+  ch := _web_channel(sub_id);
+  go {
+    sleep(Duration.from_secs(3600)); // sleep-ok: the armed timer is the subject under test
+    print_line("never");
+  };
+  v := <-ch;
+  sleep(Duration.from_millis(20)); // sleep-ok: the earlier timer is the subject under test
+  print_line("WOKE");
+  _web_unsubscribe(sub_id);
+}
+`,
+	// 3,000,000,000 ms is past the longest delay a host timer takes.
+	"timer_capped": `
+main() {
+  print_line("SLEEPING");
+  sleep(Duration.from_millis(3000000000)); // sleep-ok: the host timer's range is the subject under test
+  print_line("never");
+}
+`,
+}
+
+// TestWebReactorTimers drives sleeping reactor programs through their generated
+// loader under the pinned node (promise-language/promise#74; docs/web-apps.md
+// "The liveness rule", "Budget and continuation"). A goroutine in sleep parks:
+// _initialize returns with it parked — init() resolves after the program has
+// printed only what precedes the sleep, since no timer callback can run before
+// the code awaiting init() — and the continuation the drain schedules for its
+// deadline (schedule_pump, kind Timer: a host timer) wakes it. An armed timer
+// is a live registration until it expires, and only until then, and the loader
+// holds one host timer for it however many pumps ask.
+func TestWebReactorTimers(t *testing.T) {
+	t.Parallel()
+	nodePath, driver := buildWebReactorPrograms(t, webTimerPrograms)
+
+	for _, c := range []struct {
+		name     string
+		ops      []string
+		initLogs []string
+		logs     []string
+		pumps    []int
+		exits    []int
+		timers   int   // host timers still pending at the end
+		delays   []int // when set, the delay of every host timer the loader asked for
+	}{
+		// The continuation ends the program; the instance then takes nothing
+		// more, and no host timer is left behind.
+		{"timer", []string{"await:AFTER", "pump"},
+			[]string{"BEFORE"}, []string{"BEFORE", "AFTER"}, []int{wasmweb.PumpTerminated}, nil, 0, nil},
+		{"timer_through_call", []string{"await:AFTER", "pump"},
+			[]string{"BEFORE"}, []string{"BEFORE", "WOKE", "AFTER"}, []int{wasmweb.PumpTerminated}, nil, 0, nil},
+		// After the wake only the subscription is live: a pump is idle, and the
+		// pump that runs main past its unsubscribe ends the program.
+		{"timer_and_subscription", []string{"await:WOKE", "pump", "enq:sub:5", "pump?"},
+			nil, []string{"WOKE", "GOT 5"}, []int{wasmweb.PumpIdle}, []int{0}, 0, nil},
+		// Nothing is due, so each pump — an event's would do the same — asks
+		// for another continuation and reports one in flight, and the loader
+		// keeps the one timer it already holds rather than adding another.
+		{"armed_timer", []string{"pump", "pump", "pump", "quit"},
+			[]string{"SLEEPING"}, []string{"SLEEPING"}, []int{wasmweb.PumpMore, wasmweb.PumpMore, wasmweb.PumpMore}, nil, 1, nil},
+		// main is done when init() resolves, yet the sleeper still wakes and
+		// runs; only then does the program end.
+		{"timer_after_main", []string{"await:LATE", "pump"},
+			[]string{"MAIN DONE"}, []string{"MAIN DONE", "LATE"}, []int{wasmweb.PumpTerminated}, nil, 0, nil},
+		// The earlier timer replaces the hour-long one — main wakes — and once
+		// it has fired the hour-long sleeper's timer is the only one held.
+		{"timer_replaced", []string{"enq:sub:5", "pump", "await:WOKE", "quit"},
+			nil, []string{"WOKE"}, []int{wasmweb.PumpMore}, nil, 1, nil},
+		// The delay is capped at math.MaxInt32, the longest a host timer takes,
+		// rather than wrapping into a short or negative one.
+		{"timer_capped", []string{"quit"},
+			[]string{"SLEEPING"}, []string{"SLEEPING"}, nil, nil, 1, []int{math.MaxInt32}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := runNodeDriver[webReactorResult](t, nodePath, driver, append([]string{c.name, "script"}, c.ops...)...)
+			if got.DriverError != "" || !got.OK {
+				t.Fatalf("driver error %q, ok=%v, exitSignal=%v code=%d, stderr %q",
+					got.DriverError, got.OK, got.ExitSignal, got.Code, got.Errs)
+			}
+			if !slices.Equal(got.InitLogs, c.initLogs) {
+				t.Errorf("printed %q before init() resolved, want %q", got.InitLogs, c.initLogs)
+			}
+			if !slices.Equal(got.Logs, c.logs) {
+				t.Errorf("logs = %q, want %q", got.Logs, c.logs)
+			}
+			if !slices.Equal(got.Pumps, c.pumps) || !slices.Equal(got.Exits, c.exits) {
+				t.Errorf("pumps = %v and exits = %v, want %v and %v", got.Pumps, got.Exits, c.pumps, c.exits)
+			}
+			if len(got.Errs) != 0 {
+				t.Errorf("unexpected stderr %q", got.Errs)
+			}
+			if got.OpenPorts != 0 {
+				t.Errorf("%d MessagePorts still hold node open, want none", got.OpenPorts)
+			}
+			if got.OpenTimers != c.timers {
+				t.Errorf("%d host timers pending at the end, want %d", got.OpenTimers, c.timers)
+			}
+			if c.delays != nil && !slices.Equal(got.TimerDelays, c.delays) {
+				t.Errorf("host timers asked for with delays %v ms, want %v", got.TimerDelays, c.delays)
+			}
+		})
+	}
 }
 
 // assertWebCleanExit requires the driven program to have ended with exit code 0

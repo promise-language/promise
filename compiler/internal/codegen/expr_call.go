@@ -13,6 +13,7 @@ import (
 	"github.com/promise-language/promise/compiler/internal/ast"
 	"github.com/promise-language/promise/compiler/internal/sema"
 	"github.com/promise-language/promise/compiler/internal/types"
+	"github.com/promise-language/promise/compiler/internal/wasmweb"
 )
 
 // --- Call expressions ---
@@ -405,6 +406,14 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		}
 		if ext.CName == "promise_netpoll_wait_write" {
 			c.genNetpollWaitWrite(c.extractI64FromIntArg(argVals[0]))
+			c.clearVariadicStaticFlags(variadicPTs)
+			return nil
+		}
+		// std's sleep on wasm32-web parks the caller's own coroutine frame on a
+		// timer, so it is lowered here rather than called (sched_timer.go). Sema
+		// admits the extern only on wasm32-web, the one target with a timer list.
+		if ext.CName == wasmweb.ParkTimerFunc && c.isWasmWeb {
+			c.genWebParkTimer(c.extractI64FromIntArg(argVals[0]))
 			c.clearVariadicStaticFlags(variadicPTs)
 			return nil
 		}

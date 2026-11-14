@@ -1,0 +1,100 @@
+// promise-language/promise#74: on wasm32-web a goroutine in sleep() parks on a
+// timer, so other goroutines run while it waits, and sleepers wake in deadline
+// order. A sleep reached through a closure cannot suspend (#717); it runs the
+// other goroutines itself until its deadline.
+//
+// What these tests assert is the cooperative scheduler's, decided by the timers
+// and the run queue alone, never by how long the host takes. exclude: wasi ||
+// posix || windows — natively it is the OS thread scheduler's, and asserting it
+// would synchronize on time; on wasm32-wasi sleep returns at once (#548).
+// A goroutine that becomes runnable while another sleeps runs first.
+sleeper_does_not_stall_a_runnable_goroutine() `test(exclude: wasi || posix || windows) {
+  out := channel[string](2);
+  s := go {
+    sleep(Duration.from_millis(20)); // sleep-ok: the park is the subject under test
+    out.send("sleeper");
+  };
+  r := go {
+    out.send("runnable");
+  };
+  first := <-out;
+  second := <-out;
+  <-s;
+  <-r;
+  assert(first is present && first! == "runnable", "the runnable goroutine ran while the other slept");
+  assert(second is present && second! == "sleeper", "the sleeper woke");
+}
+
+// Sleepers wake in the order of their deadlines, not the order they slept.
+// Each reports the deadline it slept until, so the assertion holds however
+// far apart the host happened to run them.
+sleepers_wake_in_deadline_order() `test(exclude: wasi || posix || windows) {
+  out := channel[int](3);
+  for ms in[30, 10, 20] {
+    go {
+      d := Duration.from_millis(ms);
+      due := (Instant.now() + d).as_nanos;
+      sleep(d); // sleep-ok: the wake order is the subject under test
+      out.send(due);
+    };
+  }
+  order := [0, 0, 0];
+  for i in 0..3 {
+    v := <-out;
+    if v is present {
+      order[i] = v;
+    }
+  }
+  assert(order[0] <= order[1] && order[1] <= order[2], "sleepers woke in deadline order");
+}
+
+// A sleep reached through a closure runs the other goroutines until its
+// deadline. Main never parks — it only naps through the closure and checks for
+// the message without waiting — so nothing but the closure's sleep can run the
+// goroutine. However the host times the naps, the message arrives during one of
+// them; a sleep that ran nothing would leave the test to time out.
+closure_sleep_runs_other_goroutines() `test(exclude: wasi || posix || windows, timeout: "10s") {
+  out := channel[string](1);
+  nap := |int ms| {
+    sleep(Duration.from_millis(ms)); // sleep-ok: the non-suspending sleep is the subject under test
+  };
+  r := go {
+    out.send("runnable");
+  };
+  bool got = false;
+  while !got {
+    nap(1);
+    select {
+      v := <-out:
+        got = v is present && v! == "runnable";
+      default:
+    }
+  }
+  <-r;
+}
+
+// A parked sleeper whose deadline passes while main sleeps through a closure is
+// woken by that sleep. As above, main never parks, so only the closure's sleep
+// can wake it: however the host times the deadlines, the sleeper reports during
+// one of the naps; a sleep that woke no parked sleeper would leave the test to
+// time out.
+closure_sleep_wakes_a_parked_sleeper() `test(exclude: wasi || posix || windows, timeout: "10s") {
+  out := channel[string](1);
+  nap := |int ms| {
+    sleep(Duration.from_millis(ms)); // sleep-ok: the non-suspending sleep is the subject under test
+  };
+  s := go {
+    sleep(Duration.from_millis(5)); // sleep-ok: the parked sleeper is the subject under test
+    out.send("parked");
+  };
+  bool got = false;
+  while !got {
+    nap(1);
+    select {
+      v := <-out:
+        got = v is present && v! == "parked";
+      default:
+    }
+  }
+  <-s;
+}

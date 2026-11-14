@@ -383,9 +383,13 @@ function _enter(entry) {
 // the host to call %[1]s again. kind 0 = ASAP (a MessageChannel,
 // free of setTimeout(0)'s ~4ms clamp), 1 = Timer (setTimeout(delayMs)),
 // 2 = AnimationFrame (requestAnimationFrame). A drain may end the program, so
-// a pump is a host entry like any other.
+// a pump is a host entry like any other. One timer is kept ({at, handle}, or
+// null): every drain that leaves a goroutine asleep asks for one, so a request
+// no earlier than the pending timer is already covered by it, and an earlier
+// one replaces it.
 let _asapChannel;
 const _asapQueue = [];
+let _timerPump = null;
 
 function _pump() {
   _enter(() => wasm.exports.%[1]s());
@@ -405,7 +409,18 @@ function _deliver(id, obj) {
 `, wasmweb.ExportPump, wasmweb.ExportEnqueue)
 	g.write(`function _schedulePump(kind, delayMs) {
   if (kind === 1) {
-    setTimeout(_pump, delayMs);
+    const at = performance.now() + delayMs;
+    if (_timerPump !== null) {
+      if (_timerPump.at <= at) return;
+      clearTimeout(_timerPump.handle);
+    }
+    _timerPump = {
+      at,
+      handle: setTimeout(() => {
+        _timerPump = null;
+        _pump();
+      }, delayMs),
+    };
     return;
   }
   if (kind === 2) {
